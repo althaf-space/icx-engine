@@ -1,0 +1,233 @@
+﻿import re
+from unittest.mock import patch
+
+import click
+from icx_engine.cli import app
+from icx_engine.config_manager import ConfigManager
+from icx_engine.models.config import AppConfig, LLMConfig, ChannelConfig
+
+
+def test_help_exits_cleanly(cli_runner):
+    result = cli_runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    for cmd in ("connection", "model", "analyze", "status", "logout", "mcp"):
+        assert cmd in result.output
+
+
+def test_connection_help(cli_runner):
+    result = cli_runner.invoke(app, ["connection", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    assert "--add" in output
+    assert "--remove" in output
+    assert "--active" in output
+
+
+def test_model_help(cli_runner):
+    result = cli_runner.invoke(app, ["model", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    assert "--add" in output
+    assert "--active" in output
+    assert "--remove" in output
+
+
+def test_analyze_help(cli_runner):
+    assert cli_runner.invoke(app, ["analyze", "--help"]).exit_code == 0
+
+
+def test_mcp_help(cli_runner):
+    result = cli_runner.invoke(app, ["mcp", "--help"])
+    assert result.exit_code == 0
+    for cmd in ("setup", "remove", "config", "run"):
+        assert cmd in result.output
+
+
+def test_status_runs_with_no_config(cli_runner):
+    from unittest.mock import patch
+    with patch.object(ConfigManager, "load", return_value=AppConfig()):
+        result = cli_runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "Connections" in result.output
+    assert "AI Profiles" in result.output
+
+
+def test_status_shows_indexed_connections(cli_runner):
+    from unittest.mock import patch
+    from icx_engine.connectors.jira.config import JiraConnection, TokenAuth
+    config = AppConfig(
+        connections=[
+            JiraConnection(domain="company.atlassian.net",
+                           auth=TokenAuth(auth_type="token", email="u@test.com", api_token="tok")),
+            JiraConnection(domain="personal.atlassian.net",
+                           auth=TokenAuth(auth_type="token", email="u@test.com", api_token="tok")),
+        ],
+        default_connection="jira:company.atlassian.net",
+    )
+    with patch.object(ConfigManager, "load", return_value=config):
+        result = cli_runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert re.search(r"(?<![.\w])company\.atlassian\.net(?![.\w])", result.output)
+    assert "ACTIVE" in result.output
+    assert "1" in result.output
+    assert "2" in result.output
+
+
+def test_status_shows_indexed_ai_profiles(cli_runner):
+    from unittest.mock import patch
+    config = AppConfig(
+        llm_profiles={
+            "personal": LLMConfig(text_config=ChannelConfig(provider="ollama", model="llama3")),
+            "work": LLMConfig(text_config=ChannelConfig(provider="openai", model="gpt-4o")),
+        },
+        current_llm_profile="work",
+    )
+    with patch.object(ConfigManager, "load", return_value=config):
+        result = cli_runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    # Profile names may be truncated by Rich when terminal width is narrow in tests.
+    # Check for a prefix that survives truncation.
+    assert "perso" in result.output  # "personal" or "perso…"
+    assert "work" in result.output
+    assert "ACTI" in result.output   # "[ACTIVE]" or "[ACTI…"
+
+
+def test_analyze_requires_argument(cli_runner):
+    assert cli_runner.invoke(app, ["analyze"]).exit_code != 0
+
+
+def test_analyze_invalid_key_exits_cleanly(cli_runner):
+    assert cli_runner.invoke(app, ["analyze", "notakey"]).exit_code != 0
+
+
+def test_mcp_config_prints_snippet(cli_runner):
+    result = cli_runner.invoke(app, ["mcp", "config"])
+    assert result.exit_code == 0
+    assert "mcpServers" in result.output
+    assert "icx" in result.output
+
+
+# ── Phase 4 smoke tests ───────────────────────────────────────────────────────
+
+def test_raw_issue_data_has_phase4_fields():
+    """RawIssueData carries optional fields with correct defaults."""
+    from icx_engine.models.output import RawIssueData
+    raw = RawIssueData(
+        issue_key="P4-1", issue_type="Bug", summary="s", description="d",
+        comments=[], attachments=[], priority="Medium", status="Open", metadata={},
+    )
+    assert raw.due_date is None
+    assert raw.attachment_content_urls == {}
+    assert raw.attachment_texts == {}
+
+
+def test_compute_missing_is_exported():
+    """_compute_missing flags absent metadata fields, not present ones."""
+    from icx_engine.llm.base import _compute_missing
+    from icx_engine.models.output import RawIssueData, IssueContext
+    raw = RawIssueData(
+        issue_key="P4-1", issue_type="Bug", summary="s", description="d",
+        comments=[], attachments=[], priority="Medium", status="Open", metadata={},
+        due_date="2026-06-15",
+    )
+    ctx = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=["step"], expected_behavior="e", actual_behavior="a",
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=1.0, missing_information=[],
+    )
+    missing = _compute_missing(ctx, raw)
+    assert "due_date" not in missing
+
+
+def test_attachments_module_importable():
+    """Phase 4: attachments module is importable and exposes expected functions."""
+    from icx_engine.connectors.attachments import _is_image, ocr_image, vision_enrich, process_attachments
+    assert callable(_is_image)
+    assert callable(ocr_image)
+    assert callable(vision_enrich)
+    assert callable(process_attachments)
+
+
+def test_jira_client_has_download_attachment():
+    """Phase 4: JiraClient exposes download_attachment method."""
+    from icx_engine.connectors.jira.client import JiraClient
+    assert hasattr(JiraClient, "download_attachment")
+    assert callable(JiraClient.download_attachment)
+
+
+def test_model_no_flags_prints_help_hint(cli_runner):
+    from unittest.mock import patch
+    with patch.object(ConfigManager, "load", return_value=AppConfig()):
+        result = cli_runner.invoke(app, ["model"])
+    assert result.exit_code == 0
+    assert "--add" in result.output or "model" in result.output
+
+
+def test_connection_remove_invalid_target(cli_runner):
+    from unittest.mock import patch
+    with patch.object(ConfigManager, "load", return_value=AppConfig()):
+        result = cli_runner.invoke(app, ["connection", "--remove", "xyz.atlassian.net"])
+    assert result.exit_code != 0
+
+
+def test_connection_active_invalid_target(cli_runner):
+    from unittest.mock import patch
+    with patch.object(ConfigManager, "load", return_value=AppConfig()):
+        result = cli_runner.invoke(app, ["connection", "--active", "1"])
+    assert result.exit_code != 0
+
+
+def test_model_active_invalid_target(cli_runner):
+    from unittest.mock import patch
+    with patch.object(ConfigManager, "load", return_value=AppConfig()):
+        result = cli_runner.invoke(app, ["model", "--active", "1"])
+    assert result.exit_code != 0
+
+
+def test_model_help_shows_remove_option(cli_runner):
+    result = cli_runner.invoke(app, ["model", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    assert "--remove" in output
+
+
+def test_model_remove_no_profiles(cli_runner):
+    from unittest.mock import patch
+    with patch.object(ConfigManager, "load", return_value=AppConfig()):
+        result = cli_runner.invoke(app, ["model", "--remove", "work"])
+    assert result.exit_code != 0
+
+
+def test_model_remove_invalid_index(cli_runner):
+    from unittest.mock import patch
+    config = AppConfig(
+        llm_profiles={"personal": LLMConfig(text_config=ChannelConfig(provider="ollama", model="llama3"))},
+        current_llm_profile="personal",
+    )
+    with patch.object(ConfigManager, "load", return_value=config):
+        with patch.object(ConfigManager, "save"):
+            result = cli_runner.invoke(app, ["model", "--remove", "5"])
+    assert result.exit_code != 0
+
+
+def test_connection_add_duplicate_domain_prompts_overwrite(cli_runner):
+    from unittest.mock import patch
+    from icx_engine.connectors.jira.config import JiraConnection, TokenAuth
+
+    existing = AppConfig(
+        connections=[
+            JiraConnection(
+                domain="xyz.atlassian.net",
+                auth=TokenAuth(auth_type="token", email="old@test.com", api_token="old-tok"),
+            )
+        ]
+    )
+    with patch.object(ConfigManager, "load", return_value=existing):
+        # input: method=1 (API Token), domain=xyz.atlassian.net, then "n" to decline overwrite
+        result = cli_runner.invoke(
+            app, ["connection", "--add"],
+            input="1\nhttps://xyz.atlassian.net\nn\n",
+        )
+    assert "already exists" in result.output
+    assert "Cancelled" in result.output

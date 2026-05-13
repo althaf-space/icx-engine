@@ -1,0 +1,88 @@
+﻿ICE - Issue Context Engine
+Personal Use License with Contributor License Agreement
+
+Copyright (c) 2026 Althaf. All rights reserved.
+
+────────────────────────────────────────────────────────────────────────────────
+GRANT OF USE
+────────────────────────────────────────────────────────────────────────────────
+
+Permission is granted, free of charge, to any individual to use this software
+for personal, non-commercial purposes, subject to the following conditions.
+
+────────────────────────────────────────────────────────────────────────────────
+RESTRICTIONS
+────────────────────────────────────────────────────────────────────────────────
+
+You MAY NOT, without prior written permission from the copyright holder:
+
+  1. Sell, rent, lease, or sublicense this software or any derivative of it.
+
+  2. Incorporate this software or any derivative into a commercial product,
+     SaaS offering, hosted service, or any product sold or licensed to others.
+
+  3. Redistribute this software or modified versions of it to third parties,
+     whether for free or for a fee.
+
+  4. Remove or alter any copyright, license, or attribution notices contained
+     in the software.
+
+────────────────────────────────────────────────────────────────────────────────
+PERMITTED MODIFICATIONS
+────────────────────────────────────────────────────────────────────────────────
+
+You may modify the software for your own personal use. Modified versions may
+not be redistributed or published without written permission from the copyright
+holder.
+
+────────────────────────────────────────────────────────────────────────────────
+CONTRIBUTOR LICENSE AGREEMENT
+────────────────────────────────────────────────────────────────────────────────
+
+By submitting a contribution (pull request, patch, or any other change) to
+this project, you agree to the following terms:
+
+  1. You retain copyright in your contribution.
+
+  2. You grant the copyright holder (Althaf) a perpetual, worldwide,
+     irrevocable, royalty-free license to use, reproduce, modify, distribute,
+     sublicense, and commercialize your contribution as part of this project,
+     without restriction, including for commercial purposes.
+
+  3. You confirm that you have the right to grant this license - that your
+     contribution is your original work, or that you have the necessary rights
+     from your employer or any third party.
+
+  4. You understand that this project and all contributions to it may be used
+     commercially by the copyright holder, and that you will receive no
+     compensation, royalty, or commercial rights as a result of contributing.
+
+This agreement does not transfer your copyright - you remain the author of your
+contribution. It gives the copyright holder the exclusive right to commercialize
+the combined work.
+
+────────────────────────────────────────────────────────────────────────────────
+COPYRIGHT INFRINGEMENT
+────────────────────────────────────────────────────────────────────────────────
+
+Any use of this software in violation of the restrictions above constitutes
+copyright infringement and may be subject to legal action under applicable
+copyright law.
+
+────────────────────────────────────────────────────────────────────────────────
+DISCLAIMER
+────────────────────────────────────────────────────────────────────────────────
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+────────────────────────────────────────────────────────────────────────────────
+CONTACT
+────────────────────────────────────────────────────────────────────────────────
+
+For commercial licensing inquiries or written permissions:
+  althaf.space@gmail.com
+  https://github.com/althaf-space/ice
