@@ -3,7 +3,7 @@
 **AI-native intelligence layer for development teams.**
 
 [![PyPI](https://img.shields.io/pypi/v/icx-engine?color=0066cc&label=latest)](https://pypi.org/project/icx-engine/)
-[![Python](https://img.shields.io/pypi/pyversions/icx-engine?color=0066cc)](https://pypi.org/project/icx-engine/)
+[![Python](https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13%20|%203.14-0066cc)](https://pypi.org/project/icx-engine/)
 [![License](https://img.shields.io/badge/license-proprietary-lightgrey)](./license)
 [![Status](https://img.shields.io/badge/status-active%20development-orange)](https://github.com/althaf-space/icx-engine/releases)
 
@@ -109,7 +109,7 @@ flowchart LR
 
 ## Install
 
-**Requires Python 3.11–3.14.**
+**Version:** 0.2.0 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
 
 ```
 pipx install icx-engine
@@ -300,7 +300,7 @@ Without a provider, ICX falls back to raw mode in MCP. It returns `RawIssueRespo
 - All network calls go directly to your work tracker and your configured AI provider.
 - The config file at `~/.icx/config.json` contains no secrets - only profile names and domains.
 
-See [SECURITY.md](./security.md) for the full security architecture and how to report vulnerabilities.
+See [security.md](./security.md) for the full security architecture and how to report vulnerabilities.
 
 ---
 
