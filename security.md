@@ -59,7 +59,7 @@ ICX never stores credentials in plaintext when an OS keyring is available:
 1. **OS keyring first** - credentials go into Windows Credential Manager, macOS Keychain, or GNOME Keyring via the `keyring` library. `~/.icx/config.json` stores only a `"__keychain__"` sentinel.
 2. **D-Lock (AES-256-GCM)** - tokens longer than 512 bytes (common in Jira Cloud OAuth flows) exceed the Windows Credential Manager blob limit. ICX encrypts these with AES-256-GCM using a randomly-generated 32-byte Master Key, which is itself stored in the OS keyring. Ciphertext is tagged `dlock:v1:BASE64` in `config.json`. No readable credential ever appears.
 3. **Double-lock serialization** - all secret Pydantic fields (`api_token`, `access_token`, `refresh_token`, `client_secret`, `api_key`) declare `Field(exclude=True)`. `model_dump_json()` never serializes them even if called unexpectedly. `ConfigManager.save()` reads secrets from live model attributes and writes them directly to the keyring.
-4. **Headless/CI fallback** - when no keyring daemon is available, ICX writes a warning to stderr and falls back to the `ICX_*` environment variable path. Plaintext storage to disk is a last resort with an explicit user-visible warning.
+4. **Headless/CI fallback** - when no keyring daemon is available, ICX writes a warning to stderr and falls back to the `ICX_*` environment variable path. Plaintext storage to disk is a last resort with an explicit user-visible warning that fires **once per account and once per machine** — tracked via a `~/.icx/.warned_plaintext` sidecar file so repeated commands (e.g. OAuth token refreshes) do not spam the terminal.
 
 ### SSRF protection
 

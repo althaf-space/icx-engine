@@ -58,7 +58,13 @@ class MemoryManager:
         import pyarrow as pa
 
         self._db = lancedb.connect(str(self._db_path))
-        if _TABLE_NAME in self._db.list_tables():
+        tables_response = self._db.list_tables()
+        existing = (
+            tables_response.tables
+            if hasattr(tables_response, "tables")
+            else list(tables_response)
+        )
+        if _TABLE_NAME in existing:
             self._table = self._db.open_table(_TABLE_NAME)
             return self._table
 
@@ -112,8 +118,8 @@ class MemoryManager:
             "saved_at": entry.saved_at,
             "tags": entry.tags,
         }
-        table = self._get_table()
         try:
+            table = self._get_table()
             (
                 table.merge_insert("issue_key")
                 .when_matched_update_all()
@@ -172,13 +178,29 @@ class MemoryManager:
 
         fetch_n = min(row_count, top_k * 4)
 
-        # Vector search
+        # Vector search with cosine metric — _distance = cosine distance (1 - similarity)
         try:
-            vec_rows = table.search(vector).limit(fetch_n).to_list()
+            vec_rows = table.search(vector).metric("cosine").limit(fetch_n).to_list()
         except Exception:
             return []
 
-        # FTS search (best-effort - may not be available)
+        # Build per-entry cosine similarity from actual distance. Filter below threshold here
+        # so irrelevant entries never make it into ranking regardless of how many entries exist.
+        id_to_row: dict[str, dict] = {}
+        cosine_sim: dict[str, float] = {}
+        for row in vec_rows:
+            rid = row["id"]
+            dist = row.get("_distance", 1.0)
+            sim = round(1.0 - dist, 4)
+            if sim < min_score:
+                continue
+            cosine_sim[rid] = sim
+            id_to_row[rid] = row
+
+        if not cosine_sim:
+            return []
+
+        # FTS search (best-effort) — only over already-qualified candidates
         fts_rows: list[dict] = []
         try:
             fts_rows = (
@@ -189,43 +211,35 @@ class MemoryManager:
         except Exception:
             pass
 
-        # RRF merge
-        scores: dict[str, float] = {}
-        id_to_row: dict[str, dict] = {}
-
+        # RRF over qualified candidates only — used purely for ranking, not filtering
+        rrf_scores: dict[str, float] = {}
         for rank, row in enumerate(vec_rows):
             rid = row["id"]
-            scores[rid] = scores.get(rid, 0.0) + 1.0 / (_RRF_K + rank + 1)
-            id_to_row[rid] = row
+            if rid in cosine_sim:
+                rrf_scores[rid] = rrf_scores.get(rid, 0.0) + 1.0 / (_RRF_K + rank + 1)
 
         for rank, row in enumerate(fts_rows):
             rid = row["id"]
-            scores[rid] = scores.get(rid, 0.0) + 1.0 / (_RRF_K + rank + 1)
-            id_to_row[rid] = row
+            if rid in cosine_sim:
+                id_to_row[rid] = row
+                rrf_scores[rid] = rrf_scores.get(rid, 0.0) + 1.0 / (_RRF_K + rank + 1)
 
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-
-        # Normalize scores to 0-1 range
-        max_score = ranked[0][1] if ranked else 1.0
+        ranked = sorted(cosine_sim.keys(), key=lambda rid: rrf_scores.get(rid, 0.0), reverse=True)
 
         results: list[PastInsight] = []
-        for rid, raw_score in ranked:
-            norm_score = round(raw_score / max_score, 4) if max_score > 0 else 0.0
-            if norm_score < min_score:
-                continue
-            row = id_to_row[rid]
-            entry = _row_to_entry(row)
+        for rid in ranked[:top_k]:
+            entry = _row_to_entry(id_to_row[rid])
             results.append(PastInsight(
                 issue_key=entry.issue_key,
                 source_type=entry.source_type,
                 summary=entry.summary,
                 resolution_note=entry.resolution_note,
                 files_changed=entry.files_changed,
-                similarity_score=norm_score,
+                similarity_score=cosine_sim[rid],
                 saved_at=entry.saved_at,
             ))
 
-        return results[:top_k]
+        return results
 
     def show(self, issue_key: str) -> MemoryEntry | None:
         """Return the full MemoryEntry for one issue_key, or None if not found."""
@@ -258,7 +272,13 @@ class MemoryManager:
 
             if self._db is None:
                 self._db = lancedb.connect(str(self._db_path))
-            if _TABLE_NAME in self._db.list_tables():
+            tables_response = self._db.list_tables()
+            existing = (
+                tables_response.tables
+                if hasattr(tables_response, "tables")
+                else list(tables_response)
+            )
+            if _TABLE_NAME in existing:
                 self._db.drop_table(_TABLE_NAME)
             self._table = None
             self._db = None  # force fresh connection on next access

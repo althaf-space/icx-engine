@@ -28,7 +28,7 @@ ICX is an early-stage product. The core pipeline (fetch → process → analyse 
 | Connectors | Jira Cloud (stable) | GitHub Issues, Linear |
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
 | Attachments | PDF, DOCX, XLSX, CSV, images via OCR + vision | Audio/video transcription |
-| Memory | Local LanceDB + sentence-transformers | Team-shared memory, conflict resolution |
+| Memory | Local LanceDB + ONNX embeddings (BAAI/bge-small-en-v1.5, no PyTorch) | Team-shared memory, conflict resolution |
 | MCP tools | `analyze_issue_fast`, `analyze_issue`, `search_memory`, `save_memory` | Batch analysis, project-level summary |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
@@ -154,10 +154,11 @@ ICX works without an AI provider in MCP mode - your editor's AI handles the anal
 
 ```sh
 icx analyze <KEY>
-icx analyze <KEY> --fast          # skip image processing
-icx analyze <KEY> --profile NAME  # use a specific LLM profile for this run
-icx analyze <KEY> --debug         # show step-by-step pipeline output
-icx analyze <KEY> --traceback     # show full Python traceback on error
+icx analyze <KEY> --fast                   # skip image processing
+icx analyze <KEY> --profile NAME           # use a specific LLM profile for this run
+icx analyze <KEY> --profile NAME --fast    # profile + skip image processing
+icx analyze <KEY> --debug                  # show step-by-step pipeline output
+icx analyze <KEY> --traceback              # show full Python traceback on error
 ```
 
 `KEY` can be a bare issue key (`PROJ-456`) or a full URL (`https://company.atlassian.net/browse/PROJ-456`).
@@ -165,7 +166,7 @@ icx analyze <KEY> --traceback     # show full Python traceback on error
 | Flag | What it does |
 |------|-------------|
 | `--fast` | Skip image processing. Images are listed in `pending_images`. Text attachments (PDF, Excel, Word) are still processed. |
-| `--profile NAME` | Use a specific AI profile without changing your default. |
+| `--profile NAME` | Use a specific AI profile without changing your default. Combinable with `--fast`. |
 | `--debug` | Print each pipeline step to stderr as it runs. |
 | `--traceback` | Show full Python traceback on error. |
 
@@ -183,8 +184,9 @@ icx connection --active INDEX              # set default by index
 
 ```sh
 icx model --add                            # add a new AI profile
-icx model --remove PROFILE                 # remove entire profile
-icx model --remove PROFILE --channel 2     # remove only the image channel
+icx model --remove PROFILE                 # remove entire profile by name
+icx model --remove INDEX                   # remove profile by index from icx status
+icx model --remove PROFILE --channel <CHANNEL> # remove only the image/vision channel (text or image)
 icx model --active PROFILE                 # set active profile
 ```
 
@@ -214,8 +216,9 @@ icx memory status
 icx mcp setup                    # register ICX with detected AI editors
 icx mcp setup --host claude      # register with a specific editor
 icx mcp remove                   # remove ICX from all detected editors
+icx mcp remove --host claude     # remove from a specific editor only
 icx mcp config                   # print copy-paste config snippets
-icx mcp list                     # list supported editors
+icx mcp list                     # list all supported editors and detection status
 icx mcp run                      # start the MCP server (editors call this automatically)
 ```
 
@@ -266,11 +269,12 @@ Memory data lives in `~/.icx/memory/` on your machine only. The directory is loc
 
 ## Using ICX with AI editors (MCP)
 
-`icx mcp setup` registers ICX in your AI editor. ICX detects which editors are installed (Claude Code, Cursor, Windsurf, Codex) and adds itself to each one automatically.
+`icx mcp setup` registers ICX in your AI editor. ICX detects which editors are installed (Claude Code, Cursor, Windsurf, Codex, Gemini/Antigravity) and adds itself to each one automatically.
 
 ```sh
-icx mcp setup              # all detected editors
-icx mcp setup --host claude  # Claude Code only
+icx mcp setup                       # all detected editors
+icx mcp setup --host claude         # Claude Code only
+icx mcp setup --host antigravity    # Gemini CLI only
 ```
 
 After setup, restart your editor. ICX will appear in its list of available tools.

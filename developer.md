@@ -211,12 +211,12 @@ The CLI exposes this as `--profile NAME` on `icx analyze`. The MCP server expose
 
 Secrets (API tokens, OAuth tokens, LLM keys) are **never stored in plaintext** if the OS keyring is available. The config file stores `"__keychain__"` as a sentinel value; real values are in the OS keyring (Windows Credential Manager, macOS Keychain, GNOME Keyring). On headless systems, `ICE_*` environment variables are the fallback.
 
-**Plaintext warnings:** When a secret falls back to plaintext storage, ICX prints the exact environment variable name to set. All three credential types emit a per-field warning:
+**Plaintext warnings (one-shot per account):** When a secret falls back to plaintext storage, ICX prints the exact environment variable name to set — but only once per account, never again. A sidecar file at `~/.icx/.warned_plaintext` tracks which account keys have already been warned. All three credential types route through `_warn_plaintext(account, label)`:
 - Jira token: `_warn_plaintext(f"{ctype}_token:{domain}", ...)` → e.g. `ICX_JIRA_TOKEN_EXAMPLE_ATLASSIAN_NET`
 - OAuth fields: `_warn_oauth_plaintext(field, domain)` → e.g. `ICX_OAUTH_ACCESS_EXAMPLE_ATLASSIAN_NET`
 - LLM API keys: `_warn_plaintext(acct, ...)` → e.g. `ICX_LLM_TEXT_PERSONAL`
 
-All three route through `_warn_plaintext(account, label)` which calls `_env_key(account)` to compute the exact variable name. The generic `ConfigManager.warn_if_plaintext()` (called once after `save()`) also prints a full reference table of all variable patterns.
+`_warn_plaintext(account, label)` checks `_warned_accounts()` before printing; if the account key is already in the sidecar, the function returns immediately without output. After printing, `_mark_warned(account)` appends the key to the sidecar. The generic `ConfigManager.warn_if_plaintext()` (called once after `save()`) similarly shows the full reference table only once per machine, gated on the `"__summary__"` sentinel in the same sidecar file. Write failures to the sidecar are silently swallowed — the command always proceeds.
 
 **Automatic plaintext migration:** On the first load after upgrading from a pre-keyring config, `ConfigManager.load()` detects any connection or LLM key stored as a plain string (not the sentinel). It sets a `needs_secret_migration` flag and calls `ConfigManager.save()` at the end of `load()`, which writes those values into the OS keyring and replaces them with the sentinel. This is a one-time, self-healing migration - users never need to re-enter credentials.
 
@@ -782,7 +782,9 @@ Hybrid search: dense ANN vector search + BM25 FTS merged with Reciprocal Rank Fu
 
 - Vector search finds semantically similar issues even when wording differs
 - FTS catches exact technical terms (error codes, function names, file paths)
-- RRF merge (k=60) gives each result a combined score; scores normalized to 0.0-1.0
+- Cosine similarity is computed from vector distance (`1.0 - _distance`) and used as the reported score (0.0–1.0)
+- Entries below `min_score` are filtered out before ranking — irrelevant results never appear regardless of DB size
+- RRF (k=60) is used for ranking among qualified candidates only; it does not affect score values
 - Default: top_k=3, min_score=0.65
 
 FTS index is created on columns: `summary`, `problem_description`, `resolution_note`. If FTS index creation fails (LanceDB build variation), vector-only search is used as fallback - no exception raised.

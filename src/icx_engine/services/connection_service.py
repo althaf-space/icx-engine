@@ -110,14 +110,15 @@ def _connect_jira_oauth(debug: bool = False) -> None:
     typer.echo("You need an OAuth 2.0 (3LO) app at developer.atlassian.com")
     typer.echo(
         "Register these Callback URLs in your Atlassian OAuth app:\n"
-        "  http://localhost:8765/callback  (primary)\n"
-        "  http://localhost:8766/callback  (fallback - register all five if port 8765 is often in use)\n"
-        "  http://localhost:8767/callback\n"
-        "  http://localhost:8768/callback\n"
-        "  http://localhost:8769/callback"
+        "  http://localhost:8765/callback      primary\n"
+        "  http://localhost:8766/callback      fallback 1\n"
+        "  http://localhost:8767/callback      fallback 2\n"
+        "  http://localhost:8768/callback      fallback 3\n"
+        "  http://localhost:8769/callback      fallback 4\n"
+        "Register all 5 if port 8765 is often in use on your machine."
     )
     client_id = typer.prompt("Atlassian OAuth Client ID").strip()
-    client_secret = typer.prompt("Atlassian OAuth Client Secret", hide_input=True).strip()
+    client_secret = typer.prompt("Atlassian OAuth Client Secret", hide_input=True).strip() or None
     raw_domain = typer.prompt("Jira base URL (e.g. https://xyz.atlassian.net)").strip()
     domain = raw_domain.replace("https://", "").replace("http://", "").rstrip("/")
     if not domain or not _DOMAIN_RE.match(domain):
@@ -150,7 +151,18 @@ def _connect_jira_oauth(debug: bool = False) -> None:
     except Exception as exc:
         if debug:
             raise
-        render_icx_error(exc, err_console, show_traceback=False)
+        from icx_engine.exceptions import AuthError
+        import httpx as _httpx
+        if isinstance(exc, _httpx.HTTPStatusError) and exc.response.status_code == 401:
+            render_icx_error(
+                AuthError(
+                    "Token exchange failed (401). Verify your Client ID and Client Secret "
+                    "match your app at developer.atlassian.com."
+                ),
+                err_console,
+            )
+        else:
+            render_icx_error(exc, err_console, show_traceback=False)
         raise typer.Exit(1)
 
     access_token = tokens.get("access_token", "")
