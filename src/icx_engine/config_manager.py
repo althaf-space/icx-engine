@@ -52,8 +52,28 @@ def _check_keychain() -> bool:
     return _keychain_ok
 
 
+def _warned_accounts() -> set[str]:
+    try:
+        return set((CONFIG_PATH.parent / ".warned_plaintext").read_text(encoding="utf-8").splitlines())
+    except FileNotFoundError:
+        return set()
+
+
+def _mark_warned(account: str) -> None:
+    warned_path = CONFIG_PATH.parent / ".warned_plaintext"
+    warned = _warned_accounts()
+    warned.add(account)
+    try:
+        warned_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        warned_path.write_text("\n".join(sorted(warned)), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _warn_plaintext(account: str, label: str) -> None:
-    """Generic plaintext storage warning showing the exact env var to set."""
+    """Plaintext storage warning — fires once per account, never again."""
+    if account in _warned_accounts():
+        return
     env_var = _env_key(account)
     print(
         f"Warning: keyring unavailable - {label} stored as plaintext "
@@ -61,6 +81,7 @@ def _warn_plaintext(account: str, label: str) -> None:
         f"  Set {env_var}=<value> to avoid plaintext storage.",
         file=sys.stderr,
     )
+    _mark_warned(account)
 
 
 def _warn_oauth_plaintext(field: str, acct_prefix: str, domain: str) -> None:
@@ -347,8 +368,11 @@ class ConfigManager:
 
     @staticmethod
     def warn_if_plaintext() -> None:
-        """Call once after connect/apikey to inform the user if tokens will be stored plaintext."""
+        """Show plaintext env-var reference once per machine. Never repeats after first display."""
         if not _check_keychain():
+            if "__summary__" in _warned_accounts():
+                return
+            _mark_warned("__summary__")
             print(
                 "Warning: system keyring unavailable - credentials stored in "
                 f"{CONFIG_PATH} (mode 0600).\n"

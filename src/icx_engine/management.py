@@ -1,10 +1,7 @@
 ﻿from __future__ import annotations
 from icx_engine.models.config import AppConfig, BaseConnection, LLMConfig
 from icx_engine.config_manager import ConfigManager
-
-
-class ManagementError(Exception):
-    pass
+from icx_engine.exceptions import ManagementError
 
 
 def resolve_connection(config: AppConfig, target: str) -> BaseConnection:
@@ -68,20 +65,29 @@ def unset_llm_profile(config: AppConfig, target: str) -> AppConfig:
     return config.model_copy(update={"llm_profiles": new_profiles, "current_llm_profile": new_current})
 
 
-def unset_llm_channel(config: AppConfig, target: str, channel: int) -> AppConfig:
+def unset_llm_channel(config: AppConfig, target: str, channel) -> AppConfig:
     name, profile = resolve_llm_profile(config, target)
-    if channel == 1:
+    if isinstance(channel, int):
+        if channel == 1:
+            ch = "text"
+        elif channel == 2:
+            ch = "image"
+        else:
+            raise ManagementError(f"Invalid channel '{channel}'. Use 1 (text) or 2 (image).")
+    else:
+        ch = channel.lower()
+    if ch == "text":
         if profile.image_config is not None:
             raise ManagementError(
-                f"Cannot remove the text channel while an image channel is configured. "
-                f"Use `icx model --remove {target}` to remove the entire profile."
+                f"Cannot remove the text channel while an image channel exists on profile '{name}'. "
+                "Remove the image channel first."
             )
         return unset_llm_profile(config, target)
-    if channel == 2:
+    if ch == "image":
         if profile.image_config is None:
             raise ManagementError(f"Profile '{name}' has no image channel to remove.")
         ConfigManager.delete_llm_image_secrets(name)
         new_profile = profile.model_copy(update={"image_config": None})
         new_profiles = {**config.llm_profiles, name: new_profile}
         return config.model_copy(update={"llm_profiles": new_profiles})
-    raise ManagementError(f"Invalid channel {channel}. Use 1 (text) or 2 (image).")
+    raise ManagementError(f"Invalid channel '{channel}'. Use 'text' or 'image'.")

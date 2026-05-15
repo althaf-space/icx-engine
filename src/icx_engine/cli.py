@@ -94,56 +94,58 @@ AI-native intelligence layer for development teams. Deep context extraction, loc
 [bold]Quick start:[/bold]  [cyan]icx connection --add[/cyan]  ->  [cyan]icx model --add[/cyan]  ->  [cyan]icx analyze <KEY>[/cyan]
 
 [bold]Analysis[/bold]
-  [cyan]icx analyze <KEY>[/cyan]                          Analyze an issue
-  [cyan]icx analyze <KEY> --fast[/cyan]                   Text-only - skip image processing
-  [cyan]icx analyze <KEY> --profile <NAME>[/cyan]         Use a specific LLM profile for this run
-  [cyan]icx analyze <KEY> --debug[/cyan]                  Show step-by-step debug output
-  [cyan]icx analyze <KEY> --traceback[/cyan]              Show full error traceback on failure
+  [cyan]icx analyze <KEY>[/cyan]                                      Analyze an issue
+  [cyan]icx analyze <KEY> --fast[/cyan]                               Text-only - skip image processing
+  [cyan]icx analyze <KEY> --profile <NAME>[/cyan]                     Use a specific LLM profile for this run
+  [cyan]icx analyze <KEY> --profile <NAME> --fast[/cyan]              Profile + text-only (skip image processing)
+  [cyan]icx analyze <KEY> --debug[/cyan]                              Show step-by-step debug output
+  [cyan]icx analyze <KEY> --traceback[/cyan]                          Show full error traceback on failure
 
 [bold]Connections[/bold]
-  [cyan]icx connection --add[/cyan]                       Connect a new platform
-  [cyan]icx connection --remove <DOMAIN>[/cyan]           Remove by domain  (e.g. mycompany.atlassian.net)
-  [cyan]icx connection --remove <INDEX>[/cyan]            Remove by index number from icx status
-  [cyan]icx connection --active <DOMAIN>[/cyan]           Set default connection
-  [cyan]icx connection --active <INDEX>[/cyan]            Set default by index number
+  [cyan]icx connection --add[/cyan]                                   Connect a new platform
+  [cyan]icx connection --remove <DOMAIN>[/cyan]                       Remove by domain  (e.g. mycompany.atlassian.net)
+  [cyan]icx connection --remove <INDEX>[/cyan]                        Remove by index number from icx status
+  [cyan]icx connection --active <DOMAIN>[/cyan]                       Set default connection
+  [cyan]icx connection --active <INDEX>[/cyan]                        Set default by index number
 
 [bold]LLM Profiles[/bold]
-  [cyan]icx model --add[/cyan]                            Configure an AI provider
-  [cyan]icx model --remove <PROFILE>[/cyan]               Remove an entire profile (name or index)
-  [cyan]icx model --remove <PROFILE> --channel <N>[/cyan] Remove only the image/vision channel
-  [cyan]icx model --active <PROFILE>[/cyan]               Set default profile (name or index)
+  [cyan]icx model --add[/cyan]                                        Configure an AI provider
+  [cyan]icx model --remove <PROFILE>[/cyan]                           Remove an entire profile (by name)
+  [cyan]icx model --remove <INDEX>[/cyan]                             Remove by index from icx status
+  [cyan]icx model --remove <PROFILE> --channel <CHANNEL>[/cyan]       Remove only the image/vision channel
+  [cyan]icx model --active <PROFILE>[/cyan]                           Set default profile (name or index)
 
 [bold]Memory[/bold]
-  [cyan]icx memory save <KEY>[/cyan]                      Save a resolved issue to local memory
-  [cyan]icx memory save <KEY> --note "..."[/cyan]         Save non-interactively
-  [cyan]icx memory search "<query>"[/cyan]                Search past resolutions
-  [cyan]icx memory list[/cyan]                            List all saved entries (newest first)
-  [cyan]icx memory list --project <KEY>[/cyan]            Filter by project key
-  [cyan]icx memory list --source <TYPE>[/cyan]            Filter by connector type
-  [cyan]icx memory show <KEY>[/cyan]                      Show full detail for one entry
-  [cyan]icx memory delete <KEY>[/cyan]                    Delete one entry
-  [cyan]icx memory export[/cyan]                          Export memory to JSON
-  [cyan]icx memory export --output <FILE>[/cyan]          Export to specific path
-  [cyan]icx memory import <FILE>[/cyan]                   Import from a JSON export
-  [cyan]icx memory clear --confirm[/cyan]                 Delete all entries
-  [cyan]icx memory status[/cyan]                          Show stats: entries, size, model info
+  [cyan]icx memory save <KEY>[/cyan]                                  Save a resolved issue to local memory
+  [cyan]icx memory save <KEY> --note "..."[/cyan]                     Save non-interactively
+  [cyan]icx memory search "<query>"[/cyan]                            Search past resolutions
+  [cyan]icx memory list[/cyan]                                        List all saved entries (newest first)
+  [cyan]icx memory list --project <KEY>[/cyan]                        Filter by project key
+  [cyan]icx memory list --source <TYPE>[/cyan]                        Filter by connector type
+  [cyan]icx memory show <KEY>[/cyan]                                  Show full detail for one entry
+  [cyan]icx memory delete <KEY>[/cyan]                                Delete one entry
+  [cyan]icx memory export[/cyan]                                      Export memory to JSON
+  [cyan]icx memory export --output <FILE>[/cyan]                      Export to specific path
+  [cyan]icx memory import <FILE>[/cyan]                               Import from a JSON export
+  [cyan]icx memory clear --confirm[/cyan]                             Delete all entries
+  [cyan]icx memory status[/cyan]                                      Show stats: entries, size, model info
 
 [bold]MCP Server[/bold]
-  [cyan]icx mcp run[/cyan]                                Start the MCP server (stdio)
-  [cyan]icx mcp setup[/cyan]                              Register ICX with detected AI editors
-  [cyan]icx mcp setup --host <HOST>[/cyan]                Register with a specific editor only
-  [cyan]icx mcp remove[/cyan]                             Remove ICX from all detected editors
-  [cyan]icx mcp remove --host <HOST>[/cyan]               Remove from a specific editor only
-  [cyan]icx mcp config[/cyan]                             Print config snippets for all editors
-  [cyan]icx mcp list[/cyan]                               List supported MCP hosts
+  [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio)
+  [cyan]icx mcp setup[/cyan]                                          Register ICX with detected AI editors
+  [cyan]icx mcp setup --host <HOST>[/cyan]                            Register with a specific editor only
+  [cyan]icx mcp remove[/cyan]                                         Remove ICX from all detected editors
+  [cyan]icx mcp remove --host <HOST>[/cyan]                           Remove from a specific editor only
+  [cyan]icx mcp config[/cyan]                                         Print config snippets for all editors
+  [cyan]icx mcp list[/cyan]                                           List supported editors and detection status
 
 [bold]General[/bold]
-  [cyan]icx status[/cyan]                                 Show all connections and LLM profiles
-  [cyan]icx logout[/cyan]                                 Remove all credentials from this machine
-  [cyan]icx uninstall[/cyan]                              Fully remove ICX - data, credentials, editor configs, package
-  [cyan]icx uninstall --yes[/cyan]                        Skip confirmation prompt
-  [cyan]icx --version[/cyan]                              Show installed version
-  [cyan]icx --help[/cyan]                                 Show this help
+  [cyan]icx status[/cyan]                                             Show all connections and LLM profiles
+  [cyan]icx logout[/cyan]                                             Remove all credentials from this machine
+  [cyan]icx uninstall[/cyan]                                          Fully remove ICX - data, credentials, editor configs, package
+  [cyan]icx uninstall --yes[/cyan]                                    Skip confirmation prompt
+  [cyan]icx --version[/cyan]                                          Show installed version
+  [cyan]icx --help[/cyan]                                             Show this help
 
 [dim]Run icx --install-completion once to enable tab completion in your shell.[/dim]
 """
@@ -308,7 +310,7 @@ def memory_search(
             description=query,
             issue_type="",
         )
-        insights = mgr.query(q, top_k=top_k, min_score=0.0)
+        insights = mgr.query(q, top_k=top_k)
         if not insights:
             console.print(f"  No results for: {query}")
             return
@@ -447,7 +449,13 @@ def memory_export(
     from datetime import date
 
     try:
-        out_path = Path(output) if output else Path(f"icx-memory-export-{date.today()}.json")
+        default_filename = f"icx-memory-export-{date.today()}.json"
+        if output:
+            out_path = Path(output)
+            if out_path.is_dir() or str(output).endswith(("/", "\\")):
+                out_path = out_path / default_filename
+        else:
+            out_path = Path(default_filename)
         console.print(
             f"\n  [yellow]Warning:[/yellow] The export file contains issue summaries, resolution notes,\n"
             f"  and file paths. Review before sharing.\n\n"
@@ -581,6 +589,8 @@ def connection(
             console.print("[green]✓ Active connection updated.[/green]")
             return
         console.print("Use --add, --remove, or --active. See [bold]icx connection --help[/bold].")
+    except typer.Exit:
+        raise
     except Exception as exc:
         render_icx_error(exc, err_console, show_traceback=traceback)
         raise typer.Exit(1)
@@ -589,8 +599,8 @@ def connection(
 def _connect_jira(debug: bool = False) -> None:
     method = typer.prompt(
         "\nChoose Jira connection method\n"
-        "  1. API Token   (email + token, works everywhere)  ← recommended\n"
-        "  2. OAuth PKCE  (browser login - requires registering your own app at developer.atlassian.com)\n"
+        "  1. API Token   email + token from id.atlassian.com  (recommended)\n"
+        "  2. OAuth PKCE  browser login, needs OAuth app at developer.atlassian.com\n"
         "Enter number",
         default="1",
     )
@@ -785,11 +795,11 @@ def model(
     )] = None,
     remove: Annotated[Optional[str], typer.Option(
         "--remove", metavar="PROFILE",
-        help="Delete an AI profile. Add --channel 2 to remove only the image channel.",
+        help="Delete an AI profile. Add --channel image to remove only the image channel.",
     )] = None,
-    channel: Annotated[Optional[int], typer.Option(
-        "--channel", metavar="1|2",
-        help="With --remove: 1=text channel, 2=image/vision channel.",
+    channel: Annotated[Optional[str], typer.Option(
+        "--channel", metavar="text|image",
+        help="With --remove: channel to remove. 'image' removes only the vision channel; 'text' removes the entire profile.",
     )] = None,
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
@@ -808,7 +818,8 @@ def model(
       icx model --active work                  Make 'work' the default profile
       icx model --active 2                     Make profile #2 the default
       icx model --remove work                  Delete the entire 'work' profile
-      icx model --remove work --channel 2      Remove only the image channel from 'work'
+      icx model --remove 2                     Delete profile #2 (from 'icx status')
+      icx model --remove work --channel image   Remove only the image channel from 'work'
     """
     from icx_engine.config_manager import ConfigManager
     from icx_engine.models.config import LLMConfig
@@ -880,7 +891,10 @@ def model(
             config = ConfigManager.load()
             if channel is not None:
                 config = management.unset_llm_channel(config, remove, channel)
-                console.print("[green]✓ Channel removed from profile.[/green]")
+                if channel.lower() == "image":
+                    console.print("[green]✓ Image channel removed from profile.[/green]")
+                else:
+                    console.print("[green]✓ AI profile removed.[/green]")
             else:
                 config = management.unset_llm_profile(config, remove)
                 console.print("[green]✓ AI profile removed.[/green]")
@@ -1318,6 +1332,38 @@ _TOML_SNIPPET = """\
 [mcp_servers.icx]
 command = "icx"
 args = ["mcp", "run"]"""
+
+
+@mcp_app.command("list")
+def mcp_list(
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """List all supported MCP hosts and whether they are detected on this machine."""
+    from icx_engine.mcp_hosts import list_hosts, detect_installed_hosts
+    from rich.table import Table
+
+    try:
+        all_hosts = list_hosts()
+        installed_names = {h.name for h in detect_installed_hosts()}
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Host", style="cyan", width=14)
+        table.add_column("Label")
+        table.add_column("Detected", width=10)
+        table.add_column("Config path")
+
+        for h in all_hosts:
+            detected = h.name in installed_names
+            detected_cell = "[green]yes[/green]" if detected else "[dim]no[/dim]"
+            table.add_row(h.name, h.label, detected_cell, str(h.config_path))
+
+        console.print()
+        console.print(table)
+        console.print("\n  Use [cyan]icx mcp setup --host <HOST>[/cyan] to register with a specific editor.")
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=traceback)
+        raise typer.Exit(1)
 
 
 @mcp_app.command("config")
