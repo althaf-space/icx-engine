@@ -65,10 +65,23 @@ def unset_llm_profile(config: AppConfig, target: str) -> AppConfig:
     return config.model_copy(update={"llm_profiles": new_profiles, "current_llm_profile": new_current})
 
 
-def unset_llm_channel(config: AppConfig, target: str, channel: str) -> AppConfig:
+def unset_llm_channel(config: AppConfig, target: str, channel) -> AppConfig:
     name, profile = resolve_llm_profile(config, target)
-    ch = channel.lower()
+    if isinstance(channel, int):
+        if channel == 1:
+            ch = "text"
+        elif channel == 2:
+            ch = "image"
+        else:
+            raise ManagementError(f"Invalid channel '{channel}'. Use 1 (text) or 2 (image).")
+    else:
+        ch = channel.lower()
     if ch == "text":
+        if profile.image_config is not None:
+            raise ManagementError(
+                f"Cannot remove the text channel while an image channel exists on profile '{name}'. "
+                "Remove the image channel first."
+            )
         return unset_llm_profile(config, target)
     if ch == "image":
         if profile.image_config is None:

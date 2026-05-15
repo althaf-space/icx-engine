@@ -14,7 +14,6 @@ from pathlib import Path
 from icx_engine.models.config import AppConfig, BaseConnection
 
 CONFIG_PATH = Path.home() / ".icx" / "config.json"
-_WARNED_PATH = CONFIG_PATH.parent / ".warned_plaintext"
 _SERVICE = "icx"
 _SENTINEL = "__keychain__"
 _HEALTH_KEY = "_icx_healthcheck_"
@@ -55,17 +54,18 @@ def _check_keychain() -> bool:
 
 def _warned_accounts() -> set[str]:
     try:
-        return set(_WARNED_PATH.read_text(encoding="utf-8").splitlines())
+        return set((CONFIG_PATH.parent / ".warned_plaintext").read_text(encoding="utf-8").splitlines())
     except FileNotFoundError:
         return set()
 
 
 def _mark_warned(account: str) -> None:
+    warned_path = CONFIG_PATH.parent / ".warned_plaintext"
     warned = _warned_accounts()
     warned.add(account)
     try:
-        _WARNED_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _WARNED_PATH.write_text("\n".join(sorted(warned)), encoding="utf-8")
+        warned_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        warned_path.write_text("\n".join(sorted(warned)), encoding="utf-8")
     except Exception:
         pass
 
