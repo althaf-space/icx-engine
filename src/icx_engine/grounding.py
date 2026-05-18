@@ -98,7 +98,7 @@ async def visual_grounding_pass(
         return corrected
     except Exception as exc:
         if log:
-            log(f"  ⚠ visual grounding failed ({exc}) — returning original analysis")
+            log(f"  ⚠ visual grounding failed ({exc}) - returning original analysis")
         return initial
 
 

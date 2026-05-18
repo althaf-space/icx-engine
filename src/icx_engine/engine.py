@@ -1,4 +1,5 @@
 ﻿from __future__ import annotations
+import asyncio
 import re
 from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
@@ -127,11 +128,16 @@ def resolve_connection(
     if len(config.connections) == 1:
         return config.connections[0]
 
-    # Multiple connections - check default
+    # Multiple connections - use default/active connection
     if config.default_connection:
         for conn in config.connections:
             if f"{conn.connector_type}:{conn.domain}" == config.default_connection:
                 return conn
+        # default_connection is set but points to a removed connection
+        raise NoConnectionError(
+            f"Your active connection '{config.default_connection}' no longer exists. "
+            f"Run `icx connection --active <domain>` to set a new default."
+        )
 
     # Narrow by key format - auto-pick only when exactly one connector matches
     if raw_input:
@@ -198,7 +204,8 @@ async def run(
         conn = resolve_connection(domain, config, raw_input=input_str)
         if conn is None:
             raise NoConnectionError(
-                "Multiple connections configured. Specify a full URL or select a connection."
+                "Multiple connections configured and no default set. "
+                "Run `icx connection --active <domain>` to set one, or pass the full issue URL."
             )
 
     # Resolve which LLM profile to use - volatile, never written back to config.
@@ -276,7 +283,13 @@ async def run(
         log(f"\n── prompt sent to LLM ──\n{build_user_message(raw)}\n────────────────────────")
 
     provider = get_provider(text_cfg)
-    result = await provider.analyze(raw)
+    try:
+        result = await asyncio.wait_for(provider.analyze(raw), timeout=120.0)
+    except asyncio.TimeoutError:
+        raise NoLLMError(
+            f"LLM request timed out after 120s ({text_cfg.provider}/{text_cfg.model}). "
+            "Check your API key and network connection."
+        )
 
     from icx_engine.grounding import visual_grounding_pass
     result = await visual_grounding_pass(result, raw, active_llm.image_config, connector, log=log)

@@ -29,6 +29,8 @@ class PastInsight(BaseModel):
     files_changed: list[str]
     similarity_score: float = Field(..., ge=0.0, le=1.0)
     saved_at: str
+    work_item_type: str = ""
+    pattern_used: str = ""
 
 
 class IssueContext(BaseModel):

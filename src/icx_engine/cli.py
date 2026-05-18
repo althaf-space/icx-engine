@@ -1,10 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import asyncio
 import shlex
 import shutil
 import subprocess
 import sys
 import typer
+from pathlib import Path
 from typing import Annotated, Optional
 from rich.console import Console
 
@@ -130,6 +131,15 @@ AI-native intelligence layer for development teams. Deep context extraction, loc
   [cyan]icx memory clear --confirm[/cyan]                             Delete all entries
   [cyan]icx memory status[/cyan]                                      Show stats: entries, size, model info
 
+[bold]Codebase Graph[/bold]
+  [cyan]icx graph add --name <NAME> --path <PATH>[/cyan]              Register a project for graph indexing
+  [cyan]icx graph build <NAME>[/cyan]                                 Build the knowledge graph (run first; shows progress)
+  [cyan]icx graph build --path <PATH>[/cyan]                          Build without registering
+  [cyan]icx graph list[/cyan]                                         Show all projects: name, status, last built, file count
+  [cyan]icx graph status <NAME>[/cyan]                                Detailed: staleness, changed files, ETA
+  [cyan]icx graph remove <NAME>[/cyan]                                Remove registration and delete graph files
+  [cyan]icx graph remove <NAME> --keep-cache[/cyan]                   Remove registration only, keep cache
+
 [bold]MCP Server[/bold]
   [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio)
   [cyan]icx mcp setup[/cyan]                                          Register ICX with detected AI editors
@@ -180,6 +190,9 @@ app = typer.Typer(
         "Run [bold cyan]icx mcp --help[/bold cyan] to see the [bold]setup[/bold], [bold]remove[/bold], "
         "[bold]config[/bold], and [bold]run[/bold] subcommands for wiring ICX into "
         "Claude Code, Cursor, Windsurf, or Codex.\n\n"
+        "[bold]Codebase graphs:[/bold] "
+        "Run [bold cyan]icx graph --help[/bold cyan] to see [bold]add[/bold], [bold]build[/bold], "
+        "[bold]list[/bold], [bold]status[/bold], and [bold]remove[/bold] subcommands.\n\n"
         "[dim]Run [bold]icx --install-completion[/bold] once to enable tab completion in your shell.[/dim]"
     ),
 )
@@ -199,8 +212,30 @@ app.add_typer(mcp_app, name="mcp", rich_help_panel="MCP Server")
 memory_app = typer.Typer(help="Manage local memory - save resolved issues, search past fixes.", rich_markup_mode="rich")
 app.add_typer(memory_app, name="memory", rich_help_panel="Memory")
 
-console = Console()
-err_console = Console(stderr=True)
+graph_app = typer.Typer(
+    help=(
+        "Build and query codebase knowledge graphs for AI-powered code navigation.\n\n"
+        "[bold]Subcommands:[/bold]\n\n"
+        "  [bold]add[/bold]     Register a project\n"
+        "  [bold]build[/bold]   Build the knowledge graph (run this first)\n"
+        "  [bold]list[/bold]    Show all registered projects and their graph status\n"
+        "  [bold]status[/bold]  Detailed status for one project\n"
+        "  [bold]remove[/bold]  Remove a project registration and graph files"
+    ),
+    rich_markup_mode="rich",
+)
+app.add_typer(graph_app, name="graph", rich_help_panel="Codebase Graph")
+
+console = Console(highlight=False)
+err_console = Console(stderr=True, highlight=False)
+# Ensure UTF-8 output on Windows (cp1252 can't encode ✓, →, etc.)
+import sys as _sys
+if hasattr(_sys.stdout, "reconfigure"):
+    try:
+        _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # Shared options
 DebugOpt = Annotated[bool, typer.Option("--debug", help="Print step-by-step progress to stderr.")]
@@ -531,7 +566,8 @@ def main(
     )] = None,
 ) -> None:
     _check_for_update()
-    if ctx.invoked_subcommand == "memory":
+    _check_uninstall_result()
+    if ctx.invoked_subcommand in ("memory", "graph"):
         _trigger_memory_setup()
     if ctx.invoked_subcommand is None:
         _print_full_help()
@@ -1182,14 +1218,37 @@ def _build_uninstall_cmd() -> list[str]:
     return [sys.executable, "-m", "pip", "uninstall", "-y", "icx-engine"]
 
 
+_UNINSTALL_LOG = Path(
+    __import__("tempfile").gettempdir()
+) / "icx_uninstall_result.txt"
+
+
+def _check_uninstall_result() -> None:
+    """Warn if a previous background uninstall silently failed."""
+    if not _UNINSTALL_LOG.exists():
+        return
+    try:
+        result = _UNINSTALL_LOG.read_text(encoding="utf-8").strip()
+        _UNINSTALL_LOG.unlink(missing_ok=True)
+    except Exception:
+        return
+    if result.startswith("FAILED"):
+        err_console.print(
+            "\n[yellow]⚠ Previous uninstall failed.[/yellow] Remove manually:\n"
+            "  [cyan]pip uninstall -y icx-engine[/cyan]  "
+            "or  [cyan]pipx uninstall icx-engine[/cyan]\n"
+        )
+
+
 def _uninstall_package(console: Console) -> None:
     """Uninstall icx-engine, working around the Windows running-exe lock.
 
-    On Windows, pip cannot move icx.exe while it is the current process.
-    Fix: write a hidden PowerShell script that waits 3 s for this process to
-    exit, then runs the uninstall, then deletes itself. On Unix the exe lock
-    does not exist so we run the uninstall directly.
+    On Windows, pip cannot delete icx.exe while it is the current process.
+    Fix: launch a hidden PowerShell script that waits for THIS process to
+    actually exit (via Wait-Process), then runs the uninstall. On Unix the
+    exe lock does not exist so we run the uninstall directly.
     """
+    import os
     import tempfile
 
     cmd = _build_uninstall_cmd()
@@ -1203,10 +1262,23 @@ def _uninstall_package(console: Console) -> None:
         return '"' + arg.replace('"', '`"') + '"'
 
     cmd_str = " ".join(_ps_quote(c) for c in cmd)
+    log_ps = str(_UNINSTALL_LOG)  # PowerShell doesn't escape backslashes
+    pid = os.getpid()
+
     ps_script = (
-        "Start-Sleep -Seconds 3\n"
+        f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue\n"
+        f"Stop-Process -Name 'icx' -Force -ErrorAction SilentlyContinue\n"
+        f"Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\""
+        f" | Where-Object {{ $_.CommandLine -like '*icx_engine*' -or $_.CommandLine -like '*icx-engine*' }}"
+        f" | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}\n"
+        f"Start-Sleep -Seconds 1\n"
         f"& {cmd_str}\n"
-        "Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
+        f"if ($LASTEXITCODE -eq 0) {{\n"
+        f'    "OK" | Out-File -FilePath "{log_ps}" -Encoding utf8\n'
+        f"}} else {{\n"
+        f'    "FAILED:exit $LASTEXITCODE" | Out-File -FilePath "{log_ps}" -Encoding utf8\n'
+        f"}}\n"
+        f"Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
     )
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".ps1", delete=False, encoding="utf-8"
@@ -1215,14 +1287,20 @@ def _uninstall_package(console: Console) -> None:
         script_path = tf.name
 
     subprocess.Popen(
-        ["powershell", "-NonInteractive", "-WindowStyle", "Hidden", "-File", script_path],
+        [
+            "powershell",
+            "-ExecutionPolicy", "Bypass",
+            "-NonInteractive",
+            "-WindowStyle", "Hidden",
+            "-File", script_path,
+        ],
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
-        close_fds=True,
     )
     console.print(
         "[bold green]✓ Data and configs removed.[/bold green]\n"
-        "[dim]Package uninstall running in background — completes in ~3 seconds.[/dim]\n"
-        "[dim]You can close this window.[/dim]\n"
+        "[dim]Package uninstall running in background.[/dim]\n"
+        "[dim]Open a new terminal in ~5 seconds and run "
+        "[bold]icx --version[/bold] - 'not recognized' means success.[/dim]\n"
     )
 
 
@@ -1231,7 +1309,7 @@ def uninstall(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")] = False,
     traceback: TracebackOpt = False,
 ) -> None:
-    """Fully remove ICX — wipes all data, credentials, editor configs, then uninstalls the package.
+    """Fully remove ICX - wipes all data, credentials, editor configs, then uninstalls the package.
 
     \b
     Removes:
@@ -1291,12 +1369,12 @@ def uninstall(
             shutil.rmtree(icx_dir)
             console.print(f"[green]✓[/green] Deleted {icx_dir}")
         else:
-            console.print(f"[dim]  {icx_dir} not found — nothing to delete.[/dim]")
+            console.print(f"[dim]  {icx_dir} not found - nothing to delete.[/dim]")
     except Exception as exc:
         errors.append(f"~/.icx/: {exc}")
         console.print(f"[yellow]⚠[/yellow] Failed to delete {icx_dir}: {exc}")
 
-    # 4. Uninstall the package — detect pipx vs pip, handle Windows exe-lock
+    # 4. Uninstall the package - detect pipx vs pip, handle Windows exe-lock
     console.print("\nUninstalling [bold]icx-engine[/bold] package…")
     try:
         _uninstall_package(console)
@@ -1487,6 +1565,262 @@ def mcp_run(debug: DebugOpt = False) -> None:
     """
     from icx_engine.mcp_server import run_mcp_server
     run_mcp_server()
+
+
+# ---------------------------------------------------------------------------
+# Graph subcommands
+# ---------------------------------------------------------------------------
+
+@graph_app.command("add")
+def graph_add(
+    name: Annotated[str, typer.Option("--name", help="Project name (used to reference it later).")],
+    path: Annotated[str, typer.Option("--path", help="Absolute or relative path to the project root.")],
+) -> None:
+    """Register a project for codebase graph indexing.
+
+    \b
+    Examples:
+      icx graph add --name myapp --path /home/user/projects/myapp
+      icx graph add --name payments --path ./payments-svc
+    """
+    from icx_engine.graph.manager import GraphManager
+    from icx_engine.exceptions import GraphError
+
+    try:
+        mgr = GraphManager()
+        project_id = mgr.register(name, path)
+        console.print(
+            f"[green]✓ Project '[bold]{name.lower()}[/bold]' registered (id: {project_id}).[/green]\n"
+            f"  Run [cyan]icx graph build {name.lower()}[/cyan] to build the knowledge graph."
+        )
+    except GraphError as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@graph_app.command("build")
+def graph_build(
+    name: Annotated[Optional[str], typer.Argument(help="Registered project name.")] = None,
+    path: Annotated[Optional[str], typer.Option("--path", help="Path to project root (use instead of name).")] = None,
+    force: Annotated[bool, typer.Option("--force", help="Force full rebuild even if graph is current.")] = False,
+) -> None:
+    """Build the codebase knowledge graph for a project.
+
+    \b
+    Run this before using query_codebase_graph in your AI editor.
+    Building from the CLI shows a progress bar and avoids blocking your editor.
+
+    \b
+    Examples:
+      icx graph build myapp
+      icx graph build --path /home/user/projects/myapp
+      icx graph build myapp --force
+    """
+    from icx_engine.graph.manager import GraphManager
+    from icx_engine.graph.builder import estimate_build_eta
+    from icx_engine.exceptions import GraphError
+
+    try:
+        mgr = GraphManager()
+
+        if name is None and path is None:
+            err_console.print("Provide a project name or [bold]--path[/bold]. See [bold]icx graph build --help[/bold].")
+            raise typer.Exit(1)
+
+        from icx_engine.graph.storage import read_meta as _read_meta
+        project_id = mgr.resolve_project(project_name=name, project_path=path)
+        meta = _read_meta(project_id)
+        if meta is None:
+            err_console.print(f"Project not found. Register it first with [cyan]icx graph add[/cyan].")
+            raise typer.Exit(1)
+
+        if not force and meta.build_status in ("building", "rebuilding"):
+            eta = estimate_build_eta(meta.file_count)
+            console.print(f"  Graph is already building for [cyan]{meta.name}[/cyan]. ETA: ~{eta}s.")
+            raise typer.Exit(0)
+
+        display_name = meta.name or (name or path or project_id)
+        console.print(f"\n  Building codebase graph: [bold]{display_name}[/bold]")
+
+        with console.status("[bold]  Scanning and extracting files…[/bold]", spinner="dots"):
+            result = mgr.build(project_id, force=force)
+
+        if result.get("error"):
+            err_console.print(f"[red]Build failed:[/red] {result['error']}")
+            raise typer.Exit(1)
+
+        file_count = result.get("file_count", 0)
+        node_count = result.get("node_count", 0)
+        edge_count = result.get("edge_count", 0)
+        community_count = result.get("community_count", 0)
+
+        console.print(
+            f"\n  [green]✓ Graph ready.[/green] "
+            f"{file_count} files · {node_count} nodes · {edge_count} edges · {community_count} communities\n"
+            f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
+        )
+
+    except typer.Exit:
+        raise
+    except GraphError as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@graph_app.command("list")
+def graph_list() -> None:
+    """Show all registered projects and their graph status."""
+    from icx_engine.graph.manager import GraphManager
+    from rich.table import Table
+    from icx_engine.exceptions import GraphError
+
+    try:
+        mgr = GraphManager()
+        projects = mgr.list_projects()
+
+        if not projects:
+            console.print(
+                "  No projects registered. "
+                "Run [cyan]icx graph add --name <NAME> --path <PATH>[/cyan] to register one."
+            )
+            return
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Name", style="cyan")
+        table.add_column("Path")
+        table.add_column("Status", width=12)
+        table.add_column("Last Built", width=16)
+        table.add_column("Files", width=7, justify="right")
+
+        _STATUS_STYLE = {
+            "ready": "[green]ready[/green]",
+            "stale": "[yellow]stale[/yellow]",
+            "building": "[blue]building[/blue]",
+            "rebuilding": "[blue]rebuilding[/blue]",
+            "not_built": "[dim]not built[/dim]",
+        }
+
+        for p in projects:
+            status_cell = _STATUS_STYLE.get(p.build_status, p.build_status)
+            last_built = p.last_built[:16].replace("T", " ") if p.last_built else "[dim]-[/dim]"
+            file_count = str(p.file_count) if p.file_count else "[dim]-[/dim]"
+            table.add_row(p.name, p.path, status_cell, last_built, file_count)
+
+        console.print()
+        console.print(table)
+        console.print()
+
+    except GraphError as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@graph_app.command("status")
+def graph_status(
+    name: Annotated[str, typer.Argument(help="Registered project name.")],
+) -> None:
+    """Show detailed status for a project: staleness, changed files, ETA."""
+    from icx_engine.graph.manager import GraphManager
+    from icx_engine.graph.change import check_staleness
+    from icx_engine.graph.builder import estimate_build_eta
+    from icx_engine.graph.storage import read_meta
+    from pathlib import Path
+    from icx_engine.exceptions import GraphError
+
+    try:
+        mgr = GraphManager()
+        project_id = mgr.resolve_project(project_name=name)
+        meta = read_meta(project_id)
+        if meta is None:
+            err_console.print(f"Project '{name}' not found.")
+            raise typer.Exit(1)
+
+        console.print(f"\n  [bold]{meta.name}[/bold]  [dim]({meta.project_id})[/dim]")
+        console.print(f"  Path:        {meta.path}")
+        console.print(f"  Status:      {meta.build_status}")
+        console.print(f"  Last built:  {meta.last_built or 'never'}")
+        console.print(f"  Files:       {meta.file_count}")
+        console.print(f"  Git commit:  {meta.git_commit or 'unknown'}")
+
+        if meta.build_status in ("ready", "stale") and meta.git_commit:
+            change = check_staleness(meta.git_commit, meta.file_count, Path(meta.path))
+            if change.is_stale:
+                console.print(f"\n  [yellow]Graph is stale.[/yellow] {len(change.changed_files)} file(s) changed:")
+                for f in change.changed_files[:10]:
+                    console.print(f"    [dim]{f}[/dim]")
+                eta = estimate_build_eta(meta.file_count)
+                console.print(f"\n  Rebuild ETA: ~{eta}s  |  Run: [cyan]icx graph build {meta.name}[/cyan]")
+            else:
+                console.print("\n  [green]Graph is up to date.[/green]")
+        elif meta.build_status == "not_built":
+            console.print(f"\n  Run [cyan]icx graph build {meta.name}[/cyan] to build the graph.")
+        elif meta.build_status in ("building", "rebuilding"):
+            eta = estimate_build_eta(meta.file_count)
+            console.print(f"\n  Build in progress. ETA: ~{eta}s")
+        console.print()
+
+    except typer.Exit:
+        raise
+    except GraphError as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@graph_app.command("remove")
+def graph_remove(
+    name: Annotated[str, typer.Argument(help="Registered project name.")],
+    keep_cache: Annotated[bool, typer.Option("--keep-cache", help="Keep cache files; remove registration only.")] = False,
+) -> None:
+    """Remove a project registration and delete its graph files.
+
+    \b
+    Examples:
+      icx graph remove myapp               Remove registration and all graph files
+      icx graph remove myapp --keep-cache  Remove registration only, keep cache for faster future rebuild
+    """
+    from icx_engine.graph.manager import GraphManager
+    from icx_engine.exceptions import GraphError
+
+    try:
+        mgr = GraphManager()
+        project_id = mgr.resolve_project(project_name=name)
+
+        if keep_cache:
+            action_desc = f"remove registration for '[bold]{name}[/bold]' (keep cache)"
+        else:
+            action_desc = f"remove '[bold]{name}[/bold]' and delete all graph files"
+
+        confirmed = typer.confirm(f"  This will {action_desc}. Continue?", default=False)
+        if not confirmed:
+            console.print("Cancelled.")
+            return
+
+        mgr.remove(project_id, keep_cache=keep_cache)
+        if keep_cache:
+            console.print(f"[green]✓ Registration removed. Cache kept at ~/.icx/graphs/{project_id}/cache/[/green]")
+        else:
+            console.print(f"[green]✓ Project '{name}' removed.[/green]")
+
+    except typer.Exit:
+        raise
+    except GraphError as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

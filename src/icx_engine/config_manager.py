@@ -64,14 +64,14 @@ def _mark_warned(account: str) -> None:
     warned = _warned_accounts()
     warned.add(account)
     try:
-        warned_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        warned_path.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
         warned_path.write_text("\n".join(sorted(warned)), encoding="utf-8")
     except Exception:
         pass
 
 
 def _warn_plaintext(account: str, label: str) -> None:
-    """Plaintext storage warning — fires once per account, never again."""
+    """Plaintext storage warning - fires once per account, never again."""
     if account in _warned_accounts():
         return
     env_var = _env_key(account)
@@ -123,7 +123,7 @@ def _get_or_create_master_key() -> bytes:
             from icx_engine.exceptions import ConfigError
             raise ConfigError(
                 "D-Lock setup failed: the OS keyring rejected the Master Key write. "
-                "The keyring appeared healthy during startup but refused the store — "
+                "The keyring appeared healthy during startup but refused the store - "
                 "this can happen when the keyring is locked or storage quota is exceeded. "
                 "Unlock your OS keyring and retry."
             )
@@ -188,7 +188,7 @@ def _config_lock():
     Windows: O_CREAT|O_EXCL atomic creation; stale locks are evicted by PID check.
     """
     lock_path = CONFIG_PATH.with_suffix(".lock")
-    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
 
     # _thread_lock serialises threads within the same process first; the file
     # lock below then serialises independent processes.
@@ -304,16 +304,45 @@ def _resolve(account: str) -> str | None:
 class ConfigManager:
     @staticmethod
     def load() -> AppConfig:
-        if not CONFIG_PATH.exists():
-            return AppConfig()
-        try:
-            raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _last_perm_exc: Exception | None = None
+        for _attempt in range(4):
+            try:
+                raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+                break
+            except FileNotFoundError:
+                return AppConfig()
+            except PermissionError as exc:
+                _last_perm_exc = exc
+                if sys.platform == "win32" and _attempt == 0:
+                    # Self-heal: bad DACL from old os.open(0o600) - reset to inherited ACLs.
+                    try:
+                        import subprocess
+                        subprocess.run(
+                            ["icacls", str(CONFIG_PATH), "/reset", "/C"],
+                            capture_output=True,
+                            check=False,
+                        )
+                    except Exception:
+                        pass
+                time.sleep(0.05 * (2 ** _attempt))  # 50ms → 100ms → 200ms → 400ms
+            except (OSError, UnicodeDecodeError) as exc:
+                from icx_engine.exceptions import ConfigError
+                raise ConfigError(
+                    f"Failed to read config file at {CONFIG_PATH}: {exc}"
+                ) from exc
+            except json.JSONDecodeError as exc:
+                from icx_engine.exceptions import ConfigError
+                raise ConfigError(
+                    f"Config file at {CONFIG_PATH} is corrupted (invalid JSON). "
+                    "Delete it to start fresh: it will be recreated on next `icx connection --add`."
+                ) from exc
+        else:
             from icx_engine.exceptions import ConfigError
             raise ConfigError(
-                f"Failed to read config file at {CONFIG_PATH}: {exc}. "
-                "The file may be corrupted. Delete it to start fresh."
-            ) from exc
+                f"Permission denied reading config file at {CONFIG_PATH}. "
+                "Another program may be locking it. On Windows, run: "
+                f'icacls "{CONFIG_PATH}" /grant %USERNAME%:F'
+            ) from _last_perm_exc
 
         # True when any secret is stored as plain text in config.json (pre-keyring config).
         # Triggers a save() at the end to migrate those secrets into the OS keyring.
@@ -463,31 +492,31 @@ class ConfigManager:
                         _channel_label = "text model" if channel_attr == "text_config" else "image model"
                         _warn_plaintext(acct, f"LLM API key for profile '{profile_name}' ({_channel_label})")
 
-        # 0o700: only owner can list/enter the config directory (macOS/Linux)
-        CONFIG_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # 0o700: owner-only on macOS/Linux; Windows user-profile isolation makes this unnecessary
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
         # PID-unique staging file: concurrent processes get their own clean room
         # and can never clobber each other during the serialization phase.
         tmp = CONFIG_PATH.parent / f"{CONFIG_PATH.name}.tmp.{os.getpid()}"
 
         with _config_lock():
             # Lock is held - write the staging file then atomically replace.
-            # Create temp file with 0o600 from the start - eliminates the TOCTOU
-            # window between write and chmod on shared machines.
-            try:
-                fd = os.open(
-                    str(tmp),
-                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                    stat.S_IRUSR | stat.S_IWUSR,
-                )
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    fh.write(json.dumps(raw, indent=2))
-            except OSError:
-                # Fallback for platforms where os.open mode is ignored (e.g. Windows)
+            if sys.platform == "win32":
                 tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+            else:
                 try:
-                    tmp.chmod(0o600)
-                except Exception:
-                    pass
+                    fd = os.open(
+                        str(tmp),
+                        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                        stat.S_IRUSR | stat.S_IWUSR,
+                    )
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        fh.write(json.dumps(raw, indent=2))
+                except OSError:
+                    tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+                    try:
+                        tmp.chmod(0o600)
+                    except Exception:
+                        pass
             try:
                 tmp.replace(CONFIG_PATH)
             except Exception:
@@ -496,6 +525,18 @@ class ConfigManager:
                 except Exception:
                     pass
                 raise
+            if sys.platform == "win32":
+                # Reset any inherited ACL restrictions so all Windows security
+                # contexts (e.g. MCP server spawned by an AI editor) can read it.
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["icacls", str(CONFIG_PATH), "/reset", "/C"],
+                        capture_output=True,
+                        check=False,
+                    )
+                except Exception:
+                    pass
 
     @staticmethod
     def delete_all_secrets(config: AppConfig) -> None:

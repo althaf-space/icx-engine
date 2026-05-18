@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 import re
+import sys
 from pathlib import Path
 
 from icx_engine.exceptions import MemoryError
 
 _SAFE_KEY_RE = re.compile(r'^[A-Z][A-Z0-9]*-[0-9]+$')
+_BARE_KEY_RE = re.compile(r'[A-Z][A-Z0-9]*-[0-9]+')
 from icx_engine.memory.embeddings import EmbeddingsManager, VECTOR_DIM
 from icx_engine.memory.schema import MemoryEntry, MemoryQueryInput
 from icx_engine.models.output import PastInsight
@@ -16,8 +18,17 @@ _DEFAULT_MIN_SCORE = 0.65
 _RRF_K = 60
 
 
+def _extract_bare_key(s: str) -> str | None:
+    """Extract PROJ-123 style key from a bare key or full URL."""
+    m = _BARE_KEY_RE.search(s.upper())
+    return m.group(0) if m else None
+
+
 def _build_embed_text(entry: MemoryEntry) -> str:
-    parts = [entry.summary, entry.problem_description, entry.resolution_note]
+    # Embed only problem description + tags. Resolution note is data we return,
+    # not data we match on - including it skews embeddings away from problem space
+    # and hurts cross-project similarity matching.
+    parts = [entry.summary, entry.problem_description]
     if entry.tags:
         parts.append(" ".join(entry.tags))
     return " ".join(p for p in parts if p)
@@ -38,6 +49,8 @@ def _row_to_entry(row: dict) -> MemoryEntry:
         resolution_confirmed=bool(row.get("resolution_confirmed", False)),
         saved_at=row["saved_at"],
         tags=list(row.get("tags") or []),
+        work_item_type=row.get("work_item_type", "bug"),
+        pattern_used=row.get("pattern_used", ""),
     )
 
 
@@ -46,10 +59,11 @@ class MemoryManager:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path or (Path.home() / ".icx" / "memory")
-        self._db_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._db_path.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
         self._embeddings = EmbeddingsManager()
         self._db = None
         self._table = None
+        self._fts_ready = False  # deferred until first save - avoids hang on empty table
 
     def _get_table(self):
         if self._table is not None:
@@ -83,18 +97,11 @@ class MemoryManager:
             pa.field("resolution_confirmed", pa.bool_()),
             pa.field("saved_at", pa.utf8()),
             pa.field("tags", pa.list_(pa.utf8())),
+            pa.field("work_item_type", pa.utf8()),
+            pa.field("pattern_used", pa.utf8()),
         ])
         self._table = self._db.create_table(_TABLE_NAME, schema=schema)
-        for _fts_field in _FTS_FIELDS:
-            try:
-                self._table.create_fts_index(_fts_field, replace=True)
-            except Exception as exc:
-                import sys
-                print(
-                    f"[memory] FTS index on '{_fts_field}' failed ({exc}); "
-                    "that field will be excluded from keyword search.",
-                    file=sys.stderr,
-                )
+        # FTS indexes deferred to first save() - create_fts_index hangs on empty tables
         return self._table
 
     def save(self, entry: MemoryEntry) -> None:
@@ -117,6 +124,8 @@ class MemoryManager:
             "resolution_confirmed": entry.resolution_confirmed,
             "saved_at": entry.saved_at,
             "tags": entry.tags,
+            "work_item_type": entry.work_item_type,
+            "pattern_used": entry.pattern_used,
         }
         try:
             table = self._get_table()
@@ -126,6 +135,19 @@ class MemoryManager:
                 .when_not_matched_insert_all()
                 .execute([row])
             )
+            # Create FTS indexes after data exists - safe now, deferred from _get_table()
+            if not self._fts_ready:
+                for _fts_field in _FTS_FIELDS:
+                    try:
+                        table.create_fts_index(_fts_field, replace=True)
+                    except Exception as exc:
+                        import sys
+                        print(
+                            f"[memory] FTS index on '{_fts_field}' failed ({exc}); "
+                            "that field will be excluded from keyword search.",
+                            file=sys.stderr,
+                        )
+                self._fts_ready = True
         except Exception as exc:
             raise MemoryError(f"Failed to save memory entry for {entry.issue_key}: {exc}") from exc
 
@@ -178,7 +200,7 @@ class MemoryManager:
 
         fetch_n = min(row_count, top_k * 4)
 
-        # Vector search with cosine metric — _distance = cosine distance (1 - similarity)
+        # Vector search with cosine metric - _distance = cosine distance (1 - similarity)
         try:
             vec_rows = table.search(vector).metric("cosine").limit(fetch_n).to_list()
         except Exception:
@@ -200,7 +222,7 @@ class MemoryManager:
         if not cosine_sim:
             return []
 
-        # FTS search (best-effort) — only over already-qualified candidates
+        # FTS search (best-effort) - only over already-qualified candidates
         fts_rows: list[dict] = []
         try:
             fts_rows = (
@@ -211,7 +233,7 @@ class MemoryManager:
         except Exception:
             pass
 
-        # RRF over qualified candidates only — used purely for ranking, not filtering
+        # RRF over qualified candidates only - used purely for ranking, not filtering
         rrf_scores: dict[str, float] = {}
         for rank, row in enumerate(vec_rows):
             rid = row["id"]
@@ -237,9 +259,39 @@ class MemoryManager:
                 files_changed=entry.files_changed,
                 similarity_score=cosine_sim[rid],
                 saved_at=entry.saved_at,
+                work_item_type=entry.work_item_type,
+                pattern_used=entry.pattern_used,
             ))
 
-        return results
+        # Exact key match: always surface the saved entry for this specific ticket
+        # regardless of similarity score. Handles the case where the same ticket
+        # is queried again after being saved - bypasses embedding comparison entirely.
+        exact_match: PastInsight | None = None
+        if input.issue_key:
+            bare_key = _extract_bare_key(input.issue_key)
+            if bare_key:
+                try:
+                    exact_entry = self.show(bare_key)
+                    if exact_entry:
+                        exact_match = PastInsight(
+                            issue_key=exact_entry.issue_key,
+                            source_type=exact_entry.source_type,
+                            summary=exact_entry.summary,
+                            resolution_note=exact_entry.resolution_note,
+                            files_changed=exact_entry.files_changed,
+                            similarity_score=1.0,
+                            saved_at=exact_entry.saved_at,
+                            work_item_type=exact_entry.work_item_type,
+                            pattern_used=exact_entry.pattern_used,
+                        )
+                except Exception:
+                    pass
+
+        if exact_match:
+            # Prepend exact match, remove duplicate if semantic search also found it
+            results = [exact_match] + [r for r in results if r.issue_key != exact_match.issue_key]
+
+        return results[:top_k]
 
     def show(self, issue_key: str) -> MemoryEntry | None:
         """Return the full MemoryEntry for one issue_key, or None if not found."""
@@ -281,6 +333,7 @@ class MemoryManager:
             if _TABLE_NAME in existing:
                 self._db.drop_table(_TABLE_NAME)
             self._table = None
+            self._fts_ready = False
             self._db = None  # force fresh connection on next access
         except Exception as exc:
             raise MemoryError(f"Failed to clear memory: {exc}") from exc
@@ -293,7 +346,13 @@ class MemoryManager:
         except Exception:
             entry_count = 0
 
-        db_size = sum(f.stat().st_size for f in self._db_path.rglob("*") if f.is_file())
+        db_size = 0
+        for _f in self._db_path.rglob("*"):
+            try:
+                if _f.is_file():
+                    db_size += _f.stat().st_size
+            except OSError:
+                pass
 
         return {
             "entry_count": entry_count,

@@ -329,7 +329,7 @@ def _convert_document(filename: str, data: bytes, log=None) -> str:
             return _convert_txt(data)
     except Exception as exc:
         if log:
-            log(f"    {filename}: conversion error ({exc}) — skipped")
+            log(f"    {filename}: conversion error ({exc}) - skipped")
         return ""
     return ""
 
@@ -394,7 +394,7 @@ async def _llm_summarize(config: ChannelConfig, filename: str, content: str) -> 
         return (resp.choices[0].message.content or content[:_SUMMARIZE_THRESHOLD]).strip()
     except Exception as exc:
         import sys
-        print(f"    [summarize] LLM summarization failed ({exc}) — truncating content", file=sys.stderr)
+        print(f"    [summarize] LLM summarization failed ({exc}) - truncating content", file=sys.stderr)
         return content[:_SUMMARIZE_THRESHOLD] + _TRUNCATION_NOTE
 
 
@@ -412,7 +412,7 @@ async def _process_image(
         image_bytes = await downloader.download_attachment(content_url)
     except Exception as exc:
         if log:
-            log(f"    {filename}: download failed ({exc}) \u2014 skipped")
+            log(f"    {filename}: download failed ({exc}) - skipped")
         return filename, "", ""
     b64 = base64.b64encode(image_bytes).decode()
     text = ocr_image(image_bytes)
@@ -437,7 +437,7 @@ async def _process_document(
         data = await downloader.download_attachment(content_url)
     except Exception as exc:
         if log:
-            log(f"    {filename}: download failed ({exc}) \u2014 skipped")
+            log(f"    {filename}: download failed ({exc}) - skipped")
         return filename, "", ""
     text = _convert_document(filename, data, log=log)
     if not text:

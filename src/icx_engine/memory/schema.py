@@ -19,6 +19,8 @@ class MemoryEntry(BaseModel):
     resolution_confirmed: bool
     saved_at: str
     tags: list[str] = Field(default_factory=list)
+    work_item_type: str = "bug"
+    pattern_used: str = ""
 
 
 @dataclass

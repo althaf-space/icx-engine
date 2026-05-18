@@ -10,8 +10,36 @@ from icx_engine.models.config import AppConfig, LLMConfig, ChannelConfig
 def test_help_exits_cleanly(cli_runner):
     result = cli_runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("connection", "model", "analyze", "status", "logout", "mcp"):
+    for cmd in ("connection", "model", "analyze", "status", "logout", "mcp", "graph"):
         assert cmd in result.output
+
+
+def test_graph_help(cli_runner):
+    result = cli_runner.invoke(app, ["graph", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    for cmd in ("add", "build", "list", "status", "remove"):
+        assert cmd in output
+
+
+def test_graph_module_importable():
+    from icx_engine.graph import GraphManager, generate_graph_report
+    assert callable(GraphManager)
+    assert callable(generate_graph_report)
+
+
+def test_graph_manager_list_empty():
+    from icx_engine.graph.manager import GraphManager
+    from unittest.mock import patch
+    with patch("icx_engine.graph.storage._graphs_root", lambda: __import__("pathlib").Path("/nonexistent/path/icx_test_xyz")):
+        mgr = GraphManager()
+        projects = mgr.list_projects()
+        assert isinstance(projects, list)
+
+
+def test_graph_error_is_icx_error():
+    from icx_engine.exceptions import GraphError, ICXError
+    assert issubclass(GraphError, ICXError)
 
 
 def test_connection_help(cli_runner):

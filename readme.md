@@ -1,4 +1,4 @@
-# ICX - Integrated Contextual X-ecution Engine
+﻿# ICX - Integrated Contextual X-ecution Engine
 
 **AI-native intelligence layer for development teams.**
 
@@ -29,7 +29,8 @@ ICX is an early-stage product. The core pipeline (fetch → process → analyse 
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
 | Attachments | PDF, DOCX, XLSX, CSV, images via OCR + vision | Audio/video transcription |
 | Memory | Local LanceDB + ONNX embeddings (BAAI/bge-small-en-v1.5, no PyTorch) | Team-shared memory, conflict resolution |
-| MCP tools | `analyze_issue_fast`, `analyze_issue`, `search_memory`, `save_memory` | Batch analysis, project-level summary |
+| MCP tools | `analyze_issue_fast`, `analyze_issue`, `save_memory` | Batch analysis, project-level summary |
+| Codebase graph | Project registration, AST + semantic build, staleness detection, GRAPH_REPORT.md navigation map | Multi-project graph, incremental rebuild |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
 
@@ -41,7 +42,7 @@ ICX operates in three modes depending on how you call it and what you have confi
 
 **CLI mode** - run `icx analyze KEY` from your terminal. ICX fetches the work item, processes every attachment, runs your configured AI model, queries local memory for similar past resolutions, and prints a structured JSON summary to stdout.
 
-**MCP mode** - your AI editor calls ICX directly during a conversation. ICX exposes four purposeful tools. The agent calls `analyze_issue_fast` first, decides whether images are needed, queries memory with a semantically rich query, implements the fix, and saves the resolution when you confirm it works.
+**MCP mode** - your AI editor calls ICX directly during a conversation. ICX exposes three tools. The agent calls `analyze_issue_fast` first - it returns structured analysis, memory results, and the codebase graph navigation map in a single response. The agent reads the graph report, locates relevant files, implements the fix, and saves the resolution when you confirm it works.
 
 **MCP headless mode** - same as MCP mode but with no AI provider configured. ICX returns all raw content - text, attachment extracts, and Base64 images - directly to your editor's AI for analysis. No separate API key required.
 
@@ -84,15 +85,17 @@ flowchart TD
     A([Agent: work item mentioned]) --> B[analyze_issue_fast\ntext-only - always first]
     B --> C{pending_images\nnon-empty AND\nimages relevant?}
     C -- yes --> D[analyze_issue\nfull vision + OCR]
-    C -- no --> E{missing_information\nnon-empty OR\ncompleteness_score below 0.8?}
+    C -- no --> E[Single response:\nwork_item + memory + graph]
     D --> E
-    E -- gaps found --> F[Report gaps to developer\nask for clarification]
-    F --> E
-    E -- complete --> G[search_memory\ntechnical query from analysis]
-    G --> H[Implement fix\nusing acceptance_criteria as checklist]
-    H --> I[Ask developer to test manually]
-    I -- fix confirmed --> J[save_memory\nresolution stored locally]
-    I -- needs changes --> H
+    E --> F{graph.status?}
+    F -- ready --> G[Read graph.report_path\npre-authorized direct access]
+    F -- building/other --> H[grep/glob for relevant files\ngraph builds in background]
+    G --> I[Identify relevant clusters\nRead core files in listed order]
+    H --> I
+    I --> J[Use memory.results as pattern reference\nImplement per acceptance_criteria]
+    J --> K[Ask developer to test manually]
+    K -- fix confirmed --> L[save_memory\nresolution stored locally]
+    K -- needs changes --> J
 ```
 
 ### MCP headless - no AI provider
@@ -109,7 +112,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.2.0 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
+**Version:** 0.3.0 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
 
 ```
 pipx install icx-engine
@@ -210,6 +213,20 @@ icx memory clear --confirm
 icx memory status
 ```
 
+### Codebase graph
+
+```sh
+icx graph add NAME PATH            # register a project directory for graph analysis
+icx graph build NAME               # build (or rebuild) the knowledge graph for a project
+icx graph build NAME --force       # rebuild even if graph is current
+icx graph list                     # list all registered projects with status and file counts
+icx graph status NAME              # detailed status: build state, last commit, staleness info
+icx graph remove NAME              # remove a project and its graph data
+icx graph remove NAME --keep-cache # remove project but keep cached graph files
+```
+
+Graph data (including build cache) is stored in `~/.icx/graphs/` - nothing is written inside your project directories.
+
 ### MCP server
 
 ```sh
@@ -279,13 +296,12 @@ icx mcp setup --host antigravity    # Gemini CLI only
 
 After setup, restart your editor. ICX will appear in its list of available tools.
 
-### The four MCP tools
+### The MCP tools
 
 | Tool | When the agent calls it |
 |------|------------------------|
-| `analyze_issue_fast` | Always first - text-only, fast. Returns `pending_images` if images exist. |
-| `analyze_issue` | Only when `pending_images` is non-empty AND images are relevant to the problem. |
-| `search_memory` | After understanding the problem - semantic search with a precise technical query. |
+| `analyze_issue_fast` | Always first - text-only, fast. Returns `work_item` (analysis), `memory` (past similar work), and `graph` (report path or build status) in a single response. |
+| `analyze_issue` | Only when `work_item.analysis.pending_images` is non-empty AND images are relevant to the problem. Same response shape as `analyze_issue_fast`. |
 | `save_memory` | After the developer confirms the fix is tested and working. |
 
 ### With and without an AI provider

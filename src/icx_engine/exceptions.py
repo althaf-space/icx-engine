@@ -52,3 +52,7 @@ class ConfigError(ICXError):
 
 class MemoryError(ICXError):
     """Local memory operation failed (LanceDB, embeddings, or storage)."""
+
+
+class GraphError(ICXError):
+    """Codebase graph operation failed (build, query, storage, or registration)."""

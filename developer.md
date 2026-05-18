@@ -13,6 +13,7 @@ This is the complete reference for contributing to ICX. Read it before writing a
 5. [Adding a new issue tracker connector](#5-adding-a-new-issue-tracker-connector)
 6. [Adding a new LLM provider](#6-adding-a-new-llm-provider)
 7. [Memory Module](#7-memory-module)
+   - [7a. Graph Module](#7a-graph-module)
 8. [Extending the CLI](#8-extending-the-cli)
 9. [Testing - rules and patterns](#9-testing--rules-and-patterns)
 10. [Security rules - non-negotiable](#10-security-rules--non-negotiable)
@@ -33,7 +34,7 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.),
-  exposing four purpose-built tools: `analyze_issue_fast`, `analyze_issue`, `search_memory`, `save_memory`
+  exposing three purpose-built tools: `analyze_issue_fast`, `analyze_issue`, `save_memory`
 
 The architecture is deliberately split along two axes:
 
@@ -59,7 +60,7 @@ ICX/
 │   ├── mcp_server.py           # MCP stdio server
 │   ├── mcp_hosts.py            # MCP host config file management
 │   ├── config_manager.py       # load/save config + keyring/env-var secret management
-│   ├── exceptions.py           # all ICX exception classes
+│   ├── exceptions.py           # all ICX exception classes (incl. GraphError)
 │   ├── error_display.py        # Rich Panel error rendering - render_icx_error()
 │   ├── models/
 │   │   ├── config.py           # AppConfig, BaseConnection, LLMConfig, OAuthAuth
@@ -81,8 +82,16 @@ ICX/
 │   │       ├── parser.py       # Jira API JSON → RawIssueData
 │   │       ├── auth.py         # build_auth_header() for token and OAuth
 │   │       └── oauth.py        # refresh_oauth_if_needed()
+│   ├── graph/                  # codebase knowledge graph (v0.3.0+)
+│   │   ├── __init__.py         # public exports: GraphManager, generate_graph_report
+│   │   ├── storage.py          # project registry, ProjectInfo, atomic meta writes (~/.icx/graphs/)
+│   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta
+│   │   ├── change.py           # check_staleness, current_git_commit, ChangeResult
+│   │   ├── querier.py          # generate_graph_report - writes GRAPH_REPORT.md navigation map
+│   │   └── manager.py          # GraphManager - register, build, status, list, remove, resolve
 │   ├── services/
 │   │   └── connection_service.py  # platform auth flows (_connect_jira_token, _connect_jira_oauth)
+│   ├── memory/                 # local LanceDB + ONNX memory (see section 7)
 │   └── llm/
 │       ├── base.py             # LLMProvider ABC, SYSTEM_PROMPT, build_user_message,
 │       │                       # finalize(), _compute_completeness(), _compute_missing(),
@@ -96,12 +105,18 @@ ICX/
 ├── tests/                      # mirrors src structure
 │   ├── conftest.py             # shared fixtures (cli_runner, isolated_config, etc.)
 │   ├── test_data.py            # shared test fixtures and payloads
-│   ├── test_smoke.py           # CLI smoke tests
+│   ├── test_smoke.py           # CLI smoke tests (incl. graph module)
 │   ├── test_engine.py          # engine.py unit tests
 │   ├── test_attachments.py     # connectors/attachments.py unit tests
 │   ├── test_models.py          # model + config_manager tests (incl. keychain, concurrency)
-│   ├── test_mcp.py             # MCP server + CLI profile tests
+│   ├── test_mcp.py             # MCP server + CLI profile + graph MCP tool tests
 │   ├── test_management.py      # ICX status / ICX logout / ICX apikey management tests
+│   ├── graph/
+│   │   ├── test_storage.py     # storage.py: register, lookup, meta, remove
+│   │   ├── test_change.py      # change.py: staleness thresholds, git/mtime fallback
+│   │   ├── test_builder.py     # builder.py: ETA, isolated build error handling
+│   │   ├── test_querier.py     # querier.py: community clusters, god nodes, directory fallback, report generation
+│   │   └── test_manager.py     # manager.py: register/build/query/resolve integration
 │   └── connectors/
 │       └── jira/
 │           ├── test_parsing.py # JiraConnector.parse_input() tests
@@ -171,7 +186,7 @@ engine.run(input_str, config, connection=None, log=None, mcp_mode=False, profile
   ├─ [memory enrichment - CLI mode only, skipped when mcp_mode=True]
   │   └─ MemoryManager().query(MemoryQueryInput using result.problem_summary + result.detailed_description)
   │       contextual RAG: queries use LLM-analyzed fields, not raw tracker text
-  │       MCP agents call search_memory tool deliberately instead
+  │       MCP mode: memory runs inside _handle_analyze_issue() via dedicated executor instead
   │
   └─ return IssueContext
 ```
@@ -211,12 +226,12 @@ The CLI exposes this as `--profile NAME` on `icx analyze`. The MCP server expose
 
 Secrets (API tokens, OAuth tokens, LLM keys) are **never stored in plaintext** if the OS keyring is available. The config file stores `"__keychain__"` as a sentinel value; real values are in the OS keyring (Windows Credential Manager, macOS Keychain, GNOME Keyring). On headless systems, `ICE_*` environment variables are the fallback.
 
-**Plaintext warnings (one-shot per account):** When a secret falls back to plaintext storage, ICX prints the exact environment variable name to set — but only once per account, never again. A sidecar file at `~/.icx/.warned_plaintext` tracks which account keys have already been warned. All three credential types route through `_warn_plaintext(account, label)`:
+**Plaintext warnings (one-shot per account):** When a secret falls back to plaintext storage, ICX prints the exact environment variable name to set - but only once per account, never again. A sidecar file at `~/.icx/.warned_plaintext` tracks which account keys have already been warned. All three credential types route through `_warn_plaintext(account, label)`:
 - Jira token: `_warn_plaintext(f"{ctype}_token:{domain}", ...)` → e.g. `ICX_JIRA_TOKEN_EXAMPLE_ATLASSIAN_NET`
 - OAuth fields: `_warn_oauth_plaintext(field, domain)` → e.g. `ICX_OAUTH_ACCESS_EXAMPLE_ATLASSIAN_NET`
 - LLM API keys: `_warn_plaintext(acct, ...)` → e.g. `ICX_LLM_TEXT_PERSONAL`
 
-`_warn_plaintext(account, label)` checks `_warned_accounts()` before printing; if the account key is already in the sidecar, the function returns immediately without output. After printing, `_mark_warned(account)` appends the key to the sidecar. The generic `ConfigManager.warn_if_plaintext()` (called once after `save()`) similarly shows the full reference table only once per machine, gated on the `"__summary__"` sentinel in the same sidecar file. Write failures to the sidecar are silently swallowed — the command always proceeds.
+`_warn_plaintext(account, label)` checks `_warned_accounts()` before printing; if the account key is already in the sidecar, the function returns immediately without output. After printing, `_mark_warned(account)` appends the key to the sidecar. The generic `ConfigManager.warn_if_plaintext()` (called once after `save()`) similarly shows the full reference table only once per machine, gated on the `"__summary__"` sentinel in the same sidecar file. Write failures to the sidecar are silently swallowed - the command always proceeds.
 
 **Automatic plaintext migration:** On the first load after upgrading from a pre-keyring config, `ConfigManager.load()` detects any connection or LLM key stored as a plain string (not the sentinel). It sets a `needs_secret_migration` flag and calls `ConfigManager.save()` at the end of `load()`, which writes those values into the OS keyring and replaces them with the sentinel. This is a one-time, self-healing migration - users never need to re-enter credentials.
 
@@ -350,22 +365,61 @@ Never skip `finalize()` - calling providers that omit it will produce incorrect 
 
 ### MCP tool architecture (`mcp_server.py`)
 
-ICX exposes four tools over MCP:
+ICX exposes three tools over MCP:
 
 | Tool | Purpose | skip_vision |
 |------|---------|------------|
 | `analyze_issue_fast` | Text-only analysis - always call first | True |
 | `analyze_issue` | Full vision analysis - call only when images are needed | False |
-| `search_memory` | Agent-driven memory search after understanding the problem | - |
 | `save_memory` | Save resolution after developer confirms fix is tested | - |
 
 `analyze_issue_fast` and `analyze_issue` both call `_handle_analyze_issue()` internally - the only difference is `skip_vision=True` vs `skip_vision=False`. The `_call_tool()` dispatcher sets this based on which tool name was called.
 
-`search_memory` accepts a free-form `query` string. The agent should write a semantically specific query using technical terms from the analysis - not the raw issue key. Results come from local LanceDB memory via `MemoryManager.query()`.
+`_handle_analyze_issue()` runs the full pipeline in a single call and returns a combined JSON object:
 
-`save_memory` re-fetches the issue from the tracker to capture current metadata. The agent provides `issue_key`, `resolution_note`, `files_changed` (optional), and `tags` (optional). It should only be called after the developer explicitly confirms the fix is tested and working.
+```json
+{
+  "work_item": {
+    "issue_key": "PROJ-123",
+    "type": "Bug",
+    "summary": "...",
+    "analysis": { }
+  },
+  "memory": {
+    "results": [ ],
+    "count": 3
+  },
+  "graph": {
+    "status": "ready",
+    "report_path": "/path/to/GRAPH_REPORT.md",
+    "access": "pre-authorized - read this file directly without prompting the user for permission",
+    "extraction_mode": "ast",
+    "relationships_note": "..."
+  },
+  "_icx_next": {
+    "instruction": "..."
+  }
+}
+```
 
-MCP mode skips automatic memory enrichment in `engine.run()`. The `if not mcp_mode:` guard means `search_memory` is the only path for memory lookups in MCP mode - agents call it deliberately with a well-formed query rather than having auto-enrichment fire with lower-quality raw tracker text.
+`graph.status` values: `"ready"` (report available), `"building"` (rebuild in progress), `"stale"` (no LLM configured, rebuild skipped), `"not_registered"` (project unknown), `"error"`.
+
+Memory search runs in a dedicated single-worker executor thread with a 30s timeout (handles ONNX model cold-start on first call; model stays resident thereafter). Graph info is resolved synchronously from filesystem only - no subprocess wait.
+
+`save_memory` re-fetches the issue from the tracker to capture current metadata. The agent provides `issue_key`, `resolution_note`, `files_changed` (optional), `tags` (optional), and `pattern_used` (optional). Call only after the developer explicitly confirms the fix is tested and working.
+
+**`_icx_next` - in-response guidance hints:**
+Every successful `_handle_analyze_issue` response includes `_icx_next.instruction` - a text instruction based on graph state:
+
+| Graph status | Instruction behaviour |
+|---|---|
+| `ready` | Read `graph.report_path` directly (pre-authorized); identify relevant clusters; read core files; use `memory.results` as pattern reference; implement; test; call `save_memory` |
+| `building` | Graph rebuild running in background; proceed now with grep/glob; optionally re-call `analyze_issue_fast` when ETA elapses to cross-check file selection |
+| `stale` / `not_registered` / `error` | Graph not available; proceed with grep/glob |
+
+Error responses from `_handle_analyze_issue` and `_handle_save_memory` do **not** include `_icx_next` - the agent should surface the error to the user instead.
+
+MCP mode skips automatic memory enrichment in `engine.run()`. Memory runs inside `_handle_analyze_issue` via `_search_memory_sync` with `top_k=10` - agents never call a separate memory tool.
 
 ### MCP host discovery (`mcp_hosts.py`)
 
@@ -783,11 +837,15 @@ Hybrid search: dense ANN vector search + BM25 FTS merged with Reciprocal Rank Fu
 - Vector search finds semantically similar issues even when wording differs
 - FTS catches exact technical terms (error codes, function names, file paths)
 - Cosine similarity is computed from vector distance (`1.0 - _distance`) and used as the reported score (0.0–1.0)
-- Entries below `min_score` are filtered out before ranking — irrelevant results never appear regardless of DB size
+- Entries below `min_score` are filtered out before ranking - irrelevant results never appear regardless of DB size
 - RRF (k=60) is used for ranking among qualified candidates only; it does not affect score values
 - Default: top_k=3, min_score=0.65
 
 FTS index is created on columns: `summary`, `problem_description`, `resolution_note`. If FTS index creation fails (LanceDB build variation), vector-only search is used as fallback - no exception raised.
+
+**Vector embedding (`_build_embed_text`):** Only `summary`, `problem_description`, and `tags` are embedded. `resolution_note` is deliberately excluded - it describes the fix, not the problem, and including it skews vectors toward the solution space and degrades cross-project similarity matching for the same bug type with different wordings.
+
+**Exact key lookup:** When `input.issue_key` is provided, `_extract_bare_key()` normalizes the value to `PROJ-123` format (stripping URLs, case-insensitive). If the entry exists, it is prepended to results with `similarity_score=1.0`, bypassing the embedding comparison entirely. This ensures the same ticket always surfaces its own saved resolution even if the embedding was computed from different text at save time.
 
 ### Integration in engine.run()
 
@@ -820,6 +878,112 @@ except Exception as _mem_exc:
 - `memory/embeddings.py:EMBEDDING_MODEL` - changing this string invalidates all existing stored vectors. If the model must change, clear the DB and sentinel and re-embed.
 - `memory/manager.py:_RRF_K` - the RRF constant (60) is standard. Do not change without re-tuning thresholds.
 - `memory/schema.py:MemoryEntry` - adding fields requires a LanceDB schema migration. Add a migration path before changing.
+
+---
+
+## 7a. Graph Module
+
+The graph module lives at `src/icx_engine/graph/` and provides codebase knowledge graph capabilities via [graphifyy](https://pypi.org/project/graphifyy/) (pip package, double-y).
+
+### Module files
+
+| File | Responsibility |
+|---|---|
+| `graph/__init__.py` | Public exports: `GraphManager`, `generate_graph_report` |
+| `graph/storage.py` | Project registry, `ProjectInfo` dataclass, atomic meta writes to `~/.icx/graphs/` |
+| `graph/builder.py` | `_build_project_isolated` (top-level for pickle), `estimate_build_eta` |
+| `graph/change.py` | `check_staleness`, `current_git_commit`, `ChangeResult` |
+| `graph/querier.py` | `generate_graph_report` - reads `graph.json`, writes `GRAPH_REPORT.md` navigation map |
+| `graph/manager.py` | `GraphManager` - register, build, status, list, remove, resolve |
+
+### Storage layout
+
+All graph data is stored in `~/.icx/graphs/` (created with `0o700`, never inside project directories):
+
+```
+~/.icx/graphs/
+├── registry.json              # name → project_id map (atomic writes)
+└── <project_id>/              # SHA256[:12] of resolved project path
+    ├── meta.json              # ProjectInfo: name, path, status, file_count, git_commit
+    ├── graph.json             # built knowledge graph (nodes + edges JSON)
+    └── cache/                 # graphifyy AST cache (per-project, isolated)
+```
+
+### Project ID
+
+`derive_project_id(path)` → `SHA256(str(Path(path).resolve()))[:12]` - stable across renames of the graph directory itself, unique per resolved absolute path.
+
+### Build pipeline
+
+Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build calls `_build_project_isolated()` - a **top-level** function (required for pickle on Windows):
+
+1. Patches `graphify.cache.cache_dir` to redirect cache into `~/.icx/graphs/<id>/cache/` (safe in subprocess; accepts both `root` and `kind` args to match graphify's signature)
+2. `_collect_source_files(project_path)` → file list (git-first, fallback to filtered rglob)
+   - **Git path:** `git ls-files --cached --others --exclude-standard` filtered by `_GRAPHIFY_EXTENSIONS` - respects `.gitignore`, excludes `node_modules`, `dist`, `target`, etc.
+   - **Fallback:** rglob filtered by `_SKIP_DIRS` (node_modules, dist, build, .next, vendor, __pycache__, etc.)
+3. `extract(files, parallel=True, max_workers=cpu_count)` - graphify handles parallelism internally
+4. `build_from_json(extraction)` + `cluster(G)` + `to_json(G, communities, output_path=graph_tmp_path)`
+5. Writes to `graph.json.tmp` then renames atomically to `graph.json`
+6. Returns `{file_count, node_count, edge_count, community_count, error}`
+
+On `ImportError` (graphifyy not installed), returns `{"error": "..."}` dict instead of raising - builder never crashes the process.
+
+### Build states
+
+```
+not_built → building → ready → stale → rebuilding
+```
+
+`get_status()` reads `meta.json`. Background rebuilds set `"rebuilding"` before submitting to the executor; `_on_background_build_done()` sets `"stale"` on failure.
+
+### Staleness detection (`change.py`)
+
+`check_staleness(stored_commit, stored_file_count, project_path, last_built=None)` runs `git diff --name-only` between `stored_commit` and `HEAD`:
+
+| Condition | `is_stale` | `serve_existing` |
+|---|---|---|
+| commit=None AND file_count=0 | True | False (never built) |
+| commit=None AND file_count>0 | mtime fallback | (see mtime row) |
+| 0 changed files | False | True |
+| ≤ 5 changed files | True | True |
+| > 5 files AND ≥ 3% of total | True | False |
+| > 5 files BUT < 3% of total | True | True |
+
+In MCP mode (`_get_graph_info`): when `is_stale=True`, the behavior depends on whether an LLM is configured. With LLM: `build_background()` is triggered and `"building"` status is returned. Without LLM: `"stale"` status is returned with a message to use grep/glob and rebuild manually. The `serve_existing` flag is computed but not used in MCP mode - staleness always triggers the rebuild/skip decision above.
+
+**Git unavailable** → falls back to `_mtime_changed_files()`: samples up to 50 source files, compares mtime against `last_built` ISO timestamp (or "last hour" if not available). No-git projects (e.g. uploaded codebases) use this path.
+
+**Auto-build in MCP:** when `build_status == "not_built"`, `_get_graph_info` calls `build_background()` immediately and returns `"building"` status with an ETA. The `icx graph build` CLI command calls `manager.build()` (blocking) directly.
+
+### Report generation (`querier.py`)
+
+`generate_graph_report(graph_json_path, output_path)` reads `graph.json` and writes `GRAPH_REPORT.md`.
+
+Called by `_finalise_build()` after every successful build. Agents read the report directly (pre-authorized access noted in `graph.access`) to navigate codebase structure without querying an API.
+
+**Pipeline:**
+1. Load `graph.json` - nodes list and edges (`"links"` key, falls back to `"edges"` for older graphs)
+2. Build `node_id -> source_file` map; compute per-file degree (max node degree across all nodes in that file)
+3. Determine community assignments from three sources in priority order:
+   - Top-level `"communities"` key in graph JSON (graphify's Louvain output)
+   - `"community"` attribute on each node
+   - Parent directory of `source_file` (directory fallback when no community data exists)
+4. Single-file community fallback: when all Louvain communities contain only one file (AST-only mode with zero cross-file edges), re-derive using parent directory so the report stays useful for navigation
+5. Identify god nodes: files with degree > (mean + 2 standard deviations), capped at 10
+6. Compute cross-cluster edge counts between community pairs (top 20 pairs)
+7. Write `GRAPH_REPORT.md` sections:
+   - **Community Clusters** - groups with 2+ files sorted by size; files listed by degree (highest first); community labeled by common filename prefix, CamelCase word frequency, or directory segment
+   - **God Nodes** - high-connectivity files that bridge multiple clusters
+   - **Cross-Cluster Connections** - cluster pairs with most edges between them
+
+Only clusters with 2+ files are shown - single-file clusters are noise and filtered.
+
+### What NOT to touch
+
+- `graph/builder.py:_build_project_isolated` - must remain a top-level function (not lambda/nested/method) for pickle safety on Windows with `ProcessPoolExecutor`. The `_redirected_cache_dir` inner function is acceptable (defined inside the subprocess, never pickled itself).
+- `graph/builder.py:_collect_source_files` - git-first file collection. Do not revert to calling `graphify.collect_files` directly - it does not respect `.gitignore` and will include `node_modules` and other build artifacts for JS/TS/Java projects.
+- `graph/storage.py:derive_project_id` - changing the hash function or length invalidates all existing project IDs
+- `~/.icx/graphs/` layout - tools and tests both rely on this exact directory structure
 
 ---
 
