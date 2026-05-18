@@ -42,11 +42,11 @@ def parse_issue_response(issue_key: str, data: dict) -> RawIssueData:
         body = c.get("body", "")
         comments.append(_adf_to_text(body) if isinstance(body, dict) else str(body))
 
-    attachments = [a["filename"] for a in fields.get("attachment", [])]
+    attachments = [a["filename"] for a in fields.get("attachment", []) if a.get("filename")]
     attachment_content_urls = {
         a["filename"]: a["content"]
         for a in fields.get("attachment", [])
-        if a.get("content")
+        if a.get("filename") and a.get("content")
     }
 
     return RawIssueData(

@@ -379,7 +379,6 @@ def test_remove_icx_entry_toml_returns_false_when_not_present(tmp_path):
 
 from icx_engine.mcp_server import (
     _handle_analyze_issue,
-    _handle_search_memory,
     _handle_save_memory,
 )
 from unittest.mock import MagicMock, AsyncMock
@@ -422,7 +421,7 @@ def _mock_openai_response():
 
 
 @respx.mock
-async def test_handle_analyze_issue_returns_issue_context_json(mcp_config_with_llm):
+async def test_handle_analyze_issue_returns_work_item_json(mcp_config_with_llm):
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
     )
@@ -432,17 +431,20 @@ async def test_handle_analyze_issue_returns_issue_context_json(mcp_config_with_l
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
             mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
-            result = await _handle_analyze_issue("TEST-123")
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+                result = await _handle_analyze_issue("TEST-123", project_path="E:\\my-project")
     data = json.loads(result)
-    assert data["issue_type"] == "Bug"
-    assert "problem_summary" in data
-    assert "acceptance_criteria" in data
+    assert "work_item" in data
+    assert data["work_item"]["type"] == "Bug"
+    assert "problem_summary" in data["work_item"]["analysis"]
+    assert "memory" in data
+    assert "graph" in data
 
 
 async def test_handle_analyze_issue_returns_error_json_when_no_connection():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        result = await _handle_analyze_issue("TEST-123")
+        result = await _handle_analyze_issue("TEST-123", project_path="E:\\my-project")
     data = json.loads(result)
     assert "error" in data
     assert "type" in data
@@ -451,7 +453,7 @@ async def test_handle_analyze_issue_returns_error_json_when_no_connection():
 async def test_handle_analyze_issue_returns_error_json_on_invalid_key():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        result = await _handle_analyze_issue("not-a-valid-key")
+        result = await _handle_analyze_issue("not-a-valid-key", project_path="E:\\my-project")
     data = json.loads(result)
     assert "error" in data
 
@@ -484,7 +486,8 @@ async def test_handle_analyze_issue_with_profile_override(mcp_config_with_llm):
                 acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
                 confidence_score=0.9, completeness_score=0.8, missing_information=[],
             )
-            await _handle_analyze_issue("TEST-123", profile="personal")
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+                await _handle_analyze_issue("TEST-123", project_path="E:\\my-project", profile="personal")
 
     _, kwargs = mock_run.call_args
     assert kwargs.get("profile_override") == "personal"
@@ -494,7 +497,7 @@ async def test_handle_analyze_issue_unknown_profile_returns_error_json(mcp_confi
     """An unknown profile_override surfaces as an error JSON, not an exception."""
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = mcp_config_with_llm
-        result = await _handle_analyze_issue("TEST-123", profile="ghost-profile")
+        result = await _handle_analyze_issue("TEST-123", project_path="E:\\my-project", profile="ghost-profile")
     data = json.loads(result)
     assert "error" in data
     assert "ghost-profile" in data["error"]
@@ -539,34 +542,17 @@ async def test_list_tools_schema_has_optional_profile_property():
     assert "profile" not in schema.get("required", [])
 
 
-async def test_analyze_issue_fast_description_blocks_coding_on_missing_info():
-    """analyze_issue_fast description must contain the hard block instruction."""
-    from icx_engine.mcp_server import _list_tools, _FAST_DESCRIPTION
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-
-    fast_tool = next(t for t in tools if t.name == "analyze_issue_fast")
-    desc = fast_tool.description
-    assert "MUST NOT" in desc
-    assert "missing_information" in desc
-    assert "completeness_score" in desc
-    assert "coding" in desc
-    assert "MUST NOT" in _FAST_DESCRIPTION
-
-
-async def test_list_tools_returns_four_tools():
+async def test_list_tools_returns_core_tools():
     from icx_engine.mcp_server import _list_tools
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
-    assert len(tools) == 4
     names = {t.name for t in tools}
-    assert names == {"analyze_issue_fast", "analyze_issue", "search_memory", "save_memory"}
+    assert {"analyze_issue_fast", "analyze_issue", "save_memory"}.issubset(names)
 
 
 @respx.mock
-async def test_handle_analyze_issue_fast_returns_issue_context_json(mcp_config_with_llm):
+async def test_handle_analyze_issue_fast_returns_work_item_json(mcp_config_with_llm):
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
     )
@@ -576,21 +562,12 @@ async def test_handle_analyze_issue_fast_returns_issue_context_json(mcp_config_w
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
             mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
-            result = await _handle_analyze_issue("TEST-123", skip_vision=True)
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+                result = await _handle_analyze_issue("TEST-123", project_path="E:\\my-project", skip_vision=True)
     data = json.loads(result)
-    assert data["issue_type"] == "Bug"
-    assert "problem_summary" in data
-    assert "pending_images" in data
-
-
-async def test_analyze_issue_fast_description_mentions_pending_images():
-    from icx_engine.mcp_server import _list_tools
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-
-    fast_tool = next(t for t in tools if t.name == "analyze_issue_fast")
-    assert "pending_images" in fast_tool.description
+    assert "work_item" in data
+    assert data["work_item"]["type"] == "Bug"
+    assert "pending_images" in data["work_item"]["analysis"]
 
 
 async def test_save_memory_tool_has_required_inputs():
@@ -607,50 +584,56 @@ async def test_save_memory_tool_has_required_inputs():
     assert "tags" not in schema.get("required", [])
 
 
-async def test_handle_search_memory_returns_json_with_results_and_count():
-    from icx_engine.models.output import PastInsight
-    mock_insight = PastInsight(
-        issue_key="PROJ-100",
-        source_type="jira",
-        summary="Auth token expired",
-        resolution_note="Extended TTL from 1h to 24h",
-        files_changed=["src/auth/token.py"],
-        similarity_score=0.85,
-        saved_at="2026-04-01T10:00:00",
-    )
-    mock_mem = MagicMock()
-    mock_mem.query.return_value = [mock_insight]
+# ── Tool count and schema ─────────────────────────────────────────────────────
 
-    with patch("icx_engine.memory.MemoryManager", return_value=mock_mem):
-        result = await _handle_search_memory("OAuth token expiry JWT auth")
+async def test_list_tools_returns_three_tools():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
 
+    assert len(tools) == 3
+    names = {t.name for t in tools}
+    assert names == {"analyze_issue_fast", "analyze_issue", "save_memory"}
+
+
+async def test_analyze_tool_schema_requires_project_path():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+
+    fast_tool = next(t for t in tools if t.name == "analyze_issue_fast")
+    schema = fast_tool.inputSchema
+    assert "project_path" in schema["required"]
+    assert "issue_ref" in schema["required"]
+    assert "profile" not in schema.get("required", [])
+
+
+# ── _icx_next guidance hints ──────────────────────────────────────────────────
+
+async def test_handle_analyze_issue_success_includes_icx_next():
+    """_handle_analyze_issue includes _icx_next with instruction in combined response."""
+    from icx_engine.models.output import IssueContext
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock()) as mock_run:
+            mock_run.return_value = IssueContext(
+                problem_summary="AuthService token expired",
+                detailed_description="JWT refresh fails on rotation",
+                reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+                acceptance_criteria=[], impact="high", priority="High", issue_type="Bug",
+                confidence_score=0.9, completeness_score=0.9, missing_information=[],
+            )
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "ready", "report_path": "E:\\proj\\graphify-out\\GRAPH_REPORT.md", "access": "pre-authorized", "eta_seconds": None}):
+                result = await _handle_analyze_issue("TEST-123", project_path="E:\\my-project")
     data = json.loads(result)
-    assert data["count"] == 1
-    assert len(data["results"]) == 1
-    assert data["results"][0]["issue_key"] == "PROJ-100"
-
-
-async def test_handle_search_memory_empty_results_returns_count_zero():
-    mock_mem = MagicMock()
-    mock_mem.query.return_value = []
-
-    with patch("icx_engine.memory.MemoryManager", return_value=mock_mem):
-        result = await _handle_search_memory("very specific query that matches nothing")
-
-    data = json.loads(result)
-    assert data["count"] == 0
-    assert data["results"] == []
-
-
-async def test_handle_search_memory_error_returns_error_json():
-    mock_mem = MagicMock()
-    mock_mem.query.side_effect = Exception("DB failure")
-
-    with patch("icx_engine.memory.MemoryManager", return_value=mock_mem):
-        result = await _handle_search_memory("query")
-
-    data = json.loads(result)
-    assert "error" in data
+    assert "_icx_next" in data
+    assert "instruction" in data["_icx_next"]
+    assert "graph" in data
+    assert data["graph"]["status"] == "ready"
+    assert "memory" in data
+    assert "work_item" in data
 
 
 @respx.mock
@@ -663,7 +646,7 @@ async def test_handle_save_memory_returns_saved_true(mcp_config):
 
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = mcp_config
-        with patch("icx_engine.memory.manager.MemoryManager", return_value=mock_mem):
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
             result = await _handle_save_memory(
                 "TEST-123",
                 "Fixed by increasing JWT TTL from 1h to 24h",
@@ -695,7 +678,7 @@ async def test_handle_save_memory_optional_fields_default_to_empty(mcp_config):
 
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = mcp_config
-        with patch("icx_engine.memory.manager.MemoryManager", return_value=mock_mem):
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
             result = await _handle_save_memory("TEST-123", "some fix", [], [])
 
     data = json.loads(result)

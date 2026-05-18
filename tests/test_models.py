@@ -632,15 +632,16 @@ def test_config_manager_oauth_plaintext_fallback_when_keychain_unavailable(isola
 
 def test_pid_based_temp_file_name(isolated_config, monkeypatch):
     import icx_engine.config_manager as cm
+    from pathlib import Path
     monkeypatch.setattr(cm, "_keychain_ok", False)
     seen_paths: list[str] = []
-    original_open = os.open
+    original_replace = Path.replace
 
-    def spy_open(path, flags, mode=0o600):
-        seen_paths.append(path)
-        return original_open(path, flags, mode)
+    def spy_replace(self, target):
+        seen_paths.append(str(self))
+        return original_replace(self, target)
 
-    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(Path, "replace", spy_replace)
     cm.ConfigManager.save(AppConfig())
 
     tmp_writes = [p for p in seen_paths if ".tmp." in p]
