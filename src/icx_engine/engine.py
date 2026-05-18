@@ -286,7 +286,6 @@ async def run(
     try:
         result = await asyncio.wait_for(provider.analyze(raw), timeout=120.0)
     except asyncio.TimeoutError:
-        from icx_engine.exceptions import NoLLMError
         raise NoLLMError(
             f"LLM request timed out after 120s ({text_cfg.provider}/{text_cfg.model}). "
             "Check your API key and network connection."
