@@ -84,69 +84,145 @@ _SAVE_TOOL_NAME = "save_memory"
 # ---------------------------------------------------------------------------
 
 _FAST_DESCRIPTION = """\
-Fetch and analyze a work item (bug, story, or task) and find relevant codebase files.
-Runs the full pipeline: tracker fetch -> AI analysis -> memory search -> graph navigation map.
-Returns work_item (analysis), memory (past similar work), and graph (GRAPH_REPORT.md path).
+Fetches and analyzes a work item (bug, story, or task) and identifies relevant codebase files.
+Pipeline: tracker fetch -> AI analysis -> memory search -> graph navigation.
+Runtime: 15-60 seconds.
 
-project_path MUST be the absolute path to the workspace root open in the editor.
-Do NOT rely on working directory - always pass project_path explicitly.
+REQUIRED: You MUST include a progressToken in your request meta (_meta.progressToken). \
+Without it the user sees no feedback during the wait. This is not optional.
 
-When you receive the response:
-1. Read graph.report_path directly (pre-authorized access - no permission prompt needed)
-2. Identify relevant clusters from the compact index table
-3. Read the matching GRAPH_CLUSTERS/<name>.md file for the full file list
-4. Read core files from that cluster in listed order
-5. Present a confirmation summary to the user (see format below) and ask to proceed
-6. If user confirms: implement using memory.results as pattern reference
-7. If user adds context or corrections: incorporate and proceed without asking again
-8. Ask user to test after implementation
-9. Call save_memory after user confirms the fix works
+REQUIRED: project_path MUST be the absolute path to the workspace root. \
+Never use the working directory. Always pass this explicitly.
 
-Confirmation summary format (step 5):
+================================================================================
+THESE ARE HARD RULES. THEY ARE NOT SUGGESTIONS. VIOLATIONS ARE NOT ACCEPTABLE.
+================================================================================
+
+RULE 1 - NO CODE BEFORE APPROVAL:
+You MUST NOT write a single line of code, make any file edit, run any command, or begin \
+any implementation step until you have presented the confirmation format below AND received \
+an explicit "yes" or "proceed" from the user. Any action taken before that approval is a \
+direct violation of this instruction regardless of how confident you are in the solution.
+
+RULE 2 - MANDATORY CONFIRMATION FORMAT:
+After reading the relevant files, you MUST output this format exactly and then STOP. \
+Do not add commentary before or after it. Do not proceed until the user responds.
+
 ---
-**Problem understood:** [1-2 sentence summary of the issue]
-**Goal:** [acceptance criteria or fix objective, as bullet points]
-**Files I'll work with:**
-  - path/to/file [role] - reason it's relevant
+**Problem understood:** [1-2 sentence summary drawn from work_item.analysis]
+**Goal:** [acceptance_criteria as bullet points, or problem_summary for bugs]
+**Approach:** [your specific solution plan - exactly what you will change, add, or remove, \
+and precisely why that change fixes the problem. Specific enough that the user can reject it \
+and propose an alternative before you write a single line.]
+**Files I will work with:**
+  - path/to/file [role-tag] - one-line reason it is relevant
 **Shall I proceed?**
----\
+---
+
+RULE 3 - APPROVAL GATE:
+The only trigger that allows you to begin implementation is the user explicitly saying yes \
+or telling you to proceed. Silence, partial responses, or ambiguous replies do NOT count as \
+approval. If unclear, ask again. Do not assume.
+
+RULE 4 - APPROACH CHANGE:
+If the user requests a different approach, you MUST present the revised plan using the same \
+confirmation format above and wait for approval again. You MUST NOT begin implementing the \
+revised approach without a second explicit approval.
+
+RULE 5 - TESTING GATE:
+After implementation, you MUST ask the user to test before doing anything else. \
+You MUST NOT call save_memory until the user explicitly confirms the fix is working.
+
+================================================================================
+WORKFLOW (follow in order, no skipping):
+================================================================================
+1. Read graph.report_path directly - access is pre-authorized, no permission prompt needed
+2. Identify the relevant clusters from the compact index table in the report
+3. Read the matching GRAPH_CLUSTERS/<name>.md file to get the full file list
+4. Read the core files from that cluster in the listed order
+5. Apply RULE 2: present the confirmation format and STOP
+6. Wait for explicit user approval (RULE 3)
+7. Implement exactly the stated approach, using memory.results as a pattern reference
+8. Ask the user to test (RULE 5)
+9. After the user confirms it works: call save_memory with resolution_note and files_changed\
 """
 
 _FULL_DESCRIPTION = """\
-Fetch and analyze a work item (bug, story, or task) and find relevant codebase files.
-Includes full vision/OCR processing for image attachments.
-Runs the full pipeline: tracker fetch -> AI analysis -> memory search -> graph navigation map.
-Returns work_item (analysis), memory (past similar work), and graph (GRAPH_REPORT.md path).
+Fetches and analyzes a work item (bug, story, or task) with full vision and OCR processing \
+for image attachments. Identifies relevant codebase files via graph navigation.
+Pipeline: tracker fetch -> AI analysis -> vision processing -> memory search -> graph navigation.
+Runtime: 20-90 seconds.
 
-project_path MUST be the absolute path to the workspace root open in the editor.
-Do NOT rely on working directory - always pass project_path explicitly.
+REQUIRED: You MUST include a progressToken in your request meta (_meta.progressToken). \
+Without it the user sees no feedback during the wait. This is not optional.
 
-When you receive the response:
-1. Read graph.report_path directly (pre-authorized access - no permission prompt needed)
-2. Identify relevant clusters from the compact index table
-3. Read the matching GRAPH_CLUSTERS/<name>.md file for the full file list
-4. Read core files from that cluster in listed order
-5. Present a confirmation summary to the user (see format below) and ask to proceed
-6. If user confirms: implement using memory.results as pattern reference
-7. If user adds context or corrections: incorporate and proceed without asking again
-8. Ask user to test after implementation
-9. Call save_memory after user confirms the fix works
+REQUIRED: project_path MUST be the absolute path to the workspace root. \
+Never use the working directory. Always pass this explicitly.
 
-Confirmation summary format (step 5):
+================================================================================
+THESE ARE HARD RULES. THEY ARE NOT SUGGESTIONS. VIOLATIONS ARE NOT ACCEPTABLE.
+================================================================================
+
+RULE 1 - NO CODE BEFORE APPROVAL:
+You MUST NOT write a single line of code, make any file edit, run any command, or begin \
+any implementation step until you have presented the confirmation format below AND received \
+an explicit "yes" or "proceed" from the user. Any action taken before that approval is a \
+direct violation of this instruction regardless of how confident you are in the solution.
+
+RULE 2 - MANDATORY CONFIRMATION FORMAT:
+After reading the relevant files, you MUST output this format exactly and then STOP. \
+Do not add commentary before or after it. Do not proceed until the user responds.
+
 ---
-**Problem understood:** [1-2 sentence summary of the issue]
-**Goal:** [acceptance criteria or fix objective, as bullet points]
-**Files I'll work with:**
-  - path/to/file [role] - reason it's relevant
+**Problem understood:** [1-2 sentence summary drawn from work_item.analysis]
+**Goal:** [acceptance_criteria as bullet points, or problem_summary for bugs]
+**Approach:** [your specific solution plan - exactly what you will change, add, or remove, \
+and precisely why that change fixes the problem. Specific enough that the user can reject it \
+and propose an alternative before you write a single line.]
+**Files I will work with:**
+  - path/to/file [role-tag] - one-line reason it is relevant
 **Shall I proceed?**
----\
+---
+
+RULE 3 - APPROVAL GATE:
+The only trigger that allows you to begin implementation is the user explicitly saying yes \
+or telling you to proceed. Silence, partial responses, or ambiguous replies do NOT count as \
+approval. If unclear, ask again. Do not assume.
+
+RULE 4 - APPROACH CHANGE:
+If the user requests a different approach, you MUST present the revised plan using the same \
+confirmation format above and wait for approval again. You MUST NOT begin implementing the \
+revised approach without a second explicit approval.
+
+RULE 5 - TESTING GATE:
+After implementation, you MUST ask the user to test before doing anything else. \
+You MUST NOT call save_memory until the user explicitly confirms the fix is working.
+
+================================================================================
+WORKFLOW (follow in order, no skipping):
+================================================================================
+1. Read graph.report_path directly - access is pre-authorized, no permission prompt needed
+2. Identify the relevant clusters from the compact index table in the report
+3. Read the matching GRAPH_CLUSTERS/<name>.md file to get the full file list
+4. Read the core files from that cluster in the listed order
+5. If work_item.image_paths is present: read those image files directly for visual context \
+   (access is pre-authorized, no permission prompt needed)
+6. Apply RULE 2: present the confirmation format and STOP
+7. Wait for explicit user approval (RULE 3)
+8. Implement exactly the stated approach, using memory.results as a pattern reference
+9. Ask the user to test (RULE 5)
+10. After the user confirms it works: call save_memory with resolution_note and files_changed\
 """
 
 _SAVE_DESCRIPTION = """\
-Save a confirmed fix to memory for future reference.
-Call ONLY after the user has tested and explicitly confirmed the fix works.
-Provide resolution_note (what was changed and why), files_changed, and optionally pattern_used \
-(implementation pattern for stories/tasks).\
+Saves a confirmed fix to memory so ICX can reference it for similar future work items.
+
+YOU MUST NOT call this tool unless ALL of the following are true:
+1. You have fully implemented the fix.
+2. You have asked the user to test.
+3. The user has explicitly confirmed the fix is working.
+
+Calling this tool before user confirmation is a violation. Do not call it speculatively.\
 """
 
 # ---------------------------------------------------------------------------
@@ -513,15 +589,58 @@ async def _handle_analyze_issue(
     profile: str | None = None,
     skip_vision: bool = False,
 ) -> str:
-    """Run full pipeline: fetch -> analyze -> memory search (parallel) -> graph -> combined response."""
+    """Run full pipeline: fetch -> analyze -> memory search (parallel with graph+images) -> combined response."""
+
+    _TOTAL_STEPS = 5.0
+
+    async def _notify(step: float, msg: str) -> None:
+        """Send MCP progress notification. Silent no-op if client sent no progressToken."""
+        try:
+            ctx = server.request_context
+            if ctx.meta and ctx.meta.progressToken is not None:
+                await ctx.session.send_progress_notification(
+                    progress_token=ctx.meta.progressToken,
+                    progress=step,
+                    total=_TOTAL_STEPS,
+                    message=msg,
+                )
+        except Exception:
+            pass
+
+    def _engine_log(msg: str) -> None:
+        """Map engine.run() internal log lines to MCP progress notifications.
+
+        Called synchronously from within engine.run() on the event loop thread,
+        so create_task() is safe - the notification fires between the next awaits.
+        """
+        if not isinstance(msg, str):
+            return
+        _m = msg.strip().lower()
+        if "fetching" in _m:
+            step, label = 0.5, "Fetching work item..."
+        elif "attachment" in _m:
+            step, label = 1.0, "Processing attachments..."
+        elif "analyzing" in _m:
+            step, label = 1.5, "Analyzing..."
+        elif "visual grounding" in _m:
+            step, label = 2.0, "Verifying with vision..."
+        else:
+            return
+        try:
+            asyncio.get_running_loop().create_task(_notify(step, label))
+        except Exception:
+            pass
+
     try:
         from icx_engine.memory import MemoryQueryInput
         from icx_engine.models.output import IssueContext, RawIssueResponse
 
+        await _notify(0.0, "Fetching work item...")
         config = ConfigManager.load()
         result = await engine.run(
             issue_ref, config, mcp_mode=True,
             profile_override=profile, skip_vision=skip_vision,
+            log=_engine_log,
         )
 
         # Build MemoryQueryInput from result
@@ -549,18 +668,20 @@ async def _handle_analyze_issue(
             issue_key_val = result.issue_key
             issue_type_val = result.issue_type
 
-        # Run memory search with timeout; non-fatal on failure.
-        # 30s allows for ONNX model cold-start on first call (model loads once, ~5-10s).
+        await _notify(3.0, f"Searching memory for similar {issue_type_val.lower()}s...")
+
+        # Fire memory search as a task immediately. While it runs in the thread executor,
+        # image writing and graph info (both sync/fast) execute concurrently on this thread,
+        # saving the sequential wait that used to occur between these steps.
         loop = asyncio.get_running_loop()
-        try:
-            memory_results = await asyncio.wait_for(
+        memory_task = asyncio.create_task(
+            asyncio.wait_for(
                 loop.run_in_executor(_get_memory_executor(), _search_memory_sync, qi),
                 timeout=30.0,
             )
-        except Exception:
-            memory_results = []
+        )
 
-        # Write issue images to disk; replace inline base64 with file paths.
+        # Write issue images to disk while memory search runs.
         # Keeps MCP response compact - editors truncate large base64 payloads.
         # sweep_stale_temp_dirs() runs the 24h TTL cleanup silently (~1ms).
         image_paths: dict[str, str] = {}
@@ -577,7 +698,9 @@ async def _handle_analyze_issue(
                 img_dir.mkdir(parents=True, exist_ok=True)
                 for fname, b64_data in _images_raw.items():
                     try:
-                        safe_name = Path(fname).name or fname
+                        safe_name = Path(fname).name
+                        if not safe_name:
+                            continue  # skip entries that resolve to empty after stripping path
                         img_path = img_dir / safe_name
                         img_path.write_bytes(_b64.b64decode(b64_data))
                         image_paths[fname] = str(img_path)
@@ -586,29 +709,48 @@ async def _handle_analyze_issue(
             except Exception:
                 pass  # directory creation failure - proceed without images on disk
 
-        # Graph info (sync - just filesystem)
+        # Graph info (sync - filesystem only) also runs while memory search is in flight.
         graph_info = _get_graph_info(project_path)
+
+        # Now collect memory results (task may already be done by this point).
+        try:
+            memory_results = await memory_task
+        except Exception:
+            memory_results = []
+
+        await _notify(5.0, "Ready")
 
         # Build _icx_next based on graph status
         graph_status = graph_info["status"]
+        _CONFIRMATION_BLOCK = (
+            "---\n"
+            "**Problem understood:** [1-2 sentence summary from work_item.analysis]\n"
+            "**Goal:** [acceptance_criteria as bullet points, or problem_summary for bugs]\n"
+            "**Approach:** [exactly what you will change, add, or remove and precisely why it fixes the problem]\n"
+            "**Files I will work with:**\n"
+            "  - path/to/file [role-tag] - one-line reason it is relevant\n"
+            "**Shall I proceed?**\n"
+            "---"
+        )
+
         if graph_status == "ready":
             icx_instruction = (
-                "Read graph.report_path directly (permission pre-granted by project owner). "
-                "Identify relevant clusters from the compact index table. "
-                "Read the matching GRAPH_CLUSTERS/<name>.md file listed in the report for the full file list. "
-                "Read core files from that cluster in listed order. "
-                "BEFORE implementing, present a structured confirmation to the user using this exact format:\n"
-                "---\n"
-                "**Problem understood:** [1-2 sentence summary of the issue from work_item.analysis]\n"
-                "**Goal:** [acceptance_criteria as bullet points, or problem_summary for bugs]\n"
-                "**Files I'll work with:**\n"
-                "  - path/to/file [role-tag] - one-line reason it is relevant\n"
-                "**Shall I proceed?**\n"
-                "---\n"
-                "If the user says yes or confirms: implement using memory.results as pattern reference. "
-                "If the user adds context or corrections: acknowledge in one sentence, incorporate the new information, then implement immediately without asking again. "
-                "After implementation, ask the user to test the fix. "
-                "Once the user confirms it works, call save_memory with resolution_note and files_changed."
+                "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                "STEP 1: Read graph.report_path directly. Access is pre-authorized.\n"
+                "STEP 2: Identify the relevant clusters from the compact index table.\n"
+                "STEP 3: Read the matching GRAPH_CLUSTERS/<name>.md file for the full file list.\n"
+                "STEP 4: Read the core files from that cluster in listed order.\n"
+                "STEP 5: STOP. You MUST NOT write any code or make any edits yet. "
+                "Present this confirmation format to the user and wait for their response:\n\n"
+                + _CONFIRMATION_BLOCK + "\n\n"
+                "STEP 6: Wait for explicit user approval. "
+                "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                "STEP 7: On explicit approval only - implement exactly the approach you stated, "
+                "using memory.results as a pattern reference.\n"
+                "STEP 8: Ask the user to test. Do not proceed until they respond.\n"
+                "STEP 9: Only after the user confirms it works - call save_memory.\n\n"
+                "IF the user requests a different approach: present the revised plan using the same "
+                "confirmation format above and wait for approval again before writing any code."
             )
         elif graph_status == "building":
             eta = graph_info.get("eta_seconds") or 30
@@ -616,28 +758,50 @@ async def _handle_analyze_issue(
             reason = f"stale ({stale_note})" if stale_note else "building"
             icx_instruction = (
                 f"Graph is {reason} - rebuild running in background (ETA ~{eta}s). "
-                "Proceed now using grep/glob to locate relevant files - do not wait for the graph. "
-                "Use work_item.analysis to identify key terms and file patterns to search. "
-                "Use memory.results as pattern reference. "
-                "Implement per work_item.analysis.acceptance_criteria (or problem_summary for bugs). "
+                "Use grep/glob to locate relevant files now. Do not wait for the graph.\n\n"
+                "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
+                "STEP 2: Read the located files.\n"
+                "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
+                "Present this confirmation format to the user and wait for their response:\n\n"
+                + _CONFIRMATION_BLOCK + "\n\n"
+                "STEP 4: Wait for explicit user approval. "
+                "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                "STEP 5: On explicit approval only - implement exactly the approach you stated, "
+                "using memory.results as a pattern reference.\n"
+                "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
+                "STEP 7: Only after the user confirms it works - call save_memory.\n\n"
+                "IF the user requests a different approach: present the revised plan using the same "
+                "confirmation format above and wait for approval again before writing any code.\n"
                 f"Optionally call analyze_issue_fast again with the same project_path in ~{eta}s "
                 "to cross-check your file selection against the completed graph."
             )
         else:
             icx_instruction = (
-                "Graph not yet registered for this project - build started automatically. "
-                "Proceed now using grep/glob to locate relevant files - do not wait for the graph. "
-                "Use work_item.analysis to identify key terms and file patterns to search. "
-                "Use memory.results as pattern reference. "
-                "Implement per work_item.analysis.acceptance_criteria (or problem_summary for bugs). "
+                "Graph build started automatically for this project. "
+                "Use grep/glob to locate relevant files now. Do not wait for the graph.\n\n"
+                "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
+                "STEP 2: Read the located files.\n"
+                "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
+                "Present this confirmation format to the user and wait for their response:\n\n"
+                + _CONFIRMATION_BLOCK + "\n\n"
+                "STEP 4: Wait for explicit user approval. "
+                "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                "STEP 5: On explicit approval only - implement exactly the approach you stated, "
+                "using memory.results as a pattern reference.\n"
+                "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
+                "STEP 7: Only after the user confirms it works - call save_memory.\n\n"
+                "IF the user requests a different approach: present the revised plan using the same "
+                "confirmation format above and wait for approval again before writing any code.\n"
                 "Optionally call analyze_issue_fast again with the same project_path in ~60s "
                 "to cross-check your file selection against the completed graph."
             )
 
         if image_paths:
             icx_instruction += (
-                f" The issue has {len(image_paths)} attached image(s) at work_item.image_paths"
-                " - read them directly for visual context (pre-authorized, no permission prompt needed)."
+                f"\n\nThis work item has {len(image_paths)} attached image(s) at work_item.image_paths. "
+                "Read those image files directly for visual context. Access is pre-authorized."
             )
 
         # Serialize analysis excluding only the raw base64 image dict (already written to disk above).

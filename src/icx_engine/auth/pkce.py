@@ -123,6 +123,10 @@ async def run_pkce_flow(
         ValueError:          Callback received without authorization code
         httpx.HTTPStatusError: Token exchange request failed
     """
+    if not auth_endpoint.startswith("https://"):
+        raise ValueError(
+            "auth_endpoint must use HTTPS to protect the authorization code in transit."
+        )
     if not token_endpoint.startswith("https://"):
         raise ValueError(
             "token_endpoint must use HTTPS to protect authorization codes and tokens in transit."
@@ -190,7 +194,7 @@ async def run_pkce_flow(
 
     if actual_port != callback_port:
         print(
-            f"\n  ⚠  Port {callback_port} is in use - using port {actual_port} for OAuth callback.\n"
+            f"\n  Port {callback_port} is in use - using port {actual_port} for OAuth callback.\n"
             f"     Ensure http://localhost:{actual_port}/callback is registered in your\n"
             f"     Atlassian OAuth app at https://developer.atlassian.com/console/myapps/\n",
             file=sys.stderr,

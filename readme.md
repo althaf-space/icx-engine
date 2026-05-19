@@ -218,7 +218,7 @@ icx memory status
 ### Codebase graph
 
 ```sh
-icx graph add NAME PATH            # register a project directory for graph analysis
+icx graph add --name NAME --path PATH   # register a project directory for graph analysis
 icx graph build NAME               # build (or rebuild) the knowledge graph for a project
 icx graph build NAME --force       # rebuild even if graph is current
 icx graph list                     # list all registered projects with status and file counts

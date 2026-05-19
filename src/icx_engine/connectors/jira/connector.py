@@ -60,7 +60,7 @@ class JiraConnector(ConnectorBase):
 
         # Board/backlog view: ?selectedIssue=ABC-123
         params = parse_qs(parsed.query)
-        if "selectedIssue" in params:
+        if params.get("selectedIssue"):
             key = params["selectedIssue"][0].upper()
             if _ISSUE_KEY_RE.match(key):
                 return ParsedInput(issue_key=key)

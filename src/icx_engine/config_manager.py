@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import base64
 import contextlib
 import json
@@ -31,24 +31,22 @@ _thread_lock = threading.Lock()  # in-process guard: threads share a PID so file
 def _keyring_available() -> bool:
     try:
         import keyring
-        keyring.set_password(_SERVICE, _HEALTH_KEY, "ok")
-        result = keyring.get_password(_SERVICE, _HEALTH_KEY)
-        try:
-            keyring.delete_password(_SERVICE, _HEALTH_KEY)
-        except Exception:
-            pass
-        return result == "ok"
+        keyring.get_password(_SERVICE, _HEALTH_KEY)
+        return True
     except Exception:
         return False
 
 
 _keychain_ok: bool | None = None
+_keychain_init_lock = threading.Lock()
 
 
 def _check_keychain() -> bool:
     global _keychain_ok
     if _keychain_ok is None:
-        _keychain_ok = _keyring_available()
+        with _keychain_init_lock:
+            if _keychain_ok is None:
+                _keychain_ok = _keyring_available()
     return _keychain_ok
 
 
@@ -128,7 +126,14 @@ def _get_or_create_master_key() -> bytes:
                 "Unlock your OS keyring and retry."
             )
         return key
-    return bytes.fromhex(hex_key)
+    try:
+        return bytes.fromhex(hex_key)
+    except ValueError as exc:
+        from icx_engine.exceptions import ConfigError
+        raise ConfigError(
+            "D-Lock Master Key stored in the OS keyring is corrupted or not a valid hex string. "
+            "Re-authenticate with `icx connection --add` or `icx model --add` to reset credentials."
+        ) from exc
 
 
 def _dlock_encrypt(value: str) -> str:
@@ -240,7 +245,8 @@ def _config_lock():
                     break
                 except FileExistsError:
                     try:
-                        owner_pid = int(lock_path.read_text().strip())
+                        raw_pid = lock_path.read_text(encoding="utf-8").strip()
+                        owner_pid = int(raw_pid)
                         if not _pid_exists(owner_pid):
                             lock_path.unlink(missing_ok=True)
                             try:
@@ -254,6 +260,11 @@ def _config_lock():
                                 break  # acquired
                             except FileExistsError:
                                 pass  # another process won the race; fall through to backoff
+                    except ValueError:
+                        try:
+                            lock_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                     except Exception:
                         pass
                     if time.monotonic() >= deadline:

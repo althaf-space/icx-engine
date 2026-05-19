@@ -226,6 +226,8 @@ The CLI exposes this as `--profile NAME` on `icx analyze`. The MCP server expose
 
 Secrets (API tokens, OAuth tokens, LLM keys) are **never stored in plaintext** if the OS keyring is available. The config file stores `"__keychain__"` as a sentinel value; real values are in the OS keyring (Windows Credential Manager, macOS Keychain, GNOME Keyring). On headless systems, `ICE_*` environment variables are the fallback.
 
+**Keyring availability check:** `_keyring_available()` performs a read-only probe (`keyring.get_password`) rather than a write+delete test. This is intentional: MCP subprocess contexts (e.g. editors that spawn `icx mcp run` as a child process) often have read access to the OS keyring but not write access. A write-based probe would incorrectly report the keyring as unavailable, causing all stored credentials to return as empty strings. `_check_keychain()` wraps `_keyring_available()` with a double-checked lock so the probe runs at most once per process lifetime.
+
 **Plaintext warnings (one-shot per account):** When a secret falls back to plaintext storage, ICX prints the exact environment variable name to set - but only once per account, never again. A sidecar file at `~/.icx/.warned_plaintext` tracks which account keys have already been warned. All three credential types route through `_warn_plaintext(account, label)`:
 - Jira token: `_warn_plaintext(f"{ctype}_token:{domain}", ...)` → e.g. `ICX_JIRA_TOKEN_EXAMPLE_ATLASSIAN_NET`
 - OAuth fields: `_warn_oauth_plaintext(field, domain)` → e.g. `ICX_OAUTH_ACCESS_EXAMPLE_ATLASSIAN_NET`
@@ -271,11 +273,13 @@ When the LLM analysis returns `confidence_score < 0.8` and an `image_model` is c
 
 Provider routing: `_verify_anthropic` for Anthropic, `_verify_google` for Google (native `google-genai` SDK with `types.Part.from_bytes`), `_verify_openai_compat` for all others (OpenAI, xAI, NIM, Ollama). Google responses run through `_strip_json_fencing` before parsing since Gemini models sometimes wrap output in Markdown fences.
 
+**Timeout:** The pass runs inside `asyncio.wait_for(timeout=45.0)` in `engine.run()`. If the 45-second limit elapses, the original LLM result is returned unchanged and the log callback receives `"Visual grounding timed out after 45s - using original analysis"`. The timeout is separate from the main LLM call timeout (120s).
+
 ### Universal Attachment Engine (`connectors/attachments.py`)
 
 `process_attachments()` is connector-agnostic - it takes any `ConnectorBase` instance as a downloader. All attachment types are processed in parallel via `asyncio.gather`:
 
-- **Images** (`_process_image`): downloads bytes, OCR via Tesseract (`ocr_image()`), vision enrichment via `vision_enrich()` when an image model is configured (fires even when OCR is empty - sends raw bytes with `"(no OCR output)"`), captures Base64 regardless of OCR outcome. MIME type is detected from the file extension via `_mime_type()` - correct for PNG, JPEG, WebP, GIF, BMP, TIFF.
+- **Images** (`_process_image`): downloads bytes, OCR via Tesseract (`ocr_image()`), vision enrichment via `vision_enrich()` when an image model is configured (fires even when OCR is empty - sends raw bytes with `"(no OCR output)"`), captures Base64 regardless of OCR outcome. MIME type is detected from the file extension via `_mime_type()` - correct for PNG, JPEG, WebP, GIF, BMP, TIFF, and TIF.
 
 - **Documents** (`_process_document`): converts to text/Markdown, then passes through `_llm_summarize()` if the result exceeds `_SUMMARIZE_THRESHOLD` (20 000 chars).
 
@@ -408,7 +412,9 @@ ICX exposes three tools over MCP:
 
 `graph.status` values: `"ready"` (report available), `"building"` (rebuild in progress), `"stale"` (no LLM configured, rebuild skipped), `"not_registered"` (project unknown), `"error"`.
 
-Memory search runs in a dedicated single-worker executor thread with a 30s timeout (handles ONNX model cold-start on first call; model stays resident thereafter). Graph info is resolved synchronously from filesystem only - no subprocess wait.
+Memory search runs in a dedicated single-worker executor thread with a 30s timeout (handles ONNX model cold-start on first call; model stays resident thereafter). Graph info is resolved synchronously from filesystem only - no subprocess wait. Both run concurrently: immediately after `engine.run()` returns, memory search is fired as an `asyncio.create_task()`, then image writing and graph info execute synchronously while the memory task is in flight; the task is awaited last.
+
+**Progress notifications:** `_handle_analyze_issue` sends MCP progress notifications via `_notify(step, message)` when the client includes a `progressToken` in `_meta`. The `_engine_log` callback is passed to `engine.run()` as `log=`; it maps internal log messages (containing "fetching", "attachment", "analyzing", "visual grounding") to progress steps 0.5-2.0. Steps 0.0 ("starting"), 3.0 ("searching memory"), and 5.0 ("ready") are sent directly from the handler. If no `progressToken` is present, `_notify` is a silent no-op.
 
 **Image temp file lifecycle:** Issue image attachments are written to `~/.icx/temp/<PROJ-123>/` by `_handle_analyze_issue` instead of being embedded as Base64 in the JSON response (which causes editors to truncate large payloads). Three cleanup triggers:
 1. `sweep_stale_temp_dirs()` runs at the start of each `_handle_analyze_issue` call - deletes any temp dirs older than 24 hours (~1ms, non-fatal).
@@ -422,11 +428,11 @@ Every successful `_handle_analyze_issue` response includes `_icx_next.instructio
 
 | Graph status | Instruction behaviour |
 |---|---|
-| `ready` | Read `graph.report_path` (compact index); identify relevant cluster from table; read `GRAPH_CLUSTERS/<name>.md` for full file list; read core files; **present confirmation summary to user** (problem understood, goal, files list - ask "Shall I proceed?"); if confirmed implement; if user adds context incorporate and proceed; test; call `save_memory` |
+| `ready` | Read `graph.report_path` (compact index); identify relevant cluster from table; read `GRAPH_CLUSTERS/<name>.md` for full file list; read core files; **present confirmation summary to user** (problem understood, goal, **approach** - exactly what will change and why, files list - ask "Shall I proceed?"); if confirmed implement; if user adds context incorporate and proceed; test; call `save_memory` |
 | `building` | Graph rebuild running in background; proceed now with grep/glob; optionally re-call `analyze_issue_fast` when ETA elapses to cross-check file selection |
 | `stale` / `not_registered` / `error` | Graph not available; proceed with grep/glob |
 
-**Confirmation gate:** When the graph is ready, the agent is instructed to present a structured summary before writing any code: problem statement (1-2 sentences), acceptance criteria as bullet points, and the list of files it plans to touch with their role tags. The user can confirm or add context. If the user adds context, the agent incorporates it and proceeds immediately without asking again.
+**Confirmation gate:** When the graph is ready, the agent is instructed to present a structured summary before writing any code: problem statement (1-2 sentences), acceptance criteria as bullet points, **approach** (exactly what the agent will change/add/remove and precisely why that fixes the problem - specific enough for the user to reject and propose an alternative), and the list of files it plans to touch with their role tags. The user can confirm or redirect. If the user redirects, the agent must present a revised confirmation using the same format before starting.
 
 Error responses from `_handle_analyze_issue` and `_handle_save_memory` do **not** include `_icx_next` - the agent should surface the error to the user instead.
 

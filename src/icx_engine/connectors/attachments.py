@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import asyncio
 import base64
 import csv
@@ -10,12 +10,12 @@ from typing import Callable
 from icx_engine.models.config import LLMConfig, ChannelConfig
 from icx_engine.models.output import RawIssueData
 
-# ── Extension sets ─────────────────────────────────────────────────────────────
+# -- Extension sets ------------------------------------------------------------
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
 DOCUMENT_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf", ".docx", ".txt"}
 
-# ── Limits ────────────────────────────────────────────────────────────────────
+# -- Limits --------------------------------------------------------------------
 
 _MAX_CSV_ROWS = 50
 _EXTRACT_LIMIT = 100_000       # max chars extracted from PDF/DOCX/TXT before summarization
@@ -30,6 +30,7 @@ _MIME_TYPES: dict[str, str] = {
     ".webp": "image/webp",
     ".bmp":  "image/bmp",
     ".tiff": "image/tiff",
+    ".tif":  "image/tiff",
 }
 
 
@@ -55,7 +56,7 @@ def _tesseract_available() -> bool:
     return shutil.which("tesseract") is not None
 
 
-# ── OCR ───────────────────────────────────────────────────────────────────────
+# -- OCR -----------------------------------------------------------------------
 
 def ocr_image(image_bytes: bytes) -> str:
     """Extract text from image bytes using Pytesseract. Returns '' on any failure."""
@@ -71,7 +72,7 @@ def ocr_image(image_bytes: bytes) -> str:
         return ""
 
 
-# ── Vision enrichment ─────────────────────────────────────────────────────────
+# -- Vision enrichment ---------------------------------------------------------
 
 _VISION_PROMPT = (
     "The following text was extracted via OCR from the attached screenshot:\n\n"
@@ -179,7 +180,7 @@ async def vision_enrich(config: ChannelConfig, image_bytes: bytes, ocr_text: str
         ) from exc
 
 
-# ── Universal Attachment Engine (UAE) - document converters ───────────────────
+# -- Universal Attachment Engine (UAE) - document converters -------------------
 
 def _rows_to_markdown(rows: list, max_rows: int = _MAX_CSV_ROWS) -> str:
     """Convert a list of row sequences to a Markdown table, capped at max_rows data rows."""
@@ -219,7 +220,7 @@ def _convert_xlsx(data: bytes) -> str:
     except ImportError:
         return "[Excel processing unavailable - install openpyxl]"
 
-    _FORMULA_ANNOTATE_ROWS = 4  # header (index 0) + first 3 data rows (indices 1–3)
+    _FORMULA_ANNOTATE_ROWS = 4  # header (index 0) + first 3 data rows (indices 1-3)
 
     # Pass 1: extract computed values, then close immediately to free memory.
     val_data: dict[str, list] = {}
@@ -334,16 +335,16 @@ def _convert_document(filename: str, data: bytes, log=None) -> str:
     return ""
 
 
-# ── LLM summarization for large documents ────────────────────────────────────
+# -- LLM summarization for large documents ------------------------------------
 
 _SUMMARIZE_SYSTEM = (
     "You are a technical summarizer. Summarize the provided document content concisely, "
     "preserving ALL of the following verbatim - never paraphrase or drop them:\n"
-    "  • Column headers and sheet names from every spreadsheet table.\n"
-    "  • Every formula annotation in the form 'VALUE (Formula: EXPR)' - the EXPR is a "
+    "  - Column headers and sheet names from every spreadsheet table.\n"
+    "  - Every formula annotation in the form 'VALUE (Formula: EXPR)' - the EXPR is a "
     "Non-Negotiable Business Rule and must appear exactly as written.\n"
-    "  • Any block prefixed ### [TECHNICAL SCHEMA: <filename>] - reproduce the entire block.\n"
-    "  • Any block prefixed ### [TECHNICAL LOGIC: <filename>] - reproduce the entire block.\n"
+    "  - Any block prefixed ### [TECHNICAL SCHEMA: <filename>] - reproduce the entire block.\n"
+    "  - Any block prefixed ### [TECHNICAL LOGIC: <filename>] - reproduce the entire block.\n"
     "For all other content: condense to the key insights, error messages, data points, and "
     "code references. Return only the summary."
 )
@@ -398,7 +399,7 @@ async def _llm_summarize(config: ChannelConfig, filename: str, content: str) -> 
         return content[:_SUMMARIZE_THRESHOLD] + _TRUNCATION_NOTE
 
 
-# ── Per-attachment coroutines ─────────────────────────────────────────────────
+# -- Per-attachment coroutines -------------------------------------------------
 
 async def _process_image(
     filename: str,
@@ -417,11 +418,11 @@ async def _process_image(
     b64 = base64.b64encode(image_bytes).decode()
     text = ocr_image(image_bytes)
     if log:
-        log(f"    {filename}: OCR → {len(text)} chars")
+        log(f"    {filename}: OCR: {len(text)} chars")
     if image_config:
         text = await vision_enrich(image_config, image_bytes, text, filename)
         if log:
-            log(f"    {filename}: vision → {len(text)} chars")
+            log(f"    {filename}: vision: {len(text)} chars")
     return filename, text, b64
 
 
@@ -443,18 +444,18 @@ async def _process_document(
     if not text:
         return filename, "", ""
     if log:
-        log(f"    {filename}: {Path(filename).suffix} → {len(text)} chars")
+        log(f"    {filename}: {Path(filename).suffix}: {len(text)} chars")
     if len(text) > _SUMMARIZE_THRESHOLD:
         if text_config:
             text = await _llm_summarize(text_config, filename, text)
             if log:
-                log(f"    {filename}: summarized → {len(text)} chars")
+                log(f"    {filename}: summarized: {len(text)} chars")
         else:
             text = text[:_SUMMARIZE_THRESHOLD] + _TRUNCATION_NOTE
     return filename, text, ""
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# -- Main entry point ----------------------------------------------------------
 
 async def process_attachments(
     raw: RawIssueData,
@@ -465,14 +466,14 @@ async def process_attachments(
     """
     Download and process all attachments concurrently via asyncio.gather.
 
-    Images   → OCR + optional vision enrichment + Base64 capture.
-    Documents → UAE conversion + optional LLM summarization for large content.
-    Unknown file types → silently skipped.
+    Images   -> OCR + optional vision enrichment + Base64 capture.
+    Documents -> UAE conversion + optional LLM summarization for large content.
+    Unknown file types -> silently skipped.
 
     downloader - any object with async download_attachment(url) -> bytes
     Returns (attachment_texts, images):
-      attachment_texts: filename → extracted text
-      images: filename → Base64 (ALL image attachments, regardless of OCR result)
+      attachment_texts: filename -> extracted text
+      images: filename -> Base64 (ALL image attachments, regardless of OCR result)
     """
     if not raw.attachment_content_urls:
         return {}, {}
@@ -483,7 +484,7 @@ async def process_attachments(
     image_names = [f for f in raw.attachment_content_urls if _is_image(f)]
     if image_names and not _tesseract_available() and not image_config and log:
         log(
-            "  ⚠ Tesseract OCR binary not found - text will not be extracted from images.\n"
+            "  Tesseract OCR binary not found - text will not be extracted from images.\n"
             "    Install: brew install tesseract (macOS)"
             " | apt install tesseract-ocr (Linux)"
             " | winget install UB-Mannheim.TesseractOCR (Windows)"
@@ -503,7 +504,7 @@ async def process_attachments(
     if log:
         from rich.console import Console
         _con = Console(stderr=True)
-        with _con.status(f"  processing {len(tasks)} attachment(s)…", spinner="dots"):
+        with _con.status(f"  processing {len(tasks)} attachment(s)...", spinner="dots"):
             results = await asyncio.gather(*tasks, return_exceptions=True)
     else:
         results = await asyncio.gather(*tasks, return_exceptions=True)

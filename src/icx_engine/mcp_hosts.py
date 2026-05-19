@@ -1,11 +1,36 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import json
+import shutil
+import sys
 import tomllib
 import tomli_w
 from dataclasses import dataclass
 from pathlib import Path
 
-ICX_MCP_ENTRY: dict = {"command": "icx", "args": ["mcp", "run"]}
+
+def _resolve_icx_command() -> str:
+    """Return absolute path to the icx executable for the running Python environment.
+
+    Resolution order:
+      1. shutil.which("icx") - searches PATH; covers pip, pipx, conda, activated venv.
+      2. Scripts/bin next to sys.executable - covers non-activated venv.
+      3. Bare "icx" - last resort; relies on PATH at editor launch time.
+    """
+    found = shutil.which("icx")
+    if found:
+        return str(Path(found).resolve())
+    scripts_dir = Path(sys.executable).parent
+    for name in ("icx.exe", "icx"):
+        candidate = scripts_dir / name
+        if candidate.exists():
+            return str(candidate)
+    return "icx"
+
+
+def _make_icx_entry() -> dict:
+    return {"command": _resolve_icx_command(), "args": ["mcp", "run"]}
+
+ICX_MCP_ENTRY: dict = _make_icx_entry()
 
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
@@ -37,7 +62,6 @@ class WriteResult:
 def list_hosts() -> list[MCPHost]:
     """All known MCP hosts with their config file paths."""
     home = _home()
-    cwd = Path.cwd()
     return [
         MCPHost(
             "claude", "Claude Code",
@@ -145,7 +169,7 @@ def _write_json(path: Path) -> None:
         except json.JSONDecodeError:
             pass
     existing.setdefault("mcpServers", {})
-    existing["mcpServers"]["icx"] = ICX_MCP_ENTRY
+    existing["mcpServers"]["icx"] = _make_icx_entry()
     _atomic_write(path, json.dumps(existing, indent=2))
 
 
@@ -171,7 +195,7 @@ def _write_toml(path: Path) -> None:
         except Exception:
             pass
     existing.setdefault("mcp_servers", {})
-    existing["mcp_servers"]["icx"] = ICX_MCP_ENTRY
+    existing["mcp_servers"]["icx"] = _make_icx_entry()
     _atomic_write(path, tomli_w.dumps(existing))
 
 
