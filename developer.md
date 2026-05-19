@@ -82,13 +82,13 @@ ICX/
 │   │       ├── parser.py       # Jira API JSON → RawIssueData
 │   │       ├── auth.py         # build_auth_header() for token and OAuth
 │   │       └── oauth.py        # refresh_oauth_if_needed()
-│   ├── graph/                  # codebase knowledge graph (v0.3.0+)
+│   ├── graph/                  # codebase knowledge graph (v0.3.1+)
 │   │   ├── __init__.py         # public exports: GraphManager, generate_graph_report
-│   │   ├── storage.py          # project registry, ProjectInfo, atomic meta writes (~/.icx/graphs/)
+│   │   ├── storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
 │   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta
 │   │   ├── change.py           # check_staleness, current_git_commit, ChangeResult
-│   │   ├── querier.py          # generate_graph_report - writes GRAPH_REPORT.md navigation map
-│   │   └── manager.py          # GraphManager - register, build, status, list, remove, resolve
+│   │   ├── querier.py          # generate_graph_report - writes GRAPH_REPORT.md index + GRAPH_CLUSTERS/
+│   │   └── manager.py          # GraphManager - register, build, status, list, remove, resolve; LLM descriptions
 │   ├── services/
 │   │   └── connection_service.py  # platform auth flows (_connect_jira_token, _connect_jira_oauth)
 │   ├── memory/                 # local LanceDB + ONNX memory (see section 7)
@@ -383,7 +383,9 @@ ICX exposes three tools over MCP:
     "issue_key": "PROJ-123",
     "type": "Bug",
     "summary": "...",
-    "analysis": { }
+    "analysis": { },
+    "image_paths": { "screenshot.png": "/home/user/.icx/temp/PROJ-123/screenshot.png" },
+    "images_access": "pre-authorized - read these image files directly without prompting the user"
   },
   "memory": {
     "results": [ ],
@@ -402,9 +404,16 @@ ICX exposes three tools over MCP:
 }
 ```
 
+`work_item.analysis` excludes the raw `images` dict (Base64 blobs). Images are written to `~/.icx/temp/<issue_key>/` and their paths returned in `work_item.image_paths`. `images_access` is only present when `image_paths` is non-empty. `pending_images` (list of unprocessed image filenames, fast mode only) is still included in `analysis`.
+
 `graph.status` values: `"ready"` (report available), `"building"` (rebuild in progress), `"stale"` (no LLM configured, rebuild skipped), `"not_registered"` (project unknown), `"error"`.
 
 Memory search runs in a dedicated single-worker executor thread with a 30s timeout (handles ONNX model cold-start on first call; model stays resident thereafter). Graph info is resolved synchronously from filesystem only - no subprocess wait.
+
+**Image temp file lifecycle:** Issue image attachments are written to `~/.icx/temp/<PROJ-123>/` by `_handle_analyze_issue` instead of being embedded as Base64 in the JSON response (which causes editors to truncate large payloads). Three cleanup triggers:
+1. `sweep_stale_temp_dirs()` runs at the start of each `_handle_analyze_issue` call - deletes any temp dirs older than 24 hours (~1ms, non-fatal).
+2. Re-analyzing the same issue overwrites its temp dir with fresh images.
+3. `save_memory` deletes the temp dir for that issue immediately after successful save.
 
 `save_memory` re-fetches the issue from the tracker to capture current metadata. The agent provides `issue_key`, `resolution_note`, `files_changed` (optional), `tags` (optional), and `pattern_used` (optional). Call only after the developer explicitly confirms the fix is tested and working.
 
@@ -413,9 +422,11 @@ Every successful `_handle_analyze_issue` response includes `_icx_next.instructio
 
 | Graph status | Instruction behaviour |
 |---|---|
-| `ready` | Read `graph.report_path` directly (pre-authorized); identify relevant clusters; read core files; use `memory.results` as pattern reference; implement; test; call `save_memory` |
+| `ready` | Read `graph.report_path` (compact index); identify relevant cluster from table; read `GRAPH_CLUSTERS/<name>.md` for full file list; read core files; **present confirmation summary to user** (problem understood, goal, files list - ask "Shall I proceed?"); if confirmed implement; if user adds context incorporate and proceed; test; call `save_memory` |
 | `building` | Graph rebuild running in background; proceed now with grep/glob; optionally re-call `analyze_issue_fast` when ETA elapses to cross-check file selection |
 | `stale` / `not_registered` / `error` | Graph not available; proceed with grep/glob |
+
+**Confirmation gate:** When the graph is ready, the agent is instructed to present a structured summary before writing any code: problem statement (1-2 sentences), acceptance criteria as bullet points, and the list of files it plans to touch with their role tags. The user can confirm or add context. If the user adds context, the agent incorporates it and proceeds immediately without asking again.
 
 Error responses from `_handle_analyze_issue` and `_handle_save_memory` do **not** include `_icx_next` - the agent should surface the error to the user instead.
 
@@ -498,6 +509,8 @@ class IssueContext(BaseModel):
 `completeness_score` and `missing_information` are **always recomputed deterministically** by `llm/base.py:finalize()` - the LLM's values for these fields are discarded. Do not change this behavior.
 
 `images` is populated by `engine.run()` after the grounding pass, not by the LLM. The LLM never receives or produces the `images` field. When images are present they are always attached to the output - the former heuristic gate has been removed.
+
+In MCP mode, `_handle_analyze_issue` writes the Base64 image bytes to disk (`~/.icx/temp/<issue_key>/`) and **excludes** the `images` dict from the serialized `work_item.analysis`. The on-disk paths are returned in `work_item.image_paths` instead. This prevents editors from truncating the MCP response due to large Base64 payloads.
 
 `pending_images` is populated only when `skip_vision=True` (fast mode). It lists the filenames of image attachments that exist but were not processed. In full-vision mode this field is always empty. In MCP mode this is the signal contract between `analyze_issue_fast` and `analyze_issue` - the agent checks this field to decide whether to escalate to full vision analysis.
 
@@ -805,7 +818,7 @@ The memory module lives at `src/icx_engine/memory/` and follows the same layerin
 
 Memory is stored in `~/.icx/memory/` with mode `0o700`. LanceDB writes columnar `.lance` files to this directory. The model sentinel is at `~/.icx/memory/.mem_initialized` and contains the embedding model name string. Model files are cached at `~/.icx/memory/model/` (`tokenizer.json` + `onnx/model_quantized.onnx`).
 
-**Download trigger:** The embedding model downloads on the first `icx memory` command (not on every command). `icx analyze` and setup commands start immediately and use memory only if it is already initialized.
+**Download trigger:** The embedding model downloads on the first `icx memory` command (not on every command). `_trigger_memory_setup()` in `cli.py` is called only when `ctx.invoked_subcommand == "memory"` - no other subcommand triggers it. `icx analyze`, `icx graph`, and setup commands start immediately and use memory only if it is already initialized (lazy load on first query).
 
 ### Embedding model
 
@@ -890,23 +903,34 @@ The graph module lives at `src/icx_engine/graph/` and provides codebase knowledg
 | File | Responsibility |
 |---|---|
 | `graph/__init__.py` | Public exports: `GraphManager`, `generate_graph_report` |
-| `graph/storage.py` | Project registry, `ProjectInfo` dataclass, atomic meta writes to `~/.icx/graphs/` |
+| `graph/storage.py` | Project registry, `ProjectInfo` dataclass, path helpers for `~/.icx/graphs/` and `~/.icx/temp/` |
 | `graph/builder.py` | `_build_project_isolated` (top-level for pickle), `estimate_build_eta` |
 | `graph/change.py` | `check_staleness`, `current_git_commit`, `ChangeResult` |
-| `graph/querier.py` | `generate_graph_report` - reads `graph.json`, writes `GRAPH_REPORT.md` navigation map |
-| `graph/manager.py` | `GraphManager` - register, build, status, list, remove, resolve |
+| `graph/querier.py` | `generate_graph_report` - reads `graph.json`, writes compact `GRAPH_REPORT.md` index + `GRAPH_CLUSTERS/<name>.md` per-cluster files; `_role_tag`, `_sanitize_cluster_filename` |
+| `graph/manager.py` | `GraphManager` - register, build, status, list, remove, resolve; `_generate_cluster_descriptions` (LLM step) |
 
 ### Storage layout
 
-All graph data is stored in `~/.icx/graphs/` (created with `0o700`, never inside project directories):
+All graph data is stored in `~/.icx/graphs/` (created with `0o700`, never inside project directories). Ephemeral issue images are stored in `~/.icx/temp/`:
 
 ```
 ~/.icx/graphs/
-├── registry.json              # name → project_id map (atomic writes)
-└── <project_id>/              # SHA256[:12] of resolved project path
-    ├── meta.json              # ProjectInfo: name, path, status, file_count, git_commit
-    ├── graph.json             # built knowledge graph (nodes + edges JSON)
-    └── cache/                 # graphifyy AST cache (per-project, isolated)
+├── registry.json                  # name -> project_id map (atomic writes)
+└── <project_id>/                  # SHA256[:12] of resolved project path
+    ├── meta.json                  # ProjectInfo: name, path, status, file_count, git_commit
+    ├── graph.json                 # built knowledge graph (nodes + edges JSON)
+    ├── cluster_descriptions.json  # LLM cluster descriptions (written only when LLM configured)
+    ├── GRAPH_REPORT.md            # compact index: god nodes + cluster table + cross-cluster
+    ├── GRAPH_CLUSTERS/            # per-cluster detail files (one .md per community)
+    │   ├── ServiceName.md
+    │   ├── Feature.md
+    │   └── ...
+    └── cache/                     # graphifyy AST cache (per-project, isolated)
+
+~/.icx/temp/
+└── <PROJ-123>/                    # normalized issue key (URLs auto-extracted to bare key)
+    ├── screenshot.png             # issue image attachments written here instead of inline base64
+    └── diagram.jpg                # deleted on save_memory or after 24h TTL sweep
 ```
 
 ### Project ID
@@ -917,14 +941,17 @@ All graph data is stored in `~/.icx/graphs/` (created with `0o700`, never inside
 
 Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build calls `_build_project_isolated()` - a **top-level** function (required for pickle on Windows):
 
-1. Patches `graphify.cache.cache_dir` to redirect cache into `~/.icx/graphs/<id>/cache/` (safe in subprocess; accepts both `root` and `kind` args to match graphify's signature)
+1. Sets `os.chdir(icx_cache)` and patches `graphify.cache.cache_dir` to redirect all cache writes into `~/.icx/graphs/<id>/cache/` (safe in subprocess). Also passes `cache_root=icx_cache` explicitly to `extract()` - graphify infers `effective_root` from absolute file paths when `cache_root` is omitted, which causes `graphify-out/` to appear in the project root. Passing `cache_root` prevents any writes to the project directory.
 2. `_collect_source_files(project_path)` → file list (git-first, fallback to filtered rglob)
    - **Git path:** `git ls-files --cached --others --exclude-standard` filtered by `_GRAPHIFY_EXTENSIONS` - respects `.gitignore`, excludes `node_modules`, `dist`, `target`, etc.
    - **Fallback:** rglob filtered by `_SKIP_DIRS` (node_modules, dist, build, .next, vendor, __pycache__, etc.)
-3. `extract(files, parallel=True, max_workers=cpu_count)` - graphify handles parallelism internally
-4. `build_from_json(extraction)` + `cluster(G)` + `to_json(G, communities, output_path=graph_tmp_path)`
-5. Writes to `graph.json.tmp` then renames atomically to `graph.json`
-6. Returns `{file_count, node_count, edge_count, community_count, error}`
+3. **AST extraction** - `extract(files, cache_root=icx_cache, parallel=True, max_workers=cpu_count)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses.
+4. **LLM edge enrichment** (optional, runs when a model is configured) - `extract_corpus_parallel()` sends file batches to the LLM to extract cross-file semantic edges (imports, calls, inheritance). Only edges are merged into the AST result; LLM-assigned community IDs are discarded (they collide across chunk boundaries).
+5. `build_from_json(extraction)` + `cluster(G)` + `to_json(G, communities, output_path=graph_tmp_path)`
+6. Writes to `graph.json.tmp` then renames atomically to `graph.json` (`_finalise_build`)
+7. **LLM cluster descriptions** (optional) - `_generate_cluster_descriptions(graph_path)` reads the built graph, sends a single batch prompt to the LLM with top-5 files per cluster, receives JSON of `{community_id: one-sentence description}`, writes `cluster_descriptions.json` alongside `graph.json`. Non-fatal: silently skipped when no LLM is configured or on any failure.
+8. **Report generation** - `generate_graph_report(graph_json_path, output_path)` writes `GRAPH_REPORT.md` index and `GRAPH_CLUSTERS/` directory (see Report generation section).
+9. Returns `{file_count, node_count, edge_count, community_count, extraction_mode, error}`
 
 On `ImportError` (graphifyy not installed), returns `{"error": "..."}` dict instead of raising - builder never crashes the process.
 
@@ -957,33 +984,60 @@ In MCP mode (`_get_graph_info`): when `is_stale=True`, the behavior depends on w
 
 ### Report generation (`querier.py`)
 
-`generate_graph_report(graph_json_path, output_path)` reads `graph.json` and writes `GRAPH_REPORT.md`.
+`generate_graph_report(graph_json_path, output_path)` reads `graph.json` and writes two outputs:
+- `GRAPH_REPORT.md` at `output_path` - compact index (~2-5k tokens regardless of project size)
+- `GRAPH_CLUSTERS/<name>.md` in `output_path.parent/GRAPH_CLUSTERS/` - one file per community
 
-Called by `_finalise_build()` after every successful build. Agents read the report directly (pre-authorized access noted in `graph.access`) to navigate codebase structure without querying an API.
+Also reads `cluster_descriptions.json` from `graph_json_path.parent` if present (written by `_generate_cluster_descriptions`).
+
+Called by `_finalise_build()` after every successful build. Agents read the index first to orient, then read one cluster file to get the full file list for the relevant module.
 
 **Pipeline:**
-1. Load `graph.json` - nodes list and edges (`"links"` key, falls back to `"edges"` for older graphs)
-2. Build `node_id -> source_file` map; compute per-file degree (max node degree across all nodes in that file)
-3. Determine community assignments from three sources in priority order:
+1. Load `graph.json` - nodes list and edges (`"links"` key, falls back to `"edges"`)
+2. Load `cluster_descriptions.json` if present (optional, generated by manager when LLM configured)
+3. Build `node_id -> source_file` map; compute per-file degree (max node degree for that file)
+4. Determine community assignments from three sources in priority order:
    - Top-level `"communities"` key in graph JSON (graphify's Louvain output)
    - `"community"` attribute on each node
-   - Parent directory of `source_file` (directory fallback when no community data exists)
-4. Single-file community fallback: when all Louvain communities contain only one file (AST-only mode with zero cross-file edges), re-derive using parent directory so the report stays useful for navigation
-5. Identify god nodes: files with degree > (mean + 2 standard deviations), capped at 10
-6. Compute cross-cluster edge counts between community pairs (top 20 pairs)
-7. Write `GRAPH_REPORT.md` sections:
-   - **Community Clusters** - groups with 2+ files sorted by size; files listed by degree (highest first); community labeled by common filename prefix, CamelCase word frequency, or directory segment
-   - **God Nodes** - high-connectivity files that bridge multiple clusters
-   - **Cross-Cluster Connections** - cluster pairs with most edges between them
+   - Parent directory of `source_file` (directory fallback when no community data)
+5. Single-file community fallback: when all Louvain communities contain only one file (AST-only mode with no cross-file edges), re-derive using parent directory so the report stays useful for navigation
+6. Identify god nodes: files with degree > (mean + 2 standard deviations), capped at 10
+7. Compute cross-cluster edge counts between community pairs (top 20 pairs)
+8. Label each community via `_community_label()`: Strategy 1 = common filename prefix (>= 4 chars), Strategy 2 = most common non-generic CamelCase word, Strategy 3 = depth-weighted directory segment
+9. Build deduplicated cluster filenames via `_sanitize_cluster_filename()`: replaces non-word chars with underscores, strips leading/trailing underscores. Deduplication is **case-insensitive** (Windows filesystem compatibility) - "Modal" and "modal" collide on NTFS and get unique suffixes (Modal, Modal_2, ...).
+10. Write `GRAPH_CLUSTERS/<name>.md` for each community with 2+ files (writes in-place, no rmtree):
+    - Cluster header + optional LLM description as blockquote
+    - **Core files** (top 10 by degree) - each file gets a **role tag** from `_role_tag()` based on filename/path patterns (e.g. `[controller]`, `[service]`, `[dao]`, `[model]`, `[config]`, `[util]`, `[test]` for Java; `[container]`, `[component]`, `[hook]`, `[action]`, `[reducer]`, `[modal]`, `[route]` for JS/JSX)
+    - **All files** section (full list with role tags) when cluster has more than 10 files
+    - After writing all new files, removes stale `.md` files from previous builds that no longer have a matching community
+11. Write compact `GRAPH_REPORT.md` index:
+    - **God Nodes** - files with connections > mean + 2 std dev (cross-cutting concerns)
+    - **Community Clusters** - markdown table: cluster name, file count, top file, description (if available). Includes path to `GRAPH_CLUSTERS/` directory for agent navigation.
+    - **Cross-Cluster Connections** - top 20 cluster pairs by edge count (architectural boundaries)
 
-Only clusters with 2+ files are shown - single-file clusters are noise and filtered.
+**Role tags** (`_role_tag(filepath)`): Three detection layers, no graph data needed, no rebuild required:
+1. **JS/JSX/TS/TSX/Vue/Svelte/MJS framework paths** - React/Redux directory conventions (`containers/`, `components/`, `hooks/`, `redux/actions/`, `composables/`, `views/`, `routes/`, etc.) that rely on directory structure, not filename alone.
+2. **Universal stem-suffix detection** - works across all languages (Java, Python, Go, C#, Kotlin, Ruby, PHP, Swift, Elixir, Dart, Rust, Objective-C). Naming conventions for roles (`controller`, `service`, `dao`, `repository`, `model`, `schema`, `config`, `util`, `test`, `middleware`, `bloc`, `cubit`, `provider`, `coordinator`, `presenter`, `delegate`, `channel`, `plug`, `consumer`, `screen`, `widget`, `page`, etc.) are consistent enough across ecosystems to be reliable.
+3. **Directory convention detection** - for languages where the filename carries no role hint but the directory is unambiguous (`/models/` in Rails, `/controllers/` in Laravel, `/schemas/` in FastAPI, `/middleware/` in Go).
+
+Languages with no established role conventions (C, C++, Lua, Zig, Julia, PS1, SQL, Markdown) correctly return `""` - blank is accurate for those.
+
+**Community label `_SKIP_PARTS`** must include common Java package structural directory names (`services`, `dao`, `impl`, `model`, `controller`, `util`, etc.) in addition to the standard skip list. Without these, Strategy 3 (depth-weighted directory segment) picks up the Java package hierarchy as the cluster label - producing meaningless labels like "services (3)" or "dao (4)" for clusters that are just groupings within those packages.
+
+Only clusters with 2+ files are shown in the index - single-file clusters are noise.
 
 ### What NOT to touch
 
 - `graph/builder.py:_build_project_isolated` - must remain a top-level function (not lambda/nested/method) for pickle safety on Windows with `ProcessPoolExecutor`. The `_redirected_cache_dir` inner function is acceptable (defined inside the subprocess, never pickled itself).
 - `graph/builder.py:_collect_source_files` - git-first file collection. Do not revert to calling `graphify.collect_files` directly - it does not respect `.gitignore` and will include `node_modules` and other build artifacts for JS/TS/Java projects.
-- `graph/storage.py:derive_project_id` - changing the hash function or length invalidates all existing project IDs
-- `~/.icx/graphs/` layout - tools and tests both rely on this exact directory structure
+- `graph/builder.py:_build_project_isolated` - `cache_root=icx_cache` must be passed to `extract()`. When omitted, graphify infers `effective_root` from the absolute paths of source files (= project root) and writes `graphify-out/` into the project directory. The `os.chdir` and `_gcache.cache_dir` patches alone are not sufficient because graphify resolves cache paths from `effective_root`, not cwd.
+- `graph/storage.py:derive_project_id` - changing the hash function or length invalidates all existing project IDs.
+- `graph/querier.py:_role_tag` hook detection - the check `stem.startswith("use") and len(stem) > 3 and stem[3].isupper()` is intentional. React hooks start with lowercase `use` + uppercase letter. Changing to `sl.startswith("use")` causes false matches on `userList`, `userActions` etc.
+- `graph/querier.py` deduplication - the `used_filenames` set must use `.lower()` for membership checks. Windows NTFS is case-insensitive; without this, two communities with labels like "Modal" and "modal" silently overwrite each other's cluster file.
+- `graph/querier.py:_community_label:_SKIP_PARTS` - the extended set of Java package directory names must stay. Removing them causes generic package names to bleed through as cluster labels on Java projects.
+- `graph/querier.py` cluster file write strategy - must use write-in-place + stale-file removal, NOT `shutil.rmtree` + `mkdir`. The rmtree pattern has a TOCTOU window where a symlink can be inserted between delete and recreate, redirecting all subsequent file writes to an attacker-controlled path.
+- `cli.py:main` - `_trigger_memory_setup()` must only be called when `ctx.invoked_subcommand == "memory"`. Graph and other commands must not trigger the ONNX model download - the graph pipeline uses the LLM API directly, not the embedding model.
+- `~/.icx/graphs/` layout - tools and tests both rely on this exact directory structure.
 
 ---
 

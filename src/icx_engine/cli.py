@@ -567,7 +567,7 @@ def main(
 ) -> None:
     _check_for_update()
     _check_uninstall_result()
-    if ctx.invoked_subcommand in ("memory", "graph"):
+    if ctx.invoked_subcommand == "memory":
         _trigger_memory_setup()
     if ctx.invoked_subcommand is None:
         _print_full_help()

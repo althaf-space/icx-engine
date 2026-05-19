@@ -239,6 +239,20 @@ def test_model_remove_invalid_index(cli_runner):
     assert result.exit_code != 0
 
 
+def test_graph_command_does_not_trigger_memory_setup(cli_runner):
+    """icx graph <cmd> must not download the ONNX model - graph never uses embeddings."""
+    with patch("icx_engine.cli._trigger_memory_setup") as mock_trigger:
+        cli_runner.invoke(app, ["graph", "--help"])
+    mock_trigger.assert_not_called()
+
+
+def test_memory_command_triggers_memory_setup(cli_runner):
+    """icx memory <cmd> must trigger memory model setup (pre-download on first use)."""
+    with patch("icx_engine.cli._trigger_memory_setup") as mock_trigger:
+        cli_runner.invoke(app, ["memory", "--help"])
+    mock_trigger.assert_called_once()
+
+
 def test_connection_add_duplicate_domain_prompts_overwrite(cli_runner):
     from unittest.mock import patch
     from icx_engine.connectors.jira.config import JiraConnection, TokenAuth

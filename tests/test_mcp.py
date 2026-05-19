@@ -568,6 +568,66 @@ async def test_handle_analyze_issue_fast_returns_work_item_json(mcp_config_with_
     assert "work_item" in data
     assert data["work_item"]["type"] == "Bug"
     assert "pending_images" in data["work_item"]["analysis"]
+    # image_paths always present in work_item (empty dict when no images)
+    assert "image_paths" in data["work_item"]
+    assert isinstance(data["work_item"]["image_paths"], dict)
+    # raw base64 images must never appear in the analysis payload
+    assert "images" not in data["work_item"]["analysis"]
+
+
+@respx.mock
+async def test_image_paths_written_to_disk_not_inline(mcp_config_with_llm, tmp_path):
+    """Images must be written to disk and returned as paths, not inline base64.
+    Verifies the pathlib.Path import fix - a NameError here means Path was not imported."""
+    import base64
+    from icx_engine.models.output import IssueContext
+
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
+    )
+
+    fake_image_b64 = base64.b64encode(b"fake-png-bytes").decode()
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config_with_llm
+        with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+                with patch("icx_engine.graph.storage.sweep_stale_temp_dirs"):
+                    with patch("icx_engine.graph.storage.temp_images_dir", return_value=tmp_path):
+                        with patch("icx_engine.engine.run") as mock_run:
+                            ctx = IssueContext(
+                                problem_summary="Bug summary",
+                                detailed_description="desc",
+                                reproduction_steps=[],
+                                expected_behavior=None,
+                                actual_behavior=None,
+                                acceptance_criteria=[],
+                                impact="low",
+                                priority="Low",
+                                issue_type="Bug",
+                                confidence_score=0.9,
+                                completeness_score=0.8,
+                                missing_information=[],
+                                images={"screenshot.png": fake_image_b64},
+                            )
+                            mock_run.return_value = ctx
+                            result = await _handle_analyze_issue("TEST-123", project_path="E:\\my-project", skip_vision=True)
+
+    data = json.loads(result)
+    # image_paths must be non-empty and contain the filename
+    assert data["work_item"]["image_paths"] != {}
+    assert "screenshot.png" in data["work_item"]["image_paths"]
+    # images_access key present when images exist
+    assert "images_access" in data["work_item"]
+    # raw base64 must never be in the analysis
+    assert "images" not in data["work_item"]["analysis"]
+    # image file must have been written to disk (no NameError from missing Path import)
+    written_path = Path(data["work_item"]["image_paths"]["screenshot.png"])
+    assert written_path.exists()
+    assert written_path.read_bytes() == b"fake-png-bytes"
 
 
 async def test_save_memory_tool_has_required_inputs():

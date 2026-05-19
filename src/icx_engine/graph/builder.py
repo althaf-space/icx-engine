@@ -233,7 +233,7 @@ def _build_project_isolated(
         # Produces nodes + intra-file call/import edges via tree-sitter.
         # This is the foundation: zero misses regardless of project size.
         # ------------------------------------------------------------------
-        extraction = extract(files, parallel=True, max_workers=cpu)
+        extraction = extract(files, cache_root=icx_cache, parallel=True, max_workers=cpu)
 
         # ------------------------------------------------------------------
         # Step 2: LLM edge enrichment - runs only when a model is configured.
