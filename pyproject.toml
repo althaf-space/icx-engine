@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.3.0"
+version = "0.3.1"
 description = "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development workflows: deep context extraction, local memory, and MCP-powered execution."
 readme = "readme.md"
 license = { file = "license" }

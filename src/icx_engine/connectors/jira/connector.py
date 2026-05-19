@@ -6,7 +6,7 @@ from icx_engine.connectors.base import ConnectorBase, ParsedInput
 from icx_engine.models.config import BaseConnection
 from icx_engine.connectors.jira.config import JiraConnection, JiraOAuthAuth
 from icx_engine.models.output import RawIssueData
-from icx_engine.exceptions import InvalidInput
+from icx_engine.exceptions import InvalidInput, SourceUnavailable
 
 _ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 
@@ -100,7 +100,7 @@ class JiraConnector(ConnectorBase):
         if not isinstance(conn.auth, JiraOAuthAuth):
             parsed = urlparse(url)
             if parsed.netloc != conn.domain:
-                raise ValueError(
+                raise SourceUnavailable(
                     f"Attachment URL host '{parsed.netloc}' does not match "
                     f"the configured domain '{conn.domain}'."
                 )

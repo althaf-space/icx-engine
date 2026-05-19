@@ -30,7 +30,7 @@ ICX is an early-stage product. The core pipeline (fetch → process → analyse 
 | Attachments | PDF, DOCX, XLSX, CSV, images via OCR + vision | Audio/video transcription |
 | Memory | Local LanceDB + ONNX embeddings (BAAI/bge-small-en-v1.5, no PyTorch) | Team-shared memory, conflict resolution |
 | MCP tools | `analyze_issue_fast`, `analyze_issue`, `save_memory` | Batch analysis, project-level summary |
-| Codebase graph | Project registration, AST + semantic build, staleness detection, GRAPH_REPORT.md navigation map | Multi-project graph, incremental rebuild |
+| Codebase graph | Project registration, AST + semantic build, staleness detection, compact index + per-cluster files + role tags + LLM descriptions | Multi-project graph, incremental rebuild |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
 
@@ -42,9 +42,9 @@ ICX operates in three modes depending on how you call it and what you have confi
 
 **CLI mode** - run `icx analyze KEY` from your terminal. ICX fetches the work item, processes every attachment, runs your configured AI model, queries local memory for similar past resolutions, and prints a structured JSON summary to stdout.
 
-**MCP mode** - your AI editor calls ICX directly during a conversation. ICX exposes three tools. The agent calls `analyze_issue_fast` first - it returns structured analysis, memory results, and the codebase graph navigation map in a single response. The agent reads the graph report, locates relevant files, implements the fix, and saves the resolution when you confirm it works.
+**MCP mode** - your AI editor calls ICX directly during a conversation. ICX exposes three tools. The agent calls `analyze_issue_fast` first - it returns structured analysis, memory results, and the codebase graph navigation map in a single response. The agent reads the compact graph index, opens the relevant cluster file, reads core files, then presents a confirmation summary before writing any code. You confirm (or add context), the agent implements, and saves the resolution when you confirm it works.
 
-**MCP headless mode** - same as MCP mode but with no AI provider configured. ICX returns all raw content - text, attachment extracts, and Base64 images - directly to your editor's AI for analysis. No separate API key required.
+**MCP headless mode** - same as MCP mode but with no AI provider configured. ICX returns all raw content - text, attachment extracts, and image file paths - directly to your editor's AI for analysis. No separate API key required.
 
 ---
 
@@ -85,16 +85,18 @@ flowchart TD
     A([Agent: work item mentioned]) --> B[analyze_issue_fast\ntext-only - always first]
     B --> C{pending_images\nnon-empty AND\nimages relevant?}
     C -- yes --> D[analyze_issue\nfull vision + OCR]
-    C -- no --> E[Single response:\nwork_item + memory + graph]
+    C -- no --> E[Single response:\nwork_item + memory + graph\nimage_paths on disk]
     D --> E
     E --> F{graph.status?}
-    F -- ready --> G[Read graph.report_path\npre-authorized direct access]
+    F -- ready --> G[Read graph.report_path\ncompact index - pre-authorized]
     F -- building/other --> H[grep/glob for relevant files\ngraph builds in background]
-    G --> I[Identify relevant clusters\nRead core files in listed order]
+    G --> G2[Read GRAPH_CLUSTERS/name.md\nfull file list + role tags]
+    G2 --> I[Read core files\nunderstand the code]
     H --> I
-    I --> J[Use memory.results as pattern reference\nImplement per acceptance_criteria]
+    I --> I2{Confirm with user:\nproblem + goal + files\nShall I proceed?}
+    I2 -- yes / add context --> J[Use memory.results as pattern reference\nImplement per acceptance_criteria]
     J --> K[Ask developer to test manually]
-    K -- fix confirmed --> L[save_memory\nresolution stored locally]
+    K -- fix confirmed --> L[save_memory\nresolution stored + temp images cleaned]
     K -- needs changes --> J
 ```
 
@@ -104,7 +106,7 @@ flowchart TD
 flowchart LR
     A([Agent: work item mentioned]) --> B[analyze_issue_fast]
     B --> C[No LLM configured]
-    C --> D[RawIssueResponse\nraw text + attachment extracts\n+ Base64 images]
+    C --> D[RawIssueResponse\nraw text + attachment extracts\nimage paths on disk]
     D --> E([Editor AI analyses\nall content directly])
 ```
 
@@ -112,7 +114,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.0 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
+**Version:** 0.3.1 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
 
 ```
 pipx install icx-engine
@@ -300,15 +302,15 @@ After setup, restart your editor. ICX will appear in its list of available tools
 
 | Tool | When the agent calls it |
 |------|------------------------|
-| `analyze_issue_fast` | Always first - text-only, fast. Returns `work_item` (analysis), `memory` (past similar work), and `graph` (report path or build status) in a single response. |
+| `analyze_issue_fast` | Always first - text-only, fast. Returns `work_item` (analysis + `image_paths`), `memory` (past similar work), and `graph` (report path or build status) in a single response. |
 | `analyze_issue` | Only when `work_item.analysis.pending_images` is non-empty AND images are relevant to the problem. Same response shape as `analyze_issue_fast`. |
-| `save_memory` | After the developer confirms the fix is tested and working. |
+| `save_memory` | After the developer confirms the fix is tested and working. Cleans up temp images for that issue. |
 
 ### With and without an AI provider
 
-With a provider configured, ICX returns a fully analysed `IssueContext` with problem summary, reproduction steps, acceptance criteria, confidence scores, and past insights.
+With a provider configured, ICX returns a fully analysed `IssueContext` with problem summary, reproduction steps, acceptance criteria, confidence scores, and past insights. Image attachments are written to `~/.icx/temp/<key>/` and their paths returned in `work_item.image_paths` - keeping the JSON response compact so editors do not truncate it.
 
-Without a provider, ICX falls back to raw mode in MCP. It returns `RawIssueResponse` with all raw text, processed attachment content, and Base64 images - your editor's AI analyses it directly.
+Without a provider, ICX falls back to raw mode in MCP. It returns `RawIssueResponse` with all raw text, processed attachment content, and image paths - your editor's AI analyses it directly.
 
 ---
 

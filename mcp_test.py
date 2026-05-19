@@ -1,6 +1,11 @@
 """
-Drives icx mcp run via stdin/stdout JSON-RPC - exactly as Cursor/Windsurf does.
-Tests build_codebase_graph for F:\clients\vil and reports what gets stuck.
+Manual MCP smoke test - drives icx mcp run via stdin/stdout JSON-RPC
+exactly as Cursor/Windsurf/Claude Code does.
+
+Usage:
+    python mcp_test.py
+
+Edit PROJECT_PATH and ISSUE_REF before running.
 """
 import json
 import subprocess
@@ -8,7 +13,9 @@ import sys
 import threading
 import time
 
-PROJECT_PATH = r"F:\clients\vil"
+PROJECT_PATH = r"C:\path\to\your\project"   # absolute path to your workspace root
+ISSUE_REF    = "PROJ-123"                    # bare key or full URL
+
 MCP_CMD = ["icx", "mcp", "run"]
 
 proc = subprocess.Popen(
@@ -67,7 +74,6 @@ def call(method: str, params: dict, timeout=120.0) -> dict:
             continue
         if msg.get("id") == rid:
             return msg
-        # notification or other message - print and keep waiting
         if "method" in msg:
             print(f"  notification: {msg['method']}")
 
@@ -80,11 +86,11 @@ r = call("initialize", {
     "clientInfo": {"name": "test-client", "version": "1.0"},
 })
 print(f"  elapsed: {time.perf_counter()-t0:.2f}s")
-if "error" in r and "TIMEOUT" in str(r.get("error","")):
+if "error" in r and "TIMEOUT" in str(r.get("error", "")):
     print(f"STUCK: MCP server never responded to initialize: {r}")
     proc.kill()
     sys.exit(1)
-print(f"  server: {r.get('result',{}).get('serverInfo',{})}")
+print(f"  server: {r.get('result', {}).get('serverInfo', {})}")
 
 send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
 
@@ -95,11 +101,11 @@ tools = [t["name"] for t in r.get("result", {}).get("tools", [])]
 print(f"  tools: {tools}")
 
 # ---- analyze_issue_fast ----
-print("\nStep 1: analyze_issue_fast VILMA-1873...")
+print(f"\nStep 1: analyze_issue_fast {ISSUE_REF}...")
 t0 = time.perf_counter()
 r = call("tools/call", {
     "name": "analyze_issue_fast",
-    "arguments": {"issue_ref": "VILMA-1873"},
+    "arguments": {"issue_ref": ISSUE_REF, "project_path": PROJECT_PATH},
 }, timeout=60)
 elapsed = time.perf_counter() - t0
 if "TIMEOUT" in str(r.get("error", "")):
@@ -110,47 +116,33 @@ else:
     if "error" in data:
         print(f"  ERROR: {data['error']}")
     else:
-        key = "problem_summary" if "problem_summary" in data else "summary"
-        print(f"  OK ({elapsed:.1f}s) - {str(data.get(key,''))[:80]}")
+        wi = data.get("work_item", {})
+        analysis = wi.get("analysis", {})
+        summary = analysis.get("problem_summary") or wi.get("summary", "")
+        graph_status = data.get("graph", {}).get("status", "")
+        print(f"  OK ({elapsed:.1f}s) - summary={str(summary)[:80]}")
+        print(f"  graph.status={graph_status}")
+        if wi.get("image_paths"):
+            print(f"  image_paths={list(wi['image_paths'].keys())}")
 
-# ---- search_memory ----
-print("\nStep 2: search_memory (timing cold start)...")
+# ---- analyze_issue (full vision) ----
+print(f"\nStep 2: analyze_issue {ISSUE_REF} (full vision)...")
 t0 = time.perf_counter()
 r = call("tools/call", {
-    "name": "search_memory",
-    "arguments": {"query": "campaign status scheduled display N/A"},
+    "name": "analyze_issue",
+    "arguments": {"issue_ref": ISSUE_REF, "project_path": PROJECT_PATH},
 }, timeout=120)
 elapsed = time.perf_counter() - t0
 if "TIMEOUT" in str(r.get("error", "")):
-    print(f"  STUCK: search_memory timed out after {elapsed:.0f}s - ONNX cold load exceeded timeout")
+    print(f"  STUCK: analyze_issue timed out after {elapsed:.0f}s")
 else:
     content = r.get("result", {}).get("content", [{}])[0].get("text", "{}")
     data = json.loads(content)
     if "error" in data:
         print(f"  ERROR ({elapsed:.1f}s): {data['error']}")
     else:
-        print(f"  OK ({elapsed:.1f}s) - count={data.get('count')}")
-
-# ---- build_codebase_graph ----
-print(f"\nStep 3: build_codebase_graph {PROJECT_PATH} (force=true)...")
-print("  (watching for hangs - will wait up to 5 minutes)")
-t0 = time.perf_counter()
-r = call("tools/call", {
-    "name": "build_codebase_graph",
-    "arguments": {"project_path": PROJECT_PATH, "force": True},
-}, timeout=300)
-elapsed = time.perf_counter() - t0
-if "TIMEOUT" in str(r.get("error", "")):
-    print(f"  STUCK: build_codebase_graph hung for {elapsed:.0f}s")
-    print("  This is likely ProcessPoolExecutor spawn overhead on Windows")
-    print("  or graphify extraction hanging on a specific file type")
-else:
-    content = r.get("result", {}).get("content", [{}])[0].get("text", "{}")
-    data = json.loads(content)
-    if "error" in data:
-        print(f"  ERROR ({elapsed:.1f}s): {data['error']}")
-    else:
-        print(f"  OK ({elapsed:.1f}s) - status={data.get('status')} files={data.get('file_count')}")
+        memory_count = data.get("memory", {}).get("count", 0)
+        print(f"  OK ({elapsed:.1f}s) - memory.count={memory_count}")
 
 proc.kill()
 print("\nDone.")

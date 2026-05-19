@@ -22,6 +22,9 @@ from icx_engine.graph.storage import (
     set_build_status,
     ProjectInfo,
     _is_relative_to,
+    _normalize_issue_key,
+    temp_images_dir,
+    sweep_stale_temp_dirs,
 )
 from icx_engine.exceptions import GraphError
 
@@ -232,3 +235,69 @@ def test_is_relative_to_not_child():
 def test_is_relative_to_same_path():
     p = Path("/home/user/projects/myapp")
     assert _is_relative_to(p, p) is True
+
+
+# ---------------------------------------------------------------------------
+# Temp image storage helpers
+# ---------------------------------------------------------------------------
+
+def test_normalize_issue_key_bare_key():
+    assert _normalize_issue_key("PROJ-123") == "PROJ-123"
+
+def test_normalize_issue_key_lowercase():
+    assert _normalize_issue_key("proj-123") == "PROJ-123"
+
+def test_normalize_issue_key_from_url():
+    assert _normalize_issue_key("https://jira.company.com/browse/PROJ-123") == "PROJ-123"
+
+def test_normalize_issue_key_url_with_query():
+    assert _normalize_issue_key("https://jira.com/browse/PROJ-456?focusedCommentId=1") == "PROJ-456"
+
+def test_normalize_issue_key_url_and_bare_produce_same_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage.temp_root", lambda: tmp_path / "temp")
+    d1 = temp_images_dir("PROJ-123")
+    d2 = temp_images_dir("https://jira.company.com/browse/PROJ-123")
+    assert d1 == d2
+
+def test_normalize_issue_key_unknown_string():
+    result = _normalize_issue_key("random-string")
+    assert result == "random-string"  # hyphens are valid in filenames and preserved
+
+def test_temp_images_dir_uses_normalized_key(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage.temp_root", lambda: tmp_path / "temp")
+    d = temp_images_dir("ABC-99")
+    assert d.name == "ABC-99"
+
+def test_sweep_stale_temp_dirs_removes_old_dirs(tmp_path):
+    import time
+    old_dir = tmp_path / "OLD-1"
+    old_dir.mkdir()
+    (old_dir / "img.png").write_bytes(b"fake")
+    # Set mtime to 2 days ago
+    old_mtime = time.time() - 172800
+    import os
+    os.utime(old_dir, (old_mtime, old_mtime))
+
+    recent_dir = tmp_path / "NEW-2"
+    recent_dir.mkdir()
+
+    sweep_stale_temp_dirs(max_age_seconds=86400, _root=tmp_path)
+
+    assert not old_dir.exists()
+    assert recent_dir.exists()
+
+def test_sweep_stale_temp_dirs_keeps_recent_dirs(tmp_path):
+    recent = tmp_path / "RECENT-1"
+    recent.mkdir()
+    sweep_stale_temp_dirs(max_age_seconds=86400, _root=tmp_path)
+    assert recent.exists()
+
+def test_sweep_stale_temp_dirs_nonexistent_root_is_noop(tmp_path):
+    missing = tmp_path / "does_not_exist"
+    sweep_stale_temp_dirs(_root=missing)  # must not raise
+
+def test_sweep_stale_temp_dirs_skips_files(tmp_path):
+    (tmp_path / "loose_file.txt").write_text("hello")
+    sweep_stale_temp_dirs(max_age_seconds=0, _root=tmp_path)  # age=0 removes everything old
+    # File should remain (sweep only targets dirs)
+    assert (tmp_path / "loose_file.txt").exists()

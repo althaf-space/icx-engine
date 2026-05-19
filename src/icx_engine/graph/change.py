@@ -4,12 +4,15 @@ Staleness detection: git-based diff with mtime fallback.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
+
+_HEX_SHA_RE = re.compile(r'^[0-9a-f]{4,64}$')
 
 
 @dataclass
@@ -89,6 +92,9 @@ def _git_changed_files(
     """
     Returns list of changed file paths since stored_commit, or None if git fails.
     """
+    if not _HEX_SHA_RE.match(stored_commit):
+        _log.debug("stored_commit %r is not a valid hex SHA; skipping git diff", stored_commit)
+        return None
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", stored_commit, "HEAD"],

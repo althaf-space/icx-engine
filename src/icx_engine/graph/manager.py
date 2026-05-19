@@ -50,6 +50,160 @@ def _read_icx_llm_cfg() -> tuple[str, str | None, str | None] | None:
         return (backend, ch.api_key, ch.base_url)
     except Exception:
         return None
+
+
+def _read_icx_full_llm_cfg() -> tuple[str, str | None, str | None, str] | None:
+    """Return (graphify_backend, api_key, base_url, model) or None."""
+    try:
+        from icx_engine.config_manager import ConfigManager
+        cfg = ConfigManager.load()
+        llm = cfg.active_llm
+        if llm is None:
+            return None
+        ch = llm.text_config
+        backend = _ICX_PROVIDER_TO_GRAPHIFY.get(ch.provider)
+        if not backend:
+            return None
+        return (backend, ch.api_key, ch.base_url, ch.model)
+    except Exception:
+        return None
+
+
+def _call_llm_for_descriptions(
+    prompt: str,
+    backend: str,
+    api_key: str | None,
+    base_url: str | None,
+    model: str,
+) -> str:
+    """Synchronous LLM call for cluster descriptions. Returns raw response text."""
+    if backend == "claude":
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text if resp.content else ""
+
+    if backend in ("openai", "nim", "xai"):
+        from openai import OpenAI
+        kwargs: dict = {"api_key": api_key or "sk-dummy"}
+        if base_url:
+            kwargs["base_url"] = base_url
+        client = OpenAI(**kwargs)
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.choices[0].message.content or ""
+
+    if backend == "gemini":
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(model=model, contents=prompt)
+        return resp.text or ""
+
+    if backend == "ollama":
+        from openai import OpenAI
+        client = OpenAI(
+            api_key="ollama",
+            base_url=base_url or "http://localhost:11434/v1",
+        )
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.choices[0].message.content or ""
+
+    raise ValueError(f"Unknown backend: {backend}")
+
+
+def _generate_cluster_descriptions(graph_path: Path) -> None:
+    """
+    Read graph.json, call the configured LLM for one-sentence cluster descriptions,
+    write cluster_descriptions.json alongside graph.json.
+    Non-fatal: silently skips if no LLM configured or any step fails.
+    """
+    import json as _json
+    import os as _os
+    import stat as _stat
+
+    llm_cfg = _read_icx_full_llm_cfg()
+    if not llm_cfg:
+        return
+
+    backend, api_key, base_url, model = llm_cfg
+
+    try:
+        graph_data = _json.loads(graph_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    nodes: list[dict] = graph_data.get("nodes", [])
+    communities_raw = graph_data.get("communities")
+
+    if not communities_raw or not isinstance(communities_raw, dict):
+        return
+
+    node_to_file: dict[str, str] = {
+        (node.get("id") or node.get("label") or ""): node.get("source_file", "")
+        for node in nodes
+        if node.get("source_file") and (node.get("id") or node.get("label"))
+    }
+
+    from pathlib import Path as _Path
+
+    comm_files: dict[str, list[str]] = {}
+    for comm_id, member_ids in communities_raw.items():
+        files = list({node_to_file[nid] for nid in member_ids if nid in node_to_file})
+        if files:
+            comm_files[str(comm_id)] = files
+
+    if not comm_files:
+        return
+
+    sorted_comms = sorted(comm_files.items(), key=lambda x: -len(x[1]))
+
+    prompt_lines = [
+        "For each numbered cluster below, write one sentence (max 15 words) describing "
+        "what these source files do together as a module. "
+        'Reply ONLY as JSON: {"0": "description", "1": "description", ...}\n'
+    ]
+    for comm_id, files in sorted_comms:
+        top5 = sorted(files, key=lambda f: _Path(f.replace("\\", "/")).name)[:5]
+        filenames = ", ".join(_Path(f.replace("\\", "/")).name for f in top5)
+        prompt_lines.append(f"Cluster {comm_id} ({len(files)} files): {filenames}")
+
+    prompt = "\n".join(prompt_lines)
+
+    try:
+        response_text = _call_llm_for_descriptions(prompt, backend, api_key, base_url, model)
+
+        start = response_text.find("{")
+        end = response_text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return
+        descriptions: dict = _json.loads(response_text[start : end + 1])
+
+        out_path = graph_path.parent / "cluster_descriptions.json"
+        tmp = out_path.with_suffix(".tmp")
+        try:
+            fd = _os.open(str(tmp), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, _stat.S_IRUSR | _stat.S_IWUSR)
+            with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                _json.dump(descriptions, f, indent=2)
+            tmp.replace(out_path)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    except Exception as exc:
+        _log.debug("Cluster description generation failed (%s); skipping", type(exc).__name__)
 from icx_engine.graph.change import current_git_commit
 from icx_engine.graph.querier import generate_graph_report
 from icx_engine.graph.storage import (
@@ -220,7 +374,13 @@ class GraphManager:
             extraction_mode=result.get("extraction_mode", "ast"),
         )
         storage.write_meta(updated)
-        storage.update_registry_after_build(meta.project_id, file_count, git_commit)
+
+        # Generate LLM cluster descriptions (optional - silently skipped if no LLM configured)
+        try:
+            if dest.exists():
+                _generate_cluster_descriptions(dest)
+        except Exception as exc:
+            _log.debug("_generate_cluster_descriptions raised (%s); skipping", type(exc).__name__)
 
         # Generate navigation map for agents
         try:

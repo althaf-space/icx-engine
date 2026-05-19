@@ -98,6 +98,63 @@ def report_path(project_id: str) -> Path:
     return _project_dir(project_id) / "GRAPH_REPORT.md"
 
 
+def clusters_dir_path(project_id: str) -> Path:
+    return _project_dir(project_id) / "GRAPH_CLUSTERS"
+
+
+# ---------------------------------------------------------------------------
+# Temp image storage (~/.icx/temp/<issue_key>/)
+# ---------------------------------------------------------------------------
+
+def temp_root() -> Path:
+    """~/.icx/temp/ - ephemeral per-issue storage. Created on first access."""
+    root = Path.home() / ".icx" / "temp"
+    if not root.exists():
+        root.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            try:
+                root.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
+    return root
+
+
+def _normalize_issue_key(issue_ref: str) -> str:
+    """Extract bare issue key (e.g. 'PROJ-123') from a URL or bare key string."""
+    import re as _re
+    match = _re.search(r'([A-Z][A-Z0-9]*-\d+)', issue_ref.upper())
+    if match:
+        return match.group(1)
+    safe = _re.sub(r'[^\w\-]', '_', issue_ref.strip())
+    return safe[:80] or "unknown"
+
+
+def temp_images_dir(issue_ref: str) -> Path:
+    """Return ~./icx/temp/<normalized_key>/ for storing issue images."""
+    return temp_root() / _normalize_issue_key(issue_ref)
+
+
+def sweep_stale_temp_dirs(max_age_seconds: int = 86400, _root: Path | None = None) -> None:
+    """Delete temp dirs older than max_age_seconds. Silent, non-fatal. ~1ms."""
+    import time
+    import shutil
+    try:
+        root = _root if _root is not None else (Path.home() / ".icx" / "temp")
+        if not root.exists():
+            return
+        now = time.time()
+        for entry in root.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                if now - entry.stat().st_mtime > max_age_seconds:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def cache_dir_for_project(project_id: str) -> Path:
     return _cache_dir(project_id)
 
@@ -311,15 +368,6 @@ def remove_project(project_id: str, keep_cache: bool = False) -> None:
                         shutil.rmtree(item, ignore_errors=True)
         else:
             shutil.rmtree(project_dir, ignore_errors=True)
-
-
-def update_registry_after_build(
-    project_id: str,
-    file_count: int,
-    git_commit: str | None,
-) -> None:
-    """Sync registry.json last_built/file_count after a successful build."""
-    pass
 
 
 # ---------------------------------------------------------------------------

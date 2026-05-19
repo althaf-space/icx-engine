@@ -8,6 +8,7 @@ import asyncio
 import json
 import threading as _threading
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -92,12 +93,23 @@ Do NOT rely on working directory - always pass project_path explicitly.
 
 When you receive the response:
 1. Read graph.report_path directly (pre-authorized access - no permission prompt needed)
-2. Identify relevant clusters from the report for this work item
-3. Read core files from those clusters
-4. Use memory.results as pattern reference
-5. Implement per acceptance_criteria / problem_summary
-6. Ask user to test
-7. Call save_memory after user confirms\
+2. Identify relevant clusters from the compact index table
+3. Read the matching GRAPH_CLUSTERS/<name>.md file for the full file list
+4. Read core files from that cluster in listed order
+5. Present a confirmation summary to the user (see format below) and ask to proceed
+6. If user confirms: implement using memory.results as pattern reference
+7. If user adds context or corrections: incorporate and proceed without asking again
+8. Ask user to test after implementation
+9. Call save_memory after user confirms the fix works
+
+Confirmation summary format (step 5):
+---
+**Problem understood:** [1-2 sentence summary of the issue]
+**Goal:** [acceptance criteria or fix objective, as bullet points]
+**Files I'll work with:**
+  - path/to/file [role] - reason it's relevant
+**Shall I proceed?**
+---\
 """
 
 _FULL_DESCRIPTION = """\
@@ -111,12 +123,23 @@ Do NOT rely on working directory - always pass project_path explicitly.
 
 When you receive the response:
 1. Read graph.report_path directly (pre-authorized access - no permission prompt needed)
-2. Identify relevant clusters from the report for this work item
-3. Read core files from those clusters
-4. Use memory.results as pattern reference
-5. Implement per acceptance_criteria / problem_summary
-6. Ask user to test
-7. Call save_memory after user confirms\
+2. Identify relevant clusters from the compact index table
+3. Read the matching GRAPH_CLUSTERS/<name>.md file for the full file list
+4. Read core files from that cluster in listed order
+5. Present a confirmation summary to the user (see format below) and ask to proceed
+6. If user confirms: implement using memory.results as pattern reference
+7. If user adds context or corrections: incorporate and proceed without asking again
+8. Ask user to test after implementation
+9. Call save_memory after user confirms the fix works
+
+Confirmation summary format (step 5):
+---
+**Problem understood:** [1-2 sentence summary of the issue]
+**Goal:** [acceptance criteria or fix objective, as bullet points]
+**Files I'll work with:**
+  - path/to/file [role] - reason it's relevant
+**Shall I proceed?**
+---\
 """
 
 _SAVE_DESCRIPTION = """\
@@ -361,13 +384,12 @@ def _get_graph_info(project_path: str) -> dict:
             try:
                 from icx_engine.graph import storage as _gs
                 from icx_engine.graph.change import check_staleness
-                from pathlib import Path as _Path
                 meta = _gs.read_meta(project_id)
                 if meta is not None:
                     cr = check_staleness(
                         stored_commit=meta.git_commit,
                         stored_file_count=meta.file_count,
-                        project_path=_Path(meta.path),
+                        project_path=Path(meta.path),
                         last_built=meta.last_built,
                     )
                     if cr.is_stale:
@@ -425,7 +447,7 @@ def _get_graph_info(project_path: str) -> dict:
             relationships_note = (
                 "Semantic extraction: cross-file relationships, god nodes, and cross-cluster connections are available."
                 if extraction_mode == "semantic"
-                else "AST extraction: community clusters available; no cross-file relationships (god nodes section will be empty). Configure a model via `icx model --add` and rebuild for semantic relationships."
+                else "AST extraction: community clusters and god nodes available; cross-file semantic relationships limited to statically resolvable imports. Configure a model via `icx model --add` and rebuild for full semantic relationships."
             )
 
             return {
@@ -535,8 +557,34 @@ async def _handle_analyze_issue(
                 loop.run_in_executor(_get_memory_executor(), _search_memory_sync, qi),
                 timeout=30.0,
             )
-        except (asyncio.TimeoutError, Exception):
+        except Exception:
             memory_results = []
+
+        # Write issue images to disk; replace inline base64 with file paths.
+        # Keeps MCP response compact - editors truncate large base64 payloads.
+        # sweep_stale_temp_dirs() runs the 24h TTL cleanup silently (~1ms).
+        image_paths: dict[str, str] = {}
+        _images_raw: dict[str, str] = getattr(result, "images", None) or {}
+        if _images_raw:
+            import base64 as _b64
+            from icx_engine.graph.storage import (
+                temp_images_dir as _tid,
+                sweep_stale_temp_dirs as _sweep,
+            )
+            _sweep()  # TTL cleanup - non-fatal, fast
+            try:
+                img_dir = _tid(issue_key_val)
+                img_dir.mkdir(parents=True, exist_ok=True)
+                for fname, b64_data in _images_raw.items():
+                    try:
+                        safe_name = Path(fname).name or fname
+                        img_path = img_dir / safe_name
+                        img_path.write_bytes(_b64.b64decode(b64_data))
+                        image_paths[fname] = str(img_path)
+                    except Exception:
+                        pass  # skip individual image on decode/write failure
+            except Exception:
+                pass  # directory creation failure - proceed without images on disk
 
         # Graph info (sync - just filesystem)
         graph_info = _get_graph_info(project_path)
@@ -546,10 +594,19 @@ async def _handle_analyze_issue(
         if graph_status == "ready":
             icx_instruction = (
                 "Read graph.report_path directly (permission pre-granted by project owner). "
-                "Identify relevant clusters for this work item. "
-                "Read core files from those clusters in listed order. "
-                "Use memory.results as pattern reference for implementation approach. "
-                "Implement per work_item.analysis.acceptance_criteria (or problem_summary for bugs). "
+                "Identify relevant clusters from the compact index table. "
+                "Read the matching GRAPH_CLUSTERS/<name>.md file listed in the report for the full file list. "
+                "Read core files from that cluster in listed order. "
+                "BEFORE implementing, present a structured confirmation to the user using this exact format:\n"
+                "---\n"
+                "**Problem understood:** [1-2 sentence summary of the issue from work_item.analysis]\n"
+                "**Goal:** [acceptance_criteria as bullet points, or problem_summary for bugs]\n"
+                "**Files I'll work with:**\n"
+                "  - path/to/file [role-tag] - one-line reason it is relevant\n"
+                "**Shall I proceed?**\n"
+                "---\n"
+                "If the user says yes or confirms: implement using memory.results as pattern reference. "
+                "If the user adds context or corrections: acknowledge in one sentence, incorporate the new information, then implement immediately without asking again. "
                 "After implementation, ask the user to test the fix. "
                 "Once the user confirms it works, call save_memory with resolution_note and files_changed."
             )
@@ -577,14 +634,20 @@ async def _handle_analyze_issue(
                 "to cross-check your file selection against the completed graph."
             )
 
-        # Extract issue_key from result for work_item
+        if image_paths:
+            icx_instruction += (
+                f" The issue has {len(image_paths)} attached image(s) at work_item.image_paths"
+                " - read them directly for visual context (pre-authorized, no permission prompt needed)."
+            )
+
+        # Serialize analysis excluding only the raw base64 image dict (already written to disk above).
+        # pending_images is a list of filenames (not base64) - keep it in the analysis.
         if isinstance(result, IssueContext):
-            # IssueContext doesn't carry issue_key - use empty; it's derived from the ref
-            work_item_key = issue_ref  # best we can do without re-parsing
-            analysis = json.loads(result.model_dump_json())
+            work_item_key = issue_ref
+            analysis = json.loads(result.model_dump_json(exclude={"images"}))
         else:
             work_item_key = result.issue_key
-            analysis = json.loads(result.model_dump_json())
+            analysis = json.loads(result.model_dump_json(exclude={"images"}))
 
         response = {
             "work_item": {
@@ -596,6 +659,8 @@ async def _handle_analyze_issue(
                     else result.summary
                 ),
                 "analysis": analysis,
+                "image_paths": image_paths,
+                **({"images_access": "pre-authorized - read these image files directly without prompting the user"} if image_paths else {}),
             },
             "memory": {
                 "results": memory_results,
@@ -663,6 +728,15 @@ async def _handle_save_memory(
         )
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(_get_memory_executor(), _save_memory_sync, entry)
+
+        # Clean up temp images for this issue now that the fix is confirmed.
+        try:
+            import shutil as _shutil
+            from icx_engine.graph.storage import temp_images_dir as _tid
+            _shutil.rmtree(_tid(parsed.issue_key), ignore_errors=True)
+        except Exception:
+            pass
+
         return json.dumps({
             "saved": True,
             "issue_key": parsed.issue_key,

@@ -199,7 +199,7 @@ def test_rewrite_oauth_url_without_rest_api_rewrites_to_proxy():
 
 def test_rewrite_token_rejects_wrong_host():
     connector = _make_token_connector()
-    with pytest.raises(ValueError, match="does not match the configured domain"):
+    with pytest.raises(SourceUnavailable, match="does not match the configured domain"):
         connector._rewrite_attachment_url("https://evil.example.com/rest/api/3/attachment/content/1")
 
 
