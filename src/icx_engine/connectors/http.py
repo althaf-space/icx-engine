@@ -34,7 +34,7 @@ def check_http_status(response: httpx.Response) -> None:
     if response.status_code == 404:
         raise IssueNotFound("Issue not found. Check the URL or issue key.")
     if response.status_code == 429:
-        raise RateLimited("Rate limited. Retrying...")
+        raise RateLimited("Rate limited by the source. Wait a moment and try again.")
     if response.status_code >= 500:
         raise SourceUnavailable("Source is unavailable. Try again later.")
     if response.status_code >= 400:

@@ -1094,7 +1094,7 @@ def analyze(
         _render_past_insights(result.past_insights)
 
     if isinstance(result, IssueContext) and result.missing_information:
-        err_console.print("\n⚠ MISSING REQUIREMENTS")
+        err_console.print("\nMISSING REQUIREMENTS")
         for item in result.missing_information:
             err_console.print(f"  • {item}")
 
@@ -1234,7 +1234,7 @@ def _check_uninstall_result() -> None:
         return
     if result.startswith("FAILED"):
         err_console.print(
-            "\n[yellow]⚠ Previous uninstall failed.[/yellow] Remove manually:\n"
+            "\n[yellow]Previous uninstall failed.[/yellow] Remove manually:\n"
             "  [cyan]pip uninstall -y icx-engine[/cyan]  "
             "or  [cyan]pipx uninstall icx-engine[/cyan]\n"
         )
@@ -1348,7 +1348,7 @@ def uninstall(
         console.print("[green]✓[/green] Keyring secrets removed.")
     except Exception as exc:
         errors.append(f"Keyring: {exc}")
-        console.print(f"[yellow]⚠[/yellow] Keyring cleanup failed: {exc}")
+        console.print(f"[yellow]Keyring cleanup failed:[/yellow] {exc}")
 
     # 2. Remove ICX from MCP editor configs
     try:
@@ -1361,7 +1361,7 @@ def uninstall(
             console.print("[dim]  No editor MCP configs found to clean.[/dim]")
     except Exception as exc:
         errors.append(f"MCP hosts: {exc}")
-        console.print(f"[yellow]⚠[/yellow] Editor config cleanup failed: {exc}")
+        console.print(f"[yellow]Editor config cleanup failed:[/yellow] {exc}")
 
     # 3. Delete ~/.icx/ entirely
     try:
@@ -1372,7 +1372,7 @@ def uninstall(
             console.print(f"[dim]  {icx_dir} not found - nothing to delete.[/dim]")
     except Exception as exc:
         errors.append(f"~/.icx/: {exc}")
-        console.print(f"[yellow]⚠[/yellow] Failed to delete {icx_dir}: {exc}")
+        console.print(f"[yellow]Failed to delete {icx_dir}:[/yellow] {exc}")
 
     # 4. Uninstall the package - detect pipx vs pip, handle Windows exe-lock
     console.print("\nUninstalling [bold]icx-engine[/bold] package…")
@@ -1380,7 +1380,7 @@ def uninstall(
         _uninstall_package(console)
     except Exception as exc:
         console.print(
-            "[yellow]⚠[/yellow] Package uninstall failed. Run manually:\n"
+            "[yellow]Package uninstall failed.[/yellow] Run manually:\n"
             "  [cyan]pipx uninstall icx-engine[/cyan]  or  "
             "[cyan]pip uninstall -y icx-engine[/cyan]\n"
         )
@@ -1396,20 +1396,25 @@ HostOpt = Annotated[
     ),
 ]
 
-_JSON_SNIPPET = """\
-{
-  "mcpServers": {
-    "icx": {
-      "command": "icx",
-      "args": ["mcp", "run"]
-    }
-  }
-}"""
+def _json_snippet() -> str:
+    from icx_engine.mcp_hosts import _resolve_icx_command
+    cmd = _resolve_icx_command()
+    return (
+        '{\n'
+        '  "mcpServers": {\n'
+        '    "icx": {\n'
+        f'      "command": "{cmd}",\n'
+        '      "args": ["mcp", "run"]\n'
+        '    }\n'
+        '  }\n'
+        '}'
+    )
 
-_TOML_SNIPPET = """\
-[mcp_servers.icx]
-command = "icx"
-args = ["mcp", "run"]"""
+
+def _toml_snippet() -> str:
+    from icx_engine.mcp_hosts import _resolve_icx_command
+    cmd = _resolve_icx_command()
+    return f'[mcp_servers.icx]\ncommand = "{cmd}"\nargs = ["mcp", "run"]'
 
 
 @mcp_app.command("list")
@@ -1458,9 +1463,9 @@ def mcp_config(
 
     try:
         typer.echo("\n--- Standard (Claude Code / Cursor / Windsurf / Antigravity) ---\n")
-        typer.echo(_JSON_SNIPPET)
+        typer.echo(_json_snippet())
         typer.echo("\n--- Codex (TOML) ---\n")
-        typer.echo(_TOML_SNIPPET)
+        typer.echo(_toml_snippet())
         typer.echo("\nConfig file locations:")
         for h in list_hosts():
             typer.echo(f"  {h.label:<14} {h.config_path}")
@@ -1499,7 +1504,7 @@ def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: Tracebac
             targets = detect_installed_hosts()
             if not targets:
                 typer.echo("No known MCP host config directories detected.")
-                typer.echo("Specify one with --host claude | cursor | windsurf | codex | antigravity | cline")
+                typer.echo("Specify one with --host claude | cursor | windsurf | codex | antigravity")
                 raise typer.Exit(1)
 
         for target in targets:

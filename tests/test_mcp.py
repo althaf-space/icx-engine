@@ -834,7 +834,7 @@ def test_mcp_setup_with_host_flag_writes_config(monkeypatch, tmp_path):
     result = _runner.invoke(app, ["mcp", "setup", "--host", "cursor"])
     assert result.exit_code == 0
     raw = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
-    assert raw["mcpServers"]["icx"]["command"] == "icx"
+    assert Path(raw["mcpServers"]["icx"]["command"]).stem.lower() == "icx"
 
 
 def test_mcp_setup_auto_detects_installed_hosts(monkeypatch, tmp_path):
@@ -912,6 +912,57 @@ def test_mcp_config_shows_all_host_labels(monkeypatch, tmp_path, cli_runner):
     assert "Codex" in result.output
     assert "Antigravity" in result.output
     assert "Cline" not in result.output
+
+
+async def test_icx_next_instruction_contains_confirmation_block():
+    """_icx_next.instruction must contain the mandatory confirmation block format."""
+    from icx_engine.models.output import IssueContext
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock()) as mock_run:
+            mock_run.return_value = IssueContext(
+                problem_summary="Login fails on mobile",
+                detailed_description="d",
+                reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+                acceptance_criteria=[], impact="high", priority="High", issue_type="Bug",
+                confidence_score=0.9, completeness_score=0.9, missing_information=[],
+            )
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+                "status": "ready",
+                "report_path": "E:\\proj\\GRAPH_REPORT.md",
+                "access": "pre-authorized",
+                "eta_seconds": None,
+            }):
+                result = await _handle_analyze_issue("TEST-123", project_path="E:\\my-project")
+
+    data = json.loads(result)
+    instruction = data["_icx_next"]["instruction"]
+    assert "**Problem understood:**" in instruction
+    assert "**Approach:**" in instruction
+    assert "**Shall I proceed?**" in instruction
+
+
+async def test_handle_analyze_issue_passes_log_callback_to_engine():
+    """engine.run must receive a non-None callable log= kwarg from the MCP handler."""
+    from icx_engine.models.output import IssueContext
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock()) as mock_run:
+            mock_run.return_value = IssueContext(
+                problem_summary="p", detailed_description="d",
+                reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+                acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+                confidence_score=0.9, completeness_score=0.8, missing_information=[],
+            )
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+                "status": "not_registered", "report_path": None,
+                "access": "", "report_inline": "", "eta_seconds": None,
+            }):
+                await _handle_analyze_issue("TEST-123", project_path="E:\\my-project")
+
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("log") is not None
+    assert callable(kwargs["log"])
 
 
 def test_analyze_shows_missing_requirements_warning():

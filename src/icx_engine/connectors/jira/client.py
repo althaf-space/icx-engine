@@ -102,9 +102,11 @@ class JiraClient:
                             "Attachment download failed: redirect response is missing the Location header. "
                             "The attachment URL may be broken."
                         )
-                    def _host(netloc: str) -> str:
-                        return netloc.split(":")[0].lower()
-                    send_auth = _host(urlparse(location).netloc) == _host(parsed.netloc)
+                    next_netloc = urlparse(location).netloc
+                    send_auth = (
+                        bool(next_netloc)
+                        and next_netloc.split(":")[0].lower() == parsed.netloc.split(":")[0].lower()
+                    )
                     current_url = location
 
         raise SourceUnavailable(

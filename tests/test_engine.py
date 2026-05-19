@@ -1,4 +1,5 @@
-﻿import pytest
+﻿import asyncio
+import pytest
 import respx
 import httpx
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -538,6 +539,43 @@ async def test_engine_run_default_mode_still_raises_no_llm(token_connection):
 
 # ── Visual Grounding Pipeline ─────────────────────────────────────────────────
 
+@respx.mock
+async def test_visual_grounding_timeout_returns_original_result(app_config):
+    """When visual_grounding_pass times out, engine.run() catches it and returns the original LLM result."""
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
+    )
+    with patch("icx_engine.grounding.visual_grounding_pass",
+               new=AsyncMock(side_effect=asyncio.TimeoutError)):
+        with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+            with patch("icx_engine.memory.MemoryManager"):
+                result = await run("TEST-123", app_config)
+    assert isinstance(result, IssueContext)
+
+
+@respx.mock
+async def test_visual_grounding_timeout_calls_log_callback(app_config):
+    """When visual grounding times out, the log callback receives the timeout message."""
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
+    )
+    log_messages: list[str] = []
+    with patch("icx_engine.grounding.visual_grounding_pass",
+               new=AsyncMock(side_effect=asyncio.TimeoutError)):
+        with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+            with patch("icx_engine.memory.MemoryManager"):
+                result = await run("TEST-123", app_config, log=log_messages.append)
+    assert isinstance(result, IssueContext)
+    assert any("timed out" in m.lower() for m in log_messages)
+
+
+@respx.mock
 async def test_visual_grounding_noop_when_confidence_above_threshold(raw_ticket, jira_context):
     from icx_engine.grounding import visual_grounding_pass
 

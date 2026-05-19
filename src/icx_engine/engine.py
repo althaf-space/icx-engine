@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import asyncio
 import re
 from typing import TYPE_CHECKING, Callable
@@ -50,6 +50,9 @@ def extract_domain(input_str: str) -> str | None:
     Raises InvalidInput for strings that are neither a bare key nor a URL.
     """
     raw = input_str.strip()
+
+    if any(c in raw for c in ("\x00", "\r", "\n", "\t")):
+        raise InvalidInput("Invalid input: control characters are not allowed.")
 
     if _ISSUE_KEY_RE.match(raw.upper()):
         return None
@@ -106,11 +109,11 @@ def resolve_connection(
     caller should show a selector.
 
     Resolution order for bare keys (domain=None):
-      1. Single connection configured → use it
-      2. default_connection set → use it
-      3. raw_input provided → narrow by can_handle_bare_key(); auto-pick if
+      1. Single connection configured -> use it
+      2. default_connection set -> use it
+      3. raw_input provided -> narrow by can_handle_bare_key(); auto-pick if
          exactly one candidate remains
-      4. Still ambiguous → return None (caller prompts)
+      4. Still ambiguous -> return None (caller prompts)
 
     Raises NoConnectionError if no connections configured or domain not found.
     """
@@ -229,7 +232,7 @@ async def run(
         log(f"  fetching {issue_key} from {conn.domain}...")
     raw = await connector.fetch(issue_key, config, log=log)
     if log:
-        log(f"  ✓ {issue_key}: {raw.summary[:72]}")
+        log(f"  {issue_key}: {raw.summary[:72]}")
 
     images: dict[str, str] = {}
     pending_images: list[str] = []
@@ -272,7 +275,7 @@ async def run(
         from rich.syntax import Syntax
         from rich.panel import Panel
         prompt_text = build_user_message(raw)
-        debug_console.print(Rule(f"[bold cyan]Prompt → {text_cfg.provider}/{text_cfg.model}[/bold cyan]"))
+        debug_console.print(Rule(f"[bold cyan]Prompt -> {text_cfg.provider}/{text_cfg.model}[/bold cyan]"))
         debug_console.print(Panel(
             Syntax(prompt_text, "text", word_wrap=True),
             title="[cyan]User message sent to LLM[/cyan]",
@@ -280,7 +283,7 @@ async def run(
         ))
         debug_console.print(Rule(style="cyan"))
     elif log:
-        log(f"\n── prompt sent to LLM ──\n{build_user_message(raw)}\n────────────────────────")
+        log(f"\n-- prompt sent to LLM --\n{build_user_message(raw)}\n------------------------")
 
     provider = get_provider(text_cfg)
     try:
@@ -292,12 +295,20 @@ async def run(
         )
 
     from icx_engine.grounding import visual_grounding_pass
-    result = await visual_grounding_pass(result, raw, active_llm.image_config, connector, log=log)
+    try:
+        result = await asyncio.wait_for(
+            visual_grounding_pass(result, raw, active_llm.image_config, connector, log=log),
+            timeout=45.0,
+        )
+    except asyncio.TimeoutError:
+        if log:
+            log("  Visual grounding timed out after 45s - using original analysis")
+
 
     # Attach Base64 images when present - skipped automatically when skip_vision=True (images={}).
     if images:
         if log and _heuristic_confidence_triggered(result, raw, images):
-            log("  ⚠ Low confidence or poor OCR - raw images attached to output for verification")
+            log("  Low confidence or poor OCR - raw images attached to output for verification")
         result = result.model_copy(update={"images": images})
 
     # Set pending_images signal for fast/text-only mode.

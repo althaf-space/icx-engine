@@ -4,6 +4,7 @@ import os
 import pytest
 from pathlib import Path
 from pydantic import ValidationError
+from unittest.mock import patch
 
 from icx_engine.models.config import AppConfig, BaseConnection, LLMConfig, ChannelConfig, OAuthAuth
 from icx_engine.connectors.jira.config import JiraConnection, TokenAuth, JiraOAuthAuth
@@ -874,6 +875,38 @@ def test_dlock_long_llm_api_key_stored_in_config_not_keychain(isolated_config, m
     stored = raw["llm_profiles"]["work"]["text_config"]["api_key"]
     assert stored.startswith(cm._DLOCK_PREFIX)
     assert "llm_text:work" not in store
+
+
+# ── Keyring read-only probe and caching ──────────────────────────────────────
+
+def test_keyring_available_does_not_write_to_keychain():
+    """_keyring_available() is a read-only probe - set_password must never be called."""
+    import icx_engine.config_manager as cm
+    with patch("keyring.get_password", return_value=None) as mock_get, \
+         patch("keyring.set_password") as mock_set:
+        result = cm._keyring_available()
+    mock_get.assert_called_once()
+    mock_set.assert_not_called()
+    assert result is True
+
+
+def test_check_keychain_caches_result(monkeypatch):
+    """_check_keychain() calls _keyring_available() exactly once regardless of repeated calls."""
+    import icx_engine.config_manager as cm
+    call_count = [0]
+
+    def _counting_probe() -> bool:
+        call_count[0] += 1
+        return True
+
+    monkeypatch.setattr(cm, "_keychain_ok", None)
+    monkeypatch.setattr(cm, "_keyring_available", _counting_probe)
+
+    cm._check_keychain()
+    cm._check_keychain()
+    cm._check_keychain()
+
+    assert call_count[0] == 1
 
 
 def test_issue_context_pending_images_defaults_empty():

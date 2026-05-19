@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import base64
 import json
 from typing import Callable, Any
@@ -57,7 +57,7 @@ async def visual_grounding_pass(
 
     if log:
         log(
-            f"  ⚠ confidence_score={initial.confidence_score:.2f} < {_CONFIDENCE_THRESHOLD} "
+            f"  confidence_score={initial.confidence_score:.2f} < {_CONFIDENCE_THRESHOLD} "
             f"- running visual grounding verification..."
         )
 
@@ -72,13 +72,13 @@ async def visual_grounding_pass(
     for item in downloaded:
         if isinstance(item, BaseException):
             if log:
-                log(f"  ⚠ attachment download error: {item}")
+                log(f"  attachment download error: {item}")
             continue
         fname, img_bytes = item
         if img_bytes:
             image_data[fname] = img_bytes
         elif log:
-            log(f"  ⚠ attachment '{fname}' download failed - skipping")
+            log(f"  attachment '{fname}' download failed - skipping")
 
     if not image_data:
         return initial
@@ -92,13 +92,13 @@ async def visual_grounding_pass(
             corrected = await _verify_openai_compat(initial, raw, image_config, image_data)
         if log:
             log(
-                f"  ✓ visual grounding complete - "
-                f"confidence updated: {initial.confidence_score:.2f} → {corrected.confidence_score:.2f}"
+                f"  visual grounding complete - "
+                f"confidence updated: {initial.confidence_score:.2f} to {corrected.confidence_score:.2f}"
             )
         return corrected
     except Exception as exc:
         if log:
-            log(f"  ⚠ visual grounding failed ({exc}) - returning original analysis")
+            log(f"  visual grounding failed ({exc}) - returning original analysis")
         return initial
 
 
