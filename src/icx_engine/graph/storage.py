@@ -173,6 +173,32 @@ def derive_project_id(resolved_path: Path) -> str:
 # Path validation
 # ---------------------------------------------------------------------------
 
+_UNIX_SYSTEM_DIRS = frozenset({
+    "bin", "boot", "dev", "etc", "lib", "lib64",
+    "proc", "run", "sbin", "snap", "sys", "usr",
+})
+
+_WIN_SYSTEM_PREFIXES = (
+    "windows", "program files", "program files (x86)", "programdata",
+)
+
+
+def _is_system_path(p: Path) -> bool:
+    """Return True if path is a known OS system directory that must not be indexed."""
+    parts = p.parts
+    if not parts:
+        return False
+    if sys.platform == "win32":
+        if len(parts) == 1:
+            return True  # bare drive root (C:\)
+        second = parts[1].lower() if len(parts) > 1 else ""
+        return second in _WIN_SYSTEM_PREFIXES
+    else:
+        if str(p) == "/":
+            return True
+        return len(parts) >= 2 and parts[0] == "/" and parts[1] in _UNIX_SYSTEM_DIRS
+
+
 def validate_project_path(raw: str) -> Path:
     """Resolve and validate a project path string. Raises GraphError on failure."""
     if any(c in raw for c in ["\r", "\n", "\t", "\x00"]):
@@ -182,6 +208,11 @@ def validate_project_path(raw: str) -> Path:
         raise GraphError(f"Path does not exist: {p}")
     if not p.is_dir():
         raise GraphError(f"Path is not a directory: {p}")
+    if _is_system_path(p):
+        raise GraphError(
+            f"'{p}' is a system directory and cannot be registered as a project. "
+            "Provide the path to your project directory instead."
+        )
     return p
 
 

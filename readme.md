@@ -89,7 +89,9 @@ flowchart TD
     D --> E
     E --> F{graph.status?}
     F -- ready --> G[Read graph.report_path\ncompact index - pre-authorized]
-    F -- building/other --> H[grep/glob for relevant files\ngraph builds in background]
+    F -- building --> H[grep/glob for relevant files\nbuild in progress - do not wait]
+    F -- not_built --> HH[Tell user: run icx graph build\nthen grep/glob for files]
+    F -- other --> H
     G --> G2[Read GRAPH_CLUSTERS/name.md\nfull file list + role tags]
     G2 --> I[Read core files\nunderstand the code]
     H --> I
@@ -114,7 +116,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.1 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
+**Version:** 0.3.2 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
 
 ```
 pipx install icx-engine

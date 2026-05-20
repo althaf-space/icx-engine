@@ -223,17 +223,17 @@ def _build_project_isolated(
             result["error"] = "No source files found in project directory."
             return result
 
-        # Cap at 4: we're already inside an isolated subprocess.
-        # Spawning more sub-subprocesses on Windows causes exponential
-        # Python startup overhead and can hang for several minutes.
-        cpu = min(4, max(1, os.cpu_count() or 4))
-
         # ------------------------------------------------------------------
         # Step 1: AST extraction - always runs, covers every file, no API cost.
         # Produces nodes + intra-file call/import edges via tree-sitter.
         # This is the foundation: zero misses regardless of project size.
+        #
+        # parallel=False: this function already runs inside a ProcessPoolExecutor
+        # subprocess. Spawning grandchild processes on Windows (spawn context)
+        # causes deadlocks - each grandchild re-imports parent modules which can
+        # try to acquire locks held by the parent, hanging indefinitely.
         # ------------------------------------------------------------------
-        extraction = extract(files, cache_root=icx_cache, parallel=True, max_workers=cpu)
+        extraction = extract(files, cache_root=icx_cache, parallel=False)
 
         # ------------------------------------------------------------------
         # Step 2: LLM edge enrichment - runs only when a model is configured.

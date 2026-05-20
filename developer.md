@@ -82,7 +82,7 @@ ICX/
 │   │       ├── parser.py       # Jira API JSON → RawIssueData
 │   │       ├── auth.py         # build_auth_header() for token and OAuth
 │   │       └── oauth.py        # refresh_oauth_if_needed()
-│   ├── graph/                  # codebase knowledge graph (v0.3.1+)
+│   ├── graph/                  # codebase knowledge graph (v0.3.2+)
 │   │   ├── __init__.py         # public exports: GraphManager, generate_graph_report
 │   │   ├── storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
 │   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta
@@ -410,7 +410,7 @@ ICX exposes three tools over MCP:
 
 `work_item.analysis` excludes the raw `images` dict (Base64 blobs). Images are written to `~/.icx/temp/<issue_key>/` and their paths returned in `work_item.image_paths`. `images_access` is only present when `image_paths` is non-empty. `pending_images` (list of unprocessed image filenames, fast mode only) is still included in `analysis`.
 
-`graph.status` values: `"ready"` (report available), `"building"` (rebuild in progress), `"stale"` (no LLM configured, rebuild skipped), `"not_registered"` (project unknown), `"error"`.
+`graph.status` values: `"ready"` (report available; may include `stale_note` when files changed since last build), `"building"` (user-initiated build in progress), `"not_built"` (never built; agent must tell user to run `icx graph build`), `"not_registered"` (project unknown), `"error"`.
 
 Memory search runs in a dedicated single-worker executor thread with a 30s timeout (handles ONNX model cold-start on first call; model stays resident thereafter). Graph info is resolved synchronously from filesystem only - no subprocess wait. Both run concurrently: immediately after `engine.run()` returns, memory search is fired as an `asyncio.create_task()`, then image writing and graph info execute synchronously while the memory task is in flight; the task is awaited last.
 
@@ -426,11 +426,15 @@ Memory search runs in a dedicated single-worker executor thread with a 30s timeo
 **`_icx_next` - in-response guidance hints:**
 Every successful `_handle_analyze_issue` response includes `_icx_next.instruction` - a text instruction based on graph state:
 
-| Graph status | Instruction behaviour |
+All statuses share a mandatory **STEP 0 vision gate** prepended to the instruction: check `work_item.analysis.pending_images` - if non-empty AND the issue involves visual content (error screenshots, UI bugs, charts, images with embedded text/code), call `analyze_issue` immediately and use that response. Only proceed past STEP 0 if `pending_images` is empty or images are clearly decorative (logos, avatars).
+
+| Graph status | Instruction behaviour (after STEP 0 vision gate) |
 |---|---|
-| `ready` | Read `graph.report_path` (compact index); identify relevant cluster from table; read `GRAPH_CLUSTERS/<name>.md` for full file list; read core files; **present confirmation summary to user** (problem understood, goal, **approach** - exactly what will change and why, files list - ask "Shall I proceed?"); if confirmed implement; if user adds context incorporate and proceed; test; call `save_memory` |
-| `building` | Graph rebuild running in background; proceed now with grep/glob; optionally re-call `analyze_issue_fast` when ETA elapses to cross-check file selection |
-| `stale` / `not_registered` / `error` | Graph not available; proceed with grep/glob |
+| `ready` (no stale_note) | Read `graph.report_path` (compact index); identify relevant cluster from table; read `GRAPH_CLUSTERS/<name>.md` for full file list; read core files; **present confirmation summary to user** (problem understood, goal, **approach** - exactly what will change and why, files list - ask "Shall I proceed?"); if confirmed implement; if user adds context incorporate and proceed; test; call `save_memory` |
+| `ready` (with stale_note) | Same as ready, but **first inform the user** of the staleness: X of Y files changed (Z%), suggest `icx graph build --path <project_path>` to refresh. Then proceed with the graph as normal. |
+| `building` | User-initiated build in progress; proceed now with grep/glob; optionally re-call `analyze_issue_fast` when ETA elapses to cross-check file selection |
+| `not_built` | **Tell the user** to run `icx graph build --path <project_path>` in their terminal; then proceed with grep/glob |
+| `not_registered` / `error` | Graph unavailable; proceed with grep/glob |
 
 **Confirmation gate:** When the graph is ready, the agent is instructed to present a structured summary before writing any code: problem statement (1-2 sentences), acceptance criteria as bullet points, **approach** (exactly what the agent will change/add/remove and precisely why that fixes the problem - specific enough for the user to reject and propose an alternative), and the list of files it plans to touch with their role tags. The user can confirm or redirect. If the user redirects, the agent must present a revised confirmation using the same format before starting.
 
@@ -518,7 +522,7 @@ class IssueContext(BaseModel):
 
 In MCP mode, `_handle_analyze_issue` writes the Base64 image bytes to disk (`~/.icx/temp/<issue_key>/`) and **excludes** the `images` dict from the serialized `work_item.analysis`. The on-disk paths are returned in `work_item.image_paths` instead. This prevents editors from truncating the MCP response due to large Base64 payloads.
 
-`pending_images` is populated only when `skip_vision=True` (fast mode). It lists the filenames of image attachments that exist but were not processed. In full-vision mode this field is always empty. In MCP mode this is the signal contract between `analyze_issue_fast` and `analyze_issue` - the agent checks this field to decide whether to escalate to full vision analysis.
+`pending_images` is populated only when `skip_vision=True` (fast mode). It lists the filenames of image attachments that exist but were not processed. In full-vision mode this field is always empty. In MCP mode this is the mandatory escalation gate: every `_icx_next` instruction begins with STEP 0 which requires the agent to evaluate `pending_images` before doing anything else. If non-empty AND the issue involves visual content (error screenshots, UI bugs, charts, embedded text), the agent must call `analyze_issue` immediately with the same parameters and use that response instead.
 
 ### `RawIssueResponse` - MCP headless mode output
 
@@ -951,7 +955,7 @@ Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build
 2. `_collect_source_files(project_path)` → file list (git-first, fallback to filtered rglob)
    - **Git path:** `git ls-files --cached --others --exclude-standard` filtered by `_GRAPHIFY_EXTENSIONS` - respects `.gitignore`, excludes `node_modules`, `dist`, `target`, etc.
    - **Fallback:** rglob filtered by `_SKIP_DIRS` (node_modules, dist, build, .next, vendor, __pycache__, etc.)
-3. **AST extraction** - `extract(files, cache_root=icx_cache, parallel=True, max_workers=cpu_count)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses.
+3. **AST extraction** - `extract(files, cache_root=icx_cache, parallel=False)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses. `parallel=False` is intentional: `_build_project_isolated` already runs inside a `ProcessPoolExecutor` subprocess; spawning grandchild processes on Windows deadlocks due to the "spawn" context re-importing parent modules.
 4. **LLM edge enrichment** (optional, runs when a model is configured) - `extract_corpus_parallel()` sends file batches to the LLM to extract cross-file semantic edges (imports, calls, inheritance). Only edges are merged into the AST result; LLM-assigned community IDs are discarded (they collide across chunk boundaries).
 5. `build_from_json(extraction)` + `cluster(G)` + `to_json(G, communities, output_path=graph_tmp_path)`
 6. Writes to `graph.json.tmp` then renames atomically to `graph.json` (`_finalise_build`)
@@ -982,11 +986,11 @@ not_built → building → ready → stale → rebuilding
 | > 5 files AND ≥ 3% of total | True | False |
 | > 5 files BUT < 3% of total | True | True |
 
-In MCP mode (`_get_graph_info`): when `is_stale=True`, the behavior depends on whether an LLM is configured. With LLM: `build_background()` is triggered and `"building"` status is returned. Without LLM: `"stale"` status is returned with a message to use grep/glob and rebuild manually. The `serve_existing` flag is computed but not used in MCP mode - staleness always triggers the rebuild/skip decision above.
+In MCP mode (`_get_graph_info`): when `is_stale=True`, the existing graph is always served regardless of LLM availability. A `stale_note` is attached to the response containing the changed file count, percentage, and a suggestion to run `icx graph build`. The agent is instructed to inform the user of this before proceeding. Auto-rebuild is never triggered from MCP - the user rebuilds explicitly via CLI when ready. The `serve_existing` flag from `ChangeResult` is computed but not used in MCP mode.
 
 **Git unavailable** → falls back to `_mtime_changed_files()`: samples up to 50 source files, compares mtime against `last_built` ISO timestamp (or "last hour" if not available). No-git projects (e.g. uploaded codebases) use this path.
 
-**Auto-build in MCP:** when `build_status == "not_built"`, `_get_graph_info` calls `build_background()` immediately and returns `"building"` status with an ETA. The `icx graph build` CLI command calls `manager.build()` (blocking) directly.
+**No auto-build in MCP:** when `build_status == "not_built"`, `_get_graph_info` returns `"not_built"` status with a message. The agent is instructed to tell the user to run `icx graph build --path <project_path>` and fall back to grep/glob. No background build is triggered. The `icx graph build` CLI command calls `manager.build()` (blocking) directly and is the only way to trigger a build.
 
 ### Report generation (`querier.py`)
 

@@ -507,7 +507,7 @@ class ConfigManager:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
         # PID-unique staging file: concurrent processes get their own clean room
         # and can never clobber each other during the serialization phase.
-        tmp = CONFIG_PATH.parent / f"{CONFIG_PATH.name}.tmp.{os.getpid()}"
+        tmp = CONFIG_PATH.parent / f"{CONFIG_PATH.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}"
 
         with _config_lock():
             # Lock is held - write the staging file then atomically replace.
@@ -517,7 +517,7 @@ class ConfigManager:
                 try:
                     fd = os.open(
                         str(tmp),
-                        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
                         stat.S_IRUSR | stat.S_IWUSR,
                     )
                     with os.fdopen(fd, "w", encoding="utf-8") as fh:
