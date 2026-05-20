@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import os
 import shutil
 import sys
 import tomllib
@@ -9,16 +10,18 @@ from pathlib import Path
 
 
 def _resolve_icx_command() -> str:
-    """Return absolute path to the icx executable for the running Python environment.
+    """Return the icx executable path for the running Python environment.
 
     Resolution order:
       1. shutil.which("icx") - searches PATH; covers pip, pipx, conda, activated venv.
-      2. Scripts/bin next to sys.executable - covers non-activated venv.
+         No .resolve() - avoids following pipx symlinks/shims to internal venv paths.
+      2. Scripts/bin next to sys.executable - covers non-activated venv / PATH not set.
+         Checks icx.exe (Windows) then icx (macOS/Linux).
       3. Bare "icx" - last resort; relies on PATH at editor launch time.
     """
     found = shutil.which("icx")
     if found:
-        return str(Path(found).resolve())
+        return found
     scripts_dir = Path(sys.executable).parent
     for name in ("icx.exe", "icx"):
         candidate = scripts_dir / name
@@ -147,7 +150,7 @@ def remove_icx_entry(host: MCPHost) -> bool:
 # ── Atomic write ──────────────────────────────────────────────────────────────
 
 def _atomic_write(path: Path, content: str) -> None:
-    tmp = path.with_suffix(".tmp")
+    tmp = path.parent / f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
     tmp.write_text(content, encoding="utf-8")
     try:
         tmp.replace(path)

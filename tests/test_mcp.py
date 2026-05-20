@@ -942,6 +942,36 @@ async def test_icx_next_instruction_contains_confirmation_block():
     assert "**Shall I proceed?**" in instruction
 
 
+async def test_icx_next_instruction_contains_vision_gate():
+    """_icx_next.instruction must contain STEP 0 vision escalation gate for all graph statuses."""
+    from icx_engine.models.output import IssueContext
+
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+
+    for graph_status, graph_info in [
+        ("ready", {"status": "ready", "report_path": "E:\\proj\\GRAPH_REPORT.md", "access": "pre-authorized", "eta_seconds": None}),
+        ("building", {"status": "building", "report_path": None, "access": "", "report_inline": "", "eta_seconds": 30}),
+        ("not_built", {"status": "not_built", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}),
+        ("not_registered", {"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}),
+    ]:
+        with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+            mock_cm.load.return_value = AppConfig()
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+                with patch("icx_engine.mcp_server._get_graph_info", return_value=graph_info):
+                    result = await _handle_analyze_issue("TEST-123", project_path="E:\\my-project")
+
+        data = json.loads(result)
+        instruction = data["_icx_next"]["instruction"]
+        assert "pending_images" in instruction, f"Vision gate missing for graph_status={graph_status!r}"
+        assert "analyze_issue" in instruction, f"Escalation call missing for graph_status={graph_status!r}"
+        assert "STEP 0" in instruction, f"STEP 0 label missing for graph_status={graph_status!r}"
+
+
 async def test_handle_analyze_issue_passes_log_callback_to_engine():
     """engine.run must receive a non-None callable log= kwarg from the MCP handler."""
     from icx_engine.models.output import IssueContext
