@@ -360,3 +360,7 @@ class MemoryManager:
             "db_size_bytes": db_size,
             "model": "BAAI/bge-small-en-v1.5",
         }
+
+    def prewarm(self) -> None:
+        """Pre-warm the ONNX embedding model. Non-fatal; called at MCP server startup."""
+        self._embeddings.ensure_ready()

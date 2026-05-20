@@ -82,7 +82,7 @@ ICX/
 │   │       ├── parser.py       # Jira API JSON → RawIssueData
 │   │       ├── auth.py         # build_auth_header() for token and OAuth
 │   │       └── oauth.py        # refresh_oauth_if_needed()
-│   ├── graph/                  # codebase knowledge graph (v0.3.2+)
+│   ├── graph/                  # codebase knowledge graph (v0.3.3+)
 │   │   ├── __init__.py         # public exports: GraphManager, generate_graph_report
 │   │   ├── storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
 │   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta
@@ -224,7 +224,7 @@ The CLI exposes this as `--profile NAME` on `icx analyze`. The MCP server expose
 
 ### Secret storage (`config_manager.py`)
 
-Secrets (API tokens, OAuth tokens, LLM keys) are **never stored in plaintext** if the OS keyring is available. The config file stores `"__keychain__"` as a sentinel value; real values are in the OS keyring (Windows Credential Manager, macOS Keychain, GNOME Keyring). On headless systems, `ICE_*` environment variables are the fallback.
+Secrets (API tokens, OAuth tokens, LLM keys) are **never stored in plaintext** if the OS keyring is available. The config file stores `"__keychain__"` as a sentinel value; real values are in the OS keyring (Windows Credential Manager, macOS Keychain, GNOME Keyring). On headless systems, `ICX_*` environment variables are the fallback.
 
 **Keyring availability check:** `_keyring_available()` performs a read-only probe (`keyring.get_password`) rather than a write+delete test. This is intentional: MCP subprocess contexts (e.g. editors that spawn `icx mcp run` as a child process) often have read access to the OS keyring but not write access. A write-based probe would incorrectly report the keyring as unavailable, causing all stored credentials to return as empty strings. `_check_keychain()` wraps `_keyring_available()` with a double-checked lock so the probe runs at most once per process lifetime.
 
@@ -799,7 +799,7 @@ def get_provider(config: LLMConfig) -> LLMProvider:
 
 ### Step 4 - Add to the CLI (`cli.py`)
 
-In the `apikey` command, add your provider to the `PROVIDERS` list and `DEFAULT_MODELS` dict.
+Add your provider to `_PROVIDERS` and `_DEFAULT_MODELS` in `cli.py`.
 
 ### Step 5 - Write tests
 
@@ -1319,8 +1319,8 @@ pip install -e ".[dev]"
 pytest tests/ -x -q
 
 # Run the CLI directly
-ICX --help
-ICX --version
+icx --help
+icx --version
 
 # Run a specific test file
 pytest tests/connectors/jira/test_parsing.py -v
