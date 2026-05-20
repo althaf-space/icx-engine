@@ -1,6 +1,6 @@
 ﻿# ICX - Integrated Contextual X-ecution Engine
 
-**AI-native intelligence layer for development teams.**
+**AI-native intelligence layer for development teams.** Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP.
 
 [![PyPI](https://img.shields.io/pypi/v/icx-engine?color=0066cc&label=latest)](https://pypi.org/project/icx-engine/)
 [![Python](https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13%20|%203.14-0066cc)](https://pypi.org/project/icx-engine/)
@@ -116,7 +116,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.2 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
+**Version:** 0.3.3 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
 
 ```
 pipx install icx-engine
@@ -161,19 +161,24 @@ ICX works without an AI provider in MCP mode - your editor's AI handles the anal
 
 ```sh
 icx analyze <KEY>
-icx analyze <KEY> --fast                   # skip image processing
-icx analyze <KEY> --profile NAME           # use a specific LLM profile for this run
-icx analyze <KEY> --profile NAME --fast    # profile + skip image processing
-icx analyze <KEY> --debug                  # show step-by-step pipeline output
-icx analyze <KEY> --traceback              # show full Python traceback on error
+icx analyze <KEY> --fast                       # skip image processing
+icx analyze <KEY> --profile NAME               # use a specific LLM profile for this run
+icx analyze <KEY> --profile NAME --fast        # profile + skip image processing
+icx analyze <KEY> --path PATH                  # show graph status for a codebase path
+icx analyze <KEY> --path P1 --path P2          # show graph status for multiple paths
+icx analyze <KEY> --debug                      # show step-by-step pipeline output
+icx analyze <KEY> --traceback                  # show full Python traceback on error
 ```
 
 `KEY` can be a bare issue key (`PROJ-456`) or a full URL (`https://company.atlassian.net/browse/PROJ-456`).
+
+Image attachments are written to `~/.icx/temp/<key>/` and returned as `image_paths` in the JSON output. No base64 in the output.
 
 | Flag | What it does |
 |------|-------------|
 | `--fast` | Skip image processing. Images are listed in `pending_images`. Text attachments (PDF, Excel, Word) are still processed. |
 | `--profile NAME` | Use a specific AI profile without changing your default. Combinable with `--fast`. |
+| `--path PATH` | Show graph status for a codebase path after the analysis. Repeatable - pass multiple `--path` flags for multi-repo issues. Shows READY/BUILDING/NOT BUILT/NOT REGISTERED for each path. |
 | `--debug` | Print each pipeline step to stderr as it runs. |
 | `--traceback` | Show full Python traceback on error. |
 
@@ -304,9 +309,15 @@ After setup, restart your editor. ICX will appear in its list of available tools
 
 | Tool | When the agent calls it |
 |------|------------------------|
-| `analyze_issue_fast` | Always first - text-only, fast. Returns `work_item` (analysis + `image_paths`), `memory` (past similar work), and `graph` (report path or build status) in a single response. |
-| `analyze_issue` | Only when `work_item.analysis.pending_images` is non-empty AND images are relevant to the problem. Same response shape as `analyze_issue_fast`. |
+| `analyze_issue_fast` | Always first - text-only, fast. Returns `work_item` (analysis + `image_paths`), `memory` (past similar work), and `graph` (report path or build status) in a single response. When `project_paths` has more than one entry, also returns `graphs` (per-path status list). |
+| `analyze_issue` | Only when `work_item.analysis.pending_images` is non-empty AND images are relevant to the problem. Pass the same `project_paths` as the fast call. |
 | `save_memory` | After the developer confirms the fix is tested and working. Cleans up temp images for that issue. |
+
+**Multi-repo support:** Pass `project_paths` as a list. Two modes the agent must follow:
+- **User named specific repos** ("fix the auth service and UI") - agent resolves those paths and passes them: `project_paths: ["/projects/auth-svc", "/projects/ui"]`. Do not include the workspace root.
+- **User named no specific repo** - agent passes the open workspace root: `project_paths: ["/projects/my-app"]`.
+
+ICX returns `graph` (primary path, backward-compat) and `graphs[]` (all paths, only when more than one path passed) with per-path status - READY, BUILDING, NOT BUILT, or NOT REGISTERED. The agent uses available graphs and informs the user about paths that still need `icx graph build`.
 
 ### With and without an AI provider
 

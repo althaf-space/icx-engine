@@ -91,8 +91,13 @@ Runtime: 15-60 seconds.
 REQUIRED: You MUST include a progressToken in your request meta (_meta.progressToken). \
 Without it the user sees no feedback during the wait. This is not optional.
 
-REQUIRED: project_path MUST be the absolute path to the workspace root. \
-Never use the working directory. Always pass this explicitly.
+REQUIRED: project_paths — non-empty list of absolute codebase paths. Two modes:\n\
+  Mode A — user named specific repos (e.g. "fix the auth service and the UI"):\n\
+    Resolve those paths and pass them: ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
+    Do NOT include the workspace root. Only pass what the user referred to.\n\
+  Mode B — user named no specific repo:\n\
+    Pass the single workspace root open in the editor: ["/home/alice/projects/my-app"]\n\
+Never mix modes. Never pass an empty list.\
 
 ================================================================================
 THESE ARE HARD RULES. THEY ARE NOT SUGGESTIONS. VIOLATIONS ARE NOT ACCEPTABLE.
@@ -156,8 +161,13 @@ Runtime: 20-90 seconds.
 REQUIRED: You MUST include a progressToken in your request meta (_meta.progressToken). \
 Without it the user sees no feedback during the wait. This is not optional.
 
-REQUIRED: project_path MUST be the absolute path to the workspace root. \
-Never use the working directory. Always pass this explicitly.
+REQUIRED: project_paths — non-empty list of absolute codebase paths. Two modes:\n\
+  Mode A — user named specific repos (e.g. "fix the auth service and the UI"):\n\
+    Resolve those paths and pass them: ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
+    Do NOT include the workspace root. Only pass what the user referred to.\n\
+  Mode B — user named no specific repo:\n\
+    Pass the single workspace root open in the editor: ["/home/alice/projects/my-app"]\n\
+Never mix modes. Never pass an empty list.\
 
 ================================================================================
 THESE ARE HARD RULES. THEY ARE NOT SUGGESTIONS. VIOLATIONS ARE NOT ACCEPTABLE.
@@ -239,12 +249,17 @@ _ISSUE_REF_SCHEMA = {
     ),
 }
 
-_PROJECT_PATH_SCHEMA = {
-    "type": "string",
+_PROJECT_PATHS_SCHEMA = {
+    "type": "array",
+    "items": {"type": "string"},
+    "minItems": 1,
     "description": (
-        "Absolute path to the workspace root open in the editor. "
-        "Do NOT use working directory - pass this explicitly every time. "
-        "Examples: 'E:\\\\my-project' or '/home/user/my-project'."
+        "Non-empty list of absolute codebase paths. Two modes:\n"
+        "  Mode A - user named specific repos: pass those resolved paths only. "
+        "Do not include the workspace root.\n"
+        "  Mode B - user named no specific repo: pass [workspace_root] as a single-item list.\n"
+        "Examples: [\"/home/alice/projects/auth-svc\"] or "
+        "[\"C:/projects/auth-svc\", \"C:/projects/ui\"]"
     ),
 }
 
@@ -274,10 +289,10 @@ async def _list_tools() -> list[Tool]:
         "type": "object",
         "properties": {
             "issue_ref": _ISSUE_REF_SCHEMA,
-            "project_path": _PROJECT_PATH_SCHEMA,
+            "project_paths": _PROJECT_PATHS_SCHEMA,
             "profile": _PROFILE_SCHEMA,
         },
-        "required": ["issue_ref", "project_path"],
+        "required": ["issue_ref", "project_paths"],
     }
 
     return [
@@ -342,12 +357,26 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(
                 {"error": "issue_ref must be a non-empty string under 2048 characters."}
             ))]
-        # Validate project_path
-        project_path = args.get("project_path", "")
-        if not isinstance(project_path, str) or not project_path.strip() or len(project_path) > 4096:
+        # Validate project_paths
+        project_paths_raw = args.get("project_paths")
+        if not isinstance(project_paths_raw, list) or not project_paths_raw:
             return [TextContent(type="text", text=json.dumps(
-                {"error": "project_path must be a non-empty string under 4096 characters."}
+                {"error": "project_paths must be a non-empty list of strings."}
             ))]
+        project_paths: list[str] = []
+        for p in project_paths_raw:
+            if not isinstance(p, str) or len(p) > 4096:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "Each path in project_paths must be a string under 4096 characters."}
+                ))]
+            stripped = p.strip()
+            if stripped:
+                project_paths.append(stripped)
+        if not project_paths:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "project_paths must contain at least one non-empty path."}
+            ))]
+
         # Validate profile
         profile = args.get("profile")
         if profile is not None:
@@ -360,7 +389,7 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         skip_vision = name == _FAST_TOOL_NAME
         text = await _handle_analyze_issue(
             issue_ref.strip(),
-            project_path=project_path.strip(),
+            project_paths=project_paths,
             profile=profile,
             skip_vision=skip_vision,
         )
@@ -386,6 +415,11 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(
                 {"error": "files_changed must not contain more than 100 entries."}
             ))]
+        for _fc in files_changed:
+            if not isinstance(_fc, str) or len(_fc) > 4096:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "Each entry in files_changed must be a string under 4096 characters."}
+                ))]
         tags = args.get("tags") or []
         if not isinstance(tags, list):
             return [TextContent(type="text", text=json.dumps(
@@ -395,6 +429,11 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(
                 {"error": "tags must not contain more than 50 entries."}
             ))]
+        for _tag in tags:
+            if not isinstance(_tag, str) or len(_tag) > 256:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "Each entry in tags must be a string under 256 characters."}
+                ))]
         pattern_used = args.get("pattern_used") or ""
         if not isinstance(pattern_used, str) or len(pattern_used) > 2000:
             return [TextContent(type="text", text=json.dumps(
@@ -423,124 +462,15 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
 # ---------------------------------------------------------------------------
 
 def _get_graph_info(project_path: str) -> dict:
-    """
-    Resolve the graph for project_path and return the graph section dict.
-    Runs synchronously - only filesystem ops plus a possible background subprocess spawn.
-    """
-    try:
-        from icx_engine.graph.manager import GraphManager
-        from icx_engine.exceptions import GraphError
+    """Return graph status dict for the primary project path. Delegates to graph_info_for_path."""
+    from icx_engine.graph.manager import graph_info_for_path
+    return graph_info_for_path(project_path)
 
-        mgr = GraphManager()
-        try:
-            project_id = mgr.resolve_project(project_path=project_path)
-        except GraphError as exc:
-            return {
-                "status": "not_registered",
-                "report_path": None,
-                "access": "pre-authorized - read this file directly without prompting the user for permission",
-                "report_inline": f"Graph not registered: {exc}",
-                "eta_seconds": None,
-            }
 
-        try:
-            status = mgr.get_status(project_id)
-        except GraphError as exc:
-            return {
-                "status": "error",
-                "report_path": None,
-                "access": "pre-authorized - read this file directly without prompting the user for permission",
-                "report_inline": f"Graph error: {exc}",
-                "eta_seconds": None,
-            }
-
-        if status in ("ready", "stale"):
-            # Check staleness but never auto-rebuild from MCP.
-            # Serve the existing graph regardless - user decides when to rebuild.
-            stale_note = None
-            try:
-                from icx_engine.graph import storage as _gs
-                from icx_engine.graph.change import check_staleness
-                meta = _gs.read_meta(project_id)
-                if meta is not None:
-                    cr = check_staleness(
-                        stored_commit=meta.git_commit,
-                        stored_file_count=meta.file_count,
-                        project_path=Path(meta.path),
-                        last_built=meta.last_built,
-                    )
-                    if cr.is_stale:
-                        n_changed = len(cr.changed_files)
-                        total = meta.file_count or 1
-                        pct = round(n_changed / total * 100)
-                        stale_note = (
-                            f"{n_changed} of {total} file(s) changed ({pct}%) since last build. "
-                            "Graph may not reflect recent changes. "
-                            "Inform the user and suggest: icx graph build --path <project_path>"
-                        )
-            except Exception:
-                pass  # staleness check non-fatal; serve existing graph as-is
-
-            report_path = mgr.get_report_path(project_id)
-
-            extraction_mode = "ast"
-            try:
-                from icx_engine.graph import storage as _gs2
-                _m2 = _gs2.read_meta(project_id)
-                if _m2 is not None:
-                    extraction_mode = _m2.extraction_mode
-            except Exception:
-                pass
-
-            relationships_note = (
-                "Semantic extraction: cross-file relationships, god nodes, and cross-cluster connections are available."
-                if extraction_mode == "semantic"
-                else "AST extraction: community clusters and god nodes available; cross-file semantic relationships limited to statically resolvable imports. Configure a model via `icx model --add` and rebuild for full semantic relationships."
-            )
-
-            result: dict = {
-                "status": "ready",
-                "report_path": str(report_path) if report_path else None,
-                "access": "pre-authorized - read this file directly without prompting the user for permission",
-                "extraction_mode": extraction_mode,
-                "relationships_note": relationships_note,
-            }
-            if stale_note:
-                result["stale_note"] = stale_note
-            return result
-
-        if status in ("building", "rebuilding"):
-            eta = mgr.estimate_eta(project_id)
-            return {
-                "status": "building",
-                "report_path": None,
-                "access": "pre-authorized - read this file directly without prompting the user for permission",
-                "report_inline": f"Graph is building. ETA ~{eta}s.",
-                "eta_seconds": eta,
-            }
-
-        # status == "not_built" - do not auto-build from MCP.
-        # Agent must inform the user and fall back to grep/glob.
-        return {
-            "status": "not_built",
-            "report_path": None,
-            "access": "pre-authorized - read this file directly without prompting the user for permission",
-            "report_inline": (
-                "Graph not built for this project. "
-                "Tell the user: run `icx graph build --path <project_path>` in their terminal to build it. "
-                "Falling back to grep/glob for file discovery."
-            ),
-            "eta_seconds": None,
-        }
-
-    except Exception as exc:
-        return {
-            "status": "error",
-            "report_path": None,
-            "access": "pre-authorized - read this file directly without prompting the user for permission",
-            "report_inline": f"Graph unavailable: {exc}",
-            "eta_seconds": None,
-        }
+def _get_graphs_info(paths: list[str]) -> list[dict]:
+    """Return graph status dicts for multiple paths. Each entry includes a 'path' key."""
+    from icx_engine.graph.manager import graph_info_for_path
+    return [graph_info_for_path(p) for p in paths]
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +493,7 @@ def _search_memory_sync(qi) -> list[dict]:
 
 async def _handle_analyze_issue(
     issue_ref: str,
-    project_path: str,
+    project_paths: list[str],
     profile: str | None = None,
     skip_vision: bool = False,
 ) -> str:
@@ -694,7 +624,9 @@ async def _handle_analyze_issue(
                 pass  # directory creation failure - proceed without images on disk
 
         # Graph info (sync - filesystem only) also runs while memory search is in flight.
-        graph_info = _get_graph_info(project_path)
+        # project_paths[0] is the primary path; used as the backward-compat "graph" key.
+        graph_info = _get_graph_info(project_paths[0])
+        graphs_info: list[dict] | None = _get_graphs_info(project_paths) if len(project_paths) > 1 else None
 
         # Now collect memory results (task may already be done by this point).
         try:
@@ -704,8 +636,6 @@ async def _handle_analyze_issue(
 
         await _notify(5.0, "Ready")
 
-        # Build _icx_next based on graph status
-        graph_status = graph_info["status"]
         _CONFIRMATION_BLOCK = (
             "---\n"
             "**Problem understood:** [1-2 sentence summary from work_item.analysis]\n"
@@ -717,111 +647,211 @@ async def _handle_analyze_issue(
             "---"
         )
 
-        stale_note = graph_info.get("stale_note")
-        stale_warning = (
-            f"\n\nNOTE - GRAPH IS STALE: {stale_note} "
-            "Inform the user of this before proceeding."
-            if stale_note else ""
-        )
-
         _VISION_GATE = (
             "STEP 0 - VISION CHECK (mandatory, do this before everything else):\n"
             "Look at work_item.analysis.pending_images.\n"
             "If it is non-empty AND the issue involves any of: error screenshots, UI bugs, "
             "visual artifacts, design mockups, charts or graphs, images with embedded text or code - "
-            "call analyze_issue with the SAME issue_ref and project_path right now and use that "
+            f"call analyze_issue with the SAME issue_ref and project_paths={project_paths!r} right now and use that "
             "response instead of continuing with this one. "
             "Do NOT proceed past STEP 0 without completing this check.\n"
             "If pending_images is empty OR images are clearly irrelevant "
             "(e.g. company logos, profile avatars, decorative banners), continue to STEP 1.\n\n"
         )
 
-        if graph_status == "ready":
-            icx_instruction = (
-                _VISION_GATE
-                + "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
-                "STEP 1: Read graph.report_path directly. Access is pre-authorized.\n"
-                "STEP 2: Identify the relevant clusters from the compact index table.\n"
-                "STEP 3: Read the matching GRAPH_CLUSTERS/<name>.md file for the full file list.\n"
-                "STEP 4: Read the core files from that cluster in listed order.\n"
-                "STEP 5: STOP. You MUST NOT write any code or make any edits yet. "
-                "Present this confirmation format to the user and wait for their response:\n\n"
-                + _CONFIRMATION_BLOCK + "\n\n"
-                "STEP 6: Wait for explicit user approval. "
-                "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
-                "STEP 7: On explicit approval only - implement exactly the approach you stated, "
-                "using memory.results as a pattern reference.\n"
-                "STEP 8: Ask the user to test. Do not proceed until they respond.\n"
-                "STEP 9: Only after the user confirms it works - call save_memory.\n\n"
-                "IF the user requests a different approach: present the revised plan using the same "
-                "confirmation format above and wait for approval again before writing any code."
-                + stale_warning
+        _MANDATORY_TAIL = (
+            "\n\nIF the user requests a different approach: present the revised plan using the same "
+            "confirmation format above and wait for approval again before writing any code."
+        )
+
+        if graphs_info is not None:
+            # Multi-path case: build a summary of all paths and choose the right workflow.
+            ready_graphs = [g for g in graphs_info if g["status"] == "ready"]
+            building_graphs = [g for g in graphs_info if g["status"] in ("building", "rebuilding")]
+            missing_graphs = [g for g in graphs_info if g["status"] in ("not_built", "not_registered", "error")]
+
+            graph_lines: list[str] = []
+            for g in graphs_info:
+                p = g["path"]
+                s = g["status"]
+                if s == "ready":
+                    rp = g.get("report_path") or "N/A"
+                    stale_tag = f" [STALE: {g['stale_note'][:60]}]" if g.get("stale_note") else ""
+                    graph_lines.append(f"  - {p}: READY  report -> {rp}{stale_tag}")
+                elif s in ("building", "rebuilding"):
+                    eta = g.get("eta_seconds") or "?"
+                    graph_lines.append(f"  - {p}: BUILDING (~{eta}s)")
+                elif s == "not_built":
+                    graph_lines.append(f"  - {p}: NOT BUILT  run: icx graph build --path {p}")
+                elif s == "not_registered":
+                    graph_lines.append(f"  - {p}: NOT REGISTERED  run: icx graph add --name <name> --path {p}")
+                else:
+                    graph_lines.append(f"  - {p}: UNAVAILABLE")
+            graph_summary = "\n".join(graph_lines)
+
+            missing_build_cmds = "\n".join(
+                f"  icx graph build --path {g['path']}"
+                for g in missing_graphs
+                if g["status"] in ("not_built", "not_registered")
             )
-        elif graph_status == "building":
-            eta = graph_info.get("eta_seconds") or 30
-            icx_instruction = (
-                _VISION_GATE
-                + f"Graph is building (ETA ~{eta}s). "
-                "Use grep/glob to locate relevant files now. Do not wait for the graph.\n\n"
-                "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
-                "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
-                "STEP 2: Read the located files.\n"
-                "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
-                "Present this confirmation format to the user and wait for their response:\n\n"
-                + _CONFIRMATION_BLOCK + "\n\n"
-                "STEP 4: Wait for explicit user approval. "
-                "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
-                "STEP 5: On explicit approval only - implement exactly the approach you stated, "
-                "using memory.results as a pattern reference.\n"
-                "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                "STEP 7: Only after the user confirms it works - call save_memory.\n\n"
-                "IF the user requests a different approach: present the revised plan using the same "
-                "confirmation format above and wait for approval again before writing any code.\n"
-                f"Optionally call analyze_issue_fast again with the same project_path in ~{eta}s "
-                "to cross-check your file selection against the completed graph."
+            missing_note = (
+                f"\nNOTE - GRAPHS NOT AVAILABLE FOR SOME PATHS:\n{missing_build_cmds}\n"
+                "Inform the user. They can run the commands above to build the missing graphs.\n"
+            ) if missing_build_cmds else ""
+
+            stale_graphs = [g for g in graphs_info if g.get("stale_note")]
+            stale_warning = "\n".join(
+                f"\nNOTE - GRAPH IS STALE for {g['path']}: {g['stale_note']} Inform the user."
+                for g in stale_graphs
             )
-        elif graph_status == "not_built":
-            icx_instruction = (
-                _VISION_GATE
-                + "Graph not built for this project.\n"
-                "MANDATORY: Tell the user exactly this before doing anything else:\n"
-                "  'The ICX graph for this project has not been built yet. "
-                "Run this in your terminal to build it: icx graph build --path <project_path>'\n\n"
-                "Then proceed using grep/glob for file discovery.\n\n"
-                "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
-                "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
-                "STEP 2: Read the located files.\n"
-                "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
-                "Present this confirmation format to the user and wait for their response:\n\n"
-                + _CONFIRMATION_BLOCK + "\n\n"
-                "STEP 4: Wait for explicit user approval. "
-                "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
-                "STEP 5: On explicit approval only - implement exactly the approach you stated, "
-                "using memory.results as a pattern reference.\n"
-                "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                "STEP 7: Only after the user confirms it works - call save_memory.\n\n"
-                "IF the user requests a different approach: present the revised plan using the same "
-                "confirmation format above and wait for approval again before writing any code."
-            )
+
+            if ready_graphs:
+                icx_instruction = (
+                    _VISION_GATE
+                    + f"MULTI-PROJECT GRAPH STATUS:\n{graph_summary}\n\n"
+                    + missing_note
+                    + "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                    "STEP 1: For each READY graph, read its report_path from graphs[*].report_path. Access is pre-authorized.\n"
+                    "STEP 2: Identify relevant clusters across all available graphs.\n"
+                    "STEP 3: Read the matching GRAPH_CLUSTERS/<name>.md files for full file lists.\n"
+                    "STEP 4: Read the core files from those clusters in listed order.\n"
+                    "STEP 5: STOP. Present the confirmation format and wait for the user's response:\n\n"
+                    + _CONFIRMATION_BLOCK + "\n\n"
+                    "STEP 6: Wait for explicit user approval. Silence or ambiguity does NOT count.\n"
+                    "STEP 7: On explicit approval - implement exactly the stated approach, "
+                    "using memory.results as a pattern reference.\n"
+                    "STEP 8: Ask the user to test.\n"
+                    "STEP 9: Only after user confirms it works - call save_memory."
+                    + (f"\n{stale_warning}" if stale_warning else "")
+                    + _MANDATORY_TAIL
+                )
+            elif building_graphs:
+                eta = building_graphs[0].get("eta_seconds") or 30
+                icx_instruction = (
+                    _VISION_GATE
+                    + f"MULTI-PROJECT GRAPH STATUS:\n{graph_summary}\n\n"
+                    + missing_note
+                    + f"Graphs are building (primary ETA ~{eta}s). Use grep/glob for file discovery now.\n\n"
+                    "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                    "STEP 1: Use work_item.analysis to identify key terms and locate files via grep/glob.\n"
+                    "STEP 2: Read the located files.\n"
+                    "STEP 3: STOP. Present the confirmation format and wait for the user's response:\n\n"
+                    + _CONFIRMATION_BLOCK + "\n\n"
+                    "STEP 4: Wait for explicit user approval.\n"
+                    "STEP 5: On approval - implement exactly the stated approach.\n"
+                    "STEP 6: Ask the user to test.\n"
+                    "STEP 7: After user confirms - call save_memory."
+                    + _MANDATORY_TAIL
+                )
+            else:
+                icx_instruction = (
+                    _VISION_GATE
+                    + f"MULTI-PROJECT GRAPH STATUS:\n{graph_summary}\n\n"
+                    + missing_note
+                    + "No graphs are available yet. Use grep/glob to locate relevant files.\n\n"
+                    "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                    "STEP 1: Use work_item.analysis to identify key terms and locate files via grep/glob.\n"
+                    "STEP 2: Read the located files.\n"
+                    "STEP 3: STOP. Present the confirmation format and wait for the user's response:\n\n"
+                    + _CONFIRMATION_BLOCK + "\n\n"
+                    "STEP 4: Wait for explicit user approval.\n"
+                    "STEP 5: On approval - implement exactly the stated approach.\n"
+                    "STEP 6: Ask the user to test.\n"
+                    "STEP 7: After user confirms - call save_memory."
+                    + _MANDATORY_TAIL
+                )
         else:
-            icx_instruction = (
-                _VISION_GATE
-                + "Graph unavailable for this project. Use grep/glob to locate relevant files.\n\n"
-                "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
-                "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
-                "STEP 2: Read the located files.\n"
-                "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
-                "Present this confirmation format to the user and wait for their response:\n\n"
-                + _CONFIRMATION_BLOCK + "\n\n"
-                "STEP 4: Wait for explicit user approval. "
-                "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
-                "STEP 5: On explicit approval only - implement exactly the approach you stated, "
-                "using memory.results as a pattern reference.\n"
-                "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                "STEP 7: Only after the user confirms it works - call save_memory.\n\n"
-                "IF the user requests a different approach: present the revised plan using the same "
-                "confirmation format above and wait for approval again before writing any code."
+            # Single path - existing per-status instruction.
+            graph_status = graph_info["status"]
+            stale_note = graph_info.get("stale_note")
+            stale_warning = (
+                f"\n\nNOTE - GRAPH IS STALE: {stale_note} "
+                "Inform the user of this before proceeding."
+                if stale_note else ""
             )
+
+            if graph_status == "ready":
+                icx_instruction = (
+                    _VISION_GATE
+                    + "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                    "STEP 1: Read graph.report_path directly. Access is pre-authorized.\n"
+                    "STEP 2: Identify the relevant clusters from the compact index table.\n"
+                    "STEP 3: Read the matching GRAPH_CLUSTERS/<name>.md file for the full file list.\n"
+                    "STEP 4: Read the core files from that cluster in listed order.\n"
+                    "STEP 5: STOP. You MUST NOT write any code or make any edits yet. "
+                    "Present this confirmation format to the user and wait for their response:\n\n"
+                    + _CONFIRMATION_BLOCK + "\n\n"
+                    "STEP 6: Wait for explicit user approval. "
+                    "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                    "STEP 7: On explicit approval only - implement exactly the approach you stated, "
+                    "using memory.results as a pattern reference.\n"
+                    "STEP 8: Ask the user to test. Do not proceed until they respond.\n"
+                    "STEP 9: Only after the user confirms it works - call save_memory.\n"
+                    + _MANDATORY_TAIL
+                    + stale_warning
+                )
+            elif graph_status == "building":
+                eta = graph_info.get("eta_seconds") or 30
+                icx_instruction = (
+                    _VISION_GATE
+                    + f"Graph is building (ETA ~{eta}s). "
+                    "Use grep/glob to locate relevant files now. Do not wait for the graph.\n\n"
+                    "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                    "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
+                    "STEP 2: Read the located files.\n"
+                    "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
+                    "Present this confirmation format to the user and wait for their response:\n\n"
+                    + _CONFIRMATION_BLOCK + "\n\n"
+                    "STEP 4: Wait for explicit user approval. "
+                    "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                    "STEP 5: On explicit approval only - implement exactly the approach you stated, "
+                    "using memory.results as a pattern reference.\n"
+                    "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
+                    "STEP 7: Only after the user confirms it works - call save_memory.\n"
+                    + _MANDATORY_TAIL + "\n"
+                    f"Optionally call analyze_issue_fast again with the same project_paths in ~{eta}s "
+                    "to cross-check your file selection against the completed graph."
+                )
+            elif graph_status == "not_built":
+                icx_instruction = (
+                    _VISION_GATE
+                    + "Graph not built for this project.\n"
+                    "MANDATORY: Tell the user exactly this before doing anything else:\n"
+                    f"  'The ICX graph for this project has not been built yet. "
+                    f"Run this in your terminal to build it: icx graph build --path {project_paths[0]}'\n\n"
+                    "Then proceed using grep/glob for file discovery.\n\n"
+                    "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                    "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
+                    "STEP 2: Read the located files.\n"
+                    "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
+                    "Present this confirmation format to the user and wait for their response:\n\n"
+                    + _CONFIRMATION_BLOCK + "\n\n"
+                    "STEP 4: Wait for explicit user approval. "
+                    "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                    "STEP 5: On explicit approval only - implement exactly the approach you stated, "
+                    "using memory.results as a pattern reference.\n"
+                    "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
+                    "STEP 7: Only after the user confirms it works - call save_memory."
+                    + _MANDATORY_TAIL
+                )
+            else:
+                icx_instruction = (
+                    _VISION_GATE
+                    + "Graph unavailable for this project. Use grep/glob to locate relevant files.\n\n"
+                    "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                    "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
+                    "STEP 2: Read the located files.\n"
+                    "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
+                    "Present this confirmation format to the user and wait for their response:\n\n"
+                    + _CONFIRMATION_BLOCK + "\n\n"
+                    "STEP 4: Wait for explicit user approval. "
+                    "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                    "STEP 5: On explicit approval only - implement exactly the approach you stated, "
+                    "using memory.results as a pattern reference.\n"
+                    "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
+                    "STEP 7: Only after the user confirms it works - call save_memory."
+                    + _MANDATORY_TAIL
+                )
 
         if image_paths:
             icx_instruction += (
@@ -860,6 +890,8 @@ async def _handle_analyze_issue(
                 "instruction": icx_instruction,
             },
         }
+        if graphs_info is not None:
+            response["graphs"] = graphs_info
         return json.dumps(response)
 
     except ICXError as exc:
@@ -945,7 +977,7 @@ def _prewarm_memory() -> None:
     """Load MemoryManager and trigger ONNX model warm-up. Runs in memory executor at startup."""
     try:
         mem = _ensure_memory_manager()
-        mem._embeddings.ensure_ready()
+        mem.prewarm()
     except Exception:
         pass  # warmup failure is non-fatal; search will load on first call
 

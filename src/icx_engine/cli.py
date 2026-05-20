@@ -90,7 +90,7 @@ def _trigger_memory_setup() -> None:
 
 _FULL_HELP = """
 [bold]ICX: Integrated Contextual X-ecution Engine[/bold]
-AI-native intelligence layer for development teams. Deep context extraction, local memory, MCP-powered execution.
+AI-native intelligence layer for development teams. Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP.
 
 [bold]Quick start:[/bold]  [cyan]icx connection --add[/cyan]  ->  [cyan]icx model --add[/cyan]  ->  [cyan]icx analyze <KEY>[/cyan]
 
@@ -99,6 +99,8 @@ AI-native intelligence layer for development teams. Deep context extraction, loc
   [cyan]icx analyze <KEY> --fast[/cyan]                               Text-only - skip image processing
   [cyan]icx analyze <KEY> --profile <NAME>[/cyan]                     Use a specific LLM profile for this run
   [cyan]icx analyze <KEY> --profile <NAME> --fast[/cyan]              Profile + text-only (skip image processing)
+  [cyan]icx analyze <KEY> --path <PATH>[/cyan]                        Show graph status for a codebase path
+  [cyan]icx analyze <KEY> --path <P1> --path <P2>[/cyan]              Show graph status for multiple paths
   [cyan]icx analyze <KEY> --debug[/cyan]                              Show step-by-step debug output
   [cyan]icx analyze <KEY> --traceback[/cyan]                          Show full error traceback on failure
 
@@ -176,8 +178,9 @@ app = typer.Typer(
     name="icx",
     context_settings={"max_content_width": 9999},
     help=(
-        "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer "
-        "for development teams.\n\n"
+        "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development teams. "
+        "Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. "
+        "Securely bridge your work tracker to your AI agents via MCP.\n\n"
         "[bold]Quick start:[/bold]  "
         "[cyan]icx connection --add[/cyan]  ->  "
         "[cyan]icx model --add[/cyan]  ->  "
@@ -1004,6 +1007,14 @@ def analyze(
             help="Skip image processing for speed. Images are listed in pending_images.",
         ),
     ] = False,
+    paths: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--path",
+            help="Codebase path to show graph status for (repeatable for multiple repos).",
+            metavar="PATH",
+        ),
+    ] = None,
 ) -> None:
     """Fetch a Jira issue and analyze it - prints structured JSON ready for your AI tools.
 
@@ -1014,7 +1025,8 @@ def analyze(
 
     \b
     If you have a vision model configured, ICX also reads screenshots and image
-    attachments when it needs more confidence in its analysis.
+    attachments. Images are written to ~/.icx/temp/<key>/ and their paths are
+    returned in image_paths - no base64 in the JSON output.
 
     \b
     Examples:
@@ -1022,8 +1034,10 @@ def analyze(
       icx analyze ABC-123 --fast
       icx analyze https://company.atlassian.net/browse/ABC-123
       icx analyze ABC-123 --profile work
-      icx analyze ABC-123 --debug           (show step-by-step what ICX is doing)
+      icx analyze ABC-123 --path /svc --path /ui    (show graph status for multiple repos)
+      icx analyze ABC-123 --debug                   (show step-by-step what ICX is doing)
     """
+    import json as _json
     from icx_engine.config_manager import ConfigManager
     from icx_engine import engine
     from icx_engine.engine import extract_domain, resolve_connection, narrow_connections
@@ -1088,7 +1102,30 @@ def analyze(
         render_icx_error(exc, err_console, show_traceback=traceback)
         raise typer.Exit(1)
 
-    typer.echo(result.model_dump_json(indent=2))
+    # Build output dict - write images to disk, never emit base64 in CLI output.
+    result_dict = _json.loads(result.model_dump_json())
+    image_paths: dict[str, str] = {}
+    raw_images: dict[str, str] = result_dict.pop("images", None) or {}
+    if raw_images:
+        try:
+            import base64 as _b64
+            from icx_engine.graph.storage import temp_images_dir as _tid, sweep_stale_temp_dirs as _sweep
+            _ALLOWED_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"})
+            _sweep()
+            img_dir = _tid(url)
+            img_dir.mkdir(parents=True, exist_ok=True)
+            for fname, b64_data in raw_images.items():
+                safe = Path(fname).name
+                if safe and Path(safe).suffix.lower() in _ALLOWED_EXTS:
+                    img_path = img_dir / safe
+                    img_path.write_bytes(_b64.b64decode(b64_data))
+                    image_paths[fname] = str(img_path)
+        except Exception:
+            pass
+    if image_paths:
+        result_dict["image_paths"] = image_paths
+
+    typer.echo(_json.dumps(result_dict, indent=2))
 
     if isinstance(result, IssueContext) and result.past_insights:
         _render_past_insights(result.past_insights)
@@ -1097,6 +1134,41 @@ def analyze(
         err_console.print("\nMISSING REQUIREMENTS")
         for item in result.missing_information:
             err_console.print(f"  • {item}")
+
+    if paths:
+        from rich.table import Table
+        from rich.panel import Panel as _Panel
+        from icx_engine.graph.manager import graph_info_for_path as _gif
+
+        graph_table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
+        graph_table.add_column("Path", style="cyan", no_wrap=True)
+        graph_table.add_column("Status", no_wrap=True)
+        graph_table.add_column("Notes")
+
+        for p in paths:
+            info = _gif(p)
+            s = info["status"]
+            if s == "ready":
+                status_cell = "[bold green]READY[/bold green]"
+                notes = info.get("report_path") or ""
+                if info.get("stale_note"):
+                    notes = f"[yellow]STALE[/yellow]  {info['stale_note']}"
+            elif s in ("building", "rebuilding"):
+                eta = info.get("eta_seconds") or "?"
+                status_cell = "[yellow]BUILDING[/yellow]"
+                notes = f"ETA ~{eta}s"
+            elif s == "not_built":
+                status_cell = "[dim]NOT BUILT[/dim]"
+                notes = f"run: icx graph build --path {p}"
+            elif s == "not_registered":
+                status_cell = "[dim]NOT REGISTERED[/dim]"
+                notes = f"run: icx graph add --name <name> --path {p}"
+            else:
+                status_cell = "[red]ERROR[/red]"
+                notes = (info.get("report_inline") or "")[:120]
+            graph_table.add_row(p, status_cell, notes)
+
+        console.print(_Panel(graph_table, title="[bold]Codebase Graphs[/bold]"))
 
 
 @app.command(rich_help_panel="Setup")
@@ -1259,13 +1331,19 @@ def _uninstall_package(console: Console) -> None:
         return
 
     def _ps_quote(arg: str) -> str:
-        return '"' + arg.replace('"', '`"') + '"'
+        arg = arg.replace('`', '``')   # escape PS escape-char first
+        arg = arg.replace('$', '`$')   # prevent variable/subexpression expansion
+        arg = arg.replace('"', '`"')   # escape double-quote
+        return '"' + arg + '"'
 
     cmd_str = " ".join(_ps_quote(c) for c in cmd)
-    log_ps = str(_UNINSTALL_LOG)  # PowerShell doesn't escape backslashes
+    # Assign log path via single-quoted PS variable so the path is never
+    # subject to double-quote PS expansion regardless of its contents.
+    log_ps_safe = str(_UNINSTALL_LOG).replace("'", "''")  # '' is the only escape in PS single-quoted strings
     pid = os.getpid()
 
     ps_script = (
+        f"$logPath = '{log_ps_safe}'\n"
         f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue\n"
         f"Stop-Process -Name 'icx' -Force -ErrorAction SilentlyContinue\n"
         f"Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\""
@@ -1274,9 +1352,9 @@ def _uninstall_package(console: Console) -> None:
         f"Start-Sleep -Seconds 1\n"
         f"& {cmd_str}\n"
         f"if ($LASTEXITCODE -eq 0) {{\n"
-        f'    "OK" | Out-File -FilePath "{log_ps}" -Encoding utf8\n'
+        f'    "OK" | Out-File -FilePath $logPath -Encoding utf8\n'
         f"}} else {{\n"
-        f'    "FAILED:exit $LASTEXITCODE" | Out-File -FilePath "{log_ps}" -Encoding utf8\n'
+        f'    "FAILED:exit $LASTEXITCODE" | Out-File -FilePath $logPath -Encoding utf8\n'
         f"}}\n"
         f"Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
     )

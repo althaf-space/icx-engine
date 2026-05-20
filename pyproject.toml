@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.3.2"
-description = "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development workflows. Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP."
+version = "0.3.3"
+description = "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development teams. Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP."
 readme = "readme.md"
 license = { file = "license" }
 authors = [
