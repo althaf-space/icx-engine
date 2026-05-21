@@ -75,9 +75,9 @@ def test_write_icx_entry_claude_merges_into_existing_settings(monkeypatch, tmp_p
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
     host = get_host("claude")
     host.detect_path.mkdir(parents=True, exist_ok=True)
-    host.config_path.write_text(json.dumps({"hooks": {"PreToolUse": []}, "theme": "dark"}))
+    host.config_path.write_text(json.dumps({"hooks": {"PreToolUse": []}, "theme": "dark"}), encoding="utf-8")
     write_icx_entry(host)
-    raw = json.loads(host.config_path.read_text())
+    raw = json.loads(host.config_path.read_text(encoding="utf-8"))
     assert raw["hooks"] == {"PreToolUse": []}
     assert raw["theme"] == "dark"
     assert raw["mcpServers"]["icx"] == ICX_MCP_ENTRY
@@ -183,7 +183,7 @@ def test_write_icx_entry_no_fallback_when_detect_exists(monkeypatch, tmp_path):
     result = write_icx_entry(host)
     assert result.fallback is False
     assert result.path == host.config_path
-    raw = json.loads(result.path.read_text())
+    raw = json.loads(result.path.read_text(encoding="utf-8"))
     assert raw["mcpServers"]["icx"] == ICX_MCP_ENTRY
 
 
@@ -195,7 +195,7 @@ def test_write_icx_entry_fallback_when_detect_missing(monkeypatch, tmp_path):
     result = write_icx_entry(host)
     assert result.fallback is True
     assert result.path == tmp_path / ".mcp.json"
-    raw = json.loads(result.path.read_text())
+    raw = json.loads(result.path.read_text(encoding="utf-8"))
     assert raw["mcpServers"]["icx"] == ICX_MCP_ENTRY
 
 
@@ -205,9 +205,9 @@ def test_write_icx_entry_merges_with_existing_config(monkeypatch, tmp_path):
     (tmp_path / ".cursor").mkdir()
     host = get_host("cursor")
     host.config_path.parent.mkdir(parents=True, exist_ok=True)
-    host.config_path.write_text(json.dumps({"mcpServers": {"other-tool": {"command": "other"}}}))
+    host.config_path.write_text(json.dumps({"mcpServers": {"other-tool": {"command": "other"}}}), encoding="utf-8")
     write_icx_entry(host)
-    raw = json.loads(host.config_path.read_text())
+    raw = json.loads(host.config_path.read_text(encoding="utf-8"))
     assert "other-tool" in raw["mcpServers"]
     assert "icx" in raw["mcpServers"]
 
@@ -228,7 +228,7 @@ def test_write_icx_entry_overwrites_existing_ice_entry(monkeypatch, tmp_path):
     host = get_host("cursor")
     write_icx_entry(host)
     write_icx_entry(host)
-    raw = json.loads(host.config_path.read_text())
+    raw = json.loads(host.config_path.read_text(encoding="utf-8"))
     assert list(raw["mcpServers"].keys()).count("icx") == 1
 
 
@@ -239,7 +239,7 @@ def test_write_icx_entry_windsurf_writes_json(monkeypatch, tmp_path):
     host.detect_path.mkdir(parents=True, exist_ok=True)
     result = write_icx_entry(host)
     assert result.fallback is False
-    raw = json.loads(result.path.read_text())
+    raw = json.loads(result.path.read_text(encoding="utf-8"))
     assert raw["mcpServers"]["icx"] == ICX_MCP_ENTRY
 
 
@@ -255,9 +255,9 @@ def test_write_icx_entry_windsurf_merges_existing_entries(monkeypatch, tmp_path)
     host = get_host("windsurf")
     host.detect_path.mkdir(parents=True, exist_ok=True)
     host.config_path.parent.mkdir(parents=True, exist_ok=True)
-    host.config_path.write_text(json.dumps({"mcpServers": {"other-tool": {"command": "other"}}}))
+    host.config_path.write_text(json.dumps({"mcpServers": {"other-tool": {"command": "other"}}}), encoding="utf-8")
     write_icx_entry(host)
-    raw = json.loads(host.config_path.read_text())
+    raw = json.loads(host.config_path.read_text(encoding="utf-8"))
     assert "other-tool" in raw["mcpServers"]
     assert "icx" in raw["mcpServers"]
 
@@ -277,7 +277,7 @@ def test_write_icx_entry_antigravity_writes_json(monkeypatch, tmp_path):
     result = write_icx_entry(host)
     assert result.fallback is False
     assert result.path == tmp_path / ".gemini" / "antigravity" / "mcp_config.json"
-    raw = json.loads(result.path.read_text())
+    raw = json.loads(result.path.read_text(encoding="utf-8"))
     assert raw["mcpServers"]["icx"] == ICX_MCP_ENTRY
 
 
@@ -286,9 +286,9 @@ def test_write_icx_entry_antigravity_merges_existing_entries(monkeypatch, tmp_pa
     host = get_host("antigravity")
     host.detect_path.mkdir(parents=True, exist_ok=True)
     host.config_path.parent.mkdir(parents=True, exist_ok=True)
-    host.config_path.write_text(json.dumps({"mcpServers": {"gemini-tool": {"command": "gemini"}}}))
+    host.config_path.write_text(json.dumps({"mcpServers": {"gemini-tool": {"command": "gemini"}}}), encoding="utf-8")
     write_icx_entry(host)
-    raw = json.loads(host.config_path.read_text())
+    raw = json.loads(host.config_path.read_text(encoding="utf-8"))
     assert "gemini-tool" in raw["mcpServers"]
     assert "icx" in raw["mcpServers"]
 
@@ -323,7 +323,7 @@ def test_remove_icx_entry_removes_and_returns_true(monkeypatch, tmp_path):
     write_icx_entry(host)
     removed = remove_icx_entry(host)
     assert removed is True
-    raw = json.loads(host.config_path.read_text())
+    raw = json.loads(host.config_path.read_text(encoding="utf-8"))
     assert "icx" not in raw.get("mcpServers", {})
 
 
@@ -333,7 +333,7 @@ def test_remove_icx_entry_returns_false_when_not_present(monkeypatch, tmp_path):
     (tmp_path / ".cursor").mkdir()
     host = get_host("cursor")
     host.config_path.parent.mkdir(parents=True, exist_ok=True)
-    host.config_path.write_text(json.dumps({"mcpServers": {}}))
+    host.config_path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
     assert remove_icx_entry(host) is False
 
 
@@ -350,11 +350,11 @@ def test_remove_icx_entry_preserves_other_tools(monkeypatch, tmp_path):
     (tmp_path / ".cursor").mkdir()
     host = get_host("cursor")
     write_icx_entry(host)
-    existing = json.loads(host.config_path.read_text())
+    existing = json.loads(host.config_path.read_text(encoding="utf-8"))
     existing["mcpServers"]["other"] = {"command": "other"}
-    host.config_path.write_text(json.dumps(existing))
+    host.config_path.write_text(json.dumps(existing), encoding="utf-8")
     remove_icx_entry(host)
-    raw = json.loads(host.config_path.read_text())
+    raw = json.loads(host.config_path.read_text(encoding="utf-8"))
     assert "other" in raw["mcpServers"]
 
 
@@ -915,7 +915,7 @@ def test_mcp_setup_with_host_flag_writes_config(monkeypatch, tmp_path):
     (tmp_path / ".cursor").mkdir()
     result = _runner.invoke(app, ["mcp", "setup", "--host", "cursor"])
     assert result.exit_code == 0
-    raw = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
+    raw = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
     assert Path(raw["mcpServers"]["icx"]["command"]).stem.lower() == "icx"
 
 
@@ -970,7 +970,7 @@ def test_mcp_remove_with_host_flag_removes_entry(monkeypatch, tmp_path):
     _runner.invoke(app, ["mcp", "setup", "--host", "cursor"])
     result = _runner.invoke(app, ["mcp", "remove", "--host", "cursor"])
     assert result.exit_code == 0
-    raw = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
+    raw = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
     assert "icx" not in raw.get("mcpServers", {})
 
 
@@ -1132,6 +1132,58 @@ async def test_handle_analyze_multi_path_icx_next_mentions_all_paths():
     assert "/projects/svc" in instruction
     assert "/projects/ui" in instruction
     assert "MULTI-PROJECT" in instruction
+
+
+async def test_handle_analyze_multi_path_not_registered_suggests_graph_add():
+    """missing_note for not_registered paths must suggest icx graph add, not icx graph build."""
+    from icx_engine.models.output import IssueContext
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    ready_info = {"status": "ready", "report_path": "/projects/svc/GRAPH_REPORT.md", "access": "pre-authorized", "path": "/projects/svc", "eta_seconds": None}
+    not_reg_info = {"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "path": "/projects/ui", "eta_seconds": None}
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+            with patch("icx_engine.mcp_server._get_graph_info", return_value=ready_info):
+                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, not_reg_info]):
+                    result = await _handle_analyze_issue(
+                        "TEST-123",
+                        project_paths=["/projects/svc", "/projects/ui"],
+                    )
+
+    data = json.loads(result)
+    instruction = data["_icx_next"]["instruction"]
+    assert "icx graph add" in instruction
+    assert "icx graph build --path /projects/ui" not in instruction
+
+
+async def test_handle_analyze_single_path_not_registered_suggests_graph_add():
+    """Single-path not_registered instruction must tell user to run icx graph add."""
+    from icx_engine.models.output import IssueContext
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+                "status": "not_registered", "report_path": None,
+                "access": "", "report_inline": "", "eta_seconds": None,
+            }):
+                result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+
+    data = json.loads(result)
+    instruction = data["_icx_next"]["instruction"]
+    assert "icx graph add" in instruction
+    assert "not registered" in instruction.lower()
 
 
 async def test_handle_analyze_multi_path_vision_gate_includes_additional_paths():

@@ -14,7 +14,7 @@ def export_to_json(entries: list[MemoryEntry], output_path: Path) -> None:
         "entry_count": len(entries),
         "entries": [e.model_dump() for e in entries],
     }
-    output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def import_from_json(input_path: Path) -> list[MemoryEntry]:
@@ -25,7 +25,7 @@ def import_from_json(input_path: Path) -> list[MemoryEntry]:
             "Run `icx memory export` to create an export file first."
         )
     try:
-        data = json.loads(input_path.read_text())
+        data = json.loads(input_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise MemoryError(f"Failed to read export file {input_path}: {exc}") from exc
     if not isinstance(data, dict) or "entries" not in data:

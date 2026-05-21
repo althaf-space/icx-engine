@@ -122,7 +122,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.4 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
+**Version:** 0.3.5 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
 
 ```
 pipx install icx-engine
@@ -233,6 +233,7 @@ icx memory status
 ```sh
 icx graph add --name NAME --path PATH   # register a project directory for graph analysis
 icx graph build NAME               # build (or rebuild) the knowledge graph for a project
+icx graph build --path PATH        # build by path instead of name
 icx graph build NAME --force       # rebuild even if graph is current
 icx graph list                     # list all registered projects with status and file counts
 icx graph status NAME              # detailed status: build state, last commit, staleness info
