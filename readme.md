@@ -3,7 +3,7 @@
 **AI-native intelligence layer for development teams.** Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP.
 
 [![PyPI](https://img.shields.io/pypi/v/icx-engine?color=0066cc&label=latest)](https://pypi.org/project/icx-engine/)
-[![Python](https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13%20|%203.14-0066cc)](https://pypi.org/project/icx-engine/)
+[![Python](https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13%20|%203.14%20|%203.15-0066cc)](https://pypi.org/project/icx-engine/)
 [![License](https://img.shields.io/badge/license-proprietary-lightgrey)](./license)
 [![Status](https://img.shields.io/badge/status-active%20development-orange)](https://github.com/althaf-space/icx-engine/releases)
 
@@ -116,7 +116,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.3 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
+**Version:** 0.3.3 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, 3.14, or 3.15**
 
 ```
 pipx install icx-engine

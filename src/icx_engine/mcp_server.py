@@ -545,10 +545,13 @@ async def _handle_analyze_issue(
 
         await _notify(0.0, "Fetching work item...")
         config = ConfigManager.load()
-        result = await engine.run(
-            issue_ref, config, mcp_mode=True,
-            profile_override=profile, skip_vision=skip_vision,
-            log=_engine_log,
+        result = await asyncio.wait_for(
+            engine.run(
+                issue_ref, config, mcp_mode=True,
+                profile_override=profile, skip_vision=skip_vision,
+                log=_engine_log,
+            ),
+            timeout=660.0,
         )
 
         # Build MemoryQueryInput from result
@@ -662,6 +665,41 @@ async def _handle_analyze_issue(
         _MANDATORY_TAIL = (
             "\n\nIF the user requests a different approach: present the revised plan using the same "
             "confirmation format above and wait for approval again before writing any code."
+        )
+
+        _is_non_bug = issue_type_val.lower() not in ("bug", "defect", "incident", "error")
+        _NON_BUG_CONVENTIONS_GATE = (
+            "STEP 0B - CONVENTION DISCOVERY (mandatory for story/task/feature work items):\n"
+            "Before reading graph clusters, locate and read 2-3 existing implementations in the "
+            "codebase that are similar in scope to this work item. Identify:\n"
+            "  1. LAYER / FLOW PATTERN - how the project structures logic layers "
+            "(e.g. Controller->Service->ServiceImpl->Repository, or routes->handlers->services, "
+            "or views->serializers->models). Derive from existing code - do NOT assume any framework.\n"
+            "  2. FILE AND CLASS NAMING - the naming convention for each layer "
+            "(suffixes, prefixes, casing style, e.g. UserController.java, user.controller.ts, user_controller.py).\n"
+            "  3. LOGGER PATTERN - how existing files declare and use loggers.\n"
+            "  4. DEPENDENCY MANAGEMENT - how the project adds external libraries "
+            "(pom.xml, build.gradle, package.json, requirements.txt, pyproject.toml, etc.).\n\n"
+            "Capture these in the 'Conventions I will follow' section of your confirmation format.\n"
+            "If ANY new external dependency is required:\n"
+            "  - List it explicitly under 'New external dependencies required' with name and version.\n"
+            "  - Do NOT write a single line of implementation until the user explicitly approves.\n"
+            "  - If the user rejects a dependency, propose an alternative approach that avoids it.\n\n"
+        )
+        _NON_BUG_CONFIRMATION_BLOCK = (
+            "---\n"
+            "**Problem understood:** [1-2 sentence summary from work_item.analysis]\n"
+            "**Goal:** [acceptance_criteria as bullet points]\n"
+            "**Approach:** [exactly what you will add, change, or remove and precisely why]\n"
+            "**Files I will work with:**\n"
+            "  - path/to/file [role-tag] - one-line reason it is relevant\n"
+            "**Conventions I will follow:** [naming pattern, layer structure, logger style - "
+            "derived from existing code in this repo, not assumed]\n"
+            "**New external dependencies required:**\n"
+            "  - [package-name @ version] - reason needed\n"
+            "  - OR: None\n"
+            "**Shall I proceed?**\n"
+            "---"
         )
 
         if graphs_info is not None:
@@ -853,6 +891,12 @@ async def _handle_analyze_issue(
                     + _MANDATORY_TAIL
                 )
 
+        if _is_non_bug:
+            icx_instruction = icx_instruction.replace(
+                _VISION_GATE, _VISION_GATE + _NON_BUG_CONVENTIONS_GATE, 1
+            )
+            icx_instruction = icx_instruction.replace(_CONFIRMATION_BLOCK, _NON_BUG_CONFIRMATION_BLOCK)
+
         if image_paths:
             icx_instruction += (
                 f"\n\nThis work item has {len(image_paths)} attached image(s) at work_item.image_paths. "
@@ -894,6 +938,12 @@ async def _handle_analyze_issue(
             response["graphs"] = graphs_info
         return json.dumps(response)
 
+    except asyncio.TimeoutError:
+        return json.dumps({"error": (
+            "Analysis timed out after 11 minutes. "
+            "The issue tracker or AI provider may be slow or unreachable. "
+            "Check your network and credentials, then try again."
+        )})
     except ICXError as exc:
         return json.dumps({"error": str(exc), "type": type(exc).__name__})
     except Exception as exc:
@@ -988,6 +1038,17 @@ def _prewarm_memory() -> None:
 
 def run_mcp_server() -> None:
     """Entry point called by `icx mcp run`. Blocks until the MCP host closes stdio."""
+    import sys
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     async def _serve() -> None:
         # Pre-warm memory in background so ONNX model is loaded before first analyze call.
         # Combined with the 8s timeout in _handle_analyze_issue, this guarantees

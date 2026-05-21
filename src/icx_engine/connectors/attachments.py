@@ -96,6 +96,7 @@ async def _vision_enrich_anthropic(config: ChannelConfig, image_bytes: bytes, oc
     response = await client.messages.create(
         model=config.model,
         max_tokens=512,
+        timeout=90.0,
         messages=[{
             "role": "user",
             "content": [
@@ -125,6 +126,7 @@ async def _vision_enrich_openai_compat(config: ChannelConfig, image_bytes: bytes
     response = await client.chat.completions.create(
         model=config.model,
         max_tokens=512,
+        timeout=90.0,
         messages=[{
             "role": "user",
             "content": [
@@ -151,9 +153,12 @@ async def _vision_enrich_google(config: ChannelConfig, image_bytes: bytes, ocr_t
         types.Part.from_bytes(data=image_bytes, mime_type=_mime_type(fname)),
         types.Part.from_text(text=_VISION_PROMPT.format(ocr_text=ocr_text or "(no OCR output)")),
     ]
-    response = await client.aio.models.generate_content(
-        model=config.model,
-        contents=contents,
+    response = await asyncio.wait_for(
+        client.aio.models.generate_content(
+            model=config.model,
+            contents=contents,
+        ),
+        timeout=90.0,
     )
     return (response.text or ocr_text).strip()
 
@@ -360,6 +365,7 @@ async def _llm_summarize(config: ChannelConfig, filename: str, content: str) -> 
             resp = await client.messages.create(
                 model=config.model,
                 max_tokens=1024,
+                timeout=90.0,
                 system=_SUMMARIZE_SYSTEM,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -372,10 +378,13 @@ async def _llm_summarize(config: ChannelConfig, filename: str, content: str) -> 
                 system_instruction=_SUMMARIZE_SYSTEM,
                 temperature=0.0,
             )
-            resp = await client.aio.models.generate_content(
-                model=config.model,
-                contents=prompt,
-                config=cfg,
+            resp = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=config.model,
+                    contents=prompt,
+                    config=cfg,
+                ),
+                timeout=90.0,
             )
             return (resp.text or content[:_SUMMARIZE_THRESHOLD]).strip()
         from openai import AsyncOpenAI
@@ -387,6 +396,7 @@ async def _llm_summarize(config: ChannelConfig, filename: str, content: str) -> 
         resp = await client.chat.completions.create(
             model=config.model,
             max_tokens=1024,
+            timeout=90.0,
             messages=[
                 {"role": "system", "content": _SUMMARIZE_SYSTEM},
                 {"role": "user", "content": prompt},
