@@ -116,7 +116,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.3 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, 3.14, or 3.15**
+**Version:** 0.3.4 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, 3.14, or 3.15**
 
 ```
 pipx install icx-engine

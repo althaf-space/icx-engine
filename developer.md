@@ -82,7 +82,7 @@ ICX/
 │   │       ├── parser.py       # Jira API JSON → RawIssueData
 │   │       ├── auth.py         # build_auth_header() for token and OAuth
 │   │       └── oauth.py        # refresh_oauth_if_needed()
-│   ├── graph/                  # codebase knowledge graph (v0.3.3+)
+│   ├── graph/                  # codebase knowledge graph (v0.3.4+)
 │   │   ├── __init__.py         # public exports: GraphManager, generate_graph_report
 │   │   ├── storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
 │   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta
