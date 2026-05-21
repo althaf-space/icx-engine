@@ -41,7 +41,7 @@ See `developer.md` for a step-by-step guide to adding a connector.
 
 ## Code standards
 
-- Python 3.11–3.15, Pydantic v2, async/await for I/O
+- Python 3.11–3.14, Pydantic v2, async/await for I/O
 - Tests required for new code (pytest, no mocking the database)
 - No new dependencies without discussion - keep the install footprint small
 - Type annotations on all public functions

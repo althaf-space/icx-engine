@@ -1315,7 +1315,7 @@ chore: update pyproject.toml classifiers
 
 ## 13. Running the project locally
 
-**Python 3.11–3.15 required.**
+**Python 3.11–3.14 required.**
 
 ```bash
 # Clone and install in editable mode with dev dependencies
