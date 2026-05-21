@@ -101,7 +101,7 @@ def test_validate_path_raises_if_not_exists():
 
 def test_validate_path_raises_if_not_dir(tmp_path):
     f = tmp_path / "file.txt"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     with pytest.raises(GraphError, match="not a directory"):
         validate_project_path(str(f))
 
@@ -207,7 +207,7 @@ def test_remove_project_keep_cache(tmp_path, isolated_graphs):
     # Create a fake cache file
     cache_dir = isolated_graphs / pid / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    (cache_dir / "test.json").write_text("{}")
+    (cache_dir / "test.json").write_text("{}", encoding="utf-8")
 
     remove_project(pid, keep_cache=True)
     # Registration gone
@@ -297,7 +297,7 @@ def test_sweep_stale_temp_dirs_nonexistent_root_is_noop(tmp_path):
     sweep_stale_temp_dirs(_root=missing)  # must not raise
 
 def test_sweep_stale_temp_dirs_skips_files(tmp_path):
-    (tmp_path / "loose_file.txt").write_text("hello")
+    (tmp_path / "loose_file.txt").write_text("hello", encoding="utf-8")
     sweep_stale_temp_dirs(max_age_seconds=0, _root=tmp_path)  # age=0 removes everything old
     # File should remain (sweep only targets dirs)
     assert (tmp_path / "loose_file.txt").exists()

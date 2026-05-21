@@ -730,12 +730,22 @@ async def _handle_analyze_issue(
             missing_build_cmds = "\n".join(
                 f"  icx graph build --path {g['path']}"
                 for g in missing_graphs
-                if g["status"] in ("not_built", "not_registered")
+                if g["status"] == "not_built"
             )
+            missing_register_cmds = "\n".join(
+                f"  icx graph add --name <name> --path {g['path']}  then: icx graph build <name>"
+                for g in missing_graphs
+                if g["status"] == "not_registered"
+            )
+            _missing_parts: list[str] = []
+            if missing_build_cmds:
+                _missing_parts.append(f"To build unbuilt graphs:\n{missing_build_cmds}")
+            if missing_register_cmds:
+                _missing_parts.append(f"To register and build new graphs:\n{missing_register_cmds}")
             missing_note = (
-                f"\nNOTE - GRAPHS NOT AVAILABLE FOR SOME PATHS:\n{missing_build_cmds}\n"
-                "Inform the user. They can run the commands above to build the missing graphs.\n"
-            ) if missing_build_cmds else ""
+                "\nNOTE - GRAPHS NOT AVAILABLE FOR SOME PATHS:\n" + "\n".join(_missing_parts) + "\n"
+                "Inform the user. They can run the commands above to make these graphs available.\n"
+            ) if _missing_parts else ""
 
             stale_graphs = [g for g in graphs_info if g.get("stale_note")]
             stale_warning = "\n".join(
@@ -857,6 +867,29 @@ async def _handle_analyze_issue(
                     "MANDATORY: Tell the user exactly this before doing anything else:\n"
                     f"  'The ICX graph for this project has not been built yet. "
                     f"Run this in your terminal to build it: icx graph build --path {project_paths[0]}'\n\n"
+                    "Then proceed using grep/glob for file discovery.\n\n"
+                    "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                    "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
+                    "STEP 2: Read the located files.\n"
+                    "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
+                    "Present this confirmation format to the user and wait for their response:\n\n"
+                    + _CONFIRMATION_BLOCK + "\n\n"
+                    "STEP 4: Wait for explicit user approval. "
+                    "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                    "STEP 5: On explicit approval only - implement exactly the approach you stated, "
+                    "using memory.results as a pattern reference.\n"
+                    "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
+                    "STEP 7: Only after the user confirms it works - call save_memory."
+                    + _MANDATORY_TAIL
+                )
+            elif graph_status == "not_registered":
+                icx_instruction = (
+                    _VISION_GATE
+                    + "Graph not registered for this project.\n"
+                    "MANDATORY: Tell the user exactly this before doing anything else:\n"
+                    f"  'This project is not registered in ICX yet. Run these in your terminal:\n"
+                    f"     icx graph add --name <name> --path {project_paths[0]}\n"
+                    f"     icx graph build <name>'\n\n"
                     "Then proceed using grep/glob for file discovery.\n\n"
                     "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
                     "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"

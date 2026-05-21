@@ -34,7 +34,7 @@ def test_export_creates_valid_json(tmp_path):
     export_to_json(entries, out_path)
 
     assert out_path.exists()
-    data = json.loads(out_path.read_text())
+    data = json.loads(out_path.read_text(encoding="utf-8"))
     assert len(data["entries"]) == 2
     assert data["entries"][0]["issue_key"] == "PROJ-1"
 

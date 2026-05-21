@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 import sys
 import threading
@@ -121,11 +122,10 @@ def temp_root() -> Path:
 
 def _normalize_issue_key(issue_ref: str) -> str:
     """Extract bare issue key (e.g. 'PROJ-123') from a URL or bare key string."""
-    import re as _re
-    match = _re.search(r'([A-Z][A-Z0-9]*-\d+)', issue_ref.upper())
+    match = re.search(r'([A-Z][A-Z0-9]*-\d+)', issue_ref.upper())
     if match:
         return match.group(1)
-    safe = _re.sub(r'[^\w\-]', '_', issue_ref.strip())
+    safe = re.sub(r'[^\w\-]', '_', issue_ref.strip())
     return safe[:80] or "unknown"
 
 

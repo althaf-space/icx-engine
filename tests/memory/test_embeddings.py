@@ -19,14 +19,14 @@ def test_sentinel_absent_triggers_setup(tmp_path, monkeypatch):
         mock_dl.assert_called_once()
 
     assert (tmp_path / ".mem_initialized").exists()
-    assert (tmp_path / ".mem_initialized").read_text().strip() == emb_mod.EMBEDDING_MODEL
+    assert (tmp_path / ".mem_initialized").read_text(encoding="utf-8").strip() == emb_mod.EMBEDDING_MODEL
 
 
 def test_sentinel_present_skips_setup(tmp_path, monkeypatch):
     from icx_engine.memory import embeddings as emb_mod
     monkeypatch.setattr(emb_mod, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(emb_mod, "SENTINEL_PATH", tmp_path / ".mem_initialized")
-    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL)
+    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL, encoding="utf-8")
 
     with patch.object(emb_mod.EmbeddingsManager, "_download_model_files") as mock_dl:
         mgr = emb_mod.EmbeddingsManager()
@@ -39,7 +39,7 @@ def test_sentinel_model_mismatch_retriggers_setup(tmp_path, monkeypatch):
     monkeypatch.setattr(emb_mod, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(emb_mod, "MODEL_DIR", tmp_path / "model")
     sentinel = tmp_path / ".mem_initialized"
-    sentinel.write_text("some-old-model-name")
+    sentinel.write_text("some-old-model-name", encoding="utf-8")
     monkeypatch.setattr(emb_mod, "SENTINEL_PATH", sentinel)
 
     with patch.object(emb_mod.EmbeddingsManager, "_download_model_files"), \
@@ -47,7 +47,7 @@ def test_sentinel_model_mismatch_retriggers_setup(tmp_path, monkeypatch):
         mgr = emb_mod.EmbeddingsManager()
         mgr.ensure_ready()
 
-    assert sentinel.read_text().strip() == emb_mod.EMBEDDING_MODEL
+    assert sentinel.read_text(encoding="utf-8").strip() == emb_mod.EMBEDDING_MODEL
 
 
 def test_download_failure_raises_memory_error(tmp_path, monkeypatch):
@@ -107,7 +107,7 @@ def test_embed_returns_384_dim_list(tmp_path, monkeypatch):
     from icx_engine.memory import embeddings as emb_mod
     monkeypatch.setattr(emb_mod, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(emb_mod, "SENTINEL_PATH", tmp_path / ".mem_initialized")
-    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL)
+    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL, encoding="utf-8")
 
     mock_encoding = MagicMock()
     mock_encoding.ids = [101, 2023, 2003, 1037, 3231, 102]
@@ -136,7 +136,7 @@ def test_embed_passes_token_type_ids_when_model_expects_it(tmp_path, monkeypatch
     from icx_engine.memory import embeddings as emb_mod
     monkeypatch.setattr(emb_mod, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(emb_mod, "SENTINEL_PATH", tmp_path / ".mem_initialized")
-    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL)
+    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL, encoding="utf-8")
 
     mock_encoding = MagicMock()
     mock_encoding.ids = [101, 1000, 102]
@@ -171,7 +171,7 @@ def test_embed_empty_string_returns_zero_vector(tmp_path, monkeypatch):
     from icx_engine.memory import embeddings as emb_mod
     monkeypatch.setattr(emb_mod, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(emb_mod, "SENTINEL_PATH", tmp_path / ".mem_initialized")
-    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL)
+    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL, encoding="utf-8")
 
     mgr = emb_mod.EmbeddingsManager()
     result = mgr.embed("")
@@ -185,7 +185,7 @@ def test_embed_whitespace_only_returns_zero_vector(tmp_path, monkeypatch):
     from icx_engine.memory import embeddings as emb_mod
     monkeypatch.setattr(emb_mod, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(emb_mod, "SENTINEL_PATH", tmp_path / ".mem_initialized")
-    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL)
+    (tmp_path / ".mem_initialized").write_text(emb_mod.EMBEDDING_MODEL, encoding="utf-8")
 
     mgr = emb_mod.EmbeddingsManager()
     result = mgr.embed("   ")

@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import typer
 from pathlib import Path
 from typing import Annotated, Optional
@@ -1290,9 +1291,7 @@ def _build_uninstall_cmd() -> list[str]:
     return [sys.executable, "-m", "pip", "uninstall", "-y", "icx-engine"]
 
 
-_UNINSTALL_LOG = Path(
-    __import__("tempfile").gettempdir()
-) / "icx_uninstall_result.txt"
+_UNINSTALL_LOG = Path(tempfile.gettempdir()) / "icx_uninstall_result.txt"
 
 
 def _check_uninstall_result() -> None:
@@ -1321,7 +1320,6 @@ def _uninstall_package(console: Console) -> None:
     exe lock does not exist so we run the uninstall directly.
     """
     import os
-    import tempfile
 
     cmd = _build_uninstall_cmd()
 

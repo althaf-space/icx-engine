@@ -311,7 +311,7 @@ def test_config_manager_stores_token_in_keychain(isolated_config, monkeypatch):
     )
     cm.ConfigManager.save(config)
 
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     assert raw["connections"][0]["auth"]["api_token"] == cm._SENTINEL
 
     # Keychain uses new-format key
@@ -336,7 +336,7 @@ def test_config_manager_loads_token_from_keychain(isolated_config, monkeypatch):
         "default_connection": None,
     }
     isolated_config.parent.mkdir(parents=True, exist_ok=True)
-    isolated_config.write_text(json.dumps(skeleton))
+    isolated_config.write_text(json.dumps(skeleton), encoding="utf-8")
 
     loaded = cm.ConfigManager.load()
     assert loaded.connections[0].auth.api_token == "secret-tok"
@@ -356,7 +356,7 @@ def test_config_manager_plaintext_fallback_when_keychain_unavailable(isolated_co
     )
     cm.ConfigManager.save(config)
 
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     assert raw["connections"][0]["auth"]["api_token"] == "plain-tok"
 
     loaded = cm.ConfigManager.load()
@@ -379,7 +379,7 @@ def test_config_manager_stores_llm_profile_in_keychain(isolated_config, monkeypa
     )
     cm.ConfigManager.save(config)
 
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     assert raw["llm_profiles"]["work"]["text_config"]["api_key"] == cm._SENTINEL
     assert store["llm_text:work"] == "sk-abc123"
 
@@ -405,7 +405,7 @@ def test_config_manager_loads_llm_profile_from_keychain(isolated_config, monkeyp
         "default_connection": None,
     }
     isolated_config.parent.mkdir(parents=True, exist_ok=True)
-    isolated_config.write_text(json.dumps(skeleton))
+    isolated_config.write_text(json.dumps(skeleton), encoding="utf-8")
 
     loaded = cm.ConfigManager.load()
     assert loaded.llm_profiles["work"].text_config.api_key == "sk-abc123"
@@ -461,7 +461,7 @@ def test_config_manager_stores_llm_text_in_keychain(isolated_config, monkeypatch
     )
     cm.ConfigManager.save(config)
 
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     assert raw["llm_profiles"]["work"]["text_config"]["api_key"] == cm._SENTINEL
     assert raw["llm_profiles"]["work"]["image_config"]["api_key"] == cm._SENTINEL
     assert store["llm_text:work"] == "sk-text"
@@ -490,7 +490,7 @@ def test_config_manager_loads_llm_channels_from_keychain(isolated_config, monkey
         "default_connection": None,
     }
     isolated_config.parent.mkdir(parents=True, exist_ok=True)
-    isolated_config.write_text(json.dumps(skeleton))
+    isolated_config.write_text(json.dumps(skeleton), encoding="utf-8")
 
     loaded = cm.ConfigManager.load()
     assert loaded.llm_profiles["work"].text_config.api_key == "sk-text"
@@ -554,7 +554,7 @@ def test_config_manager_stores_oauth_tokens_in_keychain(isolated_config, monkeyp
     )
     cm.ConfigManager.save(config)
 
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     auth_raw = raw["connections"][0]["auth"]
     assert auth_raw["access_token"] == cm._SENTINEL
     assert auth_raw["refresh_token"] == cm._SENTINEL
@@ -592,7 +592,7 @@ def test_config_manager_loads_oauth_tokens_from_keychain(isolated_config, monkey
         "default_connection": None,
     }
     isolated_config.parent.mkdir(parents=True, exist_ok=True)
-    isolated_config.write_text(json.dumps(skeleton))
+    isolated_config.write_text(json.dumps(skeleton), encoding="utf-8")
 
     loaded = cm.ConfigManager.load()
     auth = loaded.connections[0].auth
@@ -618,7 +618,7 @@ def test_config_manager_oauth_plaintext_fallback_when_keychain_unavailable(isola
     )
     cm.ConfigManager.save(config)
 
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     auth_raw = raw["connections"][0]["auth"]
     assert auth_raw["access_token"] == "acc-plain"
     assert auth_raw["refresh_token"] == "ref-plain"
@@ -711,7 +711,7 @@ def test_concurrent_saves_produce_valid_config(isolated_config, monkeypatch):
 
     assert not errors, f"concurrent save errors: {errors}"
     # File must be valid JSON and loadable - no partial writes
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     assert isinstance(raw, dict)
     loaded = cm.ConfigManager.load()
     assert loaded.current_llm_profile == "p"
@@ -793,7 +793,7 @@ def test_dlock_long_oauth_token_stored_in_config_not_keychain(isolated_config, m
     )])
     cm.ConfigManager.save(config)
 
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     stored = raw["connections"][0]["auth"]["access_token"]
     assert stored.startswith(cm._DLOCK_PREFIX)
     assert "oauth_access:x.atlassian.net" not in store  # NOT written to keychain
@@ -836,7 +836,7 @@ def test_dlock_short_token_still_goes_to_keychain(isolated_config, monkeypatch):
         auth=TokenAuth(auth_type="token", email="a@b.com", api_token="short-tok"),
     )])
     cm.ConfigManager.save(config)
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     assert raw["connections"][0]["auth"]["api_token"] == cm._SENTINEL
     assert store["jira_token:x.atlassian.net"] == "short-tok"
 
@@ -871,7 +871,7 @@ def test_dlock_long_llm_api_key_stored_in_config_not_keychain(isolated_config, m
         current_llm_profile="work",
     )
     cm.ConfigManager.save(config)
-    raw = json.loads(isolated_config.read_text())
+    raw = json.loads(isolated_config.read_text(encoding="utf-8"))
     stored = raw["llm_profiles"]["work"]["text_config"]["api_key"]
     assert stored.startswith(cm._DLOCK_PREFIX)
     assert "llm_text:work" not in store

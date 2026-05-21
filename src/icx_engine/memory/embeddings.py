@@ -21,12 +21,12 @@ SENTINEL_PATH = MEMORY_DIR / ".mem_initialized"
 def _is_initialized() -> bool:
     if not SENTINEL_PATH.exists():
         return False
-    return SENTINEL_PATH.read_text().strip() == EMBEDDING_MODEL
+    return SENTINEL_PATH.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
 
 
 def _mark_initialized() -> None:
     MEMORY_DIR.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
-    SENTINEL_PATH.write_text(EMBEDDING_MODEL)
+    SENTINEL_PATH.write_text(EMBEDDING_MODEL, encoding="utf-8")
     if sys.platform != "win32":
         SENTINEL_PATH.chmod(0o600)
 
