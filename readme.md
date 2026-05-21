@@ -83,23 +83,29 @@ flowchart LR
 ```mermaid
 flowchart TD
     A([Agent: work item mentioned]) --> B[analyze_issue_fast\ntext-only - always first]
-    B --> C{pending_images\nnon-empty AND\nimages relevant?}
-    C -- yes --> D[analyze_issue\nfull vision + OCR]
-    C -- no --> E[Single response:\nwork_item + memory + graph\nimage_paths on disk]
-    D --> E
-    E --> F{graph.status?}
-    F -- ready --> G[Read graph.report_path\ncompact index - pre-authorized]
-    F -- building --> H[grep/glob for relevant files\nbuild in progress - do not wait]
-    F -- not_built --> HH[Tell user: run icx graph build\nthen grep/glob for files]
-    F -- other --> H
+    B --> E[Response received:\nwork_item + memory + graph\nimage_paths on disk]
+    E --> C{pending_images\nnon-empty AND\nimages relevant?}
+    C -- yes --> D[analyze_issue\nfull vision + OCR\nreturns same structure]
+    C -- no --> F{graph.status?}
+    D --> F
+    F -- ready --> GS{stale_note set?}
+    GS -- no --> G[Read graph.report_path\ncompact index - pre-authorized]
+    GS -- yes --> GW[Warn user: graph is stale\nRead graph.report_path]
+    GW --> G2
     G --> G2[Read GRAPH_CLUSTERS/name.md\nfull file list + role tags]
     G2 --> I[Read core files\nunderstand the code]
+    F -- building --> H[grep/glob for relevant files\nbuild in progress - do not wait]
+    F -- not_built --> HH[Tell user: run icx graph build\nthen grep/glob for files]
+    F -- not_registered --> HR[Tell user: run icx graph add\nthen grep/glob for files]
+    F -- other --> H
+    HH --> H
+    HR --> H
     H --> I
     I --> I2{Confirm with user:\nproblem + goal + files\nShall I proceed?}
     I2 -- yes / add context --> J[Use memory.results as pattern reference\nImplement per acceptance_criteria]
     J --> K[Ask developer to test manually]
     K -- fix confirmed --> L[save_memory\nresolution stored + temp images cleaned]
-    K -- needs changes --> J
+    K -- needs changes --> I2
 ```
 
 ### MCP headless - no AI provider
@@ -116,7 +122,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.3 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14** (3.15+ not yet supported)
+**Version:** 0.3.4 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
 
 ```
 pipx install icx-engine

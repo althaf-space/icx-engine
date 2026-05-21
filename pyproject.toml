@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.3.3"
+version = "0.3.4"
 description = "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development teams. Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP."
 readme = "readme.md"
 license = { file = "license" }
@@ -74,3 +74,8 @@ packages = ["src/icx_engine"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["tests"]
+filterwarnings = [
+    # google-genai uses a private typing internal deprecated in Python 3.14.
+    # Affects tests on 3.14; removal is Python 3.17 (outside our <3.15 range).
+    "ignore:.*_UnionGenericAlias.*:DeprecationWarning:google",
+]

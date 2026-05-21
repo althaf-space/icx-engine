@@ -183,6 +183,106 @@ async def test_vision_enrich_raises_clear_error_when_model_is_text_only():
             await vision_enrich(config, fake_bytes, "ocr fallback text")
 
 
+# ── SDK timeout parameters ────────────────────────────────────────────────────
+
+async def test_vision_enrich_anthropic_passes_timeout_90s():
+    """Anthropic vision call must include timeout=90.0 to prevent indefinite hang."""
+    config = ChannelConfig(provider="anthropic", model="claude-3-haiku-20240307", api_key="sk-ant-test")
+    fake_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock()]
+    mock_response.content[0].text = "result"
+
+    with patch("anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        await vision_enrich(config, fake_bytes, "ocr text", "shot.png")
+
+    _, kwargs = mock_client.messages.create.call_args
+    assert kwargs.get("timeout") == 90.0
+
+
+async def test_vision_enrich_openai_passes_timeout_90s():
+    """OpenAI-compat vision call must include timeout=90.0 to prevent indefinite hang."""
+    config = ChannelConfig(provider="openai", model="gpt-4o", api_key="sk-test")
+    fake_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "result"
+
+    with patch("openai.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+        await vision_enrich(config, fake_bytes, "ocr text", "shot.png")
+
+    _, kwargs = mock_client.chat.completions.create.call_args
+    assert kwargs.get("timeout") == 90.0
+
+
+async def test_vision_enrich_google_timeout_raises_context_build_error():
+    """A Google vision call that hits asyncio.wait_for timeout surfaces as ContextBuildError."""
+    import asyncio as _asyncio
+    from icx_engine.exceptions import ContextBuildError
+
+    config = ChannelConfig(provider="google", model="gemini-1.5-flash", api_key="goog-test")
+    fake_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+
+    async def _timeout_wait_for(*args, **kwargs):
+        raise _asyncio.TimeoutError
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = MagicMock(return_value=MagicMock())
+
+    with patch("google.genai.Client", return_value=mock_client):
+        with patch("icx_engine.connectors.attachments.asyncio.wait_for", new=_timeout_wait_for):
+            with pytest.raises(ContextBuildError):
+                await vision_enrich(config, fake_bytes, "ocr text", "shot.png")
+
+
+async def test_llm_summarize_anthropic_passes_timeout_90s():
+    """Anthropic summarize call must include timeout=90.0."""
+    from icx_engine.connectors.attachments import _llm_summarize
+
+    config = ChannelConfig(provider="anthropic", model="claude-3-haiku-20240307", api_key="sk-ant-test")
+
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock()]
+    mock_response.content[0].text = "summary"
+
+    with patch("anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        await _llm_summarize(config, "doc.pdf", "long content here")
+
+    _, kwargs = mock_client.messages.create.call_args
+    assert kwargs.get("timeout") == 90.0
+
+
+async def test_llm_summarize_openai_passes_timeout_90s():
+    """OpenAI-compat summarize call must include timeout=90.0."""
+    from icx_engine.connectors.attachments import _llm_summarize
+
+    config = ChannelConfig(provider="openai", model="gpt-4o-mini", api_key="sk-test")
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "summary"
+
+    with patch("openai.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+        await _llm_summarize(config, "doc.pdf", "long content here")
+
+    _, kwargs = mock_client.chat.completions.create.call_args
+    assert kwargs.get("timeout") == 90.0
+
+
 # ── UAE: document converters ──────────────────────────────────────────────────
 
 def test_convert_csv_returns_markdown_table():

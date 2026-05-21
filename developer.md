@@ -82,7 +82,7 @@ ICX/
 │   │       ├── parser.py       # Jira API JSON → RawIssueData
 │   │       ├── auth.py         # build_auth_header() for token and OAuth
 │   │       └── oauth.py        # refresh_oauth_if_needed()
-│   ├── graph/                  # codebase knowledge graph (v0.3.3+)
+│   ├── graph/                  # codebase knowledge graph (v0.3.4+)
 │   │   ├── __init__.py         # public exports: GraphManager, generate_graph_report
 │   │   ├── storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
 │   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta
@@ -316,6 +316,8 @@ The prompt uses a `{ocr_text}` placeholder filled at call time. If OCR produced 
 
 Provider routing in `vision_enrich()`: `_vision_enrich_anthropic` for Anthropic, `_vision_enrich_google` for Google (native `google-genai` SDK - `types.Part.from_bytes` for inline image data), `_vision_enrich_openai_compat` for all others. The same three-way routing applies to `_llm_summarize()` for large document summarization.
 
+**SDK timeouts:** Every vision enrichment and document summarization call enforces a 90-second timeout. Anthropic and OpenAI-compat calls pass `timeout=90.0` directly to the SDK. Google calls are wrapped with `asyncio.wait_for(..., timeout=90.0)`. A timeout surfaces as a `ContextBuildError` (vision) or falls back to truncation (summarization) - it never silently hangs. Without this, SDK-level defaults (600s) would cause MCP tool calls to block for up to 10 minutes on a misconfigured or unreachable API key.
+
 **LLM summarization (`_SUMMARIZE_SYSTEM`):**
 
 For documents that exceed `_SUMMARIZE_THRESHOLD` (20 000 chars) and an LLM is configured, `_llm_summarize()` compresses the content. `_SUMMARIZE_SYSTEM` explicitly mandates verbatim preservation of:
@@ -414,6 +416,10 @@ ICX exposes three tools over MCP:
 
 Memory search runs in a dedicated single-worker executor thread with a 30s timeout (handles ONNX model cold-start on first call; model stays resident thereafter). Graph info is resolved synchronously from filesystem only - no subprocess wait. Both run concurrently: immediately after `engine.run()` returns, memory search is fired as an `asyncio.create_task()`, then image writing and graph info execute synchronously while the memory task is in flight; the task is awaited last.
 
+**`engine.run()` timeout:** The call to `engine.run()` inside `_handle_analyze_issue` is wrapped in `asyncio.wait_for(timeout=660.0)` (11 minutes). This is a hard ceiling calculated from worst-case pipeline time: Jira fetch with 3 retries + max sleep delays (~210s), parallel attachment downloads (60s), parallel vision enrichment or summarization (90s), main LLM call (120s), visual grounding (45s), plus buffer. If the deadline elapses, `_handle_analyze_issue` returns `{"error": "Analysis timed out after 11 minutes..."}` - no exception is raised to the MCP host. Without this ceiling, a hung HTTP request or stalled SDK call would block the MCP tool indefinitely with no feedback to the user.
+
+**Windows UTF-8 startup fix:** `run_mcp_server()` calls `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` and `sys.stderr.reconfigure(encoding="utf-8", errors="replace")` before starting the event loop. On Windows, the default console codepage (cp1252) cannot encode characters like `→` that can appear in Jira issue content or LLM analysis output. Without this fix, any such character written to a text-mode stream raises `UnicodeEncodeError`, which on an uncaught path crashes the MCP server process and causes the MCP host to receive no response. The `errors="replace"` fallback ensures a single unencodable character never terminates the server.
+
 **Progress notifications:** `_handle_analyze_issue` sends MCP progress notifications via `_notify(step, message)` when the client includes a `progressToken` in `_meta`. The `_engine_log` callback is passed to `engine.run()` as `log=`; it maps internal log messages (containing "fetching", "attachment", "analyzing", "visual grounding") to progress steps 0.5-2.0. Steps 0.0 ("starting"), 3.0 ("searching memory"), and 5.0 ("ready") are sent directly from the handler. If no `progressToken` is present, `_notify` is a silent no-op.
 
 **Image temp file lifecycle:** Issue image attachments are written to `~/.icx/temp/<PROJ-123>/` by `_handle_analyze_issue` instead of being embedded as Base64 in the JSON response (which causes editors to truncate large payloads). Three cleanup triggers:
@@ -428,15 +434,17 @@ Every successful `_handle_analyze_issue` response includes `_icx_next.instructio
 
 All statuses share a mandatory **STEP 0 vision gate** prepended to the instruction: check `work_item.analysis.pending_images` - if non-empty AND the issue involves visual content (error screenshots, UI bugs, charts, images with embedded text/code), call `analyze_issue` immediately and use that response. Only proceed past STEP 0 if `pending_images` is empty or images are clearly decorative (logos, avatars).
 
-| Graph status | Instruction behaviour (after STEP 0 vision gate) |
+**STEP 0B - Convention discovery (non-bug work items only):** When `issue_type` is not `bug`, `defect`, `incident`, or `error`, a second mandatory step is injected after the vision gate. The agent is instructed to locate and read 2-3 existing implementations in the codebase that are similar in scope to the work item, and explicitly derive: (1) the layer/flow pattern the project uses (e.g. Controller->Service->ServiceImpl->Repository - not assumed, discovered from existing code), (2) file and class naming conventions per layer, (3) logger declaration and usage pattern, and (4) how external dependencies are added (pom.xml, package.json, requirements.txt, etc.). These are captured in the confirmation format. If any new external dependency is required, the agent must list it with name and version and wait for explicit user approval before writing a single line of implementation. This discovery step is intentionally framework-agnostic - it works for Spring Boot, Django, Express, FastAPI, Rails, or any other project structure because it reads from the actual codebase rather than assuming conventions.
+
+| Graph status | Instruction behaviour (after STEP 0 / STEP 0B) |
 |---|---|
-| `ready` (no stale_note) | Read `graph.report_path` (compact index); identify relevant cluster from table; read `GRAPH_CLUSTERS/<name>.md` for full file list; read core files; **present confirmation summary to user** (problem understood, goal, **approach** - exactly what will change and why, files list - ask "Shall I proceed?"); if confirmed implement; if user adds context incorporate and proceed; test; call `save_memory` |
+| `ready` (no stale_note) | Read `graph.report_path` (compact index); identify relevant cluster from table; read `GRAPH_CLUSTERS/<name>.md` for full file list; read core files; **present confirmation summary to user** (problem understood, goal, **approach** - exactly what will change and why, files list, conventions followed, new dependencies if any - ask "Shall I proceed?"); if confirmed implement; if user adds context incorporate and proceed; test; call `save_memory` |
 | `ready` (with stale_note) | Same as ready, but **first inform the user** of the staleness: X of Y files changed (Z%), suggest `icx graph build --path <project_path>` to refresh. Then proceed with the graph as normal. |
 | `building` | User-initiated build in progress; proceed now with grep/glob; optionally re-call `analyze_issue_fast` when ETA elapses to cross-check file selection |
 | `not_built` | **Tell the user** to run `icx graph build --path <project_path>` in their terminal; then proceed with grep/glob |
 | `not_registered` / `error` | Graph unavailable; proceed with grep/glob |
 
-**Confirmation gate:** When the graph is ready, the agent is instructed to present a structured summary before writing any code: problem statement (1-2 sentences), acceptance criteria as bullet points, **approach** (exactly what the agent will change/add/remove and precisely why that fixes the problem - specific enough for the user to reject and propose an alternative), and the list of files it plans to touch with their role tags. The user can confirm or redirect. If the user redirects, the agent must present a revised confirmation using the same format before starting.
+**Confirmation gate:** When the graph is ready, the agent is instructed to present a structured summary before writing any code: problem statement (1-2 sentences), acceptance criteria as bullet points, **approach** (exactly what the agent will change/add/remove and precisely why that fixes the problem - specific enough for the user to reject and propose an alternative), and the list of files it plans to touch with their role tags. For non-bug work items the confirmation format also includes "Conventions I will follow" (derived from existing code) and "New external dependencies required" (or "None"). The user can confirm or redirect. If the user redirects, the agent must present a revised confirmation using the same format before starting.
 
 Error responses from `_handle_analyze_issue` and `_handle_save_memory` do **not** include `_icx_next` - the agent should surface the error to the user instead.
 
@@ -1307,7 +1315,7 @@ chore: update pyproject.toml classifiers
 
 ## 13. Running the project locally
 
-**Python 3.11–3.14 required.** Python 3.15+ is not yet supported - `onnxruntime` (used by the memory engine) does not yet publish wheels for 3.15. This will be updated as soon as onnxruntime adds support.
+**Python 3.11–3.14 required.**
 
 ```bash
 # Clone and install in editable mode with dev dependencies

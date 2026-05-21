@@ -1,4 +1,5 @@
 ﻿"""Phase 3 tests - MCP host config management, MCP server handler, CLI mcp commands."""
+import asyncio
 import json
 import tomllib
 import pytest
@@ -1385,4 +1386,120 @@ def test_analyze_without_fast_flag_uses_full_vision():
 
     assert result.exit_code == 0
     assert captured[0]["skip_vision"] is False
+
+
+# ── Timeout handling ──────────────────────────────────────────────────────────
+
+async def test_engine_run_timeout_returns_error_json():
+    """When engine.run() exceeds 660s, _handle_analyze_issue returns a JSON error (no exception)."""
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=asyncio.TimeoutError)):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert "error" in data
+    assert "timed out" in data["error"].lower()
+    assert "type" not in data
+
+
+async def test_engine_run_timeout_error_is_not_generic_unexpected():
+    """Timeout error message must be specific, not the generic 'Unexpected error' fallback."""
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=asyncio.TimeoutError)):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert "Unexpected error" not in data["error"]
+
+
+# ── Non-bug instruction enhancement ──────────────────────────────────────────
+
+async def test_non_bug_instruction_includes_convention_discovery():
+    """For Story/Task issue types, _icx_next instruction includes the convention-discovery step."""
+    from icx_engine.models.output import IssueContext
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock()) as mock_run:
+            mock_run.return_value = IssueContext(
+                problem_summary="Add CSV export for users",
+                detailed_description="Users need to download their data",
+                reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+                acceptance_criteria=["Export button visible", "CSV downloads correctly"],
+                impact="medium", priority="Medium", issue_type="Story",
+                confidence_score=0.9, completeness_score=0.9, missing_information=[],
+            )
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+                "status": "ready",
+                "report_path": "/projects/my-svc/GRAPH_REPORT.md",
+                "access": "pre-authorized",
+                "eta_seconds": None,
+            }):
+                result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+
+    data = json.loads(result)
+    instruction = data["_icx_next"]["instruction"]
+    assert "CONVENTION DISCOVERY" in instruction
+    assert "LAYER / FLOW PATTERN" in instruction
+    assert "LOGGER PATTERN" in instruction
+    assert "DEPENDENCY MANAGEMENT" in instruction
+    assert "Conventions I will follow" in instruction
+    assert "New external dependencies required" in instruction
+    assert "**Shall I proceed?**" in instruction
+
+
+async def test_bug_instruction_does_not_include_convention_discovery():
+    """For Bug issue type, instruction must NOT include the convention-discovery step."""
+    from icx_engine.models.output import IssueContext
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock()) as mock_run:
+            mock_run.return_value = IssueContext(
+                problem_summary="Login fails on mobile",
+                detailed_description="d",
+                reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+                acceptance_criteria=[], impact="high", priority="High", issue_type="Bug",
+                confidence_score=0.9, completeness_score=0.9, missing_information=[],
+            )
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+                "status": "ready",
+                "report_path": "/projects/my-svc/GRAPH_REPORT.md",
+                "access": "pre-authorized",
+                "eta_seconds": None,
+            }):
+                result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+
+    data = json.loads(result)
+    instruction = data["_icx_next"]["instruction"]
+    assert "CONVENTION DISCOVERY" not in instruction
+    assert "Conventions I will follow" not in instruction
+    assert "New external dependencies required" not in instruction
+    assert "**Shall I proceed?**" in instruction
+
+
+async def test_task_instruction_includes_convention_discovery():
+    """Task issue type also triggers convention-discovery (it is non-bug)."""
+    from icx_engine.models.output import IssueContext
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock()) as mock_run:
+            mock_run.return_value = IssueContext(
+                problem_summary="Migrate database schema",
+                detailed_description="d",
+                reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+                acceptance_criteria=[], impact="high", priority="High", issue_type="Task",
+                confidence_score=0.9, completeness_score=0.9, missing_information=[],
+            )
+            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+                "status": "not_built",
+                "report_path": None,
+                "access": "",
+                "report_inline": "",
+                "eta_seconds": None,
+            }):
+                result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+
+    data = json.loads(result)
+    instruction = data["_icx_next"]["instruction"]
+    assert "CONVENTION DISCOVERY" in instruction
+    assert "New external dependencies required" in instruction
 
