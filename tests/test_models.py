@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import json
 import os
 import pytest
@@ -940,4 +940,59 @@ def test_issue_context_pending_images_in_json_output():
     )
     data = json.loads(ctx.model_dump_json())
     assert data["pending_images"] == ["diagram.png"]
+
+
+def test_issue_context_pending_audio_defaults_empty():
+    ctx = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    assert ctx.pending_audio == []
+
+
+def test_issue_context_pending_audio_populated():
+    ctx = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+        pending_audio=["meeting.mp3", "demo.mp4"],
+    )
+    assert ctx.pending_audio == ["meeting.mp3", "demo.mp4"]
+
+
+def test_issue_context_pending_audio_in_json_output():
+    ctx = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+        pending_audio=["note.wav"],
+    )
+    data = json.loads(ctx.model_dump_json())
+    assert data["pending_audio"] == ["note.wav"]
+
+
+def test_raw_issue_response_pending_fields_default_empty():
+    from icx_engine.models.output import RawIssueResponse
+    resp = RawIssueResponse(
+        issue_key="X-1", issue_type="Bug", summary="s", description="d",
+        comments=[], attachments=[], priority="High", status="Open", metadata={},
+    )
+    assert resp.pending_images == []
+    assert resp.pending_audio == []
+
+
+def test_raw_issue_response_pending_fields_serialize():
+    from icx_engine.models.output import RawIssueResponse
+    resp = RawIssueResponse(
+        issue_key="X-1", issue_type="Bug", summary="s", description="d",
+        comments=[], attachments=[], priority="High", status="Open", metadata={},
+        pending_images=["a.png"], pending_audio=["b.mp3"],
+    )
+    data = json.loads(resp.model_dump_json())
+    assert data["pending_images"] == ["a.png"]
+    assert data["pending_audio"] == ["b.mp3"]
 

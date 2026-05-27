@@ -1,7 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+import logging
 import re
 import sys
+import threading
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 from icx_engine.exceptions import MemoryError
 
@@ -71,7 +75,27 @@ class MemoryManager:
         import lancedb  # lazy import
         import pyarrow as pa
 
-        self._db = lancedb.connect(str(self._db_path))
+        _result: list = [None]
+        _exc: list = [None]
+
+        def _connect() -> None:
+            try:
+                _result[0] = lancedb.connect(str(self._db_path))
+            except Exception as e:
+                _exc[0] = e
+
+        _t = threading.Thread(target=_connect, daemon=True)
+        _t.start()
+        _t.join(3.0)
+        if _t.is_alive():
+            raise MemoryError(
+                f"LanceDB connection timed out after 3 s at {self._db_path}. "
+                "A stale file lock from a previous server process may be blocking access. "
+                "Restart your system or kill orphan icx processes to release the lock."
+            )
+        if _exc[0] is not None:
+            raise MemoryError(f"LanceDB connection failed: {_exc[0]}") from _exc[0]
+        self._db = _result[0]
         tables_response = self._db.list_tables()
         existing = (
             tables_response.tables
@@ -106,7 +130,7 @@ class MemoryManager:
 
     def save(self, entry: MemoryEntry) -> None:
         """Save or update a memory entry. One canonical record per issue_key."""
-        self._embeddings.ensure_ready()
+        self._embeddings.check_ready()
         vector = self._embeddings.embed(_build_embed_text(entry))
 
         row = {
@@ -141,12 +165,7 @@ class MemoryManager:
                     try:
                         table.create_fts_index(_fts_field, replace=True)
                     except Exception as exc:
-                        import sys
-                        print(
-                            f"[memory] FTS index on '{_fts_field}' failed ({exc}); "
-                            "that field will be excluded from keyword search.",
-                            file=sys.stderr,
-                        )
+                        _log.warning("FTS index on '%s' failed: %s; field excluded from keyword search", _fts_field, exc)
                 self._fts_ready = True
         except Exception as exc:
             raise MemoryError(f"Failed to save memory entry for {entry.issue_key}: {exc}") from exc
@@ -179,7 +198,7 @@ class MemoryManager:
         """Hybrid semantic + keyword search. Returns ranked PastInsight list.
         Falls back to vector-only if FTS index unavailable."""
         try:
-            self._embeddings.ensure_ready()
+            self._embeddings.check_ready()
         except MemoryError:
             return []
 
@@ -362,5 +381,13 @@ class MemoryManager:
         }
 
     def prewarm(self) -> None:
-        """Pre-warm the ONNX embedding model. Non-fatal; called at MCP server startup."""
-        self._embeddings.ensure_ready()
+        """Ensure ONNX model files are downloaded and eagerly load the ONNX session.
+
+        Eager loading avoids a 3-10 s lazy-load stall on the first tool call,
+        which would block the single-worker memory executor and cause a timeout.
+        """
+        self._embeddings.check_ready()
+        try:
+            self._embeddings._load_model()
+        except Exception:
+            raise

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from icx_engine.connectors.jira.config import JiraConnection
 
 # Maps connector_type string → BaseConnection subclass.

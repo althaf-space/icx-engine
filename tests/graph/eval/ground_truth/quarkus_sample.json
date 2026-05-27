@@ -1,0 +1,14 @@
+{
+  "fixture": "quarkus_sample",
+  "language": "java",
+  "framework": "quarkus",
+  "notes": "Quarkus + JAX-RS + CDI. Tests @Path/@GET route detection and @Inject field injection.",
+  "edges": [
+    {"source": "src/main/java/com/example/api/GreetingResource.java", "target": "src/main/java/com/example/service/GreetingService.java", "kind": "import"},
+
+    {"source": "src/main/java/com/example/api/GreetingResource.java:greetingresource", "target": "src/main/java/com/example/service/GreetingService.java:greetingservice", "kind": "di"},
+
+    {"source": "src/main/java/com/example/api/GreetingResource.java", "target": "src/main/java/com/example/api/GreetingResource.java:hello", "kind": "route"},
+    {"source": "src/main/java/com/example/api/GreetingResource.java", "target": "src/main/java/com/example/api/GreetingResource.java:custom", "kind": "route"}
+  ]
+}

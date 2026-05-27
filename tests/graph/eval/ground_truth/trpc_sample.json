@@ -1,0 +1,25 @@
+{
+  "fixture": "trpc_sample",
+  "language": "typescript",
+  "framework": "trpc",
+  "notes": "tRPC router with service/db layers. Tests import chains and function calls.",
+  "edges": [
+    {"source": "src/index.ts", "target": "src/trpc.ts", "kind": "import"},
+    {"source": "src/index.ts", "target": "src/routers/user.ts", "kind": "import"},
+    {"source": "src/index.ts", "target": "src/routers/post.ts", "kind": "import"},
+
+    {"source": "src/routers/user.ts", "target": "src/trpc.ts", "kind": "import"},
+    {"source": "src/routers/user.ts", "target": "src/services/userService.ts", "kind": "import"},
+
+    {"source": "src/routers/post.ts", "target": "src/trpc.ts", "kind": "import"},
+    {"source": "src/routers/post.ts", "target": "src/services/postService.ts", "kind": "import"},
+
+    {"source": "src/services/userService.ts", "target": "src/db/prisma.ts", "kind": "import"},
+    {"source": "src/services/userService.ts:listusers", "target": "src/db/prisma.ts:getdb", "kind": "call"},
+    {"source": "src/services/userService.ts:getuser", "target": "src/db/prisma.ts:getdb", "kind": "call"},
+
+    {"source": "src/services/postService.ts", "target": "src/db/prisma.ts", "kind": "import"},
+    {"source": "src/services/postService.ts:listposts", "target": "src/db/prisma.ts:getdb", "kind": "call"},
+    {"source": "src/services/postService.ts:createpost", "target": "src/db/prisma.ts:getdb", "kind": "call"}
+  ]
+}

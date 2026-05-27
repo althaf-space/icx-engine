@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import os
 import sys
 from pathlib import Path
@@ -44,9 +44,17 @@ class EmbeddingsManager:
         self._tokenizer = None
 
     def ensure_ready(self, console: Console | None = None) -> None:
+        """Download model files if not present. Only called from `icx setup`."""
         if _is_initialized():
             return
         self._download_and_init(console or Console(stderr=True))
+
+    def check_ready(self) -> None:
+        """Assert model files are present. Raises MemoryError if not - run `icx setup` to download."""
+        if not _is_initialized():
+            raise MemoryError(
+                "Embedding model not found. Run `icx setup` to download it."
+            )
 
     def _download_and_init(self, console: Console) -> None:
         console.print(

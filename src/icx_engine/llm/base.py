@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from abc import ABC, abstractmethod
 from icx_engine.models.config import ChannelConfig
 from icx_engine.models.output import RawIssueData, IssueContext
@@ -80,9 +80,9 @@ RULES:
   reproduction_steps as [] and expected_behavior / actual_behavior as null.
 - priority: copy the value from [PRIORITY] verbatim. Do not infer.
 - issue_type: copy the value from [ISSUE_TYPE] verbatim. Do not infer.
-- confidence_score (0.0–1.0): how clear and internally consistent the
+- confidence_score (0.0-1.0): how clear and internally consistent the
   input is.
-- completeness_score (0.0–1.0): fraction of required details present. The
+- completeness_score (0.0-1.0): fraction of required details present. The
   system will recompute this deterministically - return your best estimate.
 - missing_information: return []. The system recomputes it deterministically.\
 """

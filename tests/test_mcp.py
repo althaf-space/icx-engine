@@ -1,4 +1,4 @@
-﻿"""Phase 3 tests - MCP host config management, MCP server handler, CLI mcp commands."""
+"""Phase 3 tests - MCP host config management, MCP server handler, CLI mcp commands."""
 import asyncio
 import json
 import tomllib
@@ -504,29 +504,19 @@ async def test_handle_analyze_issue_unknown_profile_returns_error_json(mcp_confi
     assert "ghost-profile" in data["error"]
 
 
-async def test_list_tools_includes_profile_names_in_description():
-    from icx_engine.mcp_server import _list_tools
-    config = AppConfig(
-        llm_profiles={"fast": LLMConfig(text_config=ChannelConfig(provider="ollama", model="llama3")),
-                      "pro":  LLMConfig(text_config=ChannelConfig(provider="ollama", model="mixtral"))},
-    )
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = config
-        tools = await _list_tools()
-
-    fast_tool = next(t for t in tools if t.name == "analyze_issue_fast")
-    description = fast_tool.description
-    assert "fast" in description
-    assert "pro" in description
-    assert "profile" in description.lower()
-
-
-async def test_list_tools_profile_hint_absent_when_no_profiles():
+async def test_list_tools_does_not_call_config_load():
+    """_list_tools must not call ConfigManager.load() - doing so triggers a 3s keyring
+    health check that blocks the MCP initialization handshake and prevents connection."""
     from icx_engine.mcp_server import _list_tools
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
+    mock_cm.load.assert_not_called()
+    assert len(tools) > 0
 
+
+async def test_list_tools_no_profile_hint_in_description():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
     for tool in tools:
         assert "Available in your config" not in tool.description
 
@@ -554,26 +544,63 @@ async def test_list_tools_returns_core_tools():
 
 @respx.mock
 async def test_handle_analyze_issue_fast_returns_work_item_json(mcp_config_with_llm):
+    """Fast mode returns RawIssueResponse(mode='fast_partial') with attachment_processing='skipped_all'."""
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
     )
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = mcp_config_with_llm
-        with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
-                result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"], skip_vision=True)
+        with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"], skip_vision=True)
     data = json.loads(result)
     assert "work_item" in data
     assert data["work_item"]["type"] == "Bug"
+    assert data["work_item"]["analysis"]["mode"] == "fast_partial"
+    assert data["work_item"]["attachment_processing"] == "skipped_all"
     assert "pending_images" in data["work_item"]["analysis"]
+    assert "pending_audio" in data["work_item"]["analysis"]
+    assert "pending_documents" in data["work_item"]["analysis"]
     # image_paths always present in work_item (empty dict when no images)
     assert "image_paths" in data["work_item"]
     assert isinstance(data["work_item"]["image_paths"], dict)
     # raw base64 images must never appear in the analysis payload
     assert "images" not in data["work_item"]["analysis"]
+
+
+async def test_mcp_fast_tool_uses_15s_timeout():
+    """analyze_issue_fast must use a 15s timeout."""
+    timeout_used = {}
+
+    async def _capture_timeout(coro, timeout):
+        timeout_used["value"] = timeout
+        raise asyncio.TimeoutError()
+
+    with patch("icx_engine.mcp_server.asyncio.wait_for", side_effect=_capture_timeout):
+        with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+            mock_cm.load.return_value = AppConfig()
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/p"], skip_vision=True)
+
+    assert timeout_used.get("value") == 15.0
+    data = json.loads(result)
+    assert "error" in data
+
+
+async def test_mcp_full_tool_uses_660s_timeout():
+    """analyze_issue must use a 660s timeout."""
+    timeout_used = {}
+
+    async def _capture_timeout(coro, timeout):
+        timeout_used["value"] = timeout
+        raise asyncio.TimeoutError()
+
+    with patch("icx_engine.mcp_server.asyncio.wait_for", side_effect=_capture_timeout):
+        with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+            mock_cm.load.return_value = AppConfig()
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/p"], skip_vision=False)
+
+    assert timeout_used.get("value") == 660.0
+    data = json.loads(result)
+    assert "error" in data
 
 
 @respx.mock
@@ -709,15 +736,19 @@ async def test_call_tool_save_memory_rejects_oversized_tag_entry():
 
 # ── Tool count and schema ─────────────────────────────────────────────────────
 
-async def test_list_tools_returns_three_tools():
+async def test_list_tools_returns_eight_tools():
     from icx_engine.mcp_server import _list_tools
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 3
+    assert len(tools) == 8
     names = {t.name for t in tools}
-    assert names == {"analyze_issue_fast", "analyze_issue", "save_memory"}
+    assert names == {
+        "analyze_issue_fast", "analyze_issue", "save_memory",
+        "graph_find_context", "graph_call_chain", "graph_impact", "graph_subsystem",
+        "graph_cross_links",
+    }
 
 
 async def test_analyze_tool_schema_requires_project_paths():
@@ -1050,6 +1081,7 @@ async def test_icx_next_instruction_contains_vision_gate():
         data = json.loads(result)
         instruction = data["_icx_next"]["instruction"]
         assert "pending_images" in instruction, f"Vision gate missing for graph_status={graph_status!r}"
+        assert "pending_audio" in instruction, f"Audio gate missing for graph_status={graph_status!r}"
         assert "analyze_issue" in instruction, f"Escalation call missing for graph_status={graph_status!r}"
         assert "STEP 0" in instruction, f"STEP 0 label missing for graph_status={graph_status!r}"
 

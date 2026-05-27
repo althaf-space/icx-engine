@@ -1,0 +1,92 @@
+{
+  "fixture": "fastapi_large",
+  "language": "python",
+  "framework": "fastapi",
+  "notes": "Realistic FastAPI app with routers, deps, service+repo layers, SQLAlchemy models, and middleware. Symbol names match parser labels (lowercase, no class prefix, no trailing parens).",
+  "edges": [
+    {"source": "app/main.py", "target": "app/api/v1/router.py", "kind": "import"},
+    {"source": "app/main.py", "target": "app/core/middleware.py", "kind": "import"},
+
+    {"source": "app/core/security.py", "target": "app/core/config.py", "kind": "import"},
+    {"source": "app/core/security.py:current_user_id", "target": "app/core/security.py:decode_token", "kind": "call"},
+    {"source": "app/core/security.py:current_user_id", "target": "app/core/config.py:get_settings", "kind": "di"},
+
+    {"source": "app/db/session.py", "target": "app/core/config.py", "kind": "import"},
+
+    {"source": "app/db/models/user.py", "target": "app/db/session.py", "kind": "import"},
+    {"source": "app/db/models/user.py:user", "target": "app/db/session.py:base", "kind": "inherit"},
+
+    {"source": "app/db/models/post.py", "target": "app/db/session.py", "kind": "import"},
+    {"source": "app/db/models/post.py:post", "target": "app/db/session.py:base", "kind": "inherit"},
+
+    {"source": "app/db/repositories/user_repo.py", "target": "app/db/models/user.py", "kind": "import"},
+    {"source": "app/db/repositories/user_repo.py:get", "target": "app/db/models/user.py:user", "kind": "reference"},
+    {"source": "app/db/repositories/user_repo.py:find_by_email", "target": "app/db/models/user.py:user", "kind": "reference"},
+    {"source": "app/db/repositories/user_repo.py:create", "target": "app/db/models/user.py:user", "kind": "reference"},
+
+    {"source": "app/db/repositories/post_repo.py", "target": "app/db/models/post.py", "kind": "import"},
+    {"source": "app/db/repositories/post_repo.py:list_for_author", "target": "app/db/models/post.py:post", "kind": "reference"},
+    {"source": "app/db/repositories/post_repo.py:create", "target": "app/db/models/post.py:post", "kind": "reference"},
+
+    {"source": "app/services/user_service.py", "target": "app/core/security.py", "kind": "import"},
+    {"source": "app/services/user_service.py", "target": "app/db/repositories/user_repo.py", "kind": "import"},
+    {"source": "app/services/user_service.py", "target": "app/db/models/user.py", "kind": "import"},
+    {"source": "app/services/user_service.py", "target": "app/schemas/user.py", "kind": "import"},
+    {"source": "app/services/user_service.py:register", "target": "app/core/security.py:hash_password", "kind": "call"},
+    {"source": "app/services/user_service.py:authenticate", "target": "app/core/security.py:verify_password", "kind": "call"},
+
+    {"source": "app/services/post_service.py", "target": "app/db/repositories/post_repo.py", "kind": "import"},
+    {"source": "app/services/post_service.py", "target": "app/db/models/post.py", "kind": "import"},
+    {"source": "app/services/post_service.py", "target": "app/schemas/post.py", "kind": "import"},
+
+    {"source": "app/api/v1/deps.py", "target": "app/db/repositories/user_repo.py", "kind": "import"},
+    {"source": "app/api/v1/deps.py", "target": "app/db/repositories/post_repo.py", "kind": "import"},
+    {"source": "app/api/v1/deps.py", "target": "app/db/session.py", "kind": "import"},
+    {"source": "app/api/v1/deps.py", "target": "app/services/user_service.py", "kind": "import"},
+    {"source": "app/api/v1/deps.py", "target": "app/services/post_service.py", "kind": "import"},
+    {"source": "app/api/v1/deps.py:get_user_repo", "target": "app/db/session.py:get_db", "kind": "di"},
+    {"source": "app/api/v1/deps.py:get_post_repo", "target": "app/db/session.py:get_db", "kind": "di"},
+    {"source": "app/api/v1/deps.py:get_user_service", "target": "app/api/v1/deps.py:get_user_repo", "kind": "di"},
+    {"source": "app/api/v1/deps.py:get_post_service", "target": "app/api/v1/deps.py:get_post_repo", "kind": "di"},
+    {"source": "app/api/v1/deps.py:get_user_repo", "target": "app/db/repositories/user_repo.py:userrepo", "kind": "call"},
+    {"source": "app/api/v1/deps.py:get_post_repo", "target": "app/db/repositories/post_repo.py:postrepo", "kind": "call"},
+    {"source": "app/api/v1/deps.py:get_user_service", "target": "app/services/user_service.py:userservice", "kind": "call"},
+    {"source": "app/api/v1/deps.py:get_post_service", "target": "app/services/post_service.py:postservice", "kind": "call"},
+
+    {"source": "app/api/v1/router.py", "target": "app/api/v1/routes/auth.py", "kind": "import"},
+    {"source": "app/api/v1/router.py", "target": "app/api/v1/routes/users.py", "kind": "import"},
+    {"source": "app/api/v1/router.py", "target": "app/api/v1/routes/posts.py", "kind": "import"},
+
+    {"source": "app/api/v1/routes/auth.py", "target": "app/api/v1/deps.py", "kind": "import"},
+    {"source": "app/api/v1/routes/auth.py", "target": "app/services/user_service.py", "kind": "import"},
+    {"source": "app/api/v1/routes/auth.py:issue_token", "target": "app/api/v1/deps.py:get_user_service", "kind": "di"},
+
+    {"source": "app/api/v1/routes/users.py", "target": "app/api/v1/deps.py", "kind": "import"},
+    {"source": "app/api/v1/routes/users.py", "target": "app/core/security.py", "kind": "import"},
+    {"source": "app/api/v1/routes/users.py", "target": "app/schemas/user.py", "kind": "import"},
+    {"source": "app/api/v1/routes/users.py", "target": "app/services/user_service.py", "kind": "import"},
+    {"source": "app/api/v1/routes/users.py:register_user", "target": "app/api/v1/deps.py:get_user_service", "kind": "di"},
+    {"source": "app/api/v1/routes/users.py:read_me", "target": "app/api/v1/deps.py:get_user_service", "kind": "di"},
+    {"source": "app/api/v1/routes/users.py:read_me", "target": "app/core/security.py:current_user_id", "kind": "di"},
+
+    {"source": "app/api/v1/routes/posts.py", "target": "app/api/v1/deps.py", "kind": "import"},
+    {"source": "app/api/v1/routes/posts.py", "target": "app/core/security.py", "kind": "import"},
+    {"source": "app/api/v1/routes/posts.py", "target": "app/schemas/post.py", "kind": "import"},
+    {"source": "app/api/v1/routes/posts.py", "target": "app/services/post_service.py", "kind": "import"},
+    {"source": "app/api/v1/routes/posts.py:list_my_posts", "target": "app/api/v1/deps.py:get_post_service", "kind": "di"},
+    {"source": "app/api/v1/routes/posts.py:list_my_posts", "target": "app/core/security.py:current_user_id", "kind": "di"},
+    {"source": "app/api/v1/routes/posts.py:publish_post", "target": "app/api/v1/deps.py:get_post_service", "kind": "di"},
+    {"source": "app/api/v1/routes/posts.py:publish_post", "target": "app/core/security.py:current_user_id", "kind": "di"},
+
+    {"source": "app/schemas/user.py:usercreate", "target": "app/schemas/user.py:userbase", "kind": "inherit"},
+    {"source": "app/schemas/user.py:userout", "target": "app/schemas/user.py:userbase", "kind": "inherit"},
+    {"source": "app/schemas/post.py:postcreate", "target": "app/schemas/post.py:postbase", "kind": "inherit"},
+    {"source": "app/schemas/post.py:postout", "target": "app/schemas/post.py:postbase", "kind": "inherit"},
+
+    {"source": "app/api/v1/routes/auth.py", "target": "app/api/v1/routes/auth.py:issue_token", "kind": "route"},
+    {"source": "app/api/v1/routes/users.py", "target": "app/api/v1/routes/users.py:register_user", "kind": "route"},
+    {"source": "app/api/v1/routes/users.py", "target": "app/api/v1/routes/users.py:read_me", "kind": "route"},
+    {"source": "app/api/v1/routes/posts.py", "target": "app/api/v1/routes/posts.py:list_my_posts", "kind": "route"},
+    {"source": "app/api/v1/routes/posts.py", "target": "app/api/v1/routes/posts.py:publish_post", "kind": "route"}
+  ]
+}

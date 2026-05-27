@@ -1,0 +1,17 @@
+{
+  "fixture": "jsts_advanced",
+  "language": "typescript",
+  "framework": "mixed",
+  "notes": "Advanced JS/TS patterns: Redux configureStore reducer-to-slice mapping (relation), GraphQL resolver new-instance DI (di), Vue Options API component registration (renders). Import edges intentionally omitted - tested in other fixtures.",
+  "edges": [
+    {"source": "src/store/index.ts", "target": "src/store/usersSlice.ts", "kind": "relation", "notes": "configureStore reducer: users -> usersReducer"},
+    {"source": "src/store/index.ts", "target": "src/store/postsSlice.ts", "kind": "relation", "notes": "configureStore reducer: posts -> postsReducer"},
+
+    {"source": "src/resolvers/index.ts", "target": "src/services/user.service.ts", "kind": "di", "notes": "new UserService()"},
+    {"source": "src/resolvers/index.ts", "target": "src/services/post.service.ts", "kind": "di", "notes": "new PostService()"},
+    {"source": "src/resolvers/index.ts", "target": "src/resolvers/user.resolver.ts", "kind": "di", "notes": "new UserResolver()"},
+    {"source": "src/resolvers/index.ts", "target": "src/resolvers/post.resolver.ts", "kind": "di", "notes": "new PostResolver()"},
+
+    {"source": "src/components/UserList.vue", "target": "src/components/PostCard.vue", "kind": "renders", "notes": "components: { PostCard } Options API"}
+  ]
+}

@@ -74,7 +74,10 @@ ICX/
 │   │   ├── http.py             # shared HTTP status → ICX exception mapping
 │   │   ├── attachments.py      # Universal Attachment Engine - connector-agnostic OCR,
 │   │   │                       # vision enrichment, formula annotation, Base64 capture,
-│   │   │                       # document conversion, and LLM summarization
+│   │   │                       # document conversion, audio/video transcription, LLM summarization
+│   │   ├── audio.py            # WhisperManager (faster-whisper, sentinel-cached ~74 MB base model),
+│   │   │                       # transcribe_openai / transcribe_google / cleanup_transcript_llm,
+│   │   │                       # transcribe() dispatch with local-fallback semantics
 │   │   └── jira/               # Jira connector (see section 5 for how it's structured)
 │   │       ├── config.py       # JiraConnection, TokenAuth, JiraOAuthAuth models
 │   │       ├── connector.py    # JiraConnector - implements ConnectorBase
@@ -82,13 +85,32 @@ ICX/
 │   │       ├── parser.py       # Jira API JSON → RawIssueData
 │   │       ├── auth.py         # build_auth_header() for token and OAuth
 │   │       └── oauth.py        # refresh_oauth_if_needed()
-│   ├── graph/                  # codebase knowledge graph (v0.3.5+)
+│   ├── graph/                  # codebase knowledge graph
 │   │   ├── __init__.py         # public exports: GraphManager, generate_graph_report
 │   │   ├── storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
-│   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta
+│   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta, progress event writer
 │   │   ├── change.py           # check_staleness, current_git_commit, ChangeResult
 │   │   ├── querier.py          # generate_graph_report - writes GRAPH_REPORT.md index + GRAPH_CLUSTERS/
-│   │   └── manager.py          # GraphManager - register, build, status, list, remove, resolve; LLM descriptions
+│   │   ├── manager.py          # GraphManager - register, build, status, list, remove, resolve; LLM descriptions
+│   │   ├── paths.py            # path resolution, sub-project detection, git root helpers
+│   │   ├── progress.py         # cross-process build progress channel (subprocess writes, parent tails)
+│   │   ├── query.py            # GraphQuerier - find_context, get_call_chain, get_impact, get_subsystem
+│   │   ├── tsserver.py         # tsserver lifecycle: private install under ~/.icx/tsserver/, Node version tracking
+│   │   └── parser/             # vendored AST parser (tree-sitter, LSP, semantic resolvers)
+│   │       ├── extract.py      # entry point: extract(files, ...) -> extraction dict
+│   │       ├── analyze.py      # per-file AST analysis via tree-sitter
+│   │       ├── build.py        # graph assembly from extraction result
+│   │       ├── cluster.py      # Louvain community detection
+│   │       ├── export.py       # graph.json serialisation, to_context_json
+│   │       ├── detect.py       # language and extension detection, _is_noise_dir
+│   │       ├── icxignore.py    # .icxignore per-project exclusion patterns
+│   │       ├── confidence.py   # edge confidence scoring
+│   │       ├── roles.py        # file role tag detection
+│   │       ├── validate.py     # graph integrity validation
+│   │       ├── dedup.py        # duplicate edge deduplication
+│   │       ├── lsp_client.py   # generic LSP stdio JSON-RPC client
+│   │       ├── lsp_manager.py  # LSP lifecycle: install, version-track, spawn, kill
+│   │       └── resolvers/      # semantic edge resolvers (Spring, React, Django, FastAPI, etc.)
 │   ├── services/
 │   │   └── connection_service.py  # platform auth flows (_connect_jira_token, _connect_jira_oauth)
 │   ├── memory/                 # local LanceDB + ONNX memory (see section 7)
@@ -112,12 +134,28 @@ ICX/
 │   ├── test_mcp.py             # MCP server + CLI profile + graph MCP tool tests
 │   ├── test_management.py      # ICX status / ICX logout / ICX apikey management tests
 │   ├── graph/
-│   │   ├── test_storage.py     # storage.py: register, lookup, meta, remove
-│   │   ├── test_change.py      # change.py: staleness thresholds, git/mtime fallback
-│   │   ├── test_builder.py     # builder.py: ETA, isolated build error handling
-│   │   ├── test_querier.py     # querier.py: community clusters, god nodes, directory fallback, report generation
-│   │   └── test_manager.py     # manager.py: register/build/query/resolve integration
+│   │   ├── test_storage.py             # storage.py: register, lookup, meta, remove
+│   │   ├── test_change.py              # change.py: staleness thresholds, git/mtime fallback
+│   │   ├── test_builder.py             # builder.py: ETA, isolated build error handling
+│   │   ├── test_querier.py             # querier.py: community clusters, god nodes, report generation
+│   │   ├── test_manager.py             # manager.py: register/build/query/resolve integration
+│   │   ├── test_query.py               # GraphQuerier: find_context, get_call_chain, get_impact, get_subsystem
+│   │   ├── test_cluster_weights.py     # cluster weight and community detection edge cases
+│   │   ├── test_confidence.py          # edge confidence scoring
+│   │   ├── test_cross_service_rest.py  # REST cross-service edge resolver
+│   │   ├── test_export_resolver_tag.py # export resolver tag annotation
+│   │   ├── test_graph_info.py          # graph info MCP response structure
+│   │   ├── test_java_inferred_upgrade.py # Java inferred dependency upgrade resolver
+│   │   ├── test_java_interface_impl.py # Java interface/implementation edge resolver
+│   │   ├── test_python_type_checking.py # Python TYPE_CHECKING import resolver
+│   │   ├── test_react_lazy.py          # React.lazy + dynamic import resolver
+│   │   ├── test_roles.py               # file role tag detection
+│   │   ├── test_universal_ast.py       # universal AST edge extraction
+│   │   ├── test_validate.py            # graph integrity validation
+│   │   └── eval/                       # precision/recall evaluation harness (see eval/readme.md)
+│   ├── test_mcp_memory_budget.py   # MCP memory warm/cold/failed/timeout budget tests
 │   └── connectors/
+│       ├── test_audio.py       # audio.py: WhisperManager, transcription dispatch, provider routing
 │       └── jira/
 │           ├── test_parsing.py # JiraConnector.parse_input() tests
 │           ├── test_parser.py  # parse_issue_response() tests
@@ -153,14 +191,17 @@ engine.run(input_str, config, connection=None, log=None, mcp_mode=False, profile
   │
   ├─ [if attachments]
   │   ├─ [if skip_vision=True]
-  │   │   └─ _split_attachments() separates image files from non-image files
+  │   │   └─ _split_attachments() separates image, audio/video, and document files
   │   │       image filenames → pending_images (collected, not processed)
-  │   │       non-image URLs → passed to process_attachments normally
+  │   │       audio/video filenames → pending_audio (collected, not processed)
+  │   │       document URLs → passed to process_attachments normally
   │   └─ [if skip_vision=False (default)]
   │       └─ attachment_texts, images = await connector.process_attachments(raw, active_llm)
   │           # Universal Attachment Engine (connectors/attachments.py):
-  │           #   images    → OCR (Tesseract) + optional vision LLM + Base64 capture
-  │           #   documents → CSV/Excel/PDF/DOCX/TXT conversion (see UAE section below)
+  │           #   images       → OCR (Tesseract) + optional vision LLM + Base64 capture
+  │           #   documents    → CSV/Excel/PDF/DOCX/TXT conversion (see UAE section below)
+  │           #   audio        → local Whisper or LLM-native transcription → attachment_texts
+  │           #   video        → imageio-ffmpeg extracts WAV → audio pipeline → attachment_texts
   │           #   all processed in parallel via asyncio.gather
   │
   ├─ [no LLM configured - MCP headless mode]
@@ -283,6 +324,10 @@ Provider routing: `_verify_anthropic` for Anthropic, `_verify_google` for Google
 
 - **Documents** (`_process_document`): converts to text/Markdown, then passes through `_llm_summarize()` if the result exceeds `_SUMMARIZE_THRESHOLD` (20 000 chars).
 
+- **Audio** (`_process_audio`): downloads bytes, transcribes via `connectors.audio.transcribe()` dispatch, writes the transcript into `attachment_texts` under the original filename. No Base64 capture - audio bytes are not preserved in the output. Supported extensions: `AUDIO_EXTENSIONS = {.mp3, .wav, .m4a, .ogg, .flac, .aac, .opus}`.
+
+- **Video** (`_process_video`): downloads bytes, extracts audio via `_extract_audio_from_video()` (imageio-ffmpeg static binary, 16 kHz mono PCM WAV), then routes through the audio pipeline. Transcript stored in `attachment_texts`. Supported extensions: `VIDEO_EXTENSIONS = {.mp4, .mov, .avi, .mkv, .webm}`. ffmpeg subprocess is killed on `asyncio.TimeoutError` (120 s) and non-zero exit codes raise `RuntimeError` rather than passing partial/empty bytes to Whisper.
+
 Returns `tuple[dict[str, str], dict[str, str]]` - `(attachment_texts, images)` where `images` maps filename → Base64 string for every successfully downloaded image.
 
 **Document converters:**
@@ -327,6 +372,25 @@ For documents that exceed `_SUMMARIZE_THRESHOLD` (20 000 chars) and an LLM is co
 - Any `### [TECHNICAL LOGIC: <filename>]` block - entire block reproduced
 
 Without an LLM configured, content is truncated at `_SUMMARIZE_THRESHOLD` with a `[Content truncated]` note appended.
+
+### Audio engine (`connectors/audio.py`)
+
+Provider-aware transcription pipeline. `connectors.attachments._process_audio` and `_process_video` both call `audio.transcribe(config, audio_bytes, fname, whisper)`:
+
+| Provider | Strategy | Fallback |
+|---|---|---|
+| `openai` | OpenAI Whisper API (`whisper-1`, large-v2 accuracy), `timeout=120s` | local Whisper on exception |
+| `google` | Gemini native audio via `google-genai`, wrapped in `asyncio.wait_for(timeout=120s)` | local Whisper on exception |
+| `anthropic` / `xai` / `nim` / `ollama` | local Whisper → text LLM cleanup (`cleanup_transcript_llm`) | cleanup returns original transcript on any error |
+| no LLM configured | local Whisper only | none - transcript may be empty |
+
+**`WhisperManager`** lazy-loads the `faster-whisper` base model (~74 MB) into `~/.icx/audio/model/` on first transcription. A sentinel file at `~/.icx/audio/.whisper_initialized` records that the download completed, so subsequent runs skip the one-time setup banner. The `_load()` method is guarded by `threading.Lock` with double-checked locking so concurrent A/V attachments queued through `asyncio.gather` never race on first-time download or duplicate model construction.
+
+**`atranscribe()`** runs `model.transcribe(path, beam_size=5)` in the default thread executor to keep the asyncio event loop responsive.
+
+**`_local_transcribe`** writes audio bytes to a `NamedTemporaryFile(delete=False)` with the original suffix (or `.mp3` fallback), passes the path to `WhisperManager.atranscribe`, then unlinks the file in `finally` (OS errors swallowed - Windows file-in-use is harmless on Linux unlink semantics).
+
+**MIME mapping** lives in `_AUDIO_MIME` and is used only by `transcribe_google` to set `types.Part.from_bytes(mime_type=...)`. Unknown extensions fall through to `"audio/mpeg"`.
 
 ### LLM analysis contract (`llm/base.py`)
 
@@ -515,13 +579,14 @@ class IssueContext(BaseModel):
     impact: str
     priority: str
     issue_type: str                    # always from source metadata via finalize()
-    confidence_score: float            # 0.0–1.0, LLM-provided
-    completeness_score: float          # 0.0–1.0, recomputed by finalize(); capped at 0.79
+    confidence_score: float            # 0.0-1.0, LLM-provided
+    completeness_score: float          # 0.0-1.0, recomputed by finalize(); capped at 0.79
                                        # for Story/Task/Epic with spreadsheets when no schema block
     missing_information: list[str]     # recomputed by finalize(); may include "missing_schema"
     images: dict[str, str] = {}        # filename → Base64; always populated when images exist
     past_insights: list[PastInsight] = Field(default_factory=list)  # populated by CLI memory enrichment
     pending_images: list[str] = Field(default_factory=list)  # image filenames not processed (fast mode only)
+    pending_audio: list[str] = Field(default_factory=list)   # audio + video filenames not processed (fast mode only)
 ```
 
 `completeness_score` and `missing_information` are **always recomputed deterministically** by `llm/base.py:finalize()` - the LLM's values for these fields are discarded. Do not change this behavior.
@@ -530,7 +595,9 @@ class IssueContext(BaseModel):
 
 In MCP mode, `_handle_analyze_issue` writes the Base64 image bytes to disk (`~/.icx/temp/<issue_key>/`) and **excludes** the `images` dict from the serialized `work_item.analysis`. The on-disk paths are returned in `work_item.image_paths` instead. This prevents editors from truncating the MCP response due to large Base64 payloads.
 
-`pending_images` is populated only when `skip_vision=True` (fast mode). It lists the filenames of image attachments that exist but were not processed. In full-vision mode this field is always empty. In MCP mode this is the mandatory escalation gate: every `_icx_next` instruction begins with STEP 0 which requires the agent to evaluate `pending_images` before doing anything else. If non-empty AND the issue involves visual content (error screenshots, UI bugs, charts, embedded text), the agent must call `analyze_issue` immediately with the same parameters and use that response instead.
+The CLI follows the same pattern: `cli.py:analyze` pops `images` from `result.model_dump_json()`, writes each Base64 blob to `~/.icx/temp/<key>/` using `temp_images_dir()`, and inserts an `image_paths` mapping into the printed JSON. Base64 never lands on stdout.
+
+`pending_images` is populated only when `skip_vision=True` (fast mode). It lists the filenames of image attachments that exist but were not processed. `pending_audio` follows the identical contract for audio and video attachments (the field name is `pending_audio` but it includes video filenames - they share the same fast-mode skip path because both flow through the audio engine). In full-vision mode both fields are always empty. In MCP mode this is the mandatory escalation gate: every `_icx_next` instruction begins with STEP 0 which requires the agent to evaluate **both** `pending_images` and `pending_audio` before doing anything else. If either is non-empty AND the issue involves relevant media (error screenshots, UI bugs, charts, embedded text, voice notes, screen-capture videos), the agent must call `analyze_issue` immediately with the same parameters and use that response instead.
 
 ### `RawIssueResponse` - MCP headless mode output
 
@@ -549,8 +616,10 @@ class RawIssueResponse(BaseModel):
     status: str
     metadata: dict
     due_date: str | None = None
-    attachment_texts: dict[str, str] = {}  # filename → extracted text (incl. formula annotations)
+    attachment_texts: dict[str, str] = {}  # filename → extracted text (incl. formula annotations, audio transcripts)
     images: dict[str, str] = {}            # filename → Base64
+    pending_images: list[str] = Field(default_factory=list)  # image filenames not processed (fast mode only)
+    pending_audio: list[str] = Field(default_factory=list)   # audio + video filenames not processed (fast mode only)
     note: str = (
         "No LLM analysis performed - no API key configured. "
         "Raw issue data, digested documents, and raw images are provided for your direct analysis."
@@ -867,7 +936,7 @@ Hybrid search: dense ANN vector search + BM25 FTS merged with Reciprocal Rank Fu
 
 - Vector search finds semantically similar issues even when wording differs
 - FTS catches exact technical terms (error codes, function names, file paths)
-- Cosine similarity is computed from vector distance (`1.0 - _distance`) and used as the reported score (0.0–1.0)
+- Cosine similarity is computed from vector distance (`1.0 - _distance`) and used as the reported score (0.0-1.0)
 - Entries below `min_score` are filtered out before ranking - irrelevant results never appear regardless of DB size
 - RRF (k=60) is used for ranking among qualified candidates only; it does not affect score values
 - Default: top_k=3, min_score=0.65
@@ -914,18 +983,36 @@ except Exception as _mem_exc:
 
 ## 7a. Graph Module
 
-The graph module lives at `src/icx_engine/graph/` and provides codebase knowledge graph capabilities via [graphifyy](https://pypi.org/project/graphifyy/) (pip package, double-y).
+The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/parser/` is a vendored fork of [graphify](https://github.com/safishamsi/graphify) at commit `990ac706`, used under the MIT License (see file headers). ICX does not depend on a pip package for the parser - all parser code is bundled under `graph/parser/`.
 
 ### Module files
 
 | File | Responsibility |
 |---|---|
 | `graph/__init__.py` | Public exports: `GraphManager`, `generate_graph_report` |
-| `graph/storage.py` | Project registry, `ProjectInfo` dataclass, path helpers for `~/.icx/graphs/` and `~/.icx/temp/` |
-| `graph/builder.py` | `_build_project_isolated` (top-level for pickle), `estimate_build_eta` |
+| `graph/storage.py` | Project registry, `ProjectInfo` dataclass, path helpers for `~/.icx/graphs/` and `~/.icx/temp/`; `icxignore_path()` |
+| `graph/builder.py` | `_build_project_isolated` (top-level for pickle), `estimate_build_eta`, progress event emission |
 | `graph/change.py` | `check_staleness`, `current_git_commit`, `ChangeResult` |
 | `graph/querier.py` | `generate_graph_report` - reads `graph.json`, writes compact `GRAPH_REPORT.md` index + `GRAPH_CLUSTERS/<name>.md` per-cluster files; `_role_tag`, `_sanitize_cluster_filename` |
 | `graph/manager.py` | `GraphManager` - register, build, status, list, remove, resolve; `_generate_cluster_descriptions` (LLM step) |
+| `graph/paths.py` | Path resolution and sub-project detection; safe git command helpers; `_GIT_BASE_CMD` |
+| `graph/progress.py` | Cross-process build progress channel: `ProgressEmitter` writes newline-delimited JSON events to a temp file; parent process tails and forwards to Rich Progress or no-op |
+| `graph/query.py` | `GraphQuerier` - loads `graph.json` once; `find_context(task)`, `get_call_chain(node_id)`, `get_impact(node_id)`, `get_subsystem(file_path)` for programmatic AI agent queries |
+| `graph/tsserver.py` | tsserver lifecycle under `~/.icx/tsserver/`; Node version tracking; kill+reinstall on runtime drift |
+| `graph/parser/extract.py` | Entry point: `extract(files, ...)` - orchestrates AST pass, returns extraction dict |
+| `graph/parser/analyze.py` | Per-file tree-sitter AST analysis |
+| `graph/parser/build.py` | Graph assembly from extraction result |
+| `graph/parser/cluster.py` | Louvain community detection |
+| `graph/parser/export.py` | `graph.json` serialisation; `to_context_json` compact export |
+| `graph/parser/detect.py` | Language and extension detection; `_is_noise_dir` |
+| `graph/parser/icxignore.py` | `.icxignore` per-project exclusion patterns; seeded with defaults on first build |
+| `graph/parser/confidence.py` | Edge confidence scoring |
+| `graph/parser/roles.py` | File role tag detection (mirrors `querier.py:_role_tag`) |
+| `graph/parser/validate.py` | Graph integrity validation |
+| `graph/parser/dedup.py` | Duplicate edge deduplication |
+| `graph/parser/lsp_client.py` | Generic LSP stdio JSON-RPC client |
+| `graph/parser/lsp_manager.py` | LSP lifecycle: detect runtime, install language server, version-track, spawn, kill |
+| `graph/parser/resolvers/` | Semantic edge resolvers: Spring, React, Django, FastAPI, Flask, Next.js, Vue, Svelte, Remix, SQLAlchemy, Celery, pytest fixtures, Redux, GraphQL, JPA, JAX-RS, Lombok, Kotlin, TypeScript LSP, Pyright LSP, Java symbols, Python Jedi, Python type-checking, cross-service REST, and more |
 
 ### Storage layout
 
@@ -957,21 +1044,21 @@ All graph data is stored in `~/.icx/graphs/` (created with `0o700`, never inside
 
 ### Build pipeline
 
-Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build calls `_build_project_isolated()` - a **top-level** function (required for pickle on Windows):
+Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build calls `_build_project_isolated()` - a **top-level** function (required for pickle on Windows). A `ProgressEmitter` writes newline-delimited JSON events to a temp file throughout the build; the parent process tails this file and forwards events to a Rich Progress bar (CLI) or a no-op renderer (MCP/background).
 
-1. Sets `os.chdir(icx_cache)` and patches `graphify.cache.cache_dir` to redirect all cache writes into `~/.icx/graphs/<id>/cache/` (safe in subprocess). Also passes `cache_root=icx_cache` explicitly to `extract()` - graphify infers `effective_root` from absolute file paths when `cache_root` is omitted, which causes `graphify-out/` to appear in the project root. Passing `cache_root` prevents any writes to the project directory.
+1. Sets `os.chdir(icx_cache)` and patches `parser.cache.cache_dir` to redirect all cache writes into `~/.icx/graphs/<id>/cache/` (safe in subprocess). Also passes `cache_root=icx_cache` explicitly to `extract()` to prevent any writes to the project directory.
 2. `_collect_source_files(project_path)` → file list (git-first, fallback to filtered rglob)
-   - **Git path:** `git ls-files --cached --others --exclude-standard` filtered by `_GRAPHIFY_EXTENSIONS` - respects `.gitignore`, excludes `node_modules`, `dist`, `target`, etc.
-   - **Fallback:** rglob filtered by `_SKIP_DIRS` (node_modules, dist, build, .next, vendor, __pycache__, etc.)
-3. **AST extraction** - `extract(files, cache_root=icx_cache, parallel=False)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses. `parallel=False` is intentional: `_build_project_isolated` already runs inside a `ProcessPoolExecutor` subprocess; spawning grandchild processes on Windows deadlocks due to the "spawn" context re-importing parent modules.
-4. **LLM edge enrichment** (optional, runs when a model is configured) - `extract_corpus_parallel()` sends file batches to the LLM to extract cross-file semantic edges (imports, calls, inheritance). Only edges are merged into the AST result; LLM-assigned community IDs are discarded (they collide across chunk boundaries).
-5. `build_from_json(extraction)` + `cluster(G)` + `to_json(G, communities, output_path=graph_tmp_path)`
-6. Writes to `graph.json.tmp` then renames atomically to `graph.json` (`_finalise_build`)
-7. **LLM cluster descriptions** (optional) - `_generate_cluster_descriptions(graph_path)` reads the built graph, sends a single batch prompt to the LLM with top-5 files per cluster, receives JSON of `{community_id: one-sentence description}`, writes `cluster_descriptions.json` alongside `graph.json`. Non-fatal: silently skipped when no LLM is configured or on any failure.
-8. **Report generation** - `generate_graph_report(graph_json_path, output_path)` writes `GRAPH_REPORT.md` index and `GRAPH_CLUSTERS/` directory (see Report generation section).
-9. Returns `{file_count, node_count, edge_count, community_count, extraction_mode, error}`
-
-On `ImportError` (graphifyy not installed), returns `{"error": "..."}` dict instead of raising - builder never crashes the process.
+   - **Git path:** `git ls-files --cached --others --exclude-standard` filtered by `_PARSER_EXTENSIONS` - respects `.gitignore`, excludes `node_modules`, `dist`, `target`, etc. Archive directories (`.war/`, `.jar/`, etc.) and committed vendor files (minified file ratio heuristic) are also filtered.
+   - **Fallback:** rglob filtered by `_is_noise_dir` from `parser/detect.py`
+   - **`.icxignore` exclusions:** patterns from `~/.icx/graphs/<project_id>/.icxignore` are applied after file collection (seeded with defaults on first build).
+3. **AST extraction** (`emit: scan, ast`) - `parser.extract.extract(files, cache_root=icx_cache, parallel=False, on_progress=...)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses. `parallel=False` prevents grandchild process spawning inside the subprocess (deadlocks on Windows with the "spawn" context).
+4. **LSP + semantic resolver pass** (`emit: lsp`) - runs language-appropriate resolvers in order; each resolver appends edges to the extraction dict. Resolvers run per-language (Python, Java, Kotlin, JS/TS). Resolver failures are logged at DEBUG and skipped - never fatal. LSP servers (Pyright, tsserver) are managed by `lsp_manager.py` under `~/.icx/` and version-tracked against the active Node / Python runtime.
+5. **LLM edge enrichment** (optional, `emit: llm`) - `extract_corpus_parallel()` sends file batches to the LLM for cross-file semantic edges. Only edges merged; LLM community IDs discarded (collide across chunk boundaries).
+6. **Community detection** (`emit: louvain`) - `build_from_json(extraction)` + `cluster(G)` → merged graph with Louvain communities.
+7. **Export** (`emit: export`) - `to_json(G, communities, output_path=graph_tmp_path)` writes `graph.json.tmp`, then `_finalise_build` renames atomically to `graph.json`.
+8. **LLM cluster descriptions** (optional) - `_generate_cluster_descriptions(graph_path)` sends top-5 files per cluster to the LLM, writes `cluster_descriptions.json`. Non-fatal: silently skipped when no LLM configured or on any failure.
+9. **Report generation** - `generate_graph_report(graph_json_path, output_path)` writes `GRAPH_REPORT.md` index and `GRAPH_CLUSTERS/` directory (see Report generation section).
+10. Returns `{file_count, node_count, edge_count, community_count, extraction_mode, error}`
 
 ### Build states
 
@@ -1044,11 +1131,24 @@ Languages with no established role conventions (C, C++, Lua, Zig, Julia, PS1, SQ
 
 Only clusters with 2+ files are shown in the index - single-file clusters are noise.
 
+### GraphQuerier API (`graph/query.py`)
+
+`GraphQuerier` loads `graph.json` once and exposes four read-only query methods for programmatic AI agent use:
+
+| Method | Returns | Description |
+|---|---|---|
+| `find_context(task)` | `list[ContextResult]` | Score-ranked files relevant to a task description (TF-IDF-style scoring over node labels and file paths) |
+| `get_call_chain(node_id)` | `CallChain` | Upstream callers + downstream callees for a node, BFS-limited to depth 3 |
+| `get_impact(node_id)` | `ImpactResult` | All dependents (direct + transitive) grouped by edge confidence tier |
+| `get_subsystem(file_path)` | `SubsystemResult` | Community containing the file, with core files and cross-cluster connections |
+
+Agents can instantiate `GraphQuerier(graph_json_path)` directly from the path returned in the `graph.report_path` parent directory. The class is stateless after construction - all methods are safe to call concurrently.
+
 ### What NOT to touch
 
 - `graph/builder.py:_build_project_isolated` - must remain a top-level function (not lambda/nested/method) for pickle safety on Windows with `ProcessPoolExecutor`. The `_redirected_cache_dir` inner function is acceptable (defined inside the subprocess, never pickled itself).
-- `graph/builder.py:_collect_source_files` - git-first file collection. Do not revert to calling `graphify.collect_files` directly - it does not respect `.gitignore` and will include `node_modules` and other build artifacts for JS/TS/Java projects.
-- `graph/builder.py:_build_project_isolated` - `cache_root=icx_cache` must be passed to `extract()`. When omitted, graphify infers `effective_root` from the absolute paths of source files (= project root) and writes `graphify-out/` into the project directory. The `os.chdir` and `_gcache.cache_dir` patches alone are not sufficient because graphify resolves cache paths from `effective_root`, not cwd.
+- `graph/builder.py:_collect_source_files` - git-first file collection with vendor filtering. Do not replace with direct `rglob` - it does not respect `.gitignore` and includes `node_modules` and build artifacts.
+- `graph/builder.py:_build_project_isolated` - `cache_root=icx_cache` must be passed to `extract()`. When omitted, the parser infers `effective_root` from absolute source file paths (= project root) and writes output into the project directory.
 - `graph/storage.py:derive_project_id` - changing the hash function or length invalidates all existing project IDs.
 - `graph/querier.py:_role_tag` hook detection - the check `stem.startswith("use") and len(stem) > 3 and stem[3].isupper()` is intentional. React hooks start with lowercase `use` + uppercase letter. Changing to `sl.startswith("use")` causes false matches on `userList`, `userActions` etc.
 - `graph/querier.py` deduplication - the `used_filenames` set must use `.lower()` for membership checks. Windows NTFS is case-insensitive; without this, two communities with labels like "Modal" and "modal" silently overwrite each other's cluster file.
@@ -1279,8 +1379,16 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 | `llm/base.py:finalize()` | Do not skip. Do not change scoring logic or the `missing_schema` / completeness cap without updating all related tests. |
 | `connectors/attachments.py:_SUMMARIZE_SYSTEM` | Preservation mandates for column headers, formula annotations, and tagged blocks are load-bearing - weakening them causes structured data to be silently dropped during LLM summarization of large documents. |
 | `connectors/attachments.py:_convert_xlsx` | The dual-pass formula annotation and `_FORMULA_ANNOTATE_ROWS = 4` scope are the upstream source of `(Formula: EXPR)` cells that `SYSTEM_PROMPT` mandates. Do not collapse to a single pass. |
+| `connectors/audio.py:WHISPER_MODEL` | Changing the model string requires re-downloading and invalidates the sentinel at `~/.icx/audio/.whisper_initialized`. Existing users see the one-time setup banner again. Bump the sentinel format too if you change it. |
+| `connectors/audio.py:SENTINEL_PATH` / `MODEL_DIR` | Path constants are referenced by tests via `monkeypatch`. Renaming them requires test updates. The `~/.icx/audio/` layout is also referenced in `readme.md`. |
+| `graph/parser/icxignore.py:_SEED_CONTENT` | Default exclusion pattern list seeded into new `.icxignore` files on first build. Removing patterns here means future first-build users include those files; changing format requires updating the file header comments. |
+| `graph/progress.py:STAGES` | Stage string constants consumed by the parent-side renderer to display named progress steps. Adding stages is additive (renderer shows unknown stages as-is); removing or renaming stages silently drops the corresponding progress bar step. |
+| `graph/tsserver.py` | tsserver install path and version-tracking logic must stay aligned with `lsp_manager.py` and `resolvers/ts_lsp.py`. If you change the install dir (`~/.icx/tsserver/`), update all three files and the `readme.md` reference. |
+| `graph/parser/lsp_manager.py` | Generic LSP lifecycle. Language-specific servers (ts_lsp, pyright_lsp) inherit from this. Do not add language-specific logic here - add a new resolver file instead. |
+| `connectors/audio.py:WhisperManager._load` | Lock + double-checked locking is required - concurrent A/V attachments run through `asyncio.gather` and hit `_load()` from multiple executor threads. Removing the lock races the first-time download. |
+| `connectors/attachments.py:_extract_audio_from_video` | The `try/except asyncio.TimeoutError -> proc.kill(); await proc.wait()` block prevents orphan ffmpeg processes on timeout. The `proc.returncode != 0 -> raise RuntimeError` check prevents passing empty/partial WAV bytes to Whisper. Do not collapse either guard. |
 | `config_manager.py:_SENTINEL` | Do not change the sentinel string - it would invalidate all existing saved configs. |
-| `auth/pkce.py` | Generic OAuth utility. Do not add Jira-specific logic here. When `webbrowser.open()` returns `False` or raises, the URL is printed to stderr for manual copy - this is intentional headless behaviour, do not remove it. Port binding tries `callback_port` through `callback_port + 4` (default 8765–8769); a clear `OSError` is raised if all are occupied. When a fallback port is used, a warning is printed to stderr. |
+| `auth/pkce.py` | Generic OAuth utility. Do not add Jira-specific logic here. When `webbrowser.open()` returns `False` or raises, the URL is printed to stderr for manual copy - this is intentional headless behaviour, do not remove it. Port binding tries `callback_port` through `callback_port + 4` (default 8765-8769); a clear `OSError` is raised if all are occupied. When a fallback port is used, a warning is printed to stderr. |
 | `auth/token.py` | Generic auth utilities. Do not add provider-specific logic here. |
 | `connectors/attachments.py` | Connector-agnostic UAE. Do not add platform-specific logic here. |
 | `grounding.py:_VERIFY_USER_TEMPLATE` | Grounding prompt is carefully tuned. The phrase "Visual evidence takes priority over text. Correct any contradictions found in the JSON." must remain present. |
@@ -1315,7 +1423,7 @@ chore: update pyproject.toml classifiers
 
 ## 13. Running the project locally
 
-**Python 3.11–3.14 required.**
+**Python 3.11-3.14 required.**
 
 ```bash
 # Clone and install in editable mode with dev dependencies

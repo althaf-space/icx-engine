@@ -3,17 +3,24 @@ import asyncio
 import base64
 import csv
 import io
+import logging
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Callable
 
 from icx_engine.models.config import LLMConfig, ChannelConfig
 from icx_engine.models.output import RawIssueData
 
+_log = logging.getLogger(__name__)
+
 # -- Extension sets ------------------------------------------------------------
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
 DOCUMENT_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf", ".docx", ".txt"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".opus"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 # -- Limits --------------------------------------------------------------------
 
@@ -43,6 +50,16 @@ _DEFAULT_BASE_URLS = {
     "ollama": "http://localhost:11434/v1",
 }
 
+_whisper_singleton: "WhisperManager | None" = None
+
+
+def _get_whisper() -> "WhisperManager":
+    global _whisper_singleton
+    if _whisper_singleton is None:
+        from icx_engine.connectors.audio import WhisperManager
+        _whisper_singleton = WhisperManager()
+    return _whisper_singleton
+
 
 def _is_image(filename: str) -> bool:
     return Path(filename).suffix.lower() in IMAGE_EXTENSIONS
@@ -50,6 +67,14 @@ def _is_image(filename: str) -> bool:
 
 def _is_document(filename: str) -> bool:
     return Path(filename).suffix.lower() in DOCUMENT_EXTENSIONS
+
+
+def _is_audio(filename: str) -> bool:
+    return Path(filename).suffix.lower() in AUDIO_EXTENSIONS
+
+
+def _is_video(filename: str) -> bool:
+    return Path(filename).suffix.lower() in VIDEO_EXTENSIONS
 
 
 def _tesseract_available() -> bool:
@@ -404,8 +429,7 @@ async def _llm_summarize(config: ChannelConfig, filename: str, content: str) -> 
         )
         return (resp.choices[0].message.content or content[:_SUMMARIZE_THRESHOLD]).strip()
     except Exception as exc:
-        import sys
-        print(f"    [summarize] LLM summarization failed ({exc}) - truncating content", file=sys.stderr)
+        _log.warning("LLM summarization failed (%s); truncating content", exc)
         return content[:_SUMMARIZE_THRESHOLD] + _TRUNCATION_NOTE
 
 
@@ -465,6 +489,321 @@ async def _process_document(
     return filename, text, ""
 
 
+_VIDEO_FRAME_PROMPT = (
+    "This is frame {frame_num} of {total_frames} from a screen recording showing a software "
+    "issue or UI interaction. The following text was extracted via OCR from this frame:\n\n"
+    "{ocr_text}\n\n"
+    "Describe exactly what you see: which UI elements are visible, what data is shown in "
+    "tables or lists, any filter values or date ranges selected, error messages, what the "
+    "user appears to be doing, and any unexpected or incorrect behavior. "
+    "Be specific about field values, column headers, visible records, and any visual "
+    "discrepancies. Return only the description, nothing else."
+)
+
+_WHISPER_NOISE_RE = None
+
+
+def _is_empty_transcript(transcript: str) -> bool:
+    """Return True if Whisper output is noise/silence rather than real speech."""
+    global _WHISPER_NOISE_RE
+    import re
+    if _WHISPER_NOISE_RE is None:
+        _WHISPER_NOISE_RE = re.compile(r'^[\s\.…\,\!\?\-\_\(\)]*$')
+    return not transcript.strip() or bool(_WHISPER_NOISE_RE.fullmatch(transcript.strip()))
+
+
+_SETUP_REQUIRED_MSG = (
+    "[Audio transcription unavailable - run 'icx setup' in your terminal to download "
+    "the Whisper model, then retry]"
+)
+
+
+def _is_setup_required_error(exc: Exception) -> bool:
+    return isinstance(exc, RuntimeError) and "icx setup" in str(exc)
+
+
+async def _extract_frames_from_video(
+    video_bytes: bytes,
+    fname: str,
+    fps: float = 0.5,
+    max_frames: int = 8,
+) -> list[bytes]:
+    """Extract JPEG frames from video using ffmpeg. Returns list of JPEG bytes."""
+    import imageio_ffmpeg
+    suffix = Path(fname).suffix.lower() or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as vf:
+        vf.write(video_bytes)
+        video_path = vf.name
+    frame_dir = tempfile.mkdtemp()
+    try:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-i", video_path,
+            "-vf", f"fps={fps}",
+            "-frames:v", str(max_frames),
+            "-q:v", "5",
+            os.path.join(frame_dir, "frame%04d.jpg"),
+            "-y",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=60.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            return []
+        frames: list[bytes] = []
+        for i in range(1, max_frames + 1):
+            frame_path = os.path.join(frame_dir, f"frame{i:04d}.jpg")
+            if os.path.exists(frame_path):
+                with open(frame_path, "rb") as f:
+                    frames.append(f.read())
+        return frames
+    except Exception:
+        return []
+    finally:
+        try:
+            os.unlink(video_path)
+        except OSError:
+            pass
+        try:
+            shutil.rmtree(frame_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+async def _describe_video_frame(
+    config: "ChannelConfig",
+    frame_bytes: bytes,
+    frame_num: int,
+    total_frames: int,
+) -> str:
+    """OCR + vision-enrich a single video frame. Returns description string."""
+    ocr_text = ocr_image(frame_bytes)
+    prompt = _VIDEO_FRAME_PROMPT.format(
+        frame_num=frame_num,
+        total_frames=total_frames,
+        ocr_text=ocr_text or "(no OCR output)",
+    )
+    try:
+        b64 = base64.b64encode(frame_bytes).decode()
+        if config.provider == "anthropic":
+            from anthropic import AsyncAnthropic
+            client = AsyncAnthropic(api_key=config.api_key)
+            resp = await client.messages.create(
+                model=config.model,
+                max_tokens=512,
+                timeout=90.0,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": prompt},
+                ]}],
+            )
+            return resp.content[0].text.strip() if resp.content else ocr_text
+        if config.provider == "google":
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=config.api_key)
+            resp = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=config.model,
+                    contents=[
+                        types.Part.from_bytes(data=frame_bytes, mime_type="image/jpeg"),
+                        types.Part.from_text(text=prompt),
+                    ],
+                ),
+                timeout=90.0,
+            )
+            return (resp.text or ocr_text).strip()
+        from openai import AsyncOpenAI
+        kwargs: dict = {"api_key": config.api_key or "ollama"}
+        base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
+        if base_url:
+            kwargs["base_url"] = base_url
+        client = AsyncOpenAI(**kwargs)
+        resp = await client.chat.completions.create(
+            model=config.model,
+            max_tokens=512,
+            timeout=90.0,
+            messages=[{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": prompt},
+            ]}],
+        )
+        return (resp.choices[0].message.content or ocr_text).strip()
+    except Exception:
+        return ocr_text
+
+
+async def _extract_audio_from_video(video_bytes: bytes, fname: str) -> bytes:
+    """Extract audio track from video bytes as WAV (16 kHz mono) using imageio-ffmpeg."""
+    import imageio_ffmpeg
+    suffix = Path(fname).suffix.lower() or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as vf:
+        vf.write(video_bytes)
+        video_path = vf.name
+    audio_fd, audio_path = tempfile.mkstemp(suffix=".wav")
+    os.close(audio_fd)
+    try:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-i", video_path,
+            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            audio_path, "-y",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            raise
+        if proc.returncode != 0:
+            msg = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
+            raise RuntimeError(
+                f"ffmpeg exited with code {proc.returncode}: {msg[-500:]}"
+            )
+        with open(audio_path, "rb") as f:
+            return f.read()
+    finally:
+        for p in (video_path, audio_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
+async def _process_audio(
+    filename: str,
+    content_url: str,
+    downloader,
+    text_config: "ChannelConfig | None",
+    whisper,
+    log: Callable[[str], None] | None,
+) -> tuple[str, str, str]:
+    """Download audio, transcribe via LLM or local Whisper. Returns (filename, transcript, "")."""
+    try:
+        audio_bytes = await downloader.download_attachment(content_url)
+    except Exception as exc:
+        if log:
+            log(f"    {filename}: download failed ({exc}) - skipped")
+        return filename, "", ""
+    try:
+        from icx_engine.connectors.audio import transcribe as audio_transcribe
+        transcript = await audio_transcribe(text_config, audio_bytes, filename, whisper)
+    except Exception as exc:
+        if _is_setup_required_error(exc):
+            if log:
+                log(f"    {filename}: Whisper model not installed - run 'icx setup'")
+            return filename, _SETUP_REQUIRED_MSG, ""
+        if log:
+            log(f"    {filename}: transcription failed ({exc}) - skipped")
+        return filename, "", ""
+    if log:
+        log(f"    {filename}: transcript: {len(transcript)} chars")
+    return filename, transcript, ""
+
+
+async def _process_video(
+    filename: str,
+    content_url: str,
+    downloader,
+    text_config: "ChannelConfig | None",
+    image_config: "ChannelConfig | None",
+    whisper,
+    log: Callable[[str], None] | None,
+) -> tuple[str, str, str]:
+    """Download video, extract audio + transcribe; fall back to frame analysis for screen recordings."""
+    try:
+        video_bytes = await downloader.download_attachment(content_url)
+    except Exception as exc:
+        if log:
+            log(f"    {filename}: download failed ({exc}) - skipped")
+        return filename, "", ""
+
+    # --- Audio path ---
+    transcript = ""
+    _audio_setup_msg = ""
+    try:
+        audio_bytes = await _extract_audio_from_video(video_bytes, filename)
+        if len(audio_bytes) >= 44:  # WAV header is 44 bytes minimum; less means no audio track
+            from icx_engine.connectors.audio import transcribe as audio_transcribe
+            raw_transcript = await audio_transcribe(
+                text_config, audio_bytes, Path(filename).stem + ".wav", whisper
+            )
+            if not _is_empty_transcript(raw_transcript):
+                transcript = raw_transcript
+                if log:
+                    log(f"    {filename}: transcript: {len(transcript)} chars")
+        else:
+            if log:
+                log(f"    {filename}: no audio track detected")
+    except Exception as exc:
+        if _is_setup_required_error(exc):
+            _audio_setup_msg = _SETUP_REQUIRED_MSG
+            if log:
+                log(f"    {filename}: Whisper model not installed - run 'icx setup'")
+        else:
+            if log:
+                log(f"    {filename}: audio extraction/transcription failed ({exc})")
+
+    if transcript:
+        return filename, transcript, ""
+
+    # --- Frame analysis fallback (screen recordings, silent videos) ---
+    if not image_config and not _tesseract_available():
+        if log:
+            log(f"    {filename}: no speech detected and no vision model configured - skipped")
+        return filename, _audio_setup_msg, ""
+
+    if log:
+        log(f"    {filename}: no speech detected - extracting frames for visual analysis")
+    try:
+        frames = await _extract_frames_from_video(video_bytes, filename)
+    except Exception as exc:
+        if log:
+            log(f"    {filename}: frame extraction failed ({exc}) - skipped")
+        return filename, _audio_setup_msg, ""
+
+    if not frames:
+        if log:
+            log(f"    {filename}: no frames extracted - skipped")
+        return filename, _audio_setup_msg, ""
+
+    if log:
+        log(f"    {filename}: analyzing {len(frames)} frame(s)")
+
+    frame_descriptions: list[str] = []
+    for i, frame_bytes in enumerate(frames, start=1):
+        if image_config:
+            try:
+                desc = await _describe_video_frame(image_config, frame_bytes, i, len(frames))
+            except Exception:
+                desc = ocr_image(frame_bytes)
+        else:
+            desc = ocr_image(frame_bytes)
+        if desc:
+            frame_descriptions.append(f"[Frame {i}/{len(frames)}] {desc}")
+
+    if not frame_descriptions:
+        return filename, _audio_setup_msg, ""
+
+    result = "\n\n".join(frame_descriptions)
+    if _audio_setup_msg:
+        result = _audio_setup_msg + "\n\n" + result
+    if log:
+        log(f"    {filename}: frame analysis: {len(result)} chars")
+    return filename, result, ""
+
+
 # -- Main entry point ----------------------------------------------------------
 
 async def process_attachments(
@@ -500,12 +839,22 @@ async def process_attachments(
             " | winget install UB-Mannheim.TesseractOCR (Windows)"
         )
 
+    _has_av = any(
+        _is_audio(f) or _is_video(f)
+        for f in raw.attachment_content_urls
+    )
+    _whisper = _get_whisper() if _has_av else None
+
     tasks = []
     for filename, content_url in raw.attachment_content_urls.items():
         if _is_image(filename):
             tasks.append(_process_image(filename, content_url, downloader, image_config, log))
         elif _is_document(filename):
             tasks.append(_process_document(filename, content_url, downloader, text_config, log))
+        elif _is_audio(filename):
+            tasks.append(_process_audio(filename, content_url, downloader, text_config, _whisper, log))
+        elif _is_video(filename):
+            tasks.append(_process_video(filename, content_url, downloader, text_config, image_config, _whisper, log))
         # Unsupported types are silently skipped - no task created
 
     if not tasks:

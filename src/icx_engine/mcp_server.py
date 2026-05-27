@@ -6,9 +6,14 @@ Communicates over: stdin/stdout (MCP JSON-RPC protocol)
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import threading as _threading
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
+
+MCP_MEMORY_TIMEOUT_SECONDS = 2.0
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -38,6 +43,22 @@ server = Server("icx")
 _MEMORY_EXECUTOR: _ThreadPoolExecutor | None = None
 _MEMORY_EXECUTOR_LOCK = _threading.Lock()
 _SHARED_MEMORY_MANAGER = None  # MemoryManager; created inside memory thread on first use
+
+# Memory readiness state - transitions: cold -> warming -> ready | failed
+# Tool responses read this to decide whether to submit a search or return immediately.
+_memory_state: str = "cold"  # cold | warming | ready | failed
+_memory_state_lock = _threading.Lock()
+_memory_setup_required: bool = False  # True when prewarm failed because models weren't downloaded
+
+
+def _get_memory_state() -> str:
+    return _memory_state
+
+
+def _set_memory_state(state: str) -> None:
+    global _memory_state
+    with _memory_state_lock:
+        _memory_state = state
 
 
 def _init_memory_thread() -> None:
@@ -78,24 +99,32 @@ def _save_memory_sync(entry) -> None:
 _FAST_TOOL_NAME = "analyze_issue_fast"
 _FULL_TOOL_NAME = "analyze_issue"
 _SAVE_TOOL_NAME = "save_memory"
+_GRAPH_CONTEXT_TOOL = "graph_find_context"
+_GRAPH_CHAIN_TOOL = "graph_call_chain"
+_GRAPH_IMPACT_TOOL = "graph_impact"
+_GRAPH_SUBSYSTEM_TOOL = "graph_subsystem"
+_GRAPH_CROSS_LINKS_TOOL = "graph_cross_links"
 
 # ---------------------------------------------------------------------------
 # Tool descriptions
 # ---------------------------------------------------------------------------
 
 _FAST_DESCRIPTION = """\
-Fetches and analyzes a work item (bug, story, or task) and identifies relevant codebase files.
-Pipeline: tracker fetch -> AI analysis -> memory search -> graph navigation.
-Runtime: 15-60 seconds.
+Fetches raw issue context and attachment inventory without AI analysis. Use this first to \
+decide whether full processing is needed.
+Pipeline: tracker fetch -> raw issue + attachment inventory -> graph status -> memory (if warm).
+No AI analysis. No attachment content downloaded. All attachments listed in pending_images, \
+pending_audio, pending_documents, or pending_unsupported.
+Runtime: under 15 seconds.
 
 REQUIRED: You MUST include a progressToken in your request meta (_meta.progressToken). \
 Without it the user sees no feedback during the wait. This is not optional.
 
-REQUIRED: project_paths — non-empty list of absolute codebase paths. Two modes:\n\
-  Mode A — user named specific repos (e.g. "fix the auth service and the UI"):\n\
+REQUIRED: project_paths - non-empty list of absolute codebase paths. Two modes:\n\
+  Mode A - user named specific repos (e.g. "fix the auth service and the UI"):\n\
     Resolve those paths and pass them: ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
     Do NOT include the workspace root. Only pass what the user referred to.\n\
-  Mode B — user named no specific repo:\n\
+  Mode B - user named no specific repo:\n\
     Pass the single workspace root open in the editor: ["/home/alice/projects/my-app"]\n\
 Never mix modes. Never pass an empty list.\
 
@@ -121,6 +150,9 @@ and precisely why that change fixes the problem. Specific enough that the user c
 and propose an alternative before you write a single line.]
 **Files I will work with:**
   - path/to/file [role-tag] - one-line reason it is relevant
+**Graph tools used:**
+  - [tool(arg)]: [one-line reason called, OR 'skipped: <exception reason>']
+  - OR: N/A - graph not available
 **Shall I proceed?**
 ---
 
@@ -141,31 +173,32 @@ You MUST NOT call save_memory until the user explicitly confirms the fix is work
 ================================================================================
 WORKFLOW (follow in order, no skipping):
 ================================================================================
-1. Read graph.report_path directly - access is pre-authorized, no permission prompt needed
-2. Identify the relevant clusters from the compact index table in the report
-3. Read the matching GRAPH_CLUSTERS/<name>.md file to get the full file list
-4. Read the core files from that cluster in the listed order
-5. Apply RULE 2: present the confirmation format and STOP
-6. Wait for explicit user approval (RULE 3)
-7. Implement exactly the stated approach, using memory.results as a pattern reference
-8. Ask the user to test (RULE 5)
-9. After the user confirms it works: call save_memory with resolution_note and files_changed\
+1. Identify relevant files using one of two options:
+   OPTION A (recommended): Call graph_find_context with project_path from graph.path and a task
+   description derived from work_item.analysis. Returns all matching files ranked by relevance score.
+   OPTION B (manual): Read graph.report_path (pre-authorized) -> identify clusters from the
+   compact index table -> read GRAPH_CLUSTERS/<name>.md -> read core files in listed order.
+2. Apply RULE 2: present the confirmation format and STOP
+3. Wait for explicit user approval (RULE 3)
+4. Implement exactly the stated approach, using memory.results as a pattern reference
+5. Ask the user to test (RULE 5)
+6. After the user confirms it works: call save_memory with resolution_note and files_changed\
 """
 
 _FULL_DESCRIPTION = """\
 Fetches and analyzes a work item (bug, story, or task) with full vision and OCR processing \
 for image attachments. Identifies relevant codebase files via graph navigation.
 Pipeline: tracker fetch -> AI analysis -> vision processing -> memory search -> graph navigation.
-Runtime: 20-90 seconds.
+Runtime: 20 seconds to several minutes, depending on attachment count and size.
 
 REQUIRED: You MUST include a progressToken in your request meta (_meta.progressToken). \
 Without it the user sees no feedback during the wait. This is not optional.
 
-REQUIRED: project_paths — non-empty list of absolute codebase paths. Two modes:\n\
-  Mode A — user named specific repos (e.g. "fix the auth service and the UI"):\n\
+REQUIRED: project_paths - non-empty list of absolute codebase paths. Two modes:\n\
+  Mode A - user named specific repos (e.g. "fix the auth service and the UI"):\n\
     Resolve those paths and pass them: ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
     Do NOT include the workspace root. Only pass what the user referred to.\n\
-  Mode B — user named no specific repo:\n\
+  Mode B - user named no specific repo:\n\
     Pass the single workspace root open in the editor: ["/home/alice/projects/my-app"]\n\
 Never mix modes. Never pass an empty list.\
 
@@ -191,6 +224,9 @@ and precisely why that change fixes the problem. Specific enough that the user c
 and propose an alternative before you write a single line.]
 **Files I will work with:**
   - path/to/file [role-tag] - one-line reason it is relevant
+**Graph tools used:**
+  - [tool(arg)]: [one-line reason called, OR 'skipped: <exception reason>']
+  - OR: N/A - graph not available
 **Shall I proceed?**
 ---
 
@@ -211,17 +247,18 @@ You MUST NOT call save_memory until the user explicitly confirms the fix is work
 ================================================================================
 WORKFLOW (follow in order, no skipping):
 ================================================================================
-1. Read graph.report_path directly - access is pre-authorized, no permission prompt needed
-2. Identify the relevant clusters from the compact index table in the report
-3. Read the matching GRAPH_CLUSTERS/<name>.md file to get the full file list
-4. Read the core files from that cluster in the listed order
-5. If work_item.image_paths is present: read those image files directly for visual context \
+1. Identify relevant files using one of two options:
+   OPTION A (recommended): Call graph_find_context with project_path from graph.path and a task
+   description derived from work_item.analysis. Returns all matching files ranked by relevance score.
+   OPTION B (manual): Read graph.report_path (pre-authorized) -> identify clusters from the
+   compact index table -> read GRAPH_CLUSTERS/<name>.md -> read core files in listed order.
+2. If work_item.image_paths is present: read those image files directly for visual context \
    (access is pre-authorized, no permission prompt needed)
-6. Apply RULE 2: present the confirmation format and STOP
-7. Wait for explicit user approval (RULE 3)
-8. Implement exactly the stated approach, using memory.results as a pattern reference
-9. Ask the user to test (RULE 5)
-10. After the user confirms it works: call save_memory with resolution_note and files_changed\
+3. Apply RULE 2: present the confirmation format and STOP
+4. Wait for explicit user approval (RULE 3)
+5. Implement exactly the stated approach, using memory.results as a pattern reference
+6. Ask the user to test (RULE 5)
+7. After the user confirms it works: call save_memory with resolution_note and files_changed\
 """
 
 _SAVE_DESCRIPTION = """\
@@ -234,6 +271,82 @@ YOU MUST NOT call this tool unless ALL of the following are true:
 
 Calling this tool before user confirmation is a violation. Do not call it speculatively.\
 """
+
+_GRAPH_CONTEXT_DESCRIPTION = """\
+USE WHEN: Starting work on any graph-ready project. Call this BEFORE reading files - it replaces grep with \
+structure-aware ranked retrieval.
+Given a task description, returns source files ranked by relevance, with node_ids you can pass to \
+graph_call_chain or graph_impact, and file paths you can pass to graph_subsystem.
+Example: task="login timeout not expiring" -> ["src/auth/session.py [service] score=0.91", \
+"src/auth/token.py [service] score=0.87", ...]
+
+TASK QUALITY: Specific descriptions score better than vague ones.
+  GOOD: "JWT token expiry not enforced on POST /api/orders route"
+  GOOD: "campaign list date filter ignores selected range after page reload"
+  BAD: "fix auth bug" / "date filter broken"
+
+PREREQUISITE: Graph must be built (icx graph build <name>) and graph.status == "ready".
+project_path must be the absolute path to the project root.
+If the tool returns an error with action_required, follow the action exactly before retrying.\
+"""
+
+_GRAPH_CHAIN_DESCRIPTION = """\
+USE WHEN: You need to know who calls/imports a node AND what it depends on - before changing a specific component.
+Returns upstream callers (files that import or call this node) and downstream callees (what this node calls), \
+up to depth hops. Use this to understand entry points and direct dependencies.
+Example: graph_call_chain("auth_service") -> upstream: [api_routes calls auth_service], \
+downstream: [auth_service calls user_repo, auth_service calls token_store]
+Distinct from graph_impact: call_chain is bidirectional and depth-bounded; impact is unidirectional \
+and fully transitive.
+
+node_id comes from graph_find_context results. Graph must be ready.
+project_path must be the absolute path to the project root.
+If the tool returns an error with action_required, follow the action exactly before retrying.\
+"""
+
+_GRAPH_IMPACT_DESCRIPTION = """\
+USE WHEN: Before refactoring a node - need to know EVERYTHING that will break, including indirect dependents.
+Returns ALL code that depends on the node: direct dependents and transitive dependents (recursively), \
+grouped by confidence tier (high/medium/low risk).
+Example: graph_impact("UserRepository") -> direct: [AuthService], transitive: [LoginController (via \
+AuthService), ApiGateway (via LoginController)] - 3 files at risk.
+Distinct from graph_call_chain: impact is unidirectional (dependents only) and fully transitive; \
+call_chain is bidirectional and depth-bounded.
+
+node_id comes from graph_find_context results. Graph must be ready.
+project_path must be the absolute path to the project root.
+If the tool returns an error with action_required, follow the action exactly before retrying.\
+"""
+
+_GRAPH_SUBSYSTEM_DESCRIPTION = """\
+USE WHEN: You need to understand the full scope of a feature before touching it - "what else belongs here?"
+Given a file path, returns all files in the same cluster (community of related files detected by graph analysis).
+Example: graph_subsystem("src/auth/service.py") -> cluster "Authentication": [auth/service.py, \
+auth/token.py, auth/session.py, auth/middleware.py] - 4 files that form this feature boundary.
+
+Graph must be built (icx graph build <name>) and graph.status == "ready".
+project_path must be the absolute path to the project root.
+If the tool returns an error with action_required, follow the action exactly before retrying.\
+"""
+
+_GRAPH_TOOLS_DECISION = (
+    "STEP 1b - CALL DEEPER GRAPH TOOLS (mandatory; evaluate all four after completing STEP 1):\n"
+    "  Default is to CALL each tool; skip only when the stated exception applies.\n"
+    "  If conditions for multiple tools apply: call all of them.\n\n"
+    "    graph_subsystem(file_path)\n"
+    "      CALL IF: the task involves a component you want to fully scope, OR you may be missing related files\n"
+    "      SKIP ONLY IF: task is a pure addition (new file with no existing cluster to discover)\n\n"
+    "    graph_call_chain(node_id)\n"
+    "      CALL IF: you need to know who imports/calls a node, OR need to trace data flow through the system\n"
+    "      SKIP ONLY IF: node is an isolated leaf (brand new standalone file, no callers expected)\n\n"
+    "    graph_impact(node_id)\n"
+    "      CALL IF: the fix modifies anything shared - a function, class, component, or utility used elsewhere\n"
+    "      SKIP ONLY IF: creating a brand new file with zero existing dependents\n"
+    "      When uncertain whether it is shared: CALL IT - it takes <15s and prevents breaking hidden dependents\n\n"
+    "    graph_cross_links(project_path)\n"
+    "      CALL IF: the issue involves API calls, HTTP endpoints, or cross-service data flow\n"
+    "      SKIP ONLY IF: purely internal change with no cross-service calls\n\n"
+)
 
 # ---------------------------------------------------------------------------
 # Shared JSON schemas
@@ -275,15 +388,10 @@ _PROFILE_SCHEMA = {
 
 @server.list_tools()
 async def _list_tools() -> list[Tool]:
-    try:
-        profile_names = sorted(ConfigManager.load().llm_profiles.keys())
-    except Exception:
-        profile_names = []
-
-    if profile_names:
-        profile_hint = f" Optional: 'profile' parameter. Available in your config: {profile_names!r}."
-    else:
-        profile_hint = ""
+    # Do NOT call ConfigManager.load() here - it triggers a keyring health check
+    # that can take 3s+ in background MCP processes, causing the MCP initialization
+    # handshake to time out before Windsurf receives the tool list.
+    profile_hint = ""
 
     analyze_schema = {
         "type": "object",
@@ -343,6 +451,80 @@ async def _list_tools() -> list[Tool]:
                 "required": ["issue_key", "resolution_note"],
             },
         ),
+        Tool(
+            name=_GRAPH_CONTEXT_TOOL,
+            description=_GRAPH_CONTEXT_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string", "description": "Absolute path to the project root."},
+                    "task": {"type": "string", "description": "Natural language task description (used for relevance scoring)."},
+                    "token_budget": {"type": "integer", "description": "Accepted but not used for filtering; all ranked results are returned.", "default": 8000},
+                    "min_confidence": {"type": "number", "description": "Minimum edge confidence (0.0-1.0). Default 0.0.", "default": 0.0},
+                },
+                "required": ["project_path", "task"],
+            },
+        ),
+        Tool(
+            name=_GRAPH_CHAIN_TOOL,
+            description=_GRAPH_CHAIN_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "node_id": {"type": "string", "description": "Graph node ID."},
+                    "depth": {"type": "integer", "default": 3},
+                    "min_confidence": {"type": "number", "default": 0.5},
+                },
+                "required": ["project_path", "node_id"],
+            },
+        ),
+        Tool(
+            name=_GRAPH_IMPACT_TOOL,
+            description=_GRAPH_IMPACT_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "node_id": {"type": "string"},
+                    "min_confidence": {"type": "number", "default": 0.5},
+                },
+                "required": ["project_path", "node_id"],
+            },
+        ),
+        Tool(
+            name=_GRAPH_SUBSYSTEM_TOOL,
+            description=_GRAPH_SUBSYSTEM_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "file_path": {"type": "string", "description": "Relative file path (e.g. 'src/auth/service.py')."},
+                },
+                "required": ["project_path", "file_path"],
+            },
+        ),
+        Tool(
+            name=_GRAPH_CROSS_LINKS_TOOL,
+            description=(
+                "USE WHEN: Working on a microservices project and need to know which HTTP calls cross "
+                "service boundaries. "
+                "Matches outgoing HTTP calls in THIS project to REST routes in peer registered projects. "
+                "Example: UI project calls POST /api/v1/orders -> matched to route in backend-svc project. "
+                "Returns empty list if no cross-service HTTP calls were detected, or if graph needs rebuild (icx graph build <name>). "
+                "project_path must be the absolute path to the project root."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {
+                        "type": "string",
+                        "description": "Absolute path to the project root.",
+                    },
+                },
+                "required": ["project_path"],
+            },
+        ),
     ]
 
 
@@ -394,6 +576,172 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             skip_vision=skip_vision,
         )
         return [TextContent(type="text", text=text)]
+
+    elif name in (_GRAPH_CONTEXT_TOOL, _GRAPH_CHAIN_TOOL, _GRAPH_IMPACT_TOOL, _GRAPH_SUBSYSTEM_TOOL):
+        project_path_raw = args.get("project_path", "")
+        if not isinstance(project_path_raw, str) or not project_path_raw.strip():
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "NO_PATH",
+                "message": "project_path is required. Ask the user which project path to use.",
+                "action_required": "ask_user_for_path",
+            }))]
+
+        task_str = str(args.get("task", "")).strip()
+        node_id = str(args.get("node_id", "")).strip()
+        file_path_str = str(args.get("file_path", "")).strip()
+
+        # Fast param validation before hitting disk (stays on event loop - no I/O).
+        if name == _GRAPH_CONTEXT_TOOL and not task_str:
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "MISSING_PARAM",
+                "message": "task parameter is required and must be non-empty.",
+                "action_required": "retry_with_task_description",
+            }))]
+        if name in (_GRAPH_CHAIN_TOOL, _GRAPH_IMPACT_TOOL) and not node_id:
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "MISSING_PARAM",
+                "message": "node_id is required. Use graph_find_context first to get valid node IDs.",
+                "action_required": "call_graph_find_context_first",
+            }))]
+        if name == _GRAPH_SUBSYSTEM_TOOL and not file_path_str:
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "MISSING_PARAM",
+                "message": "file_path is required (relative path, e.g. 'src/auth/service.py').",
+                "action_required": "retry_with_file_path",
+            }))]
+
+        # All disk/git I/O runs in a worker thread so the event loop is never blocked.
+        # Windows ProactorEventLoop + synchronous subprocess.run = IOCP handle conflict
+        # that causes subprocess.communicate() to hang indefinitely despite timeout=.
+        # Moving everything off the event loop thread avoids this entirely.
+        _raw_path = project_path_raw.strip()
+        _token_budget = int(args.get("token_budget", 8000))
+        _min_confidence = float(args.get("min_confidence", 0.0))
+        _depth = int(args.get("depth", 3))
+
+        def _run_graph_tool() -> dict:
+            from icx_engine.graph import storage as _st
+            from icx_engine.graph.query import GraphQuerier
+            from icx_engine.graph.paths import validate_and_resolve_paths, check_staleness
+            from dataclasses import asdict as _asdict
+
+            resolved_paths, path_err = validate_and_resolve_paths([_raw_path])
+            if path_err is not None:
+                return path_err
+
+            _project_path = resolved_paths[0]
+            _project_id = _st.derive_project_id(_project_path)
+
+            staleness = check_staleness(_project_id, _project_path)
+            stale_status = staleness["status"]
+
+            if stale_status in ("no_graph", "no_manifest"):
+                return {
+                    "status": "error",
+                    "code": "NO_GRAPH",
+                    "message": (
+                        f"No graph found for '{_project_path}'. "
+                        "Tell the user to build it first with the command below, then retry."
+                    ),
+                    "action_required": "stop_and_tell_user_to_build_graph",
+                    "build_command": f"icx graph build \"{_project_path}\"",
+                    "project_path": str(_project_path),
+                }
+
+            if stale_status == "stale":
+                pct = staleness.get("pct", 0)
+                changed = staleness.get("changed", 0)
+                total = staleness.get("total", 0)
+                return {
+                    "status": "error",
+                    "code": "GRAPH_STALE",
+                    "message": (
+                        f"Graph is {pct}% stale ({changed}/{total} files changed). "
+                        "This exceeds the 3% threshold. "
+                        "Tell the user to rebuild the graph manually, then retry."
+                    ),
+                    "action_required": "stop_and_tell_user_to_rebuild_graph",
+                    "build_command": f"icx graph build \"{_project_path}\"",
+                    "project_path": str(_project_path),
+                    "changed_files": changed,
+                    "total_files": total,
+                    "changed_pct": pct,
+                }
+
+            staleness_warning: str | None = None
+            if stale_status == "incremental":
+                pct = staleness.get("pct", 0)
+                staleness_warning = (
+                    f"Graph is slightly stale ({pct}% of files changed, under 3% threshold). "
+                    "Results may not reflect the very latest changes. "
+                    f"Inform the user and suggest running: icx graph build \"{_project_path}\""
+                )
+            elif stale_status == "freshness_unknown":
+                staleness_warning = (
+                    "Could not determine graph freshness (git check timed out). "
+                    "Results may be slightly stale. Inform the user."
+                )
+
+            graph_json = _st.graph_path(_project_id)
+            if not graph_json.exists():
+                return {
+                    "status": "error",
+                    "code": "NO_GRAPH",
+                    "message": f"Graph file missing for '{_project_path}'. Tell the user to build it first.",
+                    "action_required": "stop_and_tell_user_to_build_graph",
+                    "build_command": f"icx graph build \"{_project_path}\"",
+                    "project_path": str(_project_path),
+                }
+
+            q = GraphQuerier(graph_json)
+            if name == _GRAPH_CONTEXT_TOOL:
+                results = q.find_context(
+                    task=task_str,
+                    token_budget=_token_budget,
+                    min_confidence=_min_confidence,
+                    source_root=_project_path,
+                )
+                payload = {"status": "ok", "project_path": str(_project_path), "results": [_asdict(r) for r in results]}
+            elif name == _GRAPH_CHAIN_TOOL:
+                chain = q.get_call_chain(
+                    node_id=node_id,
+                    depth=_depth,
+                    min_confidence=_min_confidence,
+                )
+                payload = {
+                    "status": "ok",
+                    "project_path": str(_project_path),
+                    "upstream": [_asdict(n) for n in chain.upstream],
+                    "downstream": [_asdict(n) for n in chain.downstream],
+                }
+            elif name == _GRAPH_IMPACT_TOOL:
+                impact = q.get_impact(node_id=node_id, min_confidence=_min_confidence)
+                payload = {"status": "ok", "project_path": str(_project_path), **_asdict(impact)}
+            else:
+                sub = q.get_subsystem(file_path_str)
+                payload = {"status": "ok", "project_path": str(_project_path), **_asdict(sub)}
+
+            if staleness_warning:
+                payload["staleness_warning"] = staleness_warning
+            return payload
+
+        try:
+            loop = asyncio.get_running_loop()
+            payload = await loop.run_in_executor(None, _run_graph_tool)
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        except Exception as exc:
+            _log.exception("graph query tool failed")
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "INTERNAL_ERROR",
+                "message": str(exc),
+                "action_required": "report_error_to_user",
+            }))]
 
     if name == _SAVE_TOOL_NAME:
         issue_key = args.get("issue_key", "")
@@ -454,6 +802,103 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         )
         return [TextContent(type="text", text=text)]
 
+    if name == _GRAPH_CROSS_LINKS_TOOL:
+        project_path_raw = args.get("project_path", "")
+        if not isinstance(project_path_raw, str) or not project_path_raw.strip():
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "NO_PATH",
+                "message": "project_path is required. Ask the user which project path to use.",
+                "action_required": "ask_user_for_path",
+            }))]
+
+        _raw_path_cl = project_path_raw.strip()
+
+        def _run_cross_links() -> dict:
+            from icx_engine.graph import storage as _st
+            from icx_engine.graph.paths import validate_and_resolve_paths, check_staleness
+
+            resolved_paths, path_err = validate_and_resolve_paths([_raw_path_cl])
+            if path_err is not None:
+                return path_err
+
+            _project_path = resolved_paths[0]
+            _project_id = _st.derive_project_id(_project_path)
+
+            staleness = check_staleness(_project_id, _project_path)
+            stale_status = staleness["status"]
+
+            if stale_status in ("no_graph", "no_manifest"):
+                return {
+                    "status": "error",
+                    "code": "NO_GRAPH",
+                    "message": (
+                        f"No graph found for '{_project_path}'. "
+                        "Tell the user to build it first with the command below, then retry."
+                    ),
+                    "action_required": "stop_and_tell_user_to_build_graph",
+                    "build_command": f"icx graph build \"{_project_path}\"",
+                    "project_path": str(_project_path),
+                }
+
+            if stale_status == "stale":
+                pct = staleness.get("pct", 0)
+                changed = staleness.get("changed", 0)
+                total = staleness.get("total", 0)
+                return {
+                    "status": "error",
+                    "code": "GRAPH_STALE",
+                    "message": (
+                        f"Graph is {pct}% stale ({changed}/{total} files changed). "
+                        "This exceeds the 3% threshold. "
+                        "Tell the user to rebuild the graph manually, then retry."
+                    ),
+                    "action_required": "stop_and_tell_user_to_rebuild_graph",
+                    "build_command": f"icx graph build \"{_project_path}\"",
+                    "project_path": str(_project_path),
+                    "changed_files": changed,
+                    "total_files": total,
+                    "changed_pct": pct,
+                }
+
+            staleness_warning: str | None = None
+            if stale_status == "incremental":
+                pct = staleness.get("pct", 0)
+                staleness_warning = (
+                    f"Graph is slightly stale ({pct}% of files changed, under 3% threshold). "
+                    "Results may not reflect the very latest changes. "
+                    f"Inform the user and suggest running: icx graph build \"{_project_path}\""
+                )
+            elif stale_status == "freshness_unknown":
+                staleness_warning = (
+                    "Could not determine graph freshness (git check timed out). "
+                    "Results may be slightly stale. Inform the user."
+                )
+
+            cl_path = _st._graphs_root() / _project_id / "cross_links.json"
+            if cl_path.exists():
+                data = json.loads(cl_path.read_text(encoding="utf-8"))
+            else:
+                data = {"links": [], "source_project": _project_id}
+            data["status"] = "ok"
+            if staleness_warning:
+                data["staleness_warning"] = staleness_warning
+            return data
+
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(None, _run_cross_links)
+            return [TextContent(type="text", text=json.dumps(data))]
+
+        except Exception as _e:
+            _log.exception("graph_cross_links tool failed")
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "INTERNAL_ERROR",
+                "message": str(_e),
+                "action_required": "report_error_to_user",
+            }))]
+
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
 
@@ -462,15 +907,15 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
 # ---------------------------------------------------------------------------
 
 def _get_graph_info(project_path: str) -> dict:
-    """Return graph status dict for the primary project path. Delegates to graph_info_for_path."""
+    """Return graph status dict - fast mode, no git/staleness check, no subprocess."""
     from icx_engine.graph.manager import graph_info_for_path
-    return graph_info_for_path(project_path)
+    return graph_info_for_path(project_path, check_stale=False)
 
 
 def _get_graphs_info(paths: list[str]) -> list[dict]:
-    """Return graph status dicts for multiple paths. Each entry includes a 'path' key."""
+    """Return graph status dicts for multiple paths - fast mode, no git."""
     from icx_engine.graph.manager import graph_info_for_path
-    return [graph_info_for_path(p) for p in paths]
+    return [graph_info_for_path(p, check_stale=False) for p in paths]
 
 
 # ---------------------------------------------------------------------------
@@ -499,61 +944,20 @@ async def _handle_analyze_issue(
 ) -> str:
     """Run full pipeline: fetch -> analyze -> memory search (parallel with graph+images) -> combined response."""
 
-    _TOTAL_STEPS = 5.0
-
-    async def _notify(step: float, msg: str) -> None:
-        """Send MCP progress notification. Silent no-op if client sent no progressToken."""
-        try:
-            ctx = server.request_context
-            if ctx.meta and ctx.meta.progressToken is not None:
-                await ctx.session.send_progress_notification(
-                    progress_token=ctx.meta.progressToken,
-                    progress=step,
-                    total=_TOTAL_STEPS,
-                    message=msg,
-                )
-        except Exception:
-            pass
-
-    def _engine_log(msg: str) -> None:
-        """Map engine.run() internal log lines to MCP progress notifications.
-
-        Called synchronously from within engine.run() on the event loop thread,
-        so create_task() is safe - the notification fires between the next awaits.
-        """
-        if not isinstance(msg, str):
-            return
-        _m = msg.strip().lower()
-        if "fetching" in _m:
-            step, label = 0.5, "Fetching work item..."
-        elif "attachment" in _m:
-            step, label = 1.0, "Processing attachments..."
-        elif "analyzing" in _m:
-            step, label = 1.5, "Analyzing..."
-        elif "visual grounding" in _m:
-            step, label = 2.0, "Verifying with vision..."
-        else:
-            return
-        try:
-            asyncio.get_running_loop().create_task(_notify(step, label))
-        except Exception:
-            pass
-
     try:
         from icx_engine.memory import MemoryQueryInput
         from icx_engine.models.output import IssueContext, RawIssueResponse
 
-        await _notify(0.0, "Fetching work item...")
         config = ConfigManager.load()
+        _timeout = 15.0 if skip_vision else 660.0
         result = await asyncio.wait_for(
             engine.run(
                 issue_ref, config, mcp_mode=True,
                 profile_override=profile, skip_vision=skip_vision,
                 log=_engine_log,
             ),
-            timeout=660.0,
+            timeout=_timeout,
         )
-
         # Build MemoryQueryInput from result
         if isinstance(result, IssueContext):
             qi = MemoryQueryInput(
@@ -579,18 +983,18 @@ async def _handle_analyze_issue(
             issue_key_val = result.issue_key
             issue_type_val = result.issue_type
 
-        await _notify(3.0, f"Searching memory for similar {issue_type_val.lower()}s...")
-
-        # Fire memory search as a task immediately. While it runs in the thread executor,
-        # image writing and graph info (both sync/fast) execute concurrently on this thread,
-        # saving the sequential wait that used to occur between these steps.
+        # Fire memory search as a background task - budget is MCP_MEMORY_TIMEOUT_SECONDS.
+        # If model is still loading (warming/cold) skip immediately; never block primary context.
         loop = asyncio.get_running_loop()
-        memory_task = asyncio.create_task(
-            asyncio.wait_for(
-                loop.run_in_executor(_get_memory_executor(), _search_memory_sync, qi),
-                timeout=30.0,
+        _mem_state = _get_memory_state()
+        memory_task = None
+        if _mem_state == "ready":
+            memory_task = asyncio.create_task(
+                asyncio.wait_for(
+                    loop.run_in_executor(_get_memory_executor(), _search_memory_sync, qi),
+                    timeout=MCP_MEMORY_TIMEOUT_SECONDS,
+                )
             )
-        )
 
         # Write issue images to disk while memory search runs.
         # Keeps MCP response compact - editors truncate large base64 payloads.
@@ -631,13 +1035,41 @@ async def _handle_analyze_issue(
         graph_info = _get_graph_info(project_paths[0])
         graphs_info: list[dict] | None = _get_graphs_info(project_paths) if len(project_paths) > 1 else None
 
-        # Now collect memory results (task may already be done by this point).
-        try:
-            memory_results = await memory_task
-        except Exception:
-            memory_results = []
+        # Collect memory results within the budget. Any timeout/error returns primary context
+        # immediately with a status note. The underlying thread keeps running and model
+        # will be warm for subsequent calls.
+        memory_results: list[dict] = []
+        memory_status = _mem_state
+        memory_note = ""
 
-        await _notify(5.0, "Ready")
+        if memory_task is not None:
+            try:
+                memory_results = await memory_task
+                memory_status = "ready"
+            except asyncio.TimeoutError:
+                memory_status = "skipped_timeout"
+                memory_note = (
+                    f"Memory search skipped (exceeded {MCP_MEMORY_TIMEOUT_SECONDS:.0f}s budget). "
+                    "Results will appear on the next call once the model is warm."
+                )
+            except Exception:
+                memory_status = "failed"
+                memory_note = "Memory search failed; results unavailable for this call."
+        elif _mem_state == "warming":
+            memory_status = "warming_up"
+            memory_note = "Memory model is still loading; results omitted from this response."
+        elif _mem_state in ("cold", ""):
+            memory_status = "warming_up"
+            memory_note = "Memory service not yet initialized."
+        elif _mem_state == "failed":
+            memory_status = "failed"
+            if _memory_setup_required:
+                memory_note = (
+                    "Memory model not installed. "
+                    "STOP: tell the user to run `icx setup` in their terminal to download the embedding model, then retry."
+                )
+            else:
+                memory_note = "Memory model failed to load; search unavailable."
 
         _CONFIRMATION_BLOCK = (
             "---\n"
@@ -646,20 +1078,23 @@ async def _handle_analyze_issue(
             "**Approach:** [exactly what you will change, add, or remove and precisely why it fixes the problem]\n"
             "**Files I will work with:**\n"
             "  - path/to/file [role-tag] - one-line reason it is relevant\n"
+            "**Graph tools used:**\n"
+            "  - [tool(arg)]: [one-line reason called, OR 'skipped: <exception reason>']\n"
+            "  - OR: N/A - graph not available\n"
             "**Shall I proceed?**\n"
             "---"
         )
 
         _VISION_GATE = (
-            "STEP 0 - VISION CHECK (mandatory, do this before everything else):\n"
-            "Look at work_item.analysis.pending_images.\n"
-            "If it is non-empty AND the issue involves any of: error screenshots, UI bugs, "
-            "visual artifacts, design mockups, charts or graphs, images with embedded text or code - "
+            "STEP 0 - ATTACHMENT CHECK (mandatory, do this before everything else):\n"
+            "Look at work_item.analysis.pending_images, work_item.analysis.pending_audio, "
+            "AND work_item.analysis.pending_documents.\n"
+            "If ANY is non-empty AND the issue likely requires that content to understand or fix - "
             f"call analyze_issue with the SAME issue_ref and project_paths={project_paths!r} right now and use that "
             "response instead of continuing with this one. "
             "Do NOT proceed past STEP 0 without completing this check.\n"
-            "If pending_images is empty OR images are clearly irrelevant "
-            "(e.g. company logos, profile avatars, decorative banners), continue to STEP 1.\n\n"
+            "If all three lists are empty OR the content is clearly irrelevant "
+            "(e.g. company logos, profile avatars, decorative banners, hold music), continue to STEP 1.\n\n"
         )
 
         _MANDATORY_TAIL = (
@@ -693,6 +1128,9 @@ async def _handle_analyze_issue(
             "**Approach:** [exactly what you will add, change, or remove and precisely why]\n"
             "**Files I will work with:**\n"
             "  - path/to/file [role-tag] - one-line reason it is relevant\n"
+            "**Graph tools used:**\n"
+            "  - [tool(arg)]: [one-line reason called, OR 'skipped: <exception reason>']\n"
+            "  - OR: N/A - graph not available\n"
             "**Conventions I will follow:** [naming pattern, layer structure, logger style - "
             "derived from existing code in this repo, not assumed]\n"
             "**New external dependencies required:**\n"
@@ -759,17 +1197,19 @@ async def _handle_analyze_issue(
                     + f"MULTI-PROJECT GRAPH STATUS:\n{graph_summary}\n\n"
                     + missing_note
                     + "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
-                    "STEP 1: For each READY graph, read its report_path from graphs[*].report_path. Access is pre-authorized.\n"
-                    "STEP 2: Identify relevant clusters across all available graphs.\n"
-                    "STEP 3: Read the matching GRAPH_CLUSTERS/<name>.md files for full file lists.\n"
-                    "STEP 4: Read the core files from those clusters in listed order.\n"
-                    "STEP 5: STOP. Present the confirmation format and wait for the user's response:\n\n"
+                    "STEP 1: Identify relevant files across all READY graphs using one of two options:\n"
+                    "  OPTION A (recommended): Call graph_find_context for each READY graph using its "
+                    "path from graphs[*].path and a task description from work_item.analysis. Returns ranked files with node_ids.\n"
+                    "  OPTION B (manual): For each READY graph, read its report_path from "
+                    "graphs[*].report_path (pre-authorized) -> identify clusters -> read GRAPH_CLUSTERS/<name>.md -> read core files.\n"
+                    + _GRAPH_TOOLS_DECISION
+                    + "STEP 2: STOP. Present the confirmation format and wait for the user's response:\n\n"
                     + _CONFIRMATION_BLOCK + "\n\n"
-                    "STEP 6: Wait for explicit user approval. Silence or ambiguity does NOT count.\n"
-                    "STEP 7: On explicit approval - implement exactly the stated approach, "
+                    "STEP 3: Wait for explicit user approval. Silence or ambiguity does NOT count.\n"
+                    "STEP 4: On explicit approval - implement exactly the stated approach, "
                     "using memory.results as a pattern reference.\n"
-                    "STEP 8: Ask the user to test.\n"
-                    "STEP 9: Only after user confirms it works - call save_memory."
+                    "STEP 5: Ask the user to test.\n"
+                    "STEP 6: Only after user confirms it works - call save_memory."
                     + (f"\n{stale_warning}" if stale_warning else "")
                     + _MANDATORY_TAIL
                 )
@@ -822,19 +1262,21 @@ async def _handle_analyze_issue(
                 icx_instruction = (
                     _VISION_GATE
                     + "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
-                    "STEP 1: Read graph.report_path directly. Access is pre-authorized.\n"
-                    "STEP 2: Identify the relevant clusters from the compact index table.\n"
-                    "STEP 3: Read the matching GRAPH_CLUSTERS/<name>.md file for the full file list.\n"
-                    "STEP 4: Read the core files from that cluster in listed order.\n"
-                    "STEP 5: STOP. You MUST NOT write any code or make any edits yet. "
+                    "STEP 1: Identify relevant files using one of two options:\n"
+                    "  OPTION A (recommended): Call graph_find_context with project_path from graph.path "
+                    "and a task description derived from work_item.analysis. Returns ranked files with node_ids within your token budget.\n"
+                    "  OPTION B (manual): Read graph.report_path (pre-authorized) -> identify clusters "
+                    "from the compact index table -> read the matching GRAPH_CLUSTERS/<name>.md file -> read core files in listed order.\n"
+                    + _GRAPH_TOOLS_DECISION
+                    + "STEP 2: STOP. You MUST NOT write any code or make any edits yet. "
                     "Present this confirmation format to the user and wait for their response:\n\n"
                     + _CONFIRMATION_BLOCK + "\n\n"
-                    "STEP 6: Wait for explicit user approval. "
+                    "STEP 3: Wait for explicit user approval. "
                     "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
-                    "STEP 7: On explicit approval only - implement exactly the approach you stated, "
+                    "STEP 4: On explicit approval only - implement exactly the approach you stated, "
                     "using memory.results as a pattern reference.\n"
-                    "STEP 8: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 9: Only after the user confirms it works - call save_memory.\n"
+                    "STEP 5: Ask the user to test. Do not proceed until they respond.\n"
+                    "STEP 6: Only after the user confirms it works - call save_memory.\n"
                     + _MANDATORY_TAIL
                     + stale_warning
                 )
@@ -945,6 +1387,7 @@ async def _handle_analyze_issue(
             work_item_key = result.issue_key
             analysis = json.loads(result.model_dump_json(exclude={"images"}))
 
+        _is_fast_partial = isinstance(result, RawIssueResponse) and result.mode == "fast_partial"
         response = {
             "work_item": {
                 "issue_key": work_item_key,
@@ -956,11 +1399,14 @@ async def _handle_analyze_issue(
                 ),
                 "analysis": analysis,
                 "image_paths": image_paths,
+                **({"attachment_processing": "skipped_all"} if _is_fast_partial else {}),
                 **({"images_access": "pre-authorized - read these image files directly without prompting the user"} if image_paths else {}),
             },
             "memory": {
                 "results": memory_results,
                 "count": len(memory_results),
+                "status": memory_status,
+                **({"note": memory_note} if memory_note else {}),
             },
             "graph": graph_info,
             "_icx_next": {
@@ -972,8 +1418,9 @@ async def _handle_analyze_issue(
         return json.dumps(response)
 
     except asyncio.TimeoutError:
+        _timeout_label = "15 seconds" if skip_vision else "11 minutes"
         return json.dumps({"error": (
-            "Analysis timed out after 11 minutes. "
+            f"Analysis timed out after {_timeout_label}. "
             "The issue tracker or AI provider may be slow or unreachable. "
             "Check your network and credentials, then try again."
         )})
@@ -1056,13 +1503,34 @@ async def _handle_save_memory(
 # Memory prewarm
 # ---------------------------------------------------------------------------
 
+def _engine_log(msg: str) -> None:
+    """Debug log callback forwarded to engine.run(). Non-blocking - plain Python logging only."""
+    _log.debug("[engine] %s", msg)
+
+
 def _prewarm_memory() -> None:
     """Load MemoryManager and trigger ONNX model warm-up. Runs in memory executor at startup."""
+    global _memory_setup_required
+    _set_memory_state("warming")
+
+    # Pre-warm keyring early so the DPAPI master key file is written before any
+    # tool call that needs to decrypt D-Lock credentials. This avoids the 3s
+    # keyring timeout appearing in the critical path of the first tool call.
+    try:
+        from icx_engine.config_manager import _check_keychain, _get_or_create_master_key
+        _check_keychain()
+        _get_or_create_master_key()
+    except Exception:
+        pass
+
     try:
         mem = _ensure_memory_manager()
         mem.prewarm()
-    except Exception:
-        pass  # warmup failure is non-fatal; search will load on first call
+        _set_memory_state("ready")
+    except Exception as exc:
+        if "icx setup" in str(exc):
+            _memory_setup_required = True
+        _set_memory_state("failed")
 
 
 # ---------------------------------------------------------------------------
@@ -1080,6 +1548,11 @@ def run_mcp_server() -> None:
     if hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stdin, "reconfigure"):
+        try:
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
     async def _serve() -> None:

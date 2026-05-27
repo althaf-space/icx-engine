@@ -1,0 +1,35 @@
+{
+  "fixture": "python_advanced",
+  "language": "python",
+  "framework": "mixed",
+  "notes": "Advanced Python patterns: SQLAlchemy string relationship() refs, Celery .delay()/.apply_async() call detection, pytest conftest fixture injection, Django include() URL resolution.",
+  "edges": [
+    {"source": "myapp/models.py:user", "target": "myapp/models.py:post", "kind": "relation", "notes": "relationship('Post', back_populates='author')"},
+    {"source": "myapp/models.py:post", "target": "myapp/models.py:user", "kind": "relation", "notes": "relationship('User', back_populates='posts')"},
+    {"source": "myapp/models.py:post", "target": "myapp/models.py:comment", "kind": "relation", "notes": "relationship('Comment', back_populates='post')"},
+    {"source": "myapp/models.py:comment", "target": "myapp/models.py:post", "kind": "relation", "notes": "relationship('Post', back_populates='comments')"},
+
+    {"source": "myapp/services.py", "target": "myapp/tasks.py", "kind": "import"},
+    {"source": "myapp/services.py:create_user_and_notify", "target": "myapp/tasks.py:send_email", "kind": "call", "notes": "send_email.delay()"},
+    {"source": "myapp/services.py:run_report", "target": "myapp/tasks.py:generate_report", "kind": "call", "notes": "generate_report.apply_async()"},
+    {"source": "myapp/services.py:bulk_notify", "target": "myapp/tasks.py:send_email", "kind": "call", "notes": "send_email.delay() in loop"},
+
+    {"source": "myapp/tasks.py", "target": "myapp/tasks.py:send_email", "kind": "scheduled", "notes": "@shared_task"},
+    {"source": "myapp/tasks.py", "target": "myapp/tasks.py:generate_report", "kind": "scheduled", "notes": "@shared_task"},
+    {"source": "myapp/tasks.py", "target": "myapp/tasks.py:cleanup_old_data", "kind": "scheduled", "notes": "@shared_task"},
+
+    {"source": "myapp/urls.py", "target": "myapp/api/urls.py", "kind": "import", "notes": "include('myapp.api.urls')"},
+
+    {"source": "myapp/api/urls.py", "target": "myapp/api/views.py", "kind": "import"},
+    {"source": "myapp/api/urls.py", "target": "myapp/api/views.py:list_users", "kind": "route"},
+    {"source": "myapp/api/urls.py", "target": "myapp/api/views.py:get_user", "kind": "route"},
+
+    {"source": "tests/test_services.py:test_create_user", "target": "conftest.py:db_session", "kind": "di", "notes": "pytest fixture injection"},
+    {"source": "tests/test_services.py:test_create_user", "target": "conftest.py:test_client", "kind": "di", "notes": "pytest fixture injection"},
+    {"source": "tests/test_services.py:test_run_report", "target": "conftest.py:db_session", "kind": "di", "notes": "pytest fixture injection"},
+
+    {"source": "conftest.py:test_client", "target": "conftest.py:db_session", "kind": "di", "notes": "fixture depends on fixture"},
+
+    {"source": "tests/test_services.py", "target": "myapp/services.py", "kind": "import"}
+  ]
+}

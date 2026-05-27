@@ -1,4 +1,4 @@
-﻿"""
+"""
 Jira API response → RawIssueData mapping.
 
 Responsible for all data transformation from Jira's JSON format into the

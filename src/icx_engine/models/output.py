@@ -1,4 +1,4 @@
-﻿from typing import Literal
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
@@ -51,12 +51,14 @@ class IssueContext(BaseModel):
     images: dict[str, str] = Field(default_factory=dict)  # filename → Base64
     past_insights: list[PastInsight] = Field(default_factory=list)
     pending_images: list[str] = Field(default_factory=list)
+    pending_audio: list[str] = Field(default_factory=list)
+    pending_documents: list[str] = Field(default_factory=list)
 
 
 class RawIssueResponse(BaseModel):
-    """Returned by MCP when no LLM is configured - raw issue data with attachment content."""
+    """Returned by MCP when no LLM is configured, or by fast mode (mode='fast_partial')."""
 
-    mode: Literal["raw"] = "raw"
+    mode: Literal["raw", "fast_partial"] = "raw"
     issue_key: str
     issue_type: str
     summary: str
@@ -69,6 +71,10 @@ class RawIssueResponse(BaseModel):
     due_date: str | None = None
     attachment_texts: dict[str, str] = Field(default_factory=dict)
     images: dict[str, str] = Field(default_factory=dict)  # filename → Base64
+    pending_images: list[str] = Field(default_factory=list)
+    pending_audio: list[str] = Field(default_factory=list)
+    pending_documents: list[str] = Field(default_factory=list)
+    pending_unsupported: list[str] = Field(default_factory=list)
     note: str = (
         "No LLM analysis performed - no API key configured. "
         "Raw issue data, digested documents, and raw images are provided for your direct analysis."

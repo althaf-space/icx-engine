@@ -1,4 +1,4 @@
-﻿"""Tests for graph/manager.py (GraphManager integration)."""
+"""Tests for graph/manager.py (GraphManager integration)."""
 from __future__ import annotations
 
 import json

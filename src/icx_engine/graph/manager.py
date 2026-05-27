@@ -13,7 +13,6 @@ import logging
 import threading
 from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
-from typing import Literal
 
 _log = logging.getLogger(__name__)
 
@@ -21,8 +20,8 @@ from icx_engine.exceptions import GraphError
 from icx_engine.graph import storage
 from icx_engine.graph.builder import _build_project_isolated, estimate_build_eta, _detect_llm_backend
 
-# Provider names from ICX ChannelConfig → graphify backend names
-_ICX_PROVIDER_TO_GRAPHIFY: dict[str, str] = {
+# Provider names from ICX ChannelConfig → parser backend names
+_ICX_PROVIDER_TO_PARSER: dict[str, str] = {
     "anthropic": "claude",
     "openai": "openai",
     "nim": "openai",   # NIM is OpenAI-compatible
@@ -34,7 +33,7 @@ _ICX_PROVIDER_TO_GRAPHIFY: dict[str, str] = {
 
 def _read_icx_llm_cfg() -> tuple[str, str | None, str | None] | None:
     """
-    Read ICX's configured text model and return (graphify_backend, api_key, base_url).
+    Read ICX's configured text model and return (parser_backend, api_key, base_url).
     Returns None if no model configured or on any error.
     """
     try:
@@ -44,7 +43,7 @@ def _read_icx_llm_cfg() -> tuple[str, str | None, str | None] | None:
         if llm is None:
             return None
         ch = llm.text_config
-        backend = _ICX_PROVIDER_TO_GRAPHIFY.get(ch.provider)
+        backend = _ICX_PROVIDER_TO_PARSER.get(ch.provider)
         if not backend:
             return None
         return (backend, ch.api_key, ch.base_url)
@@ -53,7 +52,7 @@ def _read_icx_llm_cfg() -> tuple[str, str | None, str | None] | None:
 
 
 def _read_icx_full_llm_cfg() -> tuple[str, str | None, str | None, str] | None:
-    """Return (graphify_backend, api_key, base_url, model) or None."""
+    """Return (parser_backend, api_key, base_url, model) or None."""
     try:
         from icx_engine.config_manager import ConfigManager
         cfg = ConfigManager.load()
@@ -61,7 +60,7 @@ def _read_icx_full_llm_cfg() -> tuple[str, str | None, str | None, str] | None:
         if llm is None:
             return None
         ch = llm.text_config
-        backend = _ICX_PROVIDER_TO_GRAPHIFY.get(ch.provider)
+        backend = _ICX_PROVIDER_TO_PARSER.get(ch.provider)
         if not backend:
             return None
         return (backend, ch.api_key, ch.base_url, ch.model)
@@ -281,11 +280,18 @@ class GraphManager:
     # Build
     # ------------------------------------------------------------------
 
-    def build(self, project_id: str, force: bool = False) -> dict:
-        """
-        Blocking build. Runs in subprocess via ProcessPoolExecutor.
-        Returns build stats dict.
-        Raises GraphError on failure.
+    def build(
+        self,
+        project_id: str,
+        force: bool = False,
+        progress_path: str | None = None,
+        skip_llm: bool = False,
+    ) -> dict:
+        """Blocking build via ProcessPoolExecutor subprocess.
+
+        Pass `progress_path` to receive per-stage events on that file
+        (see `icx_engine.graph.progress`).
+        Pass `skip_llm=True` to skip LLM semantic enrichment (faster, AST-only).
         """
         meta = storage.read_meta(project_id)
         if meta is None:
@@ -295,13 +301,12 @@ class GraphManager:
             if not _is_build_orphaned(meta):
                 eta = estimate_build_eta(meta.file_count)
                 return {"status": meta.build_status, "eta_seconds": eta, "project_id": project_id}
-            # Orphaned build: reset and rebuild
             reset = "stale" if storage.graph_path(project_id).exists() else "not_built"
             storage.set_build_status(project_id, reset)
 
         storage.set_build_status(project_id, "building")
         try:
-            result = self._run_build_subprocess(meta)
+            result = self._run_build_subprocess(meta, progress_path=progress_path, skip_llm=skip_llm)
             self._finalise_build(meta, result)
             return result
         except Exception as exc:
@@ -309,15 +314,12 @@ class GraphManager:
             raise GraphError(f"Build failed for '{meta.name}': {exc}") from exc
 
     def build_background(self, project_id: str, force: bool = False) -> None:
-        """
-        Non-blocking background build/rebuild. Submits to ProcessPoolExecutor.
-        Guards against duplicate spawns via build_status unless force=True.
-        """
+        """Non-blocking background build/rebuild via ProcessPoolExecutor."""
         meta = storage.read_meta(project_id)
         if meta is None:
             return
         if not force and meta.build_status in ("building", "rebuilding"):
-            return  # already running
+            return
 
         storage.set_build_status(project_id, "rebuilding")
         llm_cfg = _read_icx_llm_cfg()
@@ -329,23 +331,34 @@ class GraphManager:
             llm_cfg[0] if llm_cfg else None,
             llm_cfg[1] if llm_cfg else None,
             llm_cfg[2] if llm_cfg else None,
+            None,
         )
         future.add_done_callback(
             lambda f: self._on_background_build_done(project_id, meta, f)
         )
 
-    def _run_build_subprocess(self, meta: ProjectInfo) -> dict:
-        llm_cfg = _read_icx_llm_cfg()
-        future: Future = _get_build_executor().submit(
-            _build_project_isolated,
-            str(meta.path),
-            str(storage.graph_tmp_path(meta.project_id)),
-            str(storage.cache_dir_for_project(meta.project_id)),
-            llm_cfg[0] if llm_cfg else None,
-            llm_cfg[1] if llm_cfg else None,
-            llm_cfg[2] if llm_cfg else None,
-        )
-        return future.result()  # blocks
+    def _run_build_subprocess(
+        self,
+        meta: ProjectInfo,
+        progress_path: str | None = None,
+        skip_llm: bool = False,
+    ) -> dict:
+        llm_cfg = None if skip_llm else _read_icx_llm_cfg()
+        # Fresh single-worker executor per foreground build so shutdown(wait=True)
+        # is called explicitly after result() returns, avoiding Python 3.14 atexit
+        # interaction where _python_exit → t.join() raises KeyboardInterrupt.
+        with ProcessPoolExecutor(max_workers=1) as executor:
+            future: Future = executor.submit(
+                _build_project_isolated,
+                str(meta.path),
+                str(storage.graph_tmp_path(meta.project_id)),
+                str(storage.cache_dir_for_project(meta.project_id)),
+                llm_cfg[0] if llm_cfg else None,
+                llm_cfg[1] if llm_cfg else None,
+                llm_cfg[2] if llm_cfg else None,
+                progress_path,
+            )
+            return future.result()
 
     def _finalise_build(self, meta: ProjectInfo, result: dict) -> None:
         if result.get("error"):
@@ -374,6 +387,38 @@ class GraphManager:
             extraction_mode=result.get("extraction_mode", "ast"),
         )
         storage.write_meta(updated)
+
+        # Write build manifest for staleness checking by graph tools.
+        # Sample up to 2000 file mtimes so manifest stays compact on large projects.
+        try:
+            import os as _os
+            from icx_engine.graph.parser.detect import _is_noise_dir as _noise
+            project_root = Path(meta.path)
+            _mtime_sample: dict[str, float] = {}
+            _count = 0
+            for _dirpath, _dirs, _fnames in _os.walk(project_root):
+                _dirs[:] = [d for d in _dirs if not _noise(d)]
+                for _fname in _fnames:
+                    if _count >= 2000:
+                        break
+                    _fp = _os.path.join(_dirpath, _fname)
+                    try:
+                        _rel = _os.path.relpath(_fp, project_root)
+                        _mtime_sample[_rel] = _os.path.getmtime(_fp)
+                        _count += 1
+                    except OSError:
+                        pass
+                if _count >= 2000:
+                    break
+            storage.write_manifest(
+                meta.project_id,
+                meta.path,
+                file_count,
+                git_commit,
+                _mtime_sample,
+            )
+        except Exception as _manifest_exc:
+            _log.debug("write_manifest failed (%s)", type(_manifest_exc).__name__)
 
         # Generate LLM cluster descriptions (optional - silently skipped if no LLM configured)
         try:
@@ -497,11 +542,15 @@ class GraphManager:
 # Graph info helper - used by CLI --path and MCP project_paths
 # ---------------------------------------------------------------------------
 
-def graph_info_for_path(path: str) -> dict:
+def graph_info_for_path(path: str, check_stale: bool = True) -> dict:
     """Return a graph status dict for a codebase path.
 
     Shared by CLI (--path flag) and MCP (project_paths array).
     Always includes a 'path' key so callers can identify which entry belongs to which dir.
+
+    check_stale=False (MCP normal path): skips all git/staleness checks, returns stored
+    metadata only. Completes in microseconds - no subprocess, no I/O beyond reading meta.json.
+    check_stale=True (CLI, explicit freshness ops): runs full staleness detection via git diff.
     """
     try:
         mgr = GraphManager()
@@ -531,35 +580,37 @@ def graph_info_for_path(path: str) -> dict:
 
         if status in ("ready", "stale"):
             stale_note = None
-            try:
-                meta = storage.read_meta(project_id)
-                if meta is not None:
-                    from icx_engine.graph.change import check_staleness
-                    cr = check_staleness(
-                        stored_commit=meta.git_commit,
-                        stored_file_count=meta.file_count,
-                        project_path=Path(meta.path),
-                        last_built=meta.last_built,
-                    )
-                    if cr.is_stale:
-                        n_changed = len(cr.changed_files)
-                        total = meta.file_count or 1
-                        pct = round(n_changed / total * 100)
-                        stale_note = (
-                            f"{n_changed} of {total} file(s) changed ({pct}%) since last build. "
-                            "Graph may not reflect recent changes. "
-                            f"Inform the user and suggest: icx graph build --path {path}"
+            if check_stale:
+                try:
+                    meta = storage.read_meta(project_id)
+                    if meta is not None:
+                        from icx_engine.graph.change import check_staleness
+                        cr = check_staleness(
+                            stored_commit=meta.git_commit,
+                            stored_file_count=meta.file_count,
+                            project_path=Path(meta.path),
+                            last_built=meta.last_built,
                         )
-            except Exception:
-                pass
+                        if cr.is_stale:
+                            n_changed = len(cr.changed_files)
+                            total = meta.file_count or 1
+                            pct = round(n_changed / total * 100)
+                            stale_note = (
+                                f"{n_changed} of {total} file(s) changed ({pct}%) since last build. "
+                                "Graph may not reflect recent changes. "
+                                f"Inform the user and suggest: icx graph build --path {path}"
+                            )
+                except Exception:
+                    pass
 
             report_path = mgr.get_report_path(project_id)
 
             extraction_mode = "ast"
+            meta_for_mode = None
             try:
-                meta2 = storage.read_meta(project_id)
-                if meta2 is not None:
-                    extraction_mode = meta2.extraction_mode
+                meta_for_mode = storage.read_meta(project_id)
+                if meta_for_mode is not None:
+                    extraction_mode = meta_for_mode.extraction_mode
             except Exception:
                 pass
 
@@ -581,8 +632,18 @@ def graph_info_for_path(path: str) -> dict:
                 "extraction_mode": extraction_mode,
                 "relationships_note": relationships_note,
             }
-            if stale_note:
-                result["stale_note"] = stale_note
+            if check_stale:
+                if stale_note:
+                    result["stale_note"] = stale_note
+            else:
+                result["freshness"] = "not_checked"
+                if meta_for_mode is not None:
+                    if meta_for_mode.last_built:
+                        result["last_built"] = meta_for_mode.last_built
+                    if meta_for_mode.git_commit:
+                        result["git_commit"] = meta_for_mode.git_commit
+                    if meta_for_mode.file_count:
+                        result["file_count"] = meta_for_mode.file_count
             return result
 
         if status in ("building", "rebuilding"):

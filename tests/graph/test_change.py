@@ -1,4 +1,4 @@
-﻿"""Tests for graph/change.py"""
+"""Tests for graph/change.py"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -105,6 +105,17 @@ def test_git_exception_falls_back_to_mtime(tmp_path):
         with patch("icx_engine.graph.change._mtime_changed_files", return_value=["changed.py"]):
             result = check_staleness("abc123", 100, tmp_path)
     assert result.is_stale is True
+
+
+def test_git_timeout_falls_back_to_mtime(tmp_path):
+    """subprocess.TimeoutExpired must not propagate - falls back to mtime."""
+    import subprocess as _sp
+    with patch("icx_engine.graph.change.subprocess.run",
+               side_effect=_sp.TimeoutExpired(cmd=["git"], timeout=2)):
+        with patch("icx_engine.graph.change._mtime_changed_files", return_value=[]) as mock_mtime:
+            result = check_staleness("abc123def456abc123def456abc123def456abc12", 100, tmp_path)
+    mock_mtime.assert_called_once()
+    assert result.is_stale is False
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.3.5"
+version = "0.3.6"
 description = "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development teams. Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP."
 readme = "readme.md"
 license = { file = "license" }
@@ -45,11 +45,25 @@ dependencies = [
     "pdfminer.six>=20221105",
     "python-docx>=1.1",
     "google-genai>=1.0",
-    "graphifyy>=0.1.14",
     "lancedb>=0.15",
+    "networkx>=3.0",
+    "datasketch>=1.6",
+    "rapidfuzz>=3.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-java",
+    "psutil>=5.9",
+    "filelock>=3.12",
+    "jedi>=0.19",
+    "javalang>=0.13",
     "numpy>=1.24",
     "onnxruntime>=1.17",
     "tokenizers>=0.15",
+    "faster-whisper>=1.0",
+    "imageio-ffmpeg>=0.5",
+    "tiktoken>=0.5",
 ]
 
 [project.urls]
@@ -63,6 +77,18 @@ dev = [
     "pytest-asyncio>=0.23",
     "respx>=0.21",
 ]
+graph-extended = [
+    "tree-sitter-go",
+    "tree-sitter-c-sharp",
+    "tree-sitter-ruby",
+    "tree-sitter-rust",
+    "tree-sitter-swift",
+    "tree-sitter-php",
+    "tree-sitter-c",
+    "tree-sitter-scala",
+    "tree-sitter-dart",
+    "tree-sitter-elixir",
+]
 
 [project.scripts]
 icx = "icx_engine.cli:app"
@@ -74,6 +100,7 @@ packages = ["src/icx_engine"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["tests"]
+norecursedirs = ["tests/graph/eval/fixtures"]
 filterwarnings = [
     # google-genai uses a private typing internal deprecated in Python 3.14.
     # Affects tests on 3.14; removal is Python 3.17 (outside our <3.15 range).

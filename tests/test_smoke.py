@@ -1,4 +1,4 @@
-﻿import re
+import re
 from unittest.mock import patch
 
 import click
@@ -135,8 +135,6 @@ def test_mcp_config_prints_snippet(cli_runner):
     assert "icx" in result.output
 
 
-# ── Phase 4 smoke tests ───────────────────────────────────────────────────────
-
 def test_raw_issue_data_has_phase4_fields():
     """RawIssueData carries optional fields with correct defaults."""
     from icx_engine.models.output import RawIssueData
@@ -239,18 +237,18 @@ def test_model_remove_invalid_index(cli_runner):
     assert result.exit_code != 0
 
 
-def test_graph_command_does_not_trigger_memory_setup(cli_runner):
-    """icx graph <cmd> must not download the ONNX model - graph never uses embeddings."""
-    with patch("icx_engine.cli._trigger_memory_setup") as mock_trigger:
+def test_no_auto_download_on_graph_command(cli_runner):
+    """icx graph <cmd> must never trigger a model download - only `icx setup` does."""
+    with patch("icx_engine.memory.embeddings.EmbeddingsManager.ensure_ready") as mock_dl:
         cli_runner.invoke(app, ["graph", "--help"])
-    mock_trigger.assert_not_called()
+    mock_dl.assert_not_called()
 
 
-def test_memory_command_triggers_memory_setup(cli_runner):
-    """icx memory <cmd> must trigger memory model setup (pre-download on first use)."""
-    with patch("icx_engine.cli._trigger_memory_setup") as mock_trigger:
+def test_no_auto_download_on_memory_command(cli_runner):
+    """icx memory <cmd> must not auto-download the model - only `icx setup` does."""
+    with patch("icx_engine.memory.embeddings.EmbeddingsManager.ensure_ready") as mock_dl:
         cli_runner.invoke(app, ["memory", "--help"])
-    mock_trigger.assert_called_once()
+    mock_dl.assert_not_called()
 
 
 def test_connection_add_duplicate_domain_prompts_overwrite(cli_runner):

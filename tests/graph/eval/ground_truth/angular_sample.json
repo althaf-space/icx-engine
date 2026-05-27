@@ -1,0 +1,23 @@
+{
+  "fixture": "angular_sample",
+  "language": "ts",
+  "framework": "angular",
+  "notes": "Angular sample with one module + two feature components + shared service. DI through constructor params with declared types.",
+  "edges": [
+    {"source": "src/main.ts", "target": "src/app/app.module.ts", "kind": "import"},
+    {"source": "src/app/app.module.ts", "target": "src/app/app.component.ts", "kind": "import"},
+    {"source": "src/app/app.module.ts", "target": "src/app/users/users.component.ts", "kind": "import"},
+    {"source": "src/app/app.module.ts", "target": "src/app/posts/posts.component.ts", "kind": "import"},
+    {"source": "src/app/app.module.ts", "target": "src/app/users/users.service.ts", "kind": "import"},
+    {"source": "src/app/app.module.ts", "target": "src/app/posts/posts.service.ts", "kind": "import"},
+    {"source": "src/app/users/users.service.ts", "target": "src/app/shared/api.service.ts", "kind": "import"},
+    {"source": "src/app/users/users.component.ts", "target": "src/app/users/users.service.ts", "kind": "import"},
+    {"source": "src/app/posts/posts.service.ts", "target": "src/app/shared/api.service.ts", "kind": "import"},
+    {"source": "src/app/posts/posts.component.ts", "target": "src/app/posts/posts.service.ts", "kind": "import"},
+
+    {"source": "src/app/users/users.service.ts:usersservice", "target": "src/app/shared/api.service.ts:apiservice", "kind": "di"},
+    {"source": "src/app/users/users.component.ts:userscomponent", "target": "src/app/users/users.service.ts:usersservice", "kind": "di"},
+    {"source": "src/app/posts/posts.service.ts:postsservice", "target": "src/app/shared/api.service.ts:apiservice", "kind": "di"},
+    {"source": "src/app/posts/posts.component.ts:postscomponent", "target": "src/app/posts/posts.service.ts:postsservice", "kind": "di"}
+  ]
+}

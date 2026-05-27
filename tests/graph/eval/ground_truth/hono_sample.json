@@ -1,0 +1,23 @@
+{
+  "fixture": "hono_sample",
+  "language": "typescript",
+  "framework": "hono",
+  "notes": "Hono framework with middleware, route modules, services, and DB layer.",
+  "edges": [
+    {"source": "src/index.ts", "target": "src/routes/users.ts", "kind": "import"},
+    {"source": "src/index.ts", "target": "src/routes/posts.ts", "kind": "import"},
+    {"source": "src/index.ts", "target": "src/middleware/logger.ts", "kind": "import"},
+    {"source": "src/index.ts", "target": "src/middleware/auth.ts", "kind": "import"},
+
+    {"source": "src/routes/users.ts", "target": "src/services/userService.ts", "kind": "import"},
+    {"source": "src/routes/posts.ts", "target": "src/services/postService.ts", "kind": "import"},
+
+    {"source": "src/services/userService.ts", "target": "src/db.ts", "kind": "import"},
+    {"source": "src/services/userService.ts:listusers", "target": "src/db.ts:getdb", "kind": "call"},
+    {"source": "src/services/userService.ts:getuser", "target": "src/db.ts:getdb", "kind": "call"},
+
+    {"source": "src/services/postService.ts", "target": "src/db.ts", "kind": "import"},
+    {"source": "src/services/postService.ts:listposts", "target": "src/db.ts:getdb", "kind": "call"},
+    {"source": "src/services/postService.ts:createpost", "target": "src/db.ts:getdb", "kind": "call"}
+  ]
+}

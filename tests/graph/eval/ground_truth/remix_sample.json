@@ -1,0 +1,41 @@
+{
+  "fixture": "remix_sample",
+  "language": "typescript",
+  "framework": "remix",
+  "notes": "Remix v2 file-based routing with loaders, actions, server-side services, and React components.",
+  "edges": [
+    {"source": "app/root.tsx", "target": "app/components/NavBar.tsx", "kind": "import"},
+    {"source": "app/root.tsx:app", "target": "app/components/NavBar.tsx:navbar", "kind": "renders"},
+
+    {"source": "app/routes/_index.tsx", "target": "app/models/post.server.ts", "kind": "import"},
+    {"source": "app/routes/_index.tsx", "target": "app/components/PostCard.tsx", "kind": "import"},
+    {"source": "app/routes/_index.tsx", "target": "app/routes/_index.tsx:loader", "kind": "route"},
+    {"source": "app/routes/_index.tsx:loader", "target": "app/models/post.server.ts:listposts", "kind": "call"},
+    {"source": "app/routes/_index.tsx:index", "target": "app/components/PostCard.tsx:postcard", "kind": "renders"},
+
+    {"source": "app/routes/login.tsx", "target": "app/services/auth.server.ts", "kind": "import"},
+    {"source": "app/routes/login.tsx", "target": "app/services/session.server.ts", "kind": "import"},
+    {"source": "app/routes/login.tsx", "target": "app/routes/login.tsx:action", "kind": "route"},
+    {"source": "app/routes/login.tsx:action", "target": "app/services/auth.server.ts:authenticate", "kind": "call"},
+    {"source": "app/routes/login.tsx:action", "target": "app/services/session.server.ts:createsession", "kind": "call"},
+
+    {"source": "app/routes/posts.tsx", "target": "app/services/auth.server.ts", "kind": "import"},
+    {"source": "app/routes/posts.tsx", "target": "app/models/post.server.ts", "kind": "import"},
+    {"source": "app/routes/posts.tsx", "target": "app/components/PostCard.tsx", "kind": "import"},
+    {"source": "app/routes/posts.tsx", "target": "app/routes/posts.tsx:loader", "kind": "route"},
+    {"source": "app/routes/posts.tsx:loader", "target": "app/services/auth.server.ts:requireuserid", "kind": "call"},
+    {"source": "app/routes/posts.tsx:loader", "target": "app/models/post.server.ts:listposts", "kind": "call"},
+    {"source": "app/routes/posts.tsx:posts", "target": "app/components/PostCard.tsx:postcard", "kind": "renders"},
+
+    {"source": "app/routes/posts.$id.tsx", "target": "app/models/post.server.ts", "kind": "import"},
+    {"source": "app/routes/posts.$id.tsx", "target": "app/models/user.server.ts", "kind": "import"},
+    {"source": "app/routes/posts.$id.tsx", "target": "app/routes/posts.$id.tsx:loader", "kind": "route"},
+    {"source": "app/routes/posts.$id.tsx:loader", "target": "app/models/post.server.ts:getpostbyid", "kind": "call"},
+    {"source": "app/routes/posts.$id.tsx:loader", "target": "app/models/user.server.ts:getuserbyid", "kind": "call"},
+
+    {"source": "app/services/auth.server.ts", "target": "app/models/user.server.ts", "kind": "import"},
+    {"source": "app/services/auth.server.ts", "target": "app/services/session.server.ts", "kind": "import"},
+    {"source": "app/services/auth.server.ts:authenticate", "target": "app/models/user.server.ts:getuserbyemail", "kind": "call"},
+    {"source": "app/services/auth.server.ts:requireuserid", "target": "app/services/session.server.ts:getsession", "kind": "call"}
+  ]
+}

@@ -1,10 +1,11 @@
-﻿"""
+"""
 Staleness detection: git-based diff with mtime fallback.
 """
 from __future__ import annotations
 
 import logging
 import re
+import os
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -25,7 +26,19 @@ class ChangeResult:
 _SMALL_DELTA_MAX_FILES = 5
 _SMALL_DELTA_MAX_RATIO = 0.03   # 3%
 _MTIME_SAMPLE_SIZE = 50          # files sampled for mtime fallback
-_GIT_TIMEOUT = 10               # seconds
+_GIT_TIMEOUT = 10        # build-time ops (current_git_commit during graph build)
+_GIT_FAST_TIMEOUT = 2    # staleness checks - must not block MCP event loop
+
+_GIT_SAFE_ENV: dict[str, str] = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "Never",
+}
+
+
+def _safe_git_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.update(_GIT_SAFE_ENV)
+    return env
 
 
 def check_staleness(
@@ -90,23 +103,29 @@ def _git_changed_files(
     project_path: Path,
 ) -> list[str] | None:
     """
-    Returns list of changed file paths since stored_commit, or None if git fails.
+    Returns list of changed file paths since stored_commit, or None if git fails/times out.
     """
     if not _HEX_SHA_RE.match(stored_commit):
         _log.debug("stored_commit %r is not a valid hex SHA; skipping git diff", stored_commit)
         return None
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", stored_commit, "HEAD"],
+            [
+                "git", "--no-pager", "-c", "core.quotepath=false",
+                "diff", "--name-only", "--no-ext-diff", stored_commit, "HEAD",
+            ],
             cwd=str(project_path),
             capture_output=True,
             text=True,
-            timeout=_GIT_TIMEOUT,
+            timeout=_GIT_FAST_TIMEOUT,
+            env=_safe_git_env(),
         )
         if result.returncode != 0:
             return None
-        lines = [f.strip() for f in result.stdout.splitlines() if f.strip()]
-        return lines
+        return [f.strip() for f in result.stdout.splitlines() if f.strip()]
+    except subprocess.TimeoutExpired:
+        _log.debug("git diff timed out after %ss for %s", _GIT_FAST_TIMEOUT, project_path)
+        return None
     except Exception as exc:
         _log.debug("git diff failed (%s), falling back to mtime", type(exc).__name__)
         return None

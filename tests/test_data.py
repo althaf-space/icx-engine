@@ -1,4 +1,4 @@
-﻿"""Shared test constants - imported by conftest.py and individual test modules."""
+"""Shared test constants - imported by conftest.py and individual test modules."""
 import json
 from icx_engine.auth.token import build_basic_auth_header
 

@@ -1,4 +1,4 @@
-﻿import json
+import json
 import openai
 from openai import AsyncOpenAI
 from icx_engine.exceptions import AuthError, ContextBuildError, RateLimited, SourceUnavailable

@@ -1,0 +1,35 @@
+{
+  "fixture": "kotlin_spring_sample",
+  "language": "kotlin",
+  "framework": "spring_boot",
+  "notes": "Kotlin Spring Boot + JPA. Primary-constructor DI, @Entity + @ManyToOne, JpaRepository extends, @RestController + @GetMapping/@PostMapping.",
+  "edges": [
+    {"source": "src/main/kotlin/com/example/blog/repository/UserRepository.kt", "target": "src/main/kotlin/com/example/blog/entity/User.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/repository/PostRepository.kt", "target": "src/main/kotlin/com/example/blog/entity/Post.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/repository/PostRepository.kt", "target": "src/main/kotlin/com/example/blog/entity/User.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/service/UserService.kt", "target": "src/main/kotlin/com/example/blog/entity/User.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/service/UserService.kt", "target": "src/main/kotlin/com/example/blog/repository/UserRepository.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/service/PostService.kt", "target": "src/main/kotlin/com/example/blog/entity/Post.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/service/PostService.kt", "target": "src/main/kotlin/com/example/blog/repository/PostRepository.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/controller/UserController.kt", "target": "src/main/kotlin/com/example/blog/entity/User.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/controller/UserController.kt", "target": "src/main/kotlin/com/example/blog/service/UserService.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/controller/PostController.kt", "target": "src/main/kotlin/com/example/blog/entity/Post.kt", "kind": "import"},
+    {"source": "src/main/kotlin/com/example/blog/controller/PostController.kt", "target": "src/main/kotlin/com/example/blog/service/PostService.kt", "kind": "import"},
+
+    {"source": "src/main/kotlin/com/example/blog/entity/Post.kt:post", "target": "src/main/kotlin/com/example/blog/entity/User.kt:user", "kind": "relation"},
+    {"source": "src/main/kotlin/com/example/blog/entity/User.kt:user", "target": "src/main/kotlin/com/example/blog/entity/Post.kt:post", "kind": "relation"},
+
+    {"source": "src/main/kotlin/com/example/blog/repository/UserRepository.kt:userrepository", "target": "src/main/kotlin/com/example/blog/entity/User.kt:user", "kind": "dao"},
+    {"source": "src/main/kotlin/com/example/blog/repository/PostRepository.kt:postrepository", "target": "src/main/kotlin/com/example/blog/entity/Post.kt:post", "kind": "dao"},
+
+    {"source": "src/main/kotlin/com/example/blog/service/UserService.kt:userservice", "target": "src/main/kotlin/com/example/blog/repository/UserRepository.kt:userrepository", "kind": "di"},
+    {"source": "src/main/kotlin/com/example/blog/service/PostService.kt:postservice", "target": "src/main/kotlin/com/example/blog/repository/PostRepository.kt:postrepository", "kind": "di"},
+    {"source": "src/main/kotlin/com/example/blog/service/PostService.kt:postservice", "target": "src/main/kotlin/com/example/blog/service/UserService.kt:userservice", "kind": "di"},
+    {"source": "src/main/kotlin/com/example/blog/controller/UserController.kt:usercontroller", "target": "src/main/kotlin/com/example/blog/service/UserService.kt:userservice", "kind": "di"},
+    {"source": "src/main/kotlin/com/example/blog/controller/PostController.kt:postcontroller", "target": "src/main/kotlin/com/example/blog/service/PostService.kt:postservice", "kind": "di"},
+
+    {"source": "src/main/kotlin/com/example/blog/controller/UserController.kt", "target": "src/main/kotlin/com/example/blog/controller/UserController.kt:register", "kind": "route"},
+    {"source": "src/main/kotlin/com/example/blog/controller/UserController.kt", "target": "src/main/kotlin/com/example/blog/controller/UserController.kt:read", "kind": "route"},
+    {"source": "src/main/kotlin/com/example/blog/controller/PostController.kt", "target": "src/main/kotlin/com/example/blog/controller/PostController.kt:list", "kind": "route"}
+  ]
+}

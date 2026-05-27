@@ -1,4 +1,4 @@
-﻿"""
+"""
 Generic OAuth 2.0 PKCE (RFC 7636) authorization code flow utilities.
 
 Reusable by any connector that needs browser-based OAuth. The caller provides
@@ -186,7 +186,7 @@ async def run_pkce_flow(
     if http_server is None:
         _ports = ", ".join(str(p) for p in range(callback_port, callback_port + _PORT_RANGE))
         raise OSError(
-            f"OAuth callback server could not start - ports {callback_port}–"
+            f"OAuth callback server could not start - ports {callback_port}-"
             f"{callback_port + _PORT_RANGE - 1} are all in use.\n"
             f"Free one of these ports and retry: {_ports}\n"
             f"On Linux/macOS: lsof -i :{callback_port}  |  On Windows: netstat -ano | findstr :{callback_port}"

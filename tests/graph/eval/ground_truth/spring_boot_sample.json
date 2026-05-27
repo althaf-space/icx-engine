@@ -1,0 +1,87 @@
+{
+  "fixture": "spring_boot_sample",
+  "language": "java",
+  "framework": "spring_boot",
+  "notes": "Spring Boot + Spring Data JPA + Hibernate. Symbol names match parser labels (lowercase, no class prefix, no trailing parens). Java packages reflected by directory structure.",
+  "edges": [
+    {"source": "src/main/java/com/example/blog/repository/UserRepository.java", "target": "src/main/java/com/example/blog/entity/User.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/repository/PostRepository.java", "target": "src/main/java/com/example/blog/entity/Post.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/repository/PostRepository.java", "target": "src/main/java/com/example/blog/entity/User.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/repository/CommentRepository.java", "target": "src/main/java/com/example/blog/entity/Comment.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/repository/CommentRepository.java", "target": "src/main/java/com/example/blog/entity/Post.java", "kind": "import"},
+
+    {"source": "src/main/java/com/example/blog/service/UserService.java", "target": "src/main/java/com/example/blog/entity/User.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/UserService.java", "target": "src/main/java/com/example/blog/repository/UserRepository.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/PostService.java", "target": "src/main/java/com/example/blog/entity/Post.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/PostService.java", "target": "src/main/java/com/example/blog/entity/User.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/PostService.java", "target": "src/main/java/com/example/blog/repository/PostRepository.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/CommentService.java", "target": "src/main/java/com/example/blog/entity/Comment.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/CommentService.java", "target": "src/main/java/com/example/blog/entity/Post.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/CommentService.java", "target": "src/main/java/com/example/blog/repository/CommentRepository.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/CommentService.java", "target": "src/main/java/com/example/blog/repository/PostRepository.java", "kind": "import"},
+
+    {"source": "src/main/java/com/example/blog/controller/UserController.java", "target": "src/main/java/com/example/blog/dto/UserDto.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/controller/UserController.java", "target": "src/main/java/com/example/blog/entity/User.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/controller/UserController.java", "target": "src/main/java/com/example/blog/service/UserService.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/controller/PostController.java", "target": "src/main/java/com/example/blog/dto/PostDto.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/controller/PostController.java", "target": "src/main/java/com/example/blog/entity/Post.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/controller/PostController.java", "target": "src/main/java/com/example/blog/service/PostService.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/controller/CommentController.java", "target": "src/main/java/com/example/blog/dto/CommentDto.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/controller/CommentController.java", "target": "src/main/java/com/example/blog/entity/Comment.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/controller/CommentController.java", "target": "src/main/java/com/example/blog/service/CommentService.java", "kind": "import"},
+
+    {"source": "src/main/java/com/example/blog/dto/UserDto.java", "target": "src/main/java/com/example/blog/entity/User.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/dto/PostDto.java", "target": "src/main/java/com/example/blog/entity/Post.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/dto/CommentDto.java", "target": "src/main/java/com/example/blog/entity/Comment.java", "kind": "import"},
+
+    {"source": "src/main/java/com/example/blog/repository/UserRepository.java:userrepository", "target": "src/main/java/com/example/blog/entity/User.java:user", "kind": "dao"},
+    {"source": "src/main/java/com/example/blog/repository/PostRepository.java:postrepository", "target": "src/main/java/com/example/blog/entity/Post.java:post", "kind": "dao"},
+    {"source": "src/main/java/com/example/blog/repository/CommentRepository.java:commentrepository", "target": "src/main/java/com/example/blog/entity/Comment.java:comment", "kind": "dao"},
+
+    {"source": "src/main/java/com/example/blog/entity/User.java:user", "target": "src/main/java/com/example/blog/entity/Post.java:post", "kind": "relation"},
+    {"source": "src/main/java/com/example/blog/entity/Post.java:post", "target": "src/main/java/com/example/blog/entity/User.java:user", "kind": "relation"},
+    {"source": "src/main/java/com/example/blog/entity/Comment.java:comment", "target": "src/main/java/com/example/blog/entity/Post.java:post", "kind": "relation"},
+
+    {"source": "src/main/java/com/example/blog/service/UserService.java:userservice", "target": "src/main/java/com/example/blog/repository/UserRepository.java:userrepository", "kind": "di"},
+    {"source": "src/main/java/com/example/blog/service/PostService.java:postservice", "target": "src/main/java/com/example/blog/repository/PostRepository.java:postrepository", "kind": "di"},
+    {"source": "src/main/java/com/example/blog/service/PostService.java:postservice", "target": "src/main/java/com/example/blog/service/UserService.java:userservice", "kind": "di"},
+    {"source": "src/main/java/com/example/blog/service/CommentService.java:commentservice", "target": "src/main/java/com/example/blog/repository/CommentRepository.java:commentrepository", "kind": "di"},
+    {"source": "src/main/java/com/example/blog/service/CommentService.java:commentservice", "target": "src/main/java/com/example/blog/repository/PostRepository.java:postrepository", "kind": "di"},
+
+    {"source": "src/main/java/com/example/blog/controller/UserController.java:usercontroller", "target": "src/main/java/com/example/blog/service/UserService.java:userservice", "kind": "di"},
+    {"source": "src/main/java/com/example/blog/controller/PostController.java:postcontroller", "target": "src/main/java/com/example/blog/service/PostService.java:postservice", "kind": "di"},
+    {"source": "src/main/java/com/example/blog/controller/CommentController.java:commentcontroller", "target": "src/main/java/com/example/blog/service/CommentService.java:commentservice", "kind": "di"},
+
+    {"source": "src/main/java/com/example/blog/controller/UserController.java", "target": "src/main/java/com/example/blog/controller/UserController.java:register", "kind": "route"},
+    {"source": "src/main/java/com/example/blog/controller/UserController.java", "target": "src/main/java/com/example/blog/controller/UserController.java:get", "kind": "route"},
+    {"source": "src/main/java/com/example/blog/controller/PostController.java", "target": "src/main/java/com/example/blog/controller/PostController.java:listbyauthor", "kind": "route"},
+    {"source": "src/main/java/com/example/blog/controller/PostController.java", "target": "src/main/java/com/example/blog/controller/PostController.java:publish", "kind": "route"},
+    {"source": "src/main/java/com/example/blog/controller/CommentController.java", "target": "src/main/java/com/example/blog/controller/CommentController.java:list", "kind": "route"},
+    {"source": "src/main/java/com/example/blog/controller/CommentController.java", "target": "src/main/java/com/example/blog/controller/CommentController.java:add", "kind": "route"},
+
+    {"source": "src/main/java/com/example/blog/service/UserService.java:register", "target": "src/main/java/com/example/blog/repository/UserRepository.java:findbyemail", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/service/PostService.java:listforauthor", "target": "src/main/java/com/example/blog/service/UserService.java:get", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/service/PostService.java:listforauthor", "target": "src/main/java/com/example/blog/repository/PostRepository.java:findbyauthor", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/service/PostService.java:publish", "target": "src/main/java/com/example/blog/service/UserService.java:get", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/controller/PostController.java:listbyauthor", "target": "src/main/java/com/example/blog/service/PostService.java:listforauthor", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/controller/PostController.java:publish", "target": "src/main/java/com/example/blog/service/PostService.java:publish", "kind": "call"},
+
+    {"source": "src/main/java/com/example/blog/dto/UserDto.java:from", "target": "src/main/java/com/example/blog/entity/User.java:user", "kind": "reference"},
+    {"source": "src/main/java/com/example/blog/dto/PostDto.java:from", "target": "src/main/java/com/example/blog/entity/Post.java:post", "kind": "reference"},
+    {"source": "src/main/java/com/example/blog/dto/CommentDto.java:from", "target": "src/main/java/com/example/blog/entity/Comment.java:comment", "kind": "reference"},
+
+    {"source": "src/main/java/com/example/blog/event/PostEventListener.java:onpostcreated", "target": "src/main/java/com/example/blog/event/PostCreatedEvent.java:postcreatedevent", "kind": "listens"},
+    {"source": "src/main/java/com/example/blog/scheduler/CleanupScheduler.java:cleanupscheduler", "target": "src/main/java/com/example/blog/scheduler/CleanupScheduler.java:cleandrafts", "kind": "scheduled"},
+    {"source": "src/main/java/com/example/blog/scheduler/CleanupScheduler.java:cleanupscheduler", "target": "src/main/java/com/example/blog/service/PostService.java:postservice", "kind": "di"},
+
+    {"source": "src/main/java/com/example/blog/scheduler/CleanupScheduler.java", "target": "src/main/java/com/example/blog/service/PostService.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/event/PostCreatedEvent.java", "target": "src/main/java/com/example/blog/entity/Post.java", "kind": "import"},
+
+    {"source": "src/main/java/com/example/blog/repository/PostRepository.java:findbyauthoremail", "target": "src/main/java/com/example/blog/entity/Post.java:post", "kind": "queries"},
+
+    {"source": "src/main/java/com/example/blog/config/WebConfig.java:webconfig", "target": "src/main/java/com/example/blog/service/PostService.java:postservice", "kind": "provides"},
+    {"source": "src/main/java/com/example/blog/config/WebConfig.java:webconfig", "target": "src/main/java/com/example/blog/service/UserService.java:userservice", "kind": "di"},
+
+    {"source": "src/main/java/com/example/blog/aspect/LoggingAspect.java:loguserservicecalls", "target": "src/main/java/com/example/blog/service/UserService.java", "kind": "advises"}
+  ]
+}

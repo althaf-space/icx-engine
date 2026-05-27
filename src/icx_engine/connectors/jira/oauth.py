@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import time
 
 from icx_engine.exceptions import OAuthRefreshError

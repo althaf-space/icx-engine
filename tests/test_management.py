@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import pytest
 from icx_engine.models.config import AppConfig, LLMConfig, ChannelConfig
 from icx_engine.connectors.jira.config import JiraConnection, TokenAuth
