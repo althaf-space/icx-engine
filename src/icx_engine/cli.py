@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Annotated, Optional
 from rich.console import Console
 
-from icx_engine.services.connection_service import _connect_jira_token, _connect_jira_oauth
 from icx_engine.error_display import render_icx_error
 
 try:
@@ -674,7 +673,7 @@ def connection(
     """
     try:
         if add:
-            _connect_jira(debug=debug)
+            _connect(debug=debug)
             return
         if remove is not None:
             from icx_engine.config_manager import ConfigManager
@@ -700,7 +699,48 @@ def connection(
         raise typer.Exit(1)
 
 
+# Registry of supported work tracker platforms.
+# Each entry: (connector_type, display_label).
+# Add new connectors here as they are implemented.
+PLATFORMS: list[tuple[str, str]] = [
+    ("jira", "Jira  (Jira Cloud - API Token or OAuth PKCE)"),
+]
+
+
+def _connect(debug: bool = False) -> None:
+    """Generic connection entry point - dispatches to platform-specific connect flow.
+
+    When only one platform is registered, skips the selection menu. When two or
+    more platforms are registered, prompts the user to choose before delegating.
+    """
+    if len(PLATFORMS) == 1:
+        platform_key = PLATFORMS[0][0]
+    else:
+        menu = "\n".join(f"  {i + 1}. {label}" for i, (_, label) in enumerate(PLATFORMS))
+        choice = typer.prompt(
+            f"\nChoose a work tracker platform\n{menu}\nEnter number",
+            default="1",
+        ).strip()
+        try:
+            idx = int(choice) - 1
+            if idx < 0 or idx >= len(PLATFORMS):
+                raise ValueError
+        except ValueError:
+            typer.echo("Invalid choice. Defaulting to first platform.")
+            idx = 0
+        platform_key = PLATFORMS[idx][0]
+
+    _platform_dispatch = {
+        "jira": _connect_jira,
+    }
+    fn = _platform_dispatch.get(platform_key)
+    if fn is None:
+        raise ValueError(f"No connect flow registered for platform '{platform_key}'.")
+    fn(debug=debug)
+
+
 def _connect_jira(debug: bool = False) -> None:
+    from icx_engine.services.connection_service import _connect_jira_token, _connect_jira_oauth
     method = typer.prompt(
         "\nChoose Jira connection method\n"
         "  1. API Token   email + token from id.atlassian.com  (recommended)\n"

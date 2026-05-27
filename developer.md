@@ -764,21 +764,34 @@ Write a `_connect_myplatform()` function in `services/connection_service.py` fol
 4. Build a `MyConnection` and append it to config
 5. Call `ConfigManager.save(config)` then `ConfigManager.warn_if_plaintext()`
 
-Then, in `cli.py`, add your platform to the `PLATFORMS` list and import and call your new function:
+Then, in `cli.py`, add your platform to `PLATFORMS` and register it in `_connect()`:
 
 ```python
-PLATFORMS = [
+# cli.py - PLATFORMS list (already exists)
+PLATFORMS: list[tuple[str, str]] = [
     ("jira",       "Jira  (Jira Cloud - API Token or OAuth PKCE)"),
     ("myplatform", "My Platform  (description)"),   # ← add
 ]
 
-# In _connect():
-elif platform_key == "myplatform":
-    from icx_engine.services.connection_service import _connect_myplatform
-    _connect_myplatform(debug=debug)
+# cli.py - _connect() dispatch table (already exists)
+_platform_dispatch = {
+    "jira": _connect_jira,
+    "myplatform": _connect_myplatform,   # ← add
+}
 ```
 
-**Never write auth flow logic directly in `cli.py`** - it belongs in `services/connection_service.py`.
+Add the corresponding `_connect_myplatform()` wrapper in `cli.py` that lazy-imports and calls the service function:
+
+```python
+def _connect_myplatform(debug: bool = False) -> None:
+    from icx_engine.services.connection_service import _connect_myplatform as _svc
+    _svc(debug=debug)
+```
+
+When `PLATFORMS` has more than one entry, `_connect()` automatically shows a numbered selection menu. With one entry it skips the menu and goes directly to that platform's flow. No changes to `_connect()` are needed.
+
+**Never write auth flow logic directly in `cli.py`** - it belongs in `services/connection_service.py`.  
+**Never call platform-specific service functions directly from `connection --add`** - all calls route through `_connect()` → `_platform_dispatch`.
 
 ### Step 7 - Write tests
 

@@ -26,7 +26,7 @@ _GUIDANCE: dict[type, tuple[str, str]] = {
     ),
     InvalidInput: (
         "The input is not a valid issue key or URL.",
-        "Expected a key like ABC-123 or a full URL (https://yourcompany.atlassian.net/browse/ABC-123).",
+        "Expected a bare key like ABC-123 or a full tracker URL (e.g. https://yourcompany.example.com/browse/ABC-123).",
     ),
     NoConnectionError: (
         "No connection is configured for this domain.",
