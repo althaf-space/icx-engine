@@ -32,6 +32,9 @@ jobs:
         with:
           languages: python
           queries: security-extended
+          config: |
+            paths-ignore:
+              - tests/graph/eval/fixtures
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v4
