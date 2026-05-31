@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import time
 
 from icx_engine.exceptions import OAuthRefreshError
@@ -47,9 +47,11 @@ async def refresh_oauth_if_needed(
 
     from icx_engine.config_manager import ConfigManager
 
-    config.connections = [
-        new_conn if c.domain == conn.domain else c
-        for c in config.connections
-    ]
-    ConfigManager.save(config)
+    updated_config = config.model_copy(update={
+        "connections": [
+            new_conn if c.domain == conn.domain else c
+            for c in config.connections
+        ]
+    })
+    ConfigManager.save(updated_config)
     return new_conn

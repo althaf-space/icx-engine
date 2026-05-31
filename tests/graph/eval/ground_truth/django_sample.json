@@ -1,0 +1,64 @@
+{
+  "fixture": "django_sample",
+  "language": "python",
+  "framework": "django",
+  "notes": "Django + DRF sample. Symbol names match parser labels (lowercase). Includes class-based views, model relationships, signal handlers, ModelForm/ModelSerializer Meta bindings, and url include() patterns.",
+  "edges": [
+    {"source": "myproject/urls.py", "target": "blog/views.py", "kind": "import"},
+
+    {"source": "blog/apps.py:ready", "target": "blog/signals.py", "kind": "import"},
+
+    {"source": "blog/models.py:post", "target": "blog/models.py:category", "kind": "reference", "notes": "ForeignKey(Category)"},
+    {"source": "blog/models.py:comment", "target": "blog/models.py:post", "kind": "reference", "notes": "ForeignKey(Post)"},
+
+    {"source": "blog/forms.py", "target": "blog/models.py", "kind": "import"},
+    {"source": "blog/forms.py:postform", "target": "blog/models.py:post", "kind": "reference", "notes": "ModelForm Meta.model = Post"},
+
+    {"source": "blog/services.py", "target": "blog/models.py", "kind": "import"},
+    {"source": "blog/services.py:publish_post", "target": "blog/models.py:post", "kind": "reference"},
+    {"source": "blog/services.py:post_word_count", "target": "blog/models.py:post", "kind": "reference"},
+
+    {"source": "blog/views.py", "target": "blog/forms.py", "kind": "import"},
+    {"source": "blog/views.py", "target": "blog/models.py", "kind": "import"},
+    {"source": "blog/views.py", "target": "blog/services.py", "kind": "import"},
+    {"source": "blog/views.py:postlistview", "target": "blog/models.py:post", "kind": "reference", "notes": "ListView.model"},
+    {"source": "blog/views.py:postdetailview", "target": "blog/models.py:post", "kind": "reference", "notes": "DetailView.model"},
+    {"source": "blog/views.py:create_post", "target": "blog/forms.py:postform", "kind": "call"},
+    {"source": "blog/views.py:publish_post_view", "target": "blog/models.py:post", "kind": "reference"},
+    {"source": "blog/views.py:publish_post_view", "target": "blog/services.py:publish_post", "kind": "call"},
+
+    {"source": "blog/urls.py", "target": "blog/views.py", "kind": "import"},
+
+    {"source": "blog/admin.py", "target": "blog/models.py", "kind": "import"},
+    {"source": "blog/admin.py:postadmin", "target": "blog/models.py:post", "kind": "reference"},
+
+    {"source": "blog/signals.py", "target": "blog/models.py", "kind": "import"},
+    {"source": "blog/signals.py", "target": "blog/services.py", "kind": "import"},
+    {"source": "blog/signals.py:log_post_save", "target": "blog/services.py:post_word_count", "kind": "call"},
+    {"source": "blog/signals.py:log_post_save", "target": "blog/models.py:post", "kind": "reference"},
+
+    {"source": "blog/api/serializers.py", "target": "blog/models.py", "kind": "import"},
+    {"source": "blog/api/serializers.py:postserializer", "target": "blog/models.py:post", "kind": "reference"},
+    {"source": "blog/api/serializers.py:commentserializer", "target": "blog/models.py:comment", "kind": "reference"},
+    {"source": "blog/api/serializers.py:postserializer", "target": "blog/api/serializers.py:commentserializer", "kind": "reference"},
+
+    {"source": "blog/api/views.py", "target": "blog/api/serializers.py", "kind": "import"},
+    {"source": "blog/api/views.py", "target": "blog/models.py", "kind": "import"},
+    {"source": "blog/api/views.py:postviewset", "target": "blog/models.py:post", "kind": "reference"},
+    {"source": "blog/api/views.py:postviewset", "target": "blog/api/serializers.py:postserializer", "kind": "reference"},
+
+    {"source": "blog/api/urls.py", "target": "blog/api/views.py", "kind": "import"},
+    {"source": "blog/api/urls.py", "target": "blog/api/views.py:postviewset", "kind": "reference"},
+
+    {"source": "blog/models.py:post", "target": "blog/models.py:category", "kind": "relation", "notes": "ForeignKey(Category)"},
+    {"source": "blog/models.py:comment", "target": "blog/models.py:post", "kind": "relation", "notes": "ForeignKey(Post)"},
+
+    {"source": "blog/signals.py:log_post_save", "target": "blog/models.py:post", "kind": "listens", "notes": "@receiver(post_save, sender=Post)"},
+
+    {"source": "blog/urls.py", "target": "blog/views.py:postlistview", "kind": "route"},
+    {"source": "blog/urls.py", "target": "blog/views.py:create_post", "kind": "route"},
+    {"source": "blog/urls.py", "target": "blog/views.py:postdetailview", "kind": "route"},
+    {"source": "blog/urls.py", "target": "blog/views.py:publish_post_view", "kind": "route"},
+    {"source": "myproject/urls.py", "target": "blog/views.py:health_check", "kind": "route"}
+  ]
+}

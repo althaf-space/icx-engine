@@ -1,0 +1,31 @@
+{
+  "fixture": "next_sample",
+  "language": "tsx",
+  "framework": "nextjs",
+  "notes": "Next.js app-router sample. Routes come from app/* layout/page/route conventions.",
+  "edges": [
+    {"source": "app/layout.tsx", "target": "components/SiteHeader.tsx", "kind": "import"},
+    {"source": "app/page.tsx", "target": "components/HomeHero.tsx", "kind": "import"},
+    {"source": "app/page.tsx", "target": "components/PostList.tsx", "kind": "import"},
+    {"source": "app/blog/page.tsx", "target": "components/PostList.tsx", "kind": "import"},
+    {"source": "app/api/posts/route.ts", "target": "lib/posts.ts", "kind": "import"},
+    {"source": "components/PostList.tsx", "target": "lib/posts.ts", "kind": "import"},
+    {"source": "components/PostList.tsx", "target": "components/PostCard.tsx", "kind": "import"},
+    {"source": "components/PostCard.tsx", "target": "lib/posts.ts", "kind": "import"},
+
+    {"source": "app/layout.tsx:rootlayout", "target": "components/SiteHeader.tsx:siteheader", "kind": "renders"},
+    {"source": "app/page.tsx:homepage", "target": "components/HomeHero.tsx:homehero", "kind": "renders"},
+    {"source": "app/page.tsx:homepage", "target": "components/PostList.tsx:postlist", "kind": "renders"},
+    {"source": "app/blog/page.tsx:blogindex", "target": "components/PostList.tsx:postlist", "kind": "renders"},
+    {"source": "components/PostList.tsx:postlist", "target": "components/PostCard.tsx:postcard", "kind": "renders"},
+
+    {"source": "app/api/posts/route.ts:get", "target": "lib/posts.ts:listposts", "kind": "call"},
+    {"source": "components/PostList.tsx:postlist", "target": "lib/posts.ts:listposts", "kind": "call"},
+
+    {"source": "app/layout.tsx", "target": "app/layout.tsx:rootlayout", "kind": "route"},
+    {"source": "app/page.tsx", "target": "app/page.tsx:homepage", "kind": "route"},
+    {"source": "app/blog/page.tsx", "target": "app/blog/page.tsx:blogindex", "kind": "route"},
+    {"source": "app/api/posts/route.ts", "target": "app/api/posts/route.ts:get", "kind": "route"},
+    {"source": "middleware.ts", "target": "middleware.ts:middleware", "kind": "route"}
+  ]
+}

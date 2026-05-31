@@ -1,4 +1,4 @@
-﻿from icx_engine.auth.token import build_basic_auth_header, build_bearer_header
+from icx_engine.auth.token import build_basic_auth_header, build_bearer_header
 from icx_engine.connectors.jira.config import JiraConnection, TokenAuth, JiraOAuthAuth
 
 

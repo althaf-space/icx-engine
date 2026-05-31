@@ -124,7 +124,7 @@ async def _verify_anthropic(
     image_data: dict[str, bytes],
 ) -> IssueContext:
     from anthropic import AsyncAnthropic
-    from icx_engine.llm.base import SYSTEM_PROMPT, finalize
+    from icx_engine.llm.base import SYSTEM_PROMPT, finalize, _strip_json_fencing
 
     client = AsyncAnthropic(api_key=image_config.api_key)
 
@@ -141,12 +141,13 @@ async def _verify_anthropic(
     response = await client.messages.create(
         model=image_config.model,
         max_tokens=4096,
+        timeout=45.0,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
     text = response.content[0].text.strip() if response.content else ""
     try:
-        corrected = IssueContext.model_validate(json.loads(text))
+        corrected = IssueContext.model_validate(json.loads(_strip_json_fencing(text)))
         return finalize(corrected, raw)
     except Exception:
         return initial
@@ -159,7 +160,7 @@ async def _verify_openai_compat(
     image_data: dict[str, bytes],
 ) -> IssueContext:
     from openai import AsyncOpenAI
-    from icx_engine.llm.base import SYSTEM_PROMPT, finalize
+    from icx_engine.llm.base import SYSTEM_PROMPT, finalize, _strip_json_fencing
 
     kwargs: dict = {"api_key": image_config.api_key or "ollama"}
     base_url = image_config.base_url or _DEFAULT_BASE_URLS.get(image_config.provider)
@@ -180,6 +181,7 @@ async def _verify_openai_compat(
     response = await client.chat.completions.create(
         model=image_config.model,
         max_tokens=4096,
+        timeout=45.0,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": content},
@@ -187,7 +189,7 @@ async def _verify_openai_compat(
     )
     text = (response.choices[0].message.content or "").strip()
     try:
-        corrected = IssueContext.model_validate(json.loads(text))
+        corrected = IssueContext.model_validate(json.loads(_strip_json_fencing(text)))
         return finalize(corrected, raw)
     except Exception:
         return initial

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Shared HTTP utilities for connector implementations.
 
 Provides a standard HTTP status → ICX exception mapping so connectors don't

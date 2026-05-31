@@ -1,4 +1,4 @@
-﻿from icx_engine.exceptions import ICXError, MemoryError
+from icx_engine.exceptions import ICXError, MemoryError
 
 
 def test_memory_error_is_ice_error():

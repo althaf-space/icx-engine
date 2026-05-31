@@ -1,4 +1,4 @@
-﻿import io
+import io
 import pytest
 import respx
 import httpx
@@ -8,7 +8,7 @@ from icx_engine.connectors.attachments import (
     _is_image, _is_document, _convert_csv, _convert_txt, _rows_to_markdown,
     _convert_xlsx, _VISION_PROMPT, _SUMMARIZE_SYSTEM,
     ocr_image, vision_enrich, process_attachments,
-    _convert_document, _process_image, _process_document,
+    _convert_document,
 )
 from icx_engine.connectors.jira.client import JiraClient
 from icx_engine.models.config import LLMConfig, ChannelConfig
@@ -418,11 +418,11 @@ def test_convert_xlsx_formula_annotation_skipped_beyond_row_3():
 
     result = _convert_xlsx(buf.getvalue())
 
-    # Data rows 1–3 (val_rows indices 1–3) must be annotated
+    # Data rows 1-3 (val_rows indices 1-3) must be annotated
     assert "(Formula: =A2*10)" in result
     assert "(Formula: =A3*10)" in result
     assert "(Formula: =A4*10)" in result
-    # Data rows 4–5 (val_rows indices 4–5) must NOT be annotated
+    # Data rows 4-5 (val_rows indices 4-5) must NOT be annotated
     assert "(Formula: =A5*10)" not in result
     assert "(Formula: =A6*10)" not in result
 
@@ -680,3 +680,372 @@ def test_process_attachments_spinner_shown_when_log_set():
     mock_con_instance.status.assert_called_once()
     call_msg = mock_con_instance.status.call_args[0][0]
     assert "attachment" in call_msg.lower() or "processing" in call_msg.lower()
+
+
+# ── Extension detection (audio/video) ─────────────────────────────────────────
+
+def test_is_audio_true_for_audio_formats():
+    from icx_engine.connectors.attachments import _is_audio
+    for fname in ["note.mp3", "clip.wav", "record.m4a", "sound.ogg", "track.flac", "audio.aac", "voice.opus"]:
+        assert _is_audio(fname) is True, f"Expected True for {fname}"
+
+
+def test_is_audio_false_for_non_audio():
+    from icx_engine.connectors.attachments import _is_audio
+    assert _is_audio("report.pdf") is False
+    assert _is_audio("screen.png") is False
+    assert _is_audio("video.mp4") is False
+
+
+def test_is_audio_case_insensitive():
+    from icx_engine.connectors.attachments import _is_audio
+    assert _is_audio("RECORDING.MP3") is True
+    assert _is_audio("Clip.WAV") is True
+
+
+def test_is_video_true_for_video_formats():
+    from icx_engine.connectors.attachments import _is_video
+    for fname in ["demo.mp4", "screen.mov", "capture.avi", "video.mkv", "clip.webm"]:
+        assert _is_video(fname) is True, f"Expected True for {fname}"
+
+
+def test_is_video_false_for_non_video():
+    from icx_engine.connectors.attachments import _is_video
+    assert _is_video("audio.mp3") is False
+    assert _is_video("report.pdf") is False
+    assert _is_video("screen.png") is False
+
+
+# ── _process_audio ─────────────────────────────────────────────────────────────
+
+@respx.mock
+async def test_process_audio_downloads_and_transcribes():
+    from icx_engine.connectors.attachments import _process_audio
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/200"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"fake mp3 bytes"))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+
+    with patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="Transcribed audio text.")):
+        fname, text, b64 = await _process_audio("meeting.mp3", content_url, client, None, whisper, None)
+
+    assert fname == "meeting.mp3"
+    assert text == "Transcribed audio text."
+    assert b64 == ""
+
+
+@respx.mock
+async def test_process_audio_returns_empty_on_download_error():
+    from icx_engine.connectors.attachments import _process_audio
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/201"
+    respx.get(content_url).mock(return_value=httpx.Response(403))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+
+    fname, text, b64 = await _process_audio("meeting.mp3", content_url, client, None, whisper, None)
+
+    assert text == ""
+    assert b64 == ""
+
+
+@respx.mock
+async def test_process_audio_returns_empty_on_transcription_error():
+    from icx_engine.connectors.attachments import _process_audio
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/202"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"bytes"))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+    log_messages: list[str] = []
+
+    with patch("icx_engine.connectors.audio.transcribe",
+               new=AsyncMock(side_effect=Exception("boom"))):
+        fname, text, b64 = await _process_audio(
+            "meeting.mp3", content_url, client, None, whisper, log_messages.append
+        )
+
+    assert fname == "meeting.mp3"
+    assert text == ""
+    assert b64 == ""
+    assert any("transcription failed" in m for m in log_messages), (
+        f"Expected 'transcription failed' log message but got: {log_messages}"
+    )
+    assert any("boom" in m for m in log_messages), (
+        f"Expected exception message 'boom' in log but got: {log_messages}"
+    )
+
+
+@respx.mock
+async def test_process_audio_returns_setup_msg_when_whisper_not_installed():
+    """_process_audio must surface _SETUP_REQUIRED_MSG when Whisper raises setup-required RuntimeError."""
+    from icx_engine.connectors.attachments import _process_audio, _SETUP_REQUIRED_MSG
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/203"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"bytes"))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+    log_messages: list[str] = []
+
+    with patch("icx_engine.connectors.audio.transcribe",
+               new=AsyncMock(side_effect=RuntimeError(
+                   "Whisper model not found. Run `icx setup` to download it."
+               ))):
+        fname, text, b64 = await _process_audio(
+            "meeting.mp3", content_url, client, None, whisper, log_messages.append
+        )
+
+    assert fname == "meeting.mp3"
+    assert text == _SETUP_REQUIRED_MSG
+    assert b64 == ""
+    assert any("icx setup" in m for m in log_messages)
+
+
+# ── _process_video ─────────────────────────────────────────────────────────────
+
+@respx.mock
+async def test_process_video_extracts_audio_then_transcribes():
+    from icx_engine.connectors.attachments import _process_video
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/300"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"fake mp4 bytes"))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+
+    with patch("icx_engine.connectors.attachments._extract_audio_from_video", new=AsyncMock(return_value=b"\x00" * 44)), \
+         patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="Video transcript.")):
+        fname, text, b64 = await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
+
+    assert fname == "demo.mp4"
+    assert text == "Video transcript."
+    assert b64 == ""
+
+
+@respx.mock
+async def test_process_video_returns_empty_on_extraction_error():
+    from icx_engine.connectors.attachments import _process_video
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/301"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"bytes"))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+
+    with patch("icx_engine.connectors.attachments._extract_audio_from_video",
+               new=AsyncMock(side_effect=Exception("ffmpeg failed"))), \
+         patch("icx_engine.connectors.attachments._extract_frames_from_video",
+               new=AsyncMock(return_value=[])):
+        fname, text, b64 = await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
+
+    assert text == ""
+
+
+@respx.mock
+async def test_process_video_passes_wav_fname_without_double_extension():
+    """transcribe must receive 'demo.wav', not 'demo.mp4.wav'."""
+    from icx_engine.connectors.attachments import _process_video
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/302"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"mp4 bytes"))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+
+    transcribe_mock = AsyncMock(return_value="Video transcript.")
+    with patch("icx_engine.connectors.attachments._extract_audio_from_video",
+               new=AsyncMock(return_value=b"\x00" * 44)), \
+         patch("icx_engine.connectors.audio.transcribe", new=transcribe_mock):
+        await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
+
+    # transcribe is called as: transcribe(text_config, audio_bytes, fname, whisper)
+    fname_arg = transcribe_mock.call_args[0][2]
+    assert fname_arg == "demo.wav", f"Expected 'demo.wav' but got '{fname_arg}'"
+
+
+@respx.mock
+async def test_process_video_returns_empty_when_no_audio_track():
+    """Videos with no audio track produce very small WAV bytes; must be caught and logged."""
+    from icx_engine.connectors.attachments import _process_video
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/303"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"mp4 bytes"))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+    log_messages: list[str] = []
+
+    # ffmpeg exits 0 but returns minimal/empty WAV (< 44 bytes = no real audio)
+    empty_wav = b"\x00" * 10
+    with patch("icx_engine.connectors.attachments._extract_audio_from_video",
+               new=AsyncMock(return_value=empty_wav)), \
+         patch("icx_engine.connectors.attachments._extract_frames_from_video",
+               new=AsyncMock(return_value=[])):
+        fname, text, b64 = await _process_video(
+            "silent.mp4", content_url, client, None, None, whisper, log_messages.append
+        )
+
+    assert fname == "silent.mp4"
+    assert text == ""
+    assert any("no audio" in m.lower() for m in log_messages), (
+        f"Expected 'no audio' log message but got: {log_messages}"
+    )
+
+
+@respx.mock
+async def test_process_video_returns_setup_msg_when_whisper_not_installed():
+    """_process_video must surface _SETUP_REQUIRED_MSG when Whisper raises setup-required RuntimeError.
+
+    Frame extraction still runs (it uses vision/OCR, not Whisper). When no frames
+    are available, only the setup message is returned.
+    """
+    from icx_engine.connectors.attachments import _process_video, _SETUP_REQUIRED_MSG
+    from icx_engine.connectors.audio import WhisperManager
+
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/311"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"fake mp4 bytes"))
+
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    whisper = WhisperManager()
+    log_messages: list[str] = []
+
+    with patch("icx_engine.connectors.attachments._extract_audio_from_video",
+               new=AsyncMock(return_value=b"\x00" * 100)), \
+         patch("icx_engine.connectors.audio.transcribe",
+               new=AsyncMock(side_effect=RuntimeError(
+                   "Whisper model not found. Run `icx setup` to download it."
+               ))), \
+         patch("icx_engine.connectors.attachments._extract_frames_from_video",
+               new=AsyncMock(return_value=[])):
+        fname, text, b64 = await _process_video(
+            "demo.mp4", content_url, client, None, None, whisper, log_messages.append
+        )
+
+    assert fname == "demo.mp4"
+    assert text == _SETUP_REQUIRED_MSG
+    assert b64 == ""
+    assert any("icx setup" in m for m in log_messages)
+
+
+# ── _extract_audio_from_video safety: timeout + returncode ────────────────────
+
+async def test_extract_audio_from_video_kills_ffmpeg_on_timeout():
+    """asyncio.wait_for timeout must kill the ffmpeg subprocess, not orphan it."""
+    import asyncio as _asyncio
+    from icx_engine.connectors.attachments import _extract_audio_from_video
+
+    proc = MagicMock()
+    proc.communicate = AsyncMock(side_effect=_asyncio.TimeoutError)
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=0)
+
+    async def _make_subproc(*args, **kwargs):
+        return proc
+
+    with patch("imageio_ffmpeg.get_ffmpeg_exe", return_value="ffmpeg"), \
+         patch("asyncio.create_subprocess_exec", new=_make_subproc):
+        with pytest.raises(_asyncio.TimeoutError):
+            await _extract_audio_from_video(b"fake video", "demo.mp4")
+
+    proc.kill.assert_called_once()
+    proc.wait.assert_awaited()
+
+
+async def test_extract_audio_from_video_raises_on_nonzero_returncode():
+    """Non-zero ffmpeg exit code must raise RuntimeError, not silently return empty bytes."""
+    from icx_engine.connectors.attachments import _extract_audio_from_video
+
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(b"", b"bad codec error"))
+    proc.returncode = 1
+
+    async def _make_subproc(*args, **kwargs):
+        return proc
+
+    with patch("imageio_ffmpeg.get_ffmpeg_exe", return_value="ffmpeg"), \
+         patch("asyncio.create_subprocess_exec", new=_make_subproc):
+        with pytest.raises(RuntimeError, match="ffmpeg exited with code 1"):
+            await _extract_audio_from_video(b"fake video", "demo.mp4")
+
+
+# ── process_attachments with audio/video ──────────────────────────────────────
+
+@respx.mock
+async def test_process_attachments_transcribes_audio_attachment():
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/400"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"mp3 bytes"))
+
+    raw = _make_raw({"meeting.mp3": content_url})
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+
+    with patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="Meeting transcript.")):
+        texts, images = await process_attachments(raw, client, llm_config=None)
+
+    assert texts == {"meeting.mp3": "Meeting transcript."}
+    assert images == {}
+
+
+@respx.mock
+async def test_process_attachments_transcribes_video_attachment():
+    content_url = "https://test.atlassian.net/rest/api/3/attachment/content/401"
+    respx.get(content_url).mock(return_value=httpx.Response(200, content=b"mp4 bytes"))
+
+    raw = _make_raw({"demo.mp4": content_url})
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+
+    with patch("icx_engine.connectors.attachments._extract_audio_from_video", new=AsyncMock(return_value=b"\x00" * 44)), \
+         patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="Demo video transcript.")):
+        texts, images = await process_attachments(raw, client, llm_config=None)
+
+    assert texts == {"demo.mp4": "Demo video transcript."}
+    assert images == {}
+
+
+@respx.mock
+async def test_process_attachments_handles_mixed_image_audio_video_doc():
+    img_url = "https://test.atlassian.net/rest/api/3/attachment/content/500"
+    audio_url = "https://test.atlassian.net/rest/api/3/attachment/content/501"
+    video_url = "https://test.atlassian.net/rest/api/3/attachment/content/502"
+    doc_url = "https://test.atlassian.net/rest/api/3/attachment/content/503"
+
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+    respx.get(img_url).mock(return_value=httpx.Response(200, content=fake_png))
+    respx.get(audio_url).mock(return_value=httpx.Response(200, content=b"mp3"))
+    respx.get(video_url).mock(return_value=httpx.Response(200, content=b"mp4"))
+    respx.get(doc_url).mock(return_value=httpx.Response(200, content=b"A,B\n1,2\n"))
+
+    raw = _make_raw({
+        "screen.png": img_url,
+        "note.mp3": audio_url,
+        "demo.mp4": video_url,
+        "data.csv": doc_url,
+    })
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+
+    with patch("icx_engine.connectors.attachments.ocr_image", return_value="OCR"), \
+         patch("icx_engine.connectors.attachments._extract_audio_from_video", new=AsyncMock(return_value=b"\x00" * 44)), \
+         patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="audio text")):
+        texts, images = await process_attachments(raw, client, llm_config=None)
+
+    assert "screen.png" in texts
+    assert "note.mp3" in texts
+    assert texts["note.mp3"] == "audio text"
+    assert "demo.mp4" in texts
+    assert texts["demo.mp4"] == "audio text"
+    assert "data.csv" in texts
+    assert "screen.png" in images
+    assert "note.mp3" not in images
+    assert "demo.mp4" not in images

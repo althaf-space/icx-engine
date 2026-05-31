@@ -1,6 +1,11 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
+
+
+def _sq(value: str) -> str:
+    """Escape a string for use in a LanceDB SQL filter (single-quote escape)."""
+    return value.replace("'", "''")
 
 
 class MemoryEntry(BaseModel):
@@ -21,6 +26,8 @@ class MemoryEntry(BaseModel):
     tags: list[str] = Field(default_factory=list)
     work_item_type: str = "bug"
     pattern_used: str = ""
+    confirmation_count: int = 0
+    memory_confidence: float = 0.0
 
 
 @dataclass
@@ -33,3 +40,4 @@ class MemoryQueryInput:
     summary: str
     description: str
     issue_type: str
+    tags: list[str] = field(default_factory=list)

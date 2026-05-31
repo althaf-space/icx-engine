@@ -1,0 +1,9 @@
+{
+  "fixture": "gradle_multi",
+  "language": "java",
+  "framework": "gradle",
+  "notes": "Gradle multi-module project. Tests inter-module dependency detection via build.gradle project(':...') syntax.",
+  "edges": [
+    {"source": "app/build.gradle", "target": "core/build.gradle", "kind": "module_depends"}
+  ]
+}

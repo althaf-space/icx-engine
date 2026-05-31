@@ -1,0 +1,30 @@
+{
+  "fixture": "react_sample",
+  "language": "tsx",
+  "framework": "react",
+  "notes": "Vanilla React + TS sample with components, hooks, pages. Symbols use parser labels (lowercase, no parens).",
+  "edges": [
+    {"source": "src/index.tsx", "target": "src/App.tsx", "kind": "import"},
+    {"source": "src/App.tsx", "target": "src/pages/HomePage.tsx", "kind": "import"},
+    {"source": "src/App.tsx", "target": "src/pages/ProfilePage.tsx", "kind": "import"},
+    {"source": "src/App.tsx", "target": "src/components/AppShell.tsx", "kind": "import"},
+    {"source": "src/components/AppShell.tsx", "target": "src/components/Header.tsx", "kind": "import"},
+    {"source": "src/components/AppShell.tsx", "target": "src/components/Footer.tsx", "kind": "import"},
+    {"source": "src/components/Header.tsx", "target": "src/hooks/useCurrentUser.ts", "kind": "import"},
+    {"source": "src/hooks/usePosts.ts", "target": "src/components/PostCard.tsx", "kind": "import"},
+    {"source": "src/pages/HomePage.tsx", "target": "src/components/PostCard.tsx", "kind": "import"},
+    {"source": "src/pages/HomePage.tsx", "target": "src/hooks/usePosts.ts", "kind": "import"},
+    {"source": "src/pages/ProfilePage.tsx", "target": "src/hooks/useCurrentUser.ts", "kind": "import"},
+
+    {"source": "src/App.tsx:app", "target": "src/components/AppShell.tsx:appshell", "kind": "renders"},
+    {"source": "src/App.tsx:app", "target": "src/pages/HomePage.tsx:homepage", "kind": "renders"},
+    {"source": "src/App.tsx:app", "target": "src/pages/ProfilePage.tsx:profilepage", "kind": "renders"},
+    {"source": "src/components/AppShell.tsx:appshell", "target": "src/components/Header.tsx:header", "kind": "renders"},
+    {"source": "src/components/AppShell.tsx:appshell", "target": "src/components/Footer.tsx:footer", "kind": "renders"},
+    {"source": "src/pages/HomePage.tsx:homepage", "target": "src/components/PostCard.tsx:postcard", "kind": "renders"},
+
+    {"source": "src/components/Header.tsx:header", "target": "src/hooks/useCurrentUser.ts:usecurrentuser", "kind": "call"},
+    {"source": "src/pages/HomePage.tsx:homepage", "target": "src/hooks/usePosts.ts:useposts", "kind": "call"},
+    {"source": "src/pages/ProfilePage.tsx:profilepage", "target": "src/hooks/useCurrentUser.ts:usecurrentuser", "kind": "call"}
+  ]
+}

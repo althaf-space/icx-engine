@@ -1,0 +1,40 @@
+{
+  "fixture": "nestjs_sample",
+  "language": "ts",
+  "framework": "nestjs",
+  "notes": "NestJS sample with three modules (users, posts, auth). DI through constructor params, routes via @Get/@Post.",
+  "edges": [
+    {"source": "src/main.ts", "target": "src/app.module.ts", "kind": "import"},
+    {"source": "src/app.module.ts", "target": "src/users/users.module.ts", "kind": "import"},
+    {"source": "src/app.module.ts", "target": "src/posts/posts.module.ts", "kind": "import"},
+    {"source": "src/app.module.ts", "target": "src/auth/auth.module.ts", "kind": "import"},
+
+    {"source": "src/users/users.module.ts", "target": "src/users/users.controller.ts", "kind": "import"},
+    {"source": "src/users/users.module.ts", "target": "src/users/users.service.ts", "kind": "import"},
+    {"source": "src/users/users.controller.ts", "target": "src/users/users.service.ts", "kind": "import"},
+
+    {"source": "src/posts/posts.module.ts", "target": "src/users/users.module.ts", "kind": "import"},
+    {"source": "src/posts/posts.module.ts", "target": "src/posts/posts.controller.ts", "kind": "import"},
+    {"source": "src/posts/posts.module.ts", "target": "src/posts/posts.service.ts", "kind": "import"},
+    {"source": "src/posts/posts.service.ts", "target": "src/users/users.service.ts", "kind": "import"},
+    {"source": "src/posts/posts.controller.ts", "target": "src/posts/posts.service.ts", "kind": "import"},
+
+    {"source": "src/auth/auth.module.ts", "target": "src/users/users.module.ts", "kind": "import"},
+    {"source": "src/auth/auth.module.ts", "target": "src/auth/auth.controller.ts", "kind": "import"},
+    {"source": "src/auth/auth.module.ts", "target": "src/auth/auth.service.ts", "kind": "import"},
+    {"source": "src/auth/auth.service.ts", "target": "src/users/users.service.ts", "kind": "import"},
+    {"source": "src/auth/auth.controller.ts", "target": "src/auth/auth.service.ts", "kind": "import"},
+
+    {"source": "src/users/users.controller.ts:userscontroller", "target": "src/users/users.service.ts:usersservice", "kind": "di"},
+    {"source": "src/posts/posts.service.ts:postsservice", "target": "src/users/users.service.ts:usersservice", "kind": "di"},
+    {"source": "src/posts/posts.controller.ts:postscontroller", "target": "src/posts/posts.service.ts:postsservice", "kind": "di"},
+    {"source": "src/auth/auth.service.ts:authservice", "target": "src/users/users.service.ts:usersservice", "kind": "di"},
+    {"source": "src/auth/auth.controller.ts:authcontroller", "target": "src/auth/auth.service.ts:authservice", "kind": "di"},
+
+    {"source": "src/users/users.controller.ts", "target": "src/users/users.controller.ts:register", "kind": "route"},
+    {"source": "src/users/users.controller.ts", "target": "src/users/users.controller.ts:read", "kind": "route"},
+    {"source": "src/posts/posts.controller.ts", "target": "src/posts/posts.controller.ts:list", "kind": "route"},
+    {"source": "src/posts/posts.controller.ts", "target": "src/posts/posts.controller.ts:publish", "kind": "route"},
+    {"source": "src/auth/auth.controller.ts", "target": "src/auth/auth.controller.ts:issue", "kind": "route"}
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "fixture": "svelte_sample",
+  "language": "typescript",
+  "framework": "sveltekit",
+  "notes": "SvelteKit with file-based routing, server load functions, Svelte stores, component composition.",
+  "edges": [
+    {"source": "src/lib/components/NavBar.svelte", "target": "src/lib/stores/auth.ts", "kind": "import"},
+    {"source": "src/lib/stores/auth.ts", "target": "src/lib/services/api.ts", "kind": "import"},
+    {"source": "src/lib/stores/auth.ts:login", "target": "src/lib/services/api.ts:fetchuser", "kind": "call"},
+
+    {"source": "src/routes/+layout.svelte", "target": "src/lib/components/NavBar.svelte", "kind": "renders"},
+
+    {"source": "src/routes/+page.server.ts", "target": "src/lib/services/api.ts", "kind": "import"},
+    {"source": "src/routes/+page.server.ts", "target": "src/routes/+page.server.ts:load", "kind": "route"},
+    {"source": "src/routes/+page.server.ts:load", "target": "src/lib/services/api.ts:fetchposts", "kind": "call"},
+
+    {"source": "src/routes/+page.svelte", "target": "src/lib/components/PostCard.svelte", "kind": "renders"},
+
+    {"source": "src/routes/login/+page.server.ts", "target": "src/lib/stores/auth.ts", "kind": "import"},
+    {"source": "src/routes/login/+page.server.ts", "target": "src/routes/login/+page.server.ts:actions", "kind": "route"},
+
+    {"source": "src/routes/login/+page.svelte", "target": "src/lib/stores/auth.ts", "kind": "import"}
+  ]
+}

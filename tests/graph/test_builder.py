@@ -1,4 +1,4 @@
-﻿"""Tests for graph/builder.py"""
+"""Tests for graph/builder.py"""
 from __future__ import annotations
 
 import pytest

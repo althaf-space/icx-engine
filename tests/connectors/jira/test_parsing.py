@@ -1,4 +1,4 @@
-﻿"""Jira connector input parsing tests.
+"""Jira connector input parsing tests.
 
 All URL and bare-key parsing that is Jira-specific lives here,
 not in the generic engine tests.

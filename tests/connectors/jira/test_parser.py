@@ -1,4 +1,4 @@
-﻿"""Jira API response parsing tests."""
+"""Jira API response parsing tests."""
 import pytest
 import respx
 import httpx

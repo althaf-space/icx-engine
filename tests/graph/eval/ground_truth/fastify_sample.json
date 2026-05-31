@@ -1,0 +1,15 @@
+{
+  "fixture": "fastify_sample",
+  "language": "js",
+  "framework": "fastify",
+  "notes": "Fastify with plugin-based routes (fastify.register).",
+  "edges": [
+    {"source": "src/index.js", "target": "src/routes/users.js", "kind": "import"},
+    {"source": "src/index.js", "target": "src/routes/posts.js", "kind": "import"},
+    {"source": "src/routes/users.js", "target": "src/services.js", "kind": "import"},
+    {"source": "src/routes/posts.js", "target": "src/services.js", "kind": "import"},
+
+    {"source": "src/routes/users.js", "target": "src/routes/users.js:getusers", "kind": "route"},
+    {"source": "src/routes/posts.js", "target": "src/routes/posts.js:getposts", "kind": "route"}
+  ]
+}

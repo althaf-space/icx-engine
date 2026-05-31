@@ -1,0 +1,18 @@
+{
+  "fixture": "lombok_sample",
+  "language": "java",
+  "framework": "lombok",
+  "notes": "Lombok @Data, @Getter/@Setter, @Builder. Cross-file calls hit synthetic methods that Lombok generates at compile time but tree-sitter never sees.",
+  "edges": [
+    {"source": "src/main/java/com/example/blog/service/UserPrinter.java", "target": "src/main/java/com/example/blog/dto/UserDto.java", "kind": "import"},
+    {"source": "src/main/java/com/example/blog/service/PostPrinter.java", "target": "src/main/java/com/example/blog/dto/PostDto.java", "kind": "import"},
+
+    {"source": "src/main/java/com/example/blog/service/UserPrinter.java:describe", "target": "src/main/java/com/example/blog/dto/UserDto.java:getemail", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/service/UserPrinter.java:describe", "target": "src/main/java/com/example/blog/dto/UserDto.java:getname", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/service/UserPrinter.java:rename", "target": "src/main/java/com/example/blog/dto/UserDto.java:setname", "kind": "call"},
+
+    {"source": "src/main/java/com/example/blog/service/PostPrinter.java:describe", "target": "src/main/java/com/example/blog/dto/PostDto.java:gettitle", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/service/PostPrinter.java:describe", "target": "src/main/java/com/example/blog/dto/PostDto.java:ispublished", "kind": "call"},
+    {"source": "src/main/java/com/example/blog/service/PostPrinter.java:markpublished", "target": "src/main/java/com/example/blog/dto/PostDto.java:setpublished", "kind": "call"}
+  ]
+}

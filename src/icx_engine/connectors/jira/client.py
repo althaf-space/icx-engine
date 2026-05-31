@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import asyncio
 import httpx
 from urllib.parse import urlparse, quote

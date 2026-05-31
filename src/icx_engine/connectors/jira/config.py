@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from typing import Literal, Annotated
 from pydantic import BaseModel, Field
 from icx_engine.models.config import BaseConnection, OAuthAuth

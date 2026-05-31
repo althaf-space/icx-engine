@@ -1,4 +1,4 @@
-﻿class ICXError(Exception):
+class ICXError(Exception):
     """Base exception for all ICX errors."""
 
 

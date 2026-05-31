@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import asyncio
 import shlex
 import shutil
@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Annotated, Optional
 from rich.console import Console
 
-from icx_engine.services.connection_service import _connect_jira_token, _connect_jira_oauth
 from icx_engine.error_display import render_icx_error
 
 try:
@@ -79,88 +78,95 @@ def _check_for_update() -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def _trigger_memory_setup() -> None:
-    """Check memory sentinel on every CLI startup. Download model if needed (first-run only)."""
-    try:
-        from icx_engine.memory.embeddings import _is_initialized, EmbeddingsManager
-        if not _is_initialized():
-            EmbeddingsManager().ensure_ready(console=err_console)
-    except Exception:
-        pass  # memory setup failure never prevents other commands from running
-
 
 _FULL_HELP = """
 [bold]ICX: Integrated Contextual X-ecution Engine[/bold]
-AI-native intelligence layer for development teams. Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP.
+AI-native intelligence layer for development teams. Connect your work tracker to your AI editor via MCP. Local memory, multi-modal analysis, and codebase knowledge graph.
 
-[bold]Quick start:[/bold]  [cyan]icx connection --add[/cyan]  ->  [cyan]icx model --add[/cyan]  ->  [cyan]icx analyze <KEY>[/cyan]
+[bold]Quick start:[/bold]  [cyan]icx setup[/cyan]  ->  [cyan]icx connection --add[/cyan]  ->  [cyan]icx model --add[/cyan]  ->  [cyan]icx analyze <KEY>[/cyan]
+
+[bold]First-time Setup[/bold]
+  [cyan]icx setup[/cyan]                                              Download AI model files (run once after install)
 
 [bold]Analysis[/bold]
-  [cyan]icx analyze <KEY>[/cyan]                                      Analyze an issue
-  [cyan]icx analyze <KEY> --fast[/cyan]                               Text-only - skip image processing
+  [cyan]icx analyze <KEY>[/cyan]                                      Fetch and analyze a work item (bug, story, task, feature)
+  [cyan]icx analyze <KEY> --fast[/cyan]                               Skip all attachments - return raw text only
   [cyan]icx analyze <KEY> --profile <NAME>[/cyan]                     Use a specific LLM profile for this run
-  [cyan]icx analyze <KEY> --profile <NAME> --fast[/cyan]              Profile + text-only (skip image processing)
+  [cyan]icx analyze <KEY> --profile <NAME> --fast[/cyan]              Specific profile + skip attachments
   [cyan]icx analyze <KEY> --path <PATH>[/cyan]                        Show graph status for a codebase path
   [cyan]icx analyze <KEY> --path <P1> --path <P2>[/cyan]              Show graph status for multiple paths
+  [cyan]icx analyze <KEY> --path <P1> --path <P2> --fast[/cyan]       Graph status + skip attachments
   [cyan]icx analyze <KEY> --debug[/cyan]                              Show step-by-step debug output
-  [cyan]icx analyze <KEY> --traceback[/cyan]                          Show full error traceback on failure
+  [cyan]icx analyze <KEY> --traceback[/cyan]                          Show full Python traceback on error
 
 [bold]Connections[/bold]
-  [cyan]icx connection --add[/cyan]                                   Connect a new platform
-  [cyan]icx connection --remove <DOMAIN>[/cyan]                       Remove by domain  (e.g. mycompany.atlassian.net)
-  [cyan]icx connection --remove <INDEX>[/cyan]                        Remove by index number from icx status
+  [cyan]icx connection --add[/cyan]                                   Connect a new platform (interactive)
+  [cyan]icx connection --remove <DOMAIN>[/cyan]                       Remove connection by domain
+  [cyan]icx connection --remove <INDEX>[/cyan]                        Remove connection by index (from icx status)
   [cyan]icx connection --active <DOMAIN>[/cyan]                       Set default connection
-  [cyan]icx connection --active <INDEX>[/cyan]                        Set default by index number
+  [cyan]icx connection --active <INDEX>[/cyan]                        Set default by index
 
 [bold]LLM Profiles[/bold]
-  [cyan]icx model --add[/cyan]                                        Configure an AI provider
-  [cyan]icx model --remove <PROFILE>[/cyan]                           Remove an entire profile (by name)
-  [cyan]icx model --remove <INDEX>[/cyan]                             Remove by index from icx status
-  [cyan]icx model --remove <PROFILE> --channel <CHANNEL>[/cyan]       Remove only the image/vision channel
+  [cyan]icx model --add[/cyan]                                        Add an AI provider (interactive)
+  [cyan]icx model --remove <PROFILE>[/cyan]                           Remove a profile by name
+  [cyan]icx model --remove <INDEX>[/cyan]                             Remove a profile by index (from icx status)
+  [cyan]icx model --remove <PROFILE> --channel text|image[/cyan]      Remove only one channel from a profile
   [cyan]icx model --active <PROFILE>[/cyan]                           Set default profile (name or index)
 
 [bold]Memory[/bold]
   [cyan]icx memory save <KEY>[/cyan]                                  Save a resolved issue to local memory
-  [cyan]icx memory save <KEY> --note "..."[/cyan]                     Save non-interactively
-  [cyan]icx memory search "<query>"[/cyan]                            Search past resolutions
+  [cyan]icx memory save <KEY> --note "..."[/cyan]                     Save with a note (non-interactive)
+  [cyan]icx memory search "<query>"[/cyan]                            Search past resolutions by description
   [cyan]icx memory list[/cyan]                                        List all saved entries (newest first)
-  [cyan]icx memory list --project <KEY>[/cyan]                        Filter by project key
-  [cyan]icx memory list --source <TYPE>[/cyan]                        Filter by connector type
+  [cyan]icx memory list --project <KEY>[/cyan]                        Filter list by project key (e.g. PROJ)
+  [cyan]icx memory list --source <TYPE>[/cyan]                        Filter list by source type (e.g. jira)
   [cyan]icx memory show <KEY>[/cyan]                                  Show full detail for one entry
-  [cyan]icx memory delete <KEY>[/cyan]                                Delete one entry
-  [cyan]icx memory export[/cyan]                                      Export memory to JSON
-  [cyan]icx memory export --output <FILE>[/cyan]                      Export to specific path
-  [cyan]icx memory import <FILE>[/cyan]                               Import from a JSON export
-  [cyan]icx memory clear --confirm[/cyan]                             Delete all entries
-  [cyan]icx memory status[/cyan]                                      Show stats: entries, size, model info
+  [cyan]icx memory delete <KEY>[/cyan]                                Delete one saved entry
+  [cyan]icx memory export[/cyan]                                      Export all memory to a JSON file
+  [cyan]icx memory export --output <FILE>[/cyan]                      Export to a specific path
+  [cyan]icx memory import <FILE>[/cyan]                               Import from a JSON export file
+  [cyan]icx memory clear --confirm[/cyan]                             Delete all saved entries
+  [cyan]icx memory status[/cyan]                                      Show entry count, storage size, model info
+  [cyan]icx memory migrate[/cyan]                                     Re-embed all saved work items after an embedding model upgrade
+  [cyan]icx memory by-file <PATH>[/cyan]                              List all work items that touched a file path
+  [cyan]icx memory by-file <PATH> --project <KEY>[/cyan]              Filter by project key
+  [cyan]icx memory hotspots[/cyan]                                    Show files with most historical work items
+  [cyan]icx memory hotspots --project <KEY> --top <N>[/cyan]          Filter by project, show top N files
+  [cyan]icx memory related <KEY>[/cyan]                               Show work items related via shared file history
+  [cyan]icx memory related <KEY> --project <KEY>[/cyan]               Filter related items to one project
+  [cyan]icx memory patterns[/cyan]                                    Show auto-detected patterns across work items
+  [cyan]icx memory patterns --project <KEY>[/cyan]                    Filter patterns by project key
 
 [bold]Codebase Graph[/bold]
   [cyan]icx graph add --name <NAME> --path <PATH>[/cyan]              Register a project for graph indexing
-  [cyan]icx graph build <NAME>[/cyan]                                 Build the knowledge graph (run first; shows progress)
-  [cyan]icx graph build --path <PATH>[/cyan]                          Build without registering
-  [cyan]icx graph list[/cyan]                                         Show all projects: name, status, last built, file count
-  [cyan]icx graph status <NAME>[/cyan]                                Detailed: staleness, changed files, ETA
-  [cyan]icx graph remove <NAME>[/cyan]                                Remove registration and delete graph files
-  [cyan]icx graph remove <NAME> --keep-cache[/cyan]                   Remove registration only, keep cache
+  [cyan]icx graph build <NAME>[/cyan]                                 Build the knowledge graph (shows live progress)
+  [cyan]icx graph build --path <PATH>[/cyan]                          Build by path without a registered name
+  [cyan]icx graph build <NAME> --force[/cyan]                         Force full rebuild even if graph is current
+  [cyan]icx graph build <NAME> --no-llm[/cyan]                        Build without LLM enrichment (faster, AST only)
+  [cyan]icx graph build <NAME> --force --no-llm[/cyan]                Force rebuild, AST only
+  [cyan]icx graph list[/cyan]                                         List all projects: name, status, file count, last built
+  [cyan]icx graph status <NAME>[/cyan]                                Show detail: staleness, changed files, ETA
+  [cyan]icx graph remove <NAME>[/cyan]                                Delete registration and graph files
+  [cyan]icx graph remove <NAME> --keep-cache[/cyan]                   Delete registration only, keep cache on disk
 
 [bold]MCP Server[/bold]
-  [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio)
-  [cyan]icx mcp setup[/cyan]                                          Register ICX with detected AI editors
-  [cyan]icx mcp setup --host <HOST>[/cyan]                            Register with a specific editor only
+  [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio transport)
+  [cyan]icx mcp setup[/cyan]                                          Register ICX with all detected AI editors
+  [cyan]icx mcp setup --host <HOST>[/cyan]                            Register with one specific editor
   [cyan]icx mcp remove[/cyan]                                         Remove ICX from all detected editors
-  [cyan]icx mcp remove --host <HOST>[/cyan]                           Remove from a specific editor only
-  [cyan]icx mcp config[/cyan]                                         Print config snippets for all editors
+  [cyan]icx mcp remove --host <HOST>[/cyan]                           Remove from one specific editor
+  [cyan]icx mcp config[/cyan]                                         Print config JSON snippets for all editors
   [cyan]icx mcp list[/cyan]                                           List supported editors and detection status
 
 [bold]General[/bold]
   [cyan]icx status[/cyan]                                             Show all connections and LLM profiles
   [cyan]icx logout[/cyan]                                             Remove all credentials from this machine
-  [cyan]icx uninstall[/cyan]                                          Fully remove ICX - data, credentials, editor configs, package
-  [cyan]icx uninstall --yes[/cyan]                                    Skip confirmation prompt
+  [cyan]icx uninstall[/cyan]                                          Remove ICX completely (data, credentials, editor configs, package)
+  [cyan]icx uninstall --yes[/cyan]                                    Uninstall without confirmation prompt
   [cyan]icx --version[/cyan]                                          Show installed version
   [cyan]icx --help[/cyan]                                             Show this help
 
-[dim]Run icx --install-completion once to enable tab completion in your shell.[/dim]
+[dim]Run [cyan]icx --install-completion[/cyan] once to enable tab completion in your shell.[/dim]
 """
 
 
@@ -233,11 +239,10 @@ app.add_typer(graph_app, name="graph", rich_help_panel="Codebase Graph")
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 # Ensure UTF-8 output on Windows (cp1252 can't encode ✓, →, etc.)
-import sys as _sys
-if hasattr(_sys.stdout, "reconfigure"):
+if hasattr(sys.stdout, "reconfigure"):
     try:
-        _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -477,6 +482,153 @@ def memory_status() -> None:
         raise typer.Exit(1)
 
 
+@memory_app.command("migrate")
+def memory_migrate(
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Re-embed all saved work items with the current embedding model.
+
+    Run this after upgrading ICX when the embedding model version changes.
+    All saved entries are preserved - only the internal vector representation
+    is updated to match the new model.
+    """
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.embeddings import EMBEDDING_MODEL, VECTOR_DIM
+
+    try:
+        mgr = MemoryManager()
+        entry_count = len(mgr.list_entries())
+        if entry_count == 0:
+            console.print("  No saved work items found. Nothing to migrate.")
+            return
+
+        console.print(
+            f"\n  [bold]Memory migration[/bold]\n"
+            f"  Model:   [cyan]{EMBEDDING_MODEL}[/cyan] ({VECTOR_DIM}-dim)\n"
+            f"  Entries: {entry_count} saved work items\n"
+        )
+        confirmed = typer.confirm("  Re-embed all entries with the new model?", default=True)
+        if not confirmed:
+            console.print("Cancelled.")
+            return
+
+        migrated = 0
+        with console.status("[bold]Migrating...[/bold]", spinner="dots"):
+            def _log(msg: str) -> None:
+                pass  # suppress per-entry logs in spinner mode
+
+            migrated = mgr.migrate(log=_log if not debug else console.print)
+
+        console.print(f"[green]Migrated {migrated} work items.[/green] Memory is ready.")
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=traceback)
+        raise typer.Exit(1)
+
+
+@memory_app.command("by-file")
+def memory_by_file(
+    path: Annotated[str, typer.Argument(help="File path to look up (substring match)")],
+    project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
+) -> None:
+    """List all saved work items that touched a given file path."""
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.bridge import find_work_items_by_file
+    try:
+        mgr = MemoryManager()
+        entries = find_work_items_by_file(path, mgr, project_key=project)
+        if not entries:
+            console.print(f"  No saved work items found for [cyan]{path}[/cyan].")
+            return
+        console.print(f"\n  [bold]{len(entries)} work item(s)[/bold] touching [cyan]{path}[/cyan]\n")
+        for e in entries:
+            console.print(f"  [bold]{e.issue_key}[/bold]  [{e.work_item_type}]  {e.summary}")
+            console.print(f"    {e.resolution_note[:120]}")
+            console.print()
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@memory_app.command("hotspots")
+def memory_hotspots(
+    project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
+    top: Annotated[int, typer.Option("--top", help="Number of files to show")] = 20,
+) -> None:
+    """Show files with the most saved work items (churn hotspots)."""
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.bridge import get_work_item_density
+    try:
+        mgr = MemoryManager()
+        rows = get_work_item_density(mgr, project_key=project, top_n=max(1, min(100, top)))
+        if not rows:
+            console.print("  No memory entries found.")
+            return
+        console.print(f"\n  [bold]Top {len(rows)} file(s) by work item count[/bold]\n")
+        for row in rows:
+            console.print(f"  [bold]{row['count']:>3}[/bold]  {row['file']}")
+            console.print(f"       {', '.join(row['work_items'][:5])}")
+            console.print()
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@memory_app.command("patterns")
+def memory_patterns(
+    project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
+) -> None:
+    """Show auto-detected patterns across saved work items."""
+    from icx_engine.memory.patterns import PatternManager
+    try:
+        pm = PatternManager()
+        pats = pm.get_patterns(project_key=project)
+        if not pats:
+            console.print("  No patterns detected yet. Patterns are computed every 10 saved work items.")
+            return
+        console.print(f"\n  [bold]{len(pats)} pattern(s) detected[/bold]\n")
+        for p in pats:
+            console.print(f"  [bold]{p['pattern_type']}[/bold]  [dim]{p['project_key']}[/dim]")
+            console.print(f"    {p['label']}")
+            console.print()
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@memory_app.command("related")
+def memory_related(
+    key: Annotated[str, typer.Argument(help="Issue key, e.g. PROJ-456")],
+    project: Annotated[Optional[str], typer.Option("--project", help="Filter results to a project key")] = None,
+) -> None:
+    """Show work items related to the given issue key via shared files."""
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.relations import RelationManager
+    try:
+        normalised = key.strip().upper()
+        rel = RelationManager()
+        related = rel.get_related(normalised)
+        if project:
+            mgr = MemoryManager()
+            in_project = {e.issue_key for e in mgr.list_entries(project_key=project)}
+            related = [r for r in related if r["issue_key"] in in_project]
+        if not related:
+            console.print(f"  No related work items found for [cyan]{normalised}[/cyan].")
+            return
+        console.print(f"\n  [bold]{len(related)} related work item(s)[/bold] for [cyan]{normalised}[/cyan]\n")
+        for r in related:
+            console.print(
+                f"  [bold]{r['issue_key']}[/bold]  {r['relation_type']}  "
+                f"[dim]strength={r['strength']:.2f}[/dim]"
+            )
+        console.print()
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
 @memory_app.command("export")
 def memory_export(
     output: Annotated[Optional[str], typer.Option("--output", help="Output file path")] = None,
@@ -532,7 +684,18 @@ def memory_import_cmd(
             return
         mgr = MemoryManager()
         for entry in entries:
-            mgr.save(entry)
+            mgr.save(entry, restore=True)
+        # Pattern refresh doesn't fire on small imports (every-10th trigger).
+        # Rebuild explicitly per project after all entries are loaded.
+        from collections import defaultdict
+        by_project: dict[str, list] = defaultdict(list)
+        for entry in entries:
+            by_project[entry.project_key].append(entry)
+        for proj_key, proj_entries in by_project.items():
+            try:
+                mgr._patterns.refresh(proj_entries, proj_key)
+            except Exception:
+                pass
         console.print(f"[green]Imported {len(entries)} entries.[/green]")
     except Exception as exc:
         render_icx_error(exc, err_console)
@@ -571,11 +734,87 @@ def main(
 ) -> None:
     _check_for_update()
     _check_uninstall_result()
-    if ctx.invoked_subcommand == "memory":
-        _trigger_memory_setup()
     if ctx.invoked_subcommand is None:
         _print_full_help()
         raise typer.Exit()
+
+
+# ---------------------------------------------------------------------------
+# setup - download optional AI model dependencies
+# ---------------------------------------------------------------------------
+
+@app.command(rich_help_panel="Setup")
+def setup(
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Download optional AI model dependencies (embedding model, Whisper audio model, token encoder).
+
+    Run this once after install. Nothing else will trigger downloads.
+    """
+    import traceback as _tb_mod
+
+    con = Console()
+    any_failed = False
+
+    # Step 1: ONNX embedding model (memory features)
+    con.print("\n[bold]Step 1/3[/bold] Embedding model [dim](memory features, ~110 MB)[/dim]")
+    try:
+        from icx_engine.memory.embeddings import EmbeddingsManager, _is_initialized, MEMORY_DIR
+        if _is_initialized():
+            con.print("[green]✓[/green] Already downloaded.")
+        else:
+            EmbeddingsManager().ensure_ready(console=con)
+            # Advisory: existing LanceDB data uses old vectors - needs re-embedding.
+            try:
+                _has_old_data = any(MEMORY_DIR.glob("*.lance")) if MEMORY_DIR.exists() else False
+                if _has_old_data:
+                    con.print(
+                        "\n[yellow]Advisory:[/yellow] Existing memory data uses the old vector format.\n"
+                        "Run [bold cyan]icx memory migrate[/bold cyan] to re-embed your saved work items."
+                    )
+            except Exception:
+                pass
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]✗[/red] Failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
+    # Step 2: Whisper audio model (audio/video transcription)
+    con.print("\n[bold]Step 2/3[/bold] Whisper model [dim](audio/video transcription, ~145 MB)[/dim]")
+    try:
+        from icx_engine.connectors.audio import WhisperManager, _is_whisper_ready
+        if _is_whisper_ready():
+            con.print("[green]✓[/green] Already downloaded.")
+        else:
+            WhisperManager().download()
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]✗[/red] Failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
+    # Step 3: tiktoken BPE encoding (graph token counting)
+    con.print("\n[bold]Step 3/3[/bold] Token encoder [dim](graph context sizing, ~1 MB)[/dim]")
+    try:
+        import tiktoken
+        _TIKTOKEN_ENC = "cl100k_base"
+        enc = tiktoken.get_encoding(_TIKTOKEN_ENC)
+        enc.encode("warmup")
+        con.print("[green]✓[/green] Token encoder ready.")
+    except ImportError:
+        con.print("[dim]Skipped (tiktoken not installed).[/dim]")
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]✗[/red] Failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
+    if any_failed:
+        con.print("\n[yellow]Setup completed with errors.[/yellow] Check output above.\n")
+    else:
+        con.print("\n[bold green]Setup complete.[/bold green] All models ready.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -586,31 +825,31 @@ def main(
 def connection(
     add: Annotated[bool, typer.Option(
         "--add",
-        help="Walk through connecting a new Jira account (API token or browser OAuth).",
+        help="Walk through connecting a new work tracker account (API token or OAuth).",
     )] = False,
     remove: Annotated[Optional[str], typer.Option(
         "--remove", metavar="DOMAIN/INDEX",
-        help="Disconnect a Jira account. Pass domain or number from 'icx status'.",
+        help="Remove a connection. Pass domain or index number from 'icx status'.",
     )] = None,
     active: Annotated[Optional[str], typer.Option(
         "--active", metavar="DOMAIN/INDEX",
-        help="Set the default Jira account. Pass domain or number from 'icx status'.",
+        help="Set the default connection. Pass domain or index number from 'icx status'.",
     )] = None,
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
 ) -> None:
-    """Connect to Jira - add a new account, switch the active one, or remove one.
+    """Manage work tracker connections - add, switch, or remove.
 
     \b
     Examples:
-      icx connection --add                              Walk through connecting a Jira account
-      icx connection --remove mycompany.atlassian.net   Delete that connection
-      icx connection --remove 2                         Delete connection #2 (from 'icx status')
+      icx connection --add                              Connect a new work tracker account
+      icx connection --remove mycompany.atlassian.net   Remove that connection
+      icx connection --remove 2                         Remove connection #2 (from 'icx status')
       icx connection --active mycompany.atlassian.net   Make that connection the default
     """
     try:
         if add:
-            _connect_jira(debug=debug)
+            _connect(debug=debug)
             return
         if remove is not None:
             from icx_engine.config_manager import ConfigManager
@@ -636,7 +875,48 @@ def connection(
         raise typer.Exit(1)
 
 
+# Registry of supported work tracker platforms.
+# Each entry: (connector_type, display_label).
+# Add new connectors here as they are implemented.
+PLATFORMS: list[tuple[str, str]] = [
+    ("jira", "Jira  (Jira Cloud - API Token or OAuth PKCE)"),
+]
+
+
+def _connect(debug: bool = False) -> None:
+    """Generic connection entry point - dispatches to platform-specific connect flow.
+
+    When only one platform is registered, skips the selection menu. When two or
+    more platforms are registered, prompts the user to choose before delegating.
+    """
+    if len(PLATFORMS) == 1:
+        platform_key = PLATFORMS[0][0]
+    else:
+        menu = "\n".join(f"  {i + 1}. {label}" for i, (_, label) in enumerate(PLATFORMS))
+        choice = typer.prompt(
+            f"\nChoose a work tracker platform\n{menu}\nEnter number",
+            default="1",
+        ).strip()
+        try:
+            idx = int(choice) - 1
+            if idx < 0 or idx >= len(PLATFORMS):
+                raise ValueError
+        except ValueError:
+            typer.echo("Invalid choice. Defaulting to first platform.")
+            idx = 0
+        platform_key = PLATFORMS[idx][0]
+
+    _platform_dispatch = {
+        "jira": _connect_jira,
+    }
+    fn = _platform_dispatch.get(platform_key)
+    if fn is None:
+        raise ValueError(f"No connect flow registered for platform '{platform_key}'.")
+    fn(debug=debug)
+
+
 def _connect_jira(debug: bool = False) -> None:
+    from icx_engine.services.connection_service import _connect_jira_token, _connect_jira_oauth
     method = typer.prompt(
         "\nChoose Jira connection method\n"
         "  1. API Token   email + token from id.atlassian.com  (recommended)\n"
@@ -744,7 +1024,6 @@ def _validate_and_save_model(
     traceback: bool,
 ) -> None:
     """Validate text then image channel separately; offer skip on image failure."""
-    import asyncio
     from icx_engine.llm.base import get_provider
     from icx_engine.models.output import RawIssueData
     from icx_engine.config_manager import ConfigManager
@@ -987,8 +1266,8 @@ def _render_past_insights(insights: list) -> None:
 def analyze(
     url: Annotated[str, typer.Argument(
         help=(
-            "The Jira issue to analyze. Can be a full URL "
-            "(https://company.atlassian.net/browse/ABC-123) or just the issue key (ABC-123)."
+            "Work item to analyze. Full URL or issue key (e.g. ABC-123). "
+            "Works for bugs, stories, tasks, features - any tracked work item."
         )
     )],
     debug: DebugOpt = False,
@@ -1005,29 +1284,36 @@ def analyze(
         bool,
         typer.Option(
             "--fast",
-            help="Skip image processing for speed. Images are listed in pending_images.",
+            help=(
+                "Skip all attachment processing (images, audio, video, documents). "
+                "Returns raw issue text only. "
+                "Skipped files listed in pending_images, pending_audio, "
+                "pending_documents, or pending_unsupported."
+            ),
         ),
     ] = False,
     paths: Annotated[
         Optional[list[str]],
         typer.Option(
             "--path",
-            help="Codebase path to show graph status for (repeatable for multiple repos).",
+            help=(
+                "Codebase path to show graph status for alongside the analysis. "
+                "Repeatable for multiple repos: --path /svc --path /ui."
+            ),
             metavar="PATH",
         ),
     ] = None,
 ) -> None:
-    """Fetch a Jira issue and analyze it - prints structured JSON ready for your AI tools.
+    """Fetch and analyze a work item - prints structured JSON ready for your AI tools.
 
     \b
-    ICX reads the issue title, description, comments, and attachments, then asks your
-    configured AI model to produce a structured summary with requirements, context,
-    and any missing information it detected.
+    Works with any connected platform. Analyzes bugs, stories, tasks, features
+    - anything tracked in your work tracker.
 
     \b
-    If you have a vision model configured, ICX also reads screenshots and image
-    attachments. Images are written to ~/.icx/temp/<key>/ and their paths are
-    returned in image_paths - no base64 in the JSON output.
+    ICX reads the title, description, comments, and attachments, then asks your
+    AI model to produce a structured summary with context and missing information.
+    Images are written to ~/.icx/temp/<key>/ and paths returned in image_paths.
 
     \b
     Examples:
@@ -1035,8 +1321,9 @@ def analyze(
       icx analyze ABC-123 --fast
       icx analyze https://company.atlassian.net/browse/ABC-123
       icx analyze ABC-123 --profile work
-      icx analyze ABC-123 --path /svc --path /ui    (show graph status for multiple repos)
-      icx analyze ABC-123 --debug                   (show step-by-step what ICX is doing)
+      icx analyze ABC-123 --path /path/to/repo
+      icx analyze ABC-123 --path /svc --path /ui --fast
+      icx analyze ABC-123 --debug
     """
     import json as _json
     from icx_engine.config_manager import ConfigManager
@@ -1044,7 +1331,7 @@ def analyze(
     from icx_engine.engine import extract_domain, resolve_connection, narrow_connections
     from icx_engine.models.output import IssueContext
     from icx_engine.exceptions import (
-        NoConnectionError, InvalidInput, ICXError,
+        ICXError,
     )
 
     config = ConfigManager.load()
@@ -1111,7 +1398,7 @@ def analyze(
         try:
             import base64 as _b64
             from icx_engine.graph.storage import temp_images_dir as _tid, sweep_stale_temp_dirs as _sweep
-            _ALLOWED_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"})
+            _ALLOWED_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"})
             _sweep()
             img_dir = _tid(url)
             img_dir.mkdir(parents=True, exist_ok=True)
@@ -1177,7 +1464,7 @@ def status(
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
 ) -> None:
-    """Show all connected Jira accounts and configured AI profiles at a glance."""
+    """Show all connected platforms and configured AI profiles at a glance."""
     from icx_engine.config_manager import ConfigManager
     from rich.table import Table
 
@@ -1260,7 +1547,7 @@ def logout(
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
 ) -> None:
-    """Wipe all saved credentials - removes every Jira account and AI API key from this machine."""
+    """Wipe all saved credentials - removes every work tracker connection and AI API key from this machine."""
     from icx_engine.config_manager import ConfigManager
     from icx_engine.models.config import AppConfig
     try:
@@ -1362,6 +1649,10 @@ def _uninstall_package(console: Console) -> None:
         tf.write(ps_script)
         script_path = tf.name
 
+    fallback_cmd = " ".join(cmd)
+    console.print(
+        f"[dim]If background uninstall fails, run manually: [bold]{fallback_cmd}[/bold][/dim]\n"
+    )
     subprocess.Popen(
         [
             "powershell",
@@ -1390,7 +1681,7 @@ def uninstall(
     \b
     Removes:
       • ~/.icx/             (config, memory database, embedding model)
-      • Keyring secrets     (all stored API keys and Jira tokens)
+      • Keyring secrets     (all stored API keys and work tracker tokens)
       • MCP editor configs  (Claude Code, Cursor, Windsurf, Codex)
       • icx-engine package  (via pipx or pip)
 
@@ -1682,16 +1973,143 @@ def graph_add(
         raise typer.Exit(1)
 
 
+def _run_build_with_progress(mgr, project_id: str, force: bool, skip_llm: bool = False) -> dict:
+    """Run a blocking graph build while rendering per-stage Rich Progress."""
+    import io
+    import sys
+    import time as _time
+    import threading
+    from rich.progress import (
+        Progress, SpinnerColumn, TextColumn, BarColumn,
+        MofNCompleteColumn, TimeElapsedColumn,
+    )
+    from icx_engine.graph.progress import (
+        new_progress_path, tail_events, safe_unlink, STAGES, STAGE_LABELS,
+    )
+
+    def _fmt_elapsed(secs: float) -> str:
+        m, s = divmod(int(secs), 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}"
+
+    progress_path = new_progress_path()
+    result_holder: dict[str, dict] = {}
+    error_holder: dict[str, BaseException] = {}
+    done = threading.Event()
+    _stderr_capture = io.StringIO()
+    _real_stderr = sys.stderr
+    sys.stderr = _stderr_capture
+
+    def worker() -> None:
+        try:
+            result_holder["value"] = mgr.build(
+                project_id, force=force, progress_path=progress_path, skip_llm=skip_llm,
+            )
+        except BaseException as exc:
+            error_holder["exc"] = exc
+        finally:
+            done.set()
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description:<20}"),
+        BarColumn(bar_width=30),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("[dim]{task.fields[message]}"),
+        console=console,
+        transient=True,
+    )
+
+    task_ids: dict[str, int] = {}
+    _task_start: dict[str, float] = {}
+    # stage -> (current, total, msg, elapsed_str): updated on every completion
+    # event so the LAST message wins (builder emits two completion events for
+    # AST: one from on_progress callback with "parsing", one final with "N nodes")
+    _done: dict[str, tuple] = {}
+    _prev_stage: list[str | None] = [None]
+
+    def _flush_prev() -> None:
+        """Print the previous stage's final summary line now that we know it's done."""
+        prev = _prev_stage[0]
+        if prev is not None and prev in _done:
+            cur, tot, msg, el = _done.pop(prev)
+            console.print(
+                f"  [bold]{STAGE_LABELS[prev]:<20}[/bold]"
+                f"  [dim]{cur}/{tot}[/dim]"
+                f"  {el}"
+                f"  [dim]{msg}[/dim]"
+            )
+
+    with progress:
+        for stage in STAGES:
+            task_ids[stage] = progress.add_task(
+                STAGE_LABELS[stage], total=None, message="", start=False, visible=False,
+            )
+
+        def on_event(event: dict) -> None:
+            stage = event.get("stage")
+            if stage not in task_ids:
+                return
+            task_id = task_ids[stage]
+            total = event.get("total") or 0
+            current = event.get("current") or 0
+            msg = event.get("message") or ""
+
+            # New stage starting: flush the previous stage's summary line
+            if stage != _prev_stage[0]:
+                _flush_prev()
+                _prev_stage[0] = stage
+
+            if total == 0:
+                skip_msg = f"skipped - {msg}" if msg else "skipped"
+                _done[stage] = (1, 1, skip_msg, "0:00:00")
+            else:
+                if stage not in _task_start:
+                    _task_start[stage] = _time.monotonic()
+                    progress.update(task_id, visible=True)
+                    progress.start_task(task_id)
+                progress.update(task_id, total=total, completed=current, message=msg)
+                if current >= total:
+                    elapsed = _fmt_elapsed(_time.monotonic() - _task_start[stage])
+                    # Update _done so later events with better messages overwrite
+                    _done[stage] = (current, total, msg, elapsed)
+                    progress.stop_task(task_id)
+                    progress.update(task_id, visible=False)
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
+
+        tail_events(progress_path, on_event, done.is_set)
+        worker_thread.join()
+
+    # Progress live display cleared (transient=True). Restore stderr first so
+    # any subsequent prints go to the real terminal.
+    sys.stderr = _real_stderr
+    captured_warnings = _stderr_capture.getvalue().strip()
+
+    _flush_prev()
+    safe_unlink(progress_path)
+
+    if captured_warnings:
+        console.print(f"[yellow]Build warnings:[/yellow]\n{captured_warnings}")
+
+    if "exc" in error_holder:
+        raise error_holder["exc"]
+    return result_holder.get("value", {})
+
+
 @graph_app.command("build")
 def graph_build(
     name: Annotated[Optional[str], typer.Argument(help="Registered project name.")] = None,
     path: Annotated[Optional[str], typer.Option("--path", help="Path to project root (use instead of name).")] = None,
     force: Annotated[bool, typer.Option("--force", help="Force full rebuild even if graph is current.")] = False,
+    no_llm: Annotated[bool, typer.Option("--no-llm", help="Skip LLM semantic enrichment. Faster but fewer cross-file edges.")] = False,
 ) -> None:
     """Build the codebase knowledge graph for a project.
 
     \b
-    Run this before using query_codebase_graph in your AI editor.
+    Run this before using graph tools in your AI editor.
     Building from the CLI shows a progress bar and avoids blocking your editor.
 
     \b
@@ -1699,6 +2117,7 @@ def graph_build(
       icx graph build myapp
       icx graph build --path /home/user/projects/myapp
       icx graph build myapp --force
+      icx graph build myapp --no-llm
     """
     from icx_engine.graph.manager import GraphManager
     from icx_engine.graph.builder import estimate_build_eta
@@ -1726,8 +2145,7 @@ def graph_build(
         display_name = meta.name or (name or path or project_id)
         console.print(f"\n  Building codebase graph: [bold]{display_name}[/bold]")
 
-        with console.status("[bold]  Scanning and extracting files…[/bold]", spinner="dots"):
-            result = mgr.build(project_id, force=force)
+        result = _run_build_with_progress(mgr, project_id, force, skip_llm=no_llm)
 
         if result.get("error"):
             err_console.print(f"[red]Build failed:[/red] {result['error']}")
@@ -1739,8 +2157,8 @@ def graph_build(
         community_count = result.get("community_count", 0)
 
         console.print(
-            f"\n  [green]✓ Graph ready.[/green] "
-            f"{file_count} files · {node_count} nodes · {edge_count} edges · {community_count} communities\n"
+            f"\n  [green]Graph ready.[/green] "
+            f"{file_count} files | {node_count} nodes | {edge_count} edges | {community_count} communities\n"
             f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
         )
 

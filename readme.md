@@ -11,7 +11,7 @@
 
 ---
 
-ICX reaches into your work tracker, reads every item at full depth - title, description, comments, attachments, screenshots, spreadsheets - and delivers structured, high-fidelity context your AI can act on immediately.
+ICX reaches into your work tracker, reads every item at full depth - title, description, comments, attachments, screenshots, spreadsheets, audio recordings, screen-capture videos - and delivers structured, high-fidelity context your AI can act on immediately.
 
 Run `icx analyze` from your terminal for instant structured output. Register ICX as an MCP tool in your AI editor and let your agent call it automatically. Local memory captures every resolution so past fixes surface the next time a similar problem appears.
 
@@ -27,10 +27,10 @@ ICX is an early-stage product. The core pipeline (fetch → process → analyse 
 |------|--------------|-------------|
 | Connectors | Jira Cloud (stable) | GitHub Issues, Linear |
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
-| Attachments | PDF, DOCX, XLSX, CSV, images via OCR + vision | Audio/video transcription |
-| Memory | Local LanceDB + ONNX embeddings (BAAI/bge-small-en-v1.5, no PyTorch) | Team-shared memory, conflict resolution |
-| MCP tools | `analyze_issue_fast`, `analyze_issue`, `save_memory` | Batch analysis, project-level summary |
-| Codebase graph | Project registration, AST + semantic build, staleness detection, compact index + per-cluster files + role tags + LLM descriptions | Multi-project graph, incremental rebuild |
+| Attachments | PDF, DOCX, XLSX, CSV, images via OCR + vision, audio (MP3/WAV/M4A/OGG/FLAC/AAC/Opus) + video (MP4/MOV/AVI/MKV/WebM) via local Whisper or LLM-native transcription | Speaker diarisation, language hints |
+| Memory | Local LanceDB + ONNX embeddings (BAAI/bge-base-en-v1.5, 768-dim, no PyTorch) | Team-shared memory, conflict resolution |
+| MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 5 graph tools, 4 historical memory tools, `save_memory` (13 total) | Batch analysis, project-level summary |
+| Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, incremental rebuild |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
 
@@ -65,17 +65,17 @@ flowchart LR
 
 ### CLI - fast mode
 
-Skip image processing and get text-only output immediately. Image filenames are preserved in `pending_images` so nothing is lost.
+Skip all attachment processing and get text-only output immediately. Skipped filenames are preserved in `pending_images` (images), `pending_audio` (audio + video), `pending_documents` (PDF/DOCX/XLSX), and `pending_unsupported` (other types) so nothing is lost.
 
 ```mermaid
 flowchart LR
     A([icx analyze KEY --fast]) --> B[Fetch work item]
     B --> C{Attachments?}
-    C -- yes --> D[Split attachments\nimages → pending_images\ntext files processed normally]
+    C -- yes --> D[Split attachments\nimages → pending_images\naudio/video → pending_audio\ntext files processed normally]
     C -- no --> E[LLM analysis]
     D --> E
     E --> F[Memory search]
-    F --> G([IssueContext JSON\npending_images lists skipped images])
+    F --> G([IssueContext JSON\npending_images + pending_audio\nlist skipped media])
 ```
 
 ### MCP - agent flow with AI provider
@@ -84,8 +84,8 @@ flowchart LR
 flowchart TD
     A([Agent: work item mentioned]) --> B[analyze_issue_fast\ntext-only - always first]
     B --> E[Response received:\nwork_item + memory + graph\nimage_paths on disk]
-    E --> C{pending_images\nnon-empty AND\nimages relevant?}
-    C -- yes --> D[analyze_issue\nfull vision + OCR\nreturns same structure]
+    E --> C{pending_images OR\npending_audio non-empty AND\nmedia relevant?}
+    C -- yes --> D[analyze_issue\nfull vision + OCR + transcription\nreturns same structure]
     C -- no --> F{graph.status?}
     D --> F
     F -- ready --> GS{stale_note set?}
@@ -102,7 +102,7 @@ flowchart TD
     HR --> H
     H --> I
     I --> I2{Confirm with user:\nproblem + goal + files\nShall I proceed?}
-    I2 -- yes / add context --> J[Use memory.results as pattern reference\nImplement per acceptance_criteria]
+    I2 -- yes / add context --> J[Use memory_search results as pattern reference\nImplement per acceptance_criteria]
     J --> K[Ask developer to test manually]
     K -- fix confirmed --> L[save_memory\nresolution stored + temp images cleaned]
     K -- needs changes --> I2
@@ -122,13 +122,13 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.5 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
+**Version:** 0.3.6 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
 
 ```
 pipx install icx-engine
 ```
 
-The first time you run any `icx memory` command, ICX downloads a small local embedding model (~24 MB) for memory search. This happens once with a live progress bar. Every subsequent command starts instantly.
+The first time you run `icx setup`, ICX downloads a local embedding model (~110 MB) for memory search. This happens once with a live progress bar. Every subsequent start is instant.
 
 **Optional - OCR for image attachments:**
 
@@ -139,6 +139,8 @@ The first time you run any `icx memory` command, ICX downloads a small local emb
 | Linux | `apt install tesseract-ocr` |
 
 Without Tesseract, images are still processed via your AI provider's vision model if configured. ICX shows a one-time warning and continues normally.
+
+**Audio and video transcription** ships bundled - `faster-whisper` (~145 MB base model, downloaded once on first audio attachment to `~/.icx/audio/model/`) and the static `imageio-ffmpeg` binary for video → audio extraction. No system packages required. With OpenAI configured, ICX uses the Whisper API (large-v2 accuracy); with Google, it uses Gemini native audio; otherwise it transcribes locally and routes the result through your text LLM for cleanup.
 
 **Uninstalling:** Use `icx uninstall` instead of bare `pip uninstall` - it removes all data, credentials, editor configs, and the package in one step.
 
@@ -178,11 +180,11 @@ icx analyze <KEY> --traceback                  # show full Python traceback on e
 
 `KEY` can be a bare issue key (`PROJ-456`) or a full URL (`https://company.atlassian.net/browse/PROJ-456`).
 
-Image attachments are written to `~/.icx/temp/<key>/` and returned as `image_paths` in the JSON output. No base64 in the output.
+Image attachments are written to `~/.icx/temp/<key>/` and returned as `image_paths` in the JSON output. No base64 in the output. Audio and video transcripts are inlined into `attachment_texts` under the original filename.
 
 | Flag | What it does |
 |------|-------------|
-| `--fast` | Skip image processing. Images are listed in `pending_images`. Text attachments (PDF, Excel, Word) are still processed. |
+| `--fast` | Skip all attachment processing (images, audio/video, documents). AI still analyzes issue text and comments. Skipped files listed in `pending_images`, `pending_audio`, `pending_documents`, or `pending_unsupported` depending on type. |
 | `--profile NAME` | Use a specific AI profile without changing your default. Combinable with `--fast`. |
 | `--path PATH` | Show graph status for a codebase path after the analysis. Repeatable - pass multiple `--path` flags for multi-repo issues. Shows READY/BUILDING/NOT BUILT/NOT REGISTERED for each path. |
 | `--debug` | Print each pipeline step to stderr as it runs. |
@@ -226,6 +228,15 @@ icx memory export --output backup.json
 icx memory import backup.json
 icx memory clear --confirm
 icx memory status
+icx memory migrate
+icx memory by-file <PATH>
+icx memory by-file <PATH> --project PROJ
+icx memory hotspots
+icx memory hotspots --project PROJ --top 10
+icx memory related <KEY>
+icx memory related <KEY> --project PROJ
+icx memory patterns
+icx memory patterns --project PROJ
 ```
 
 ### Codebase graph
@@ -316,15 +327,25 @@ After setup, restart your editor. ICX will appear in its list of available tools
 
 | Tool | When the agent calls it |
 |------|------------------------|
-| `analyze_issue_fast` | Always first - text-only, fast. Returns `work_item` (analysis + `image_paths`), `memory` (past similar work), and `graph` (report path or build status) in a single response. When `project_paths` has more than one entry, also returns `graphs` (per-path status list). |
-| `analyze_issue` | Only when `work_item.analysis.pending_images` is non-empty AND images are relevant to the problem. Pass the same `project_paths` as the fast call. |
+| `analyze_issue_fast` | Always first - runs LLM analysis on text only, no attachment processing. Returns `work_item` (analysis + `image_paths` + `attachment_processing: "text_only"`), `memory`, and `graphs[]`. Timeout 45s. |
+| `analyze_issue` | Only when any of `work_item.analysis.pending_images`, `pending_audio`, or `pending_documents` is non-empty AND that media is relevant to the problem. Pass the same `project_paths` as the fast call. |
+| `memory_search` | Immediately after analysis - agent generates 3-6 tags from the analysis result and calls this for refined tag-filtered retrieval. Skip only when `memory.status != 'ready'`. |
+| `graph_find_context` | Find the most relevant files and symbols for a task description. Input: `task`, optional `project_paths`. |
+| `graph_subsystem` | List all files belonging to a subsystem cluster. Input: `file_path`, `project_path`. |
+| `graph_call_chain` | Trace call chains forward or backward from a function. Input: `node_id`, `project_path`. |
+| `graph_impact` | Find everything a file or function affects (callers, dependents). Input: `node_id`, `project_path`. |
+| `graph_cross_links` | Find cross-service or cross-module dependencies. Input: `project_path`. |
+| `memory_get_hotspots` | When exploring which files need extra attention - returns files ranked by historical work item count. |
+| `memory_find_by_file` | Before editing a file - surface all past work items that touched it. Input: `file_path`. |
+| `memory_get_related` | Find work items that touched the same files. Primary: pass `files` from `graph_find_context` (works for new tickets, computes overlap on-the-fly). Secondary: pass `issue_key` for reopened tickets with prior history (uses pre-stored edges). |
+| `memory_get_patterns` | Return auto-detected statistical patterns (frequent files, dominant tags, dominant work item type) computed every 10 saves. |
 | `save_memory` | After the developer confirms the fix is tested and working. Cleans up temp images for that issue. |
 
 **Multi-repo support:** Pass `project_paths` as a list. Two modes the agent must follow:
 - **User named specific repos** ("fix the auth service and UI") - agent resolves those paths and passes them: `project_paths: ["/projects/auth-svc", "/projects/ui"]`. Do not include the workspace root.
 - **User named no specific repo** - agent passes the open workspace root: `project_paths: ["/projects/my-app"]`.
 
-ICX returns `graph` (primary path, backward-compat) and `graphs[]` (all paths, only when more than one path passed) with per-path status - READY, BUILDING, NOT BUILT, or NOT REGISTERED. The agent uses available graphs and informs the user about paths that still need `icx graph build`.
+ICX returns `graphs[]` (always a list - one entry per path in `project_paths`) with per-path status - READY, BUILDING, NOT BUILT, or NOT REGISTERED. Single project = list of one. The agent reads `graphs[0].path` / `graphs[0].report_path` for single-path work, and iterates `graphs[*]` for multi-project. The agent uses available graphs and informs the user about paths that still need `icx graph build`.
 
 ### With and without an AI provider
 
@@ -367,3 +388,7 @@ Contributions are welcome - new connectors, bug fixes, test coverage, and docume
 ## License
 
 Proprietary. See [license](./license) for terms.
+
+## Third-party
+
+ICX's graph parser is built on a vendored copy of [graphify](https://github.com/safishamsi/graphify) at commit `990ac706d823bf92275333433fde4ef4782a9139`, used under the [MIT License](https://github.com/safishamsi/graphify/blob/v8/LICENSE) (Copyright (c) 2026 Safi Shamsi). The original copyright and license notice is preserved as a header comment in each vendored file under `src/icx_engine/graph/parser/`.

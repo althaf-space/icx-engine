@@ -21,7 +21,7 @@ The highest-value contributions right now:
     pip install -e ".[dev]"
     pytest
 
-The test suite runs in under a minute. Start there.
+The full test suite runs in about 60-90 seconds. Start there.
 
 ## Adding a new connector
 
@@ -32,16 +32,17 @@ A new connector needs:
 - A `client.py` that fetches raw issue data from the API
 - A `parser.py` that maps API responses to `RawIssueData`
 - A `config.py` that defines the connection config model
+- A `connector.py` that implements `ConnectorBase` and delegates `process_attachments` to the shared Universal Attachment Engine in `connectors/attachments.py`
 - Tests in `tests/` that mock the API and verify the mapping
 
-The memory module, LLM analysis, and CLI commands all work automatically once your connector
-returns a `RawIssueData` object. You do not need to touch any other part of the codebase.
+The memory module, LLM analysis, attachment handling (OCR, vision, document conversion, audio/video transcription), and CLI commands all work automatically once your connector
+returns a `RawIssueData` object with populated `attachment_content_urls`. You do not need to touch the Universal Attachment Engine itself.
 
 See `developer.md` for a step-by-step guide to adding a connector.
 
 ## Code standards
 
-- Python 3.11–3.14, Pydantic v2, async/await for I/O
+- Python 3.11-3.14, Pydantic v2, async/await for I/O
 - Tests required for new code (pytest, no mocking the database)
 - No new dependencies without discussion - keep the install footprint small
 - Type annotations on all public functions

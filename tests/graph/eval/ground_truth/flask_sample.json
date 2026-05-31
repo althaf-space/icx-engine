@@ -1,0 +1,33 @@
+{
+  "fixture": "flask_sample",
+  "language": "python",
+  "framework": "flask",
+  "notes": "Small Flask app with blueprints, before_request hooks, dataclass models.",
+  "edges": [
+    {"source": "app/__init__.py", "target": "app/blueprints/auth.py", "kind": "import"},
+    {"source": "app/__init__.py", "target": "app/blueprints/posts.py", "kind": "import"},
+    {"source": "app/__init__.py", "target": "app/db.py", "kind": "import"},
+    {"source": "app/__init__.py:create_app", "target": "app/db.py:init_db", "kind": "call"},
+
+    {"source": "app/services.py", "target": "app/db.py", "kind": "import"},
+    {"source": "app/services.py", "target": "app/models/post.py", "kind": "import"},
+    {"source": "app/services.py", "target": "app/models/user.py", "kind": "import"},
+    {"source": "app/services.py:fetch_user", "target": "app/db.py:get_connection", "kind": "call"},
+    {"source": "app/services.py:fetch_user", "target": "app/models/user.py:user", "kind": "call"},
+    {"source": "app/services.py:list_posts_for", "target": "app/db.py:get_connection", "kind": "call"},
+    {"source": "app/services.py:list_posts_for", "target": "app/models/post.py:post", "kind": "call"},
+
+    {"source": "app/blueprints/auth.py", "target": "app/services.py", "kind": "import"},
+    {"source": "app/blueprints/auth.py:login", "target": "app/services.py:fetch_user", "kind": "call"},
+
+    {"source": "app/blueprints/posts.py", "target": "app/services.py", "kind": "import"},
+    {"source": "app/blueprints/posts.py:list_my_posts", "target": "app/services.py:list_posts_for", "kind": "call"},
+
+    {"source": "wsgi.py", "target": "app/__init__.py", "kind": "import"},
+    {"source": "wsgi.py", "target": "app/__init__.py:create_app", "kind": "call"},
+
+    {"source": "app/blueprints/auth.py", "target": "app/blueprints/auth.py:log_request", "kind": "route", "notes": "@auth_bp.before_request"},
+    {"source": "app/blueprints/auth.py", "target": "app/blueprints/auth.py:login", "kind": "route", "notes": "@auth_bp.post('/login')"},
+    {"source": "app/blueprints/posts.py", "target": "app/blueprints/posts.py:list_my_posts", "kind": "route", "notes": "@posts_bp.get('/')"}
+  ]
+}

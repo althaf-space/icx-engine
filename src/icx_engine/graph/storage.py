@@ -1,4 +1,4 @@
-﻿"""
+"""
 Graph storage layer: ~/.icx/graphs/ layout, project-id derivation,
 registry.json + meta.json read/write, atomic writes.
 """
@@ -25,6 +25,8 @@ _REGISTRY_FILE = "registry.json"
 _META_FILE = "meta.json"
 _GRAPH_FILE = "graph.json"
 _GRAPH_TMP_FILE = "graph.json.tmp"
+_MANIFEST_FILE = "build_manifest.json"
+_ICXIGNORE_FILE = ".icxignore"
 
 BuildStatus = Literal["not_built", "building", "ready", "stale", "rebuilding"]
 
@@ -65,7 +67,13 @@ def _graphs_root() -> Path:
     return root
 
 
+def _project_dir_path(project_id: str) -> Path:
+    """Return project directory path without creating it. Use for read operations."""
+    return _graphs_root() / project_id
+
+
 def _project_dir(project_id: str) -> Path:
+    """Return project directory path, creating it if needed. Use for write operations only."""
     d = _graphs_root() / project_id
     if not d.exists():
         d.mkdir(parents=True, exist_ok=True)
@@ -84,23 +92,35 @@ def _registry_path() -> Path:
 
 
 def _meta_path(project_id: str) -> Path:
-    return _project_dir(project_id) / _META_FILE
+    return _project_dir_path(project_id) / _META_FILE
 
 
 def graph_path(project_id: str) -> Path:
-    return _project_dir(project_id) / _GRAPH_FILE
+    return _project_dir_path(project_id) / _GRAPH_FILE
 
 
 def graph_tmp_path(project_id: str) -> Path:
-    return _project_dir(project_id) / _GRAPH_TMP_FILE
+    return _project_dir_path(project_id) / _GRAPH_TMP_FILE
+
+
+def manifest_path(project_id: str) -> Path:
+    return _project_dir_path(project_id) / _MANIFEST_FILE
+
+
+def icxignore_path(project_id: str) -> Path:
+    return _project_dir_path(project_id) / _ICXIGNORE_FILE
+
+
+def cross_links_path(project_id: str) -> Path:
+    return _project_dir_path(project_id) / "cross_links.json"
 
 
 def report_path(project_id: str) -> Path:
-    return _project_dir(project_id) / "GRAPH_REPORT.md"
+    return _project_dir_path(project_id) / "GRAPH_REPORT.md"
 
 
 def clusters_dir_path(project_id: str) -> Path:
-    return _project_dir(project_id) / "GRAPH_CLUSTERS"
+    return _project_dir_path(project_id) / "GRAPH_CLUSTERS"
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +261,11 @@ def _write_registry(entries: list[dict]) -> None:
     path = _registry_path()
     tmp = path.with_suffix(".tmp")
     try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+        fd = os.open(
+            str(tmp),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(entries, f, indent=2)
         tmp.replace(path)
@@ -281,10 +305,15 @@ def read_meta(project_id: str) -> ProjectInfo | None:
 
 def write_meta(info: ProjectInfo) -> None:
     path = _meta_path(info.project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     data = asdict(info)
     try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+        fd = os.open(
+            str(tmp),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         tmp.replace(path)
@@ -294,6 +323,53 @@ def write_meta(info: ProjectInfo) -> None:
         except OSError:
             pass
         raise
+
+
+def write_manifest(
+    project_id: str,
+    project_root: str,
+    total_files: int,
+    git_commit: str | None,
+    file_mtimes: dict[str, float],
+) -> None:
+    """Write build_manifest.json for staleness checking."""
+    from datetime import datetime, timezone
+    path = manifest_path(project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    data = {
+        "built_at": datetime.now(timezone.utc).isoformat(),
+        "project_root": project_root,
+        "total_files": total_files,
+        "git_commit": git_commit,
+        "file_mtimes": file_mtimes,
+    }
+    try:
+        fd = os.open(
+            str(tmp),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def read_manifest(project_id: str) -> dict | None:
+    """Return parsed build_manifest.json or None if absent/corrupt."""
+    path = manifest_path(project_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def set_build_status(project_id: str, status: BuildStatus) -> None:
@@ -345,6 +421,9 @@ def register_project(name: str, path: Path) -> str:
             file_count=0,
             build_status="not_built",
         ))
+        # Seed .icxignore on first project registration
+        from icx_engine.graph.parser.icxignore import seed as _seed_icxignore
+        _seed_icxignore(icxignore_path(project_id))
     return project_id
 
 

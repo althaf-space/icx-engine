@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from icx_engine.models.config import AppConfig, BaseConnection, LLMConfig
 from icx_engine.config_manager import ConfigManager
 from icx_engine.exceptions import ManagementError

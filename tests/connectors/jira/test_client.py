@@ -1,4 +1,4 @@
-﻿"""Unit tests for JiraClient whitelist enforcement and JiraConnector URL rewriting."""
+"""Unit tests for JiraClient whitelist enforcement and JiraConnector URL rewriting."""
 import re
 import httpx
 import pytest
@@ -203,7 +203,6 @@ def test_rewrite_token_rejects_wrong_host():
         connector._rewrite_attachment_url("https://evil.example.com/rest/api/3/attachment/content/1")
 
 
-@pytest.mark.asyncio
 async def test_download_attachment_ssrf_redirect_raises_source_unavailable(token_connection):
     """Redirecting to a disallowed host must raise SourceUnavailable, not ValueError."""
     from icx_engine.connectors.jira.client import JiraClient
@@ -230,7 +229,6 @@ async def test_download_attachment_ssrf_redirect_raises_source_unavailable(token
     assert re.search(r"(?<![.\w])external-evil\.com(?![.\w])", msg) or "ssrf" in msg or "allowed" in msg
 
 
-@pytest.mark.asyncio
 async def test_download_attachment_size_limit_raises_source_unavailable(token_connection):
     """Exceeding the size limit must raise SourceUnavailable, not ValueError."""
     from icx_engine.connectors.jira.client import JiraClient, _MAX_ATTACHMENT_BYTES

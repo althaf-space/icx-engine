@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 from typer.testing import CliRunner
 
 from icx_engine.models.config import AppConfig, BaseConnection, LLMConfig, ChannelConfig

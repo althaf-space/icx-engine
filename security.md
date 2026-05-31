@@ -4,8 +4,8 @@
 
 | Version | Status |
 |---------|--------|
-| 0.2.x   | Actively supported - security patches prioritized |
-| < 0.2.0 | Unsupported |
+| 0.3.x   | Actively supported - security patches prioritized |
+| < 0.3.0 | Unsupported |
 
 ---
 

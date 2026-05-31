@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import pytest
 import respx
 import httpx
@@ -19,6 +19,51 @@ from icx_engine.exceptions import (
 )
 
 from test_data import JIRA_DOMAIN, JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS, JIRA_ISSUE_PAYLOAD, MOCK_LLM_JSON
+
+
+# ── output model field presence ────────────────────────────────────────────
+
+def test_raw_issue_response_has_fast_partial_fields():
+    from icx_engine.models.output import RawIssueResponse
+    r = RawIssueResponse(
+        mode="fast_partial",
+        issue_key="X-1", issue_type="Bug", summary="s",
+        description="d", comments=[], attachments=[],
+        priority="High", status="Open", metadata={},
+        pending_images=["a.png"],
+        pending_audio=["b.mp3"],
+        pending_documents=["c.pdf"],
+        pending_unsupported=["d.xyz"],
+    )
+    assert r.mode == "fast_partial"
+    assert r.pending_documents == ["c.pdf"]
+    assert r.pending_unsupported == ["d.xyz"]
+
+
+def test_issue_context_has_pending_documents_field():
+    from icx_engine.models.output import IssueContext
+    ctx = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="low", priority="Low",
+        issue_type="Bug", confidence_score=0.9, completeness_score=0.8,
+        missing_information=[],
+        pending_documents=["report.pdf"],
+    )
+    assert ctx.pending_documents == ["report.pdf"]
+
+
+# ── Extension set synchronization ────────────────────────────────────────────
+
+def test_audio_video_extensions_derived_from_attachments():
+    """_AUDIO_VIDEO_EXTENSIONS must be the union of AUDIO_EXTENSIONS and VIDEO_EXTENSIONS from attachments."""
+    from icx_engine.engine import _AUDIO_VIDEO_EXTENSIONS
+    from icx_engine.connectors.attachments import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
+
+    expected = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+    assert _AUDIO_VIDEO_EXTENSIONS == expected, (
+        f"Extension set mismatch. Engine: {_AUDIO_VIDEO_EXTENSIONS}, Attachments: {expected}"
+    )
 
 
 # ── JiraClient - HTTP error mapping ──────────────────────────────────────────
@@ -1009,7 +1054,7 @@ def test_system_prompt_mandates_technical_logic_tagged_block():
     assert "formula" in p
 
 
-def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
+async def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
     """When debug_console is provided, engine.run emits Rule output to it."""
     from io import StringIO
     from rich.console import Console
@@ -1042,13 +1087,12 @@ def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
 
         mock_vg.return_value = mock_context
 
-        import asyncio
-        asyncio.run(run(
+        await run(
             "https://test.atlassian.net/browse/TEST-1",
             app_config,
             log=lambda m: None,
             debug_console=debug_con,
-        ))
+        )
 
     output = buf.getvalue()
     assert "Prompt" in output or "LLM" in output or "──" in output
@@ -1071,7 +1115,6 @@ def _make_past_insight():
     )
 
 
-@pytest.mark.asyncio
 async def test_engine_injects_past_insights_when_memory_hits():
     from unittest.mock import AsyncMock, MagicMock, patch
     from icx_engine.engine import run
@@ -1135,7 +1178,6 @@ async def test_engine_injects_past_insights_when_memory_hits():
     assert result.past_insights[0].similarity_score == 0.91
 
 
-@pytest.mark.asyncio
 async def test_engine_memory_exception_does_not_propagate():
     from unittest.mock import AsyncMock, MagicMock, patch
     from icx_engine.engine import run
@@ -1196,39 +1238,91 @@ def test_split_attachments_separates_images_from_docs():
         "report.pdf":     "https://example.com/r.pdf",
         "diagram.jpeg":   "https://example.com/d.jpeg",
     }
-    non_image, image_names = _split_attachments(urls)
-    assert non_image == {"report.pdf": "https://example.com/r.pdf"}
+    image_names, av_names, doc_names, unsupported = _split_attachments(urls)
     assert sorted(image_names) == ["diagram.jpeg", "screenshot.png"]
+    assert av_names == []
+    assert doc_names == ["report.pdf"]
+    assert unsupported == []
 
 
 def test_split_attachments_empty_input():
     from icx_engine.engine import _split_attachments
-    non_image, image_names = _split_attachments({})
-    assert non_image == {}
+    image_names, av_names, doc_names, unsupported = _split_attachments({})
     assert image_names == []
+    assert av_names == []
+    assert doc_names == []
+    assert unsupported == []
 
 
 def test_split_attachments_all_images():
     from icx_engine.engine import _split_attachments
     urls = {"a.png": "u1", "b.tif": "u2", "c.webp": "u3"}
-    non_image, image_names = _split_attachments(urls)
-    assert non_image == {}
+    image_names, av_names, doc_names, unsupported = _split_attachments(urls)
     assert len(image_names) == 3
+    assert av_names == []
+    assert doc_names == []
+    assert unsupported == []
 
 
 def test_split_attachments_no_images():
     from icx_engine.engine import _split_attachments
     urls = {"doc.xlsx": "u1", "notes.txt": "u2"}
-    non_image, image_names = _split_attachments(urls)
-    assert non_image == {"doc.xlsx": "u1", "notes.txt": "u2"}
+    image_names, av_names, doc_names, unsupported = _split_attachments(urls)
     assert image_names == []
+    assert av_names == []
+    assert sorted(doc_names) == ["doc.xlsx", "notes.txt"]
+    assert unsupported == []
+
+
+def test_split_attachments_audio_and_video():
+    from icx_engine.engine import _split_attachments
+    urls = {
+        "meeting.mp3":   "u1",
+        "demo.mp4":      "u2",
+        "report.pdf":    "u3",
+        "screenshot.png": "u4",
+        "voice.opus":    "u5",
+        "screen.webm":   "u6",
+    }
+    image_names, av_names, doc_names, unsupported = _split_attachments(urls)
+    assert image_names == ["screenshot.png"]
+    assert sorted(av_names) == ["demo.mp4", "meeting.mp3", "screen.webm", "voice.opus"]
+    assert doc_names == ["report.pdf"]
+    assert unsupported == []
+
+
+def test_split_attachments_av_case_insensitive():
+    from icx_engine.engine import _split_attachments
+    urls = {"NOTE.MP3": "u1", "CLIP.MOV": "u2"}
+    image_names, av_names, doc_names, unsupported = _split_attachments(urls)
+    assert image_names == []
+    assert sorted(av_names) == ["CLIP.MOV", "NOTE.MP3"]
+    assert doc_names == []
+    assert unsupported == []
+
+
+def test_split_attachments_four_buckets():
+    from icx_engine.engine import _split_attachments
+    urls = {
+        "screen.png":  "u1",
+        "note.mp3":    "u2",
+        "report.pdf":  "u3",
+        "data.xlsx":   "u4",
+        "file.xyz":    "u5",
+        "demo.mp4":    "u6",
+    }
+    images, av, docs, unsupported = _split_attachments(urls)
+    assert images == ["screen.png"]
+    assert sorted(av) == ["demo.mp4", "note.mp3"]
+    assert sorted(docs) == ["data.xlsx", "report.pdf"]
+    assert unsupported == ["file.xyz"]
 
 
 # ── engine.run skip_vision ────────────────────────────────────────────────────
 
 @respx.mock
 async def test_run_skip_vision_populates_pending_images(app_config):
-    """With skip_vision=True, image filenames end up in result.pending_images."""
+    """With skip_vision=True and LLM configured, returns IssueContext with pending_images."""
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
     )
@@ -1241,6 +1335,67 @@ async def test_run_skip_vision_populates_pending_images(app_config):
     assert isinstance(result, IssueContext)
     assert "screenshot.png" in result.pending_images
     assert result.images == {}
+
+
+@respx.mock
+async def test_run_skip_vision_populates_pending_audio(app_config):
+    """With skip_vision=True and LLM configured, returns IssueContext with pending_audio."""
+    import copy as _copy
+    payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
+    payload["fields"]["attachment"] = [
+        {
+            "filename": "meeting.mp3",
+            "content": "https://test.atlassian.net/rest/api/3/attachment/content/20001",
+            "mimeType": "audio/mpeg",
+        },
+        {
+            "filename": "demo.mp4",
+            "content": "https://test.atlassian.net/rest/api/3/attachment/content/20002",
+            "mimeType": "video/mp4",
+        },
+    ]
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.memory.MemoryManager"):
+            result = await run("TEST-123", app_config, skip_vision=True)
+    assert isinstance(result, IssueContext)
+    assert sorted(result.pending_audio) == ["demo.mp4", "meeting.mp3"]
+    assert result.pending_images == []
+
+
+@respx.mock
+async def test_run_full_vision_leaves_pending_audio_empty(app_config):
+    """Without skip_vision, pending_audio is empty even when audio attachments exist."""
+    import copy as _copy
+    payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
+    payload["fields"]["attachment"] = [
+        {
+            "filename": "meeting.mp3",
+            "content": "https://test.atlassian.net/rest/api/3/attachment/content/20001",
+            "mimeType": "audio/mpeg",
+        },
+    ]
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    # Stub the attachment download + transcription so the test does not hit the network or whisper.
+    respx.get("https://test.atlassian.net/rest/api/3/attachment/content/20001").mock(
+        return_value=httpx.Response(200, content=b"fake mp3")
+    )
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="transcript")):
+            with patch("icx_engine.memory.MemoryManager"):
+                result = await run("TEST-123", app_config)
+    assert isinstance(result, IssueContext)
+    assert result.pending_audio == []
 
 
 @respx.mock
@@ -1257,6 +1412,117 @@ async def test_run_full_vision_leaves_pending_images_empty(app_config):
             result = await run("TEST-123", app_config)
     assert isinstance(result, IssueContext)
     assert result.pending_images == []
+
+
+@respx.mock
+async def test_fast_mode_skips_all_attachment_processing(app_config):
+    """skip_vision=True must not call process_attachments regardless of attachment type."""
+    import copy as _copy
+    payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
+    payload["fields"]["attachment"] = [
+        {"filename": "report.pdf", "content": "https://test.atlassian.net/rest/api/3/attachment/content/30001", "mimeType": "application/pdf"},
+        {"filename": "data.xlsx",  "content": "https://test.atlassian.net/rest/api/3/attachment/content/30002", "mimeType": "application/vnd.ms-excel"},
+        {"filename": "screen.png", "content": "https://test.atlassian.net/rest/api/3/attachment/content/30003", "mimeType": "image/png"},
+        {"filename": "note.mp3",   "content": "https://test.atlassian.net/rest/api/3/attachment/content/30004", "mimeType": "audio/mpeg"},
+        {"filename": "file.xyz",   "content": "https://test.atlassian.net/rest/api/3/attachment/content/30005", "mimeType": "application/octet-stream"},
+    ]
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    with patch("icx_engine.connectors.jira.connector.JiraConnector.process_attachments", new_callable=AsyncMock) as mock_pa:
+        with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+            with patch("icx_engine.memory.MemoryManager"):
+                result = await run("TEST-123", app_config, skip_vision=True)
+    mock_pa.assert_not_called()
+    assert isinstance(result, IssueContext)
+    assert result.pending_images == ["screen.png"]
+    assert result.pending_audio == ["note.mp3"]
+    assert sorted(result.pending_documents) == ["data.xlsx", "report.pdf"]
+    assert result.pending_unsupported == ["file.xyz"]
+
+
+@respx.mock
+async def test_fast_mode_calls_llm_when_configured(app_config):
+    """skip_vision=True calls LLM when configured - returns IssueContext with pending lists."""
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
+    )
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.memory.MemoryManager"):
+            result = await run("TEST-123", app_config, skip_vision=True)
+    mock_client.chat.completions.create.assert_called_once()
+    assert isinstance(result, IssueContext)
+    assert "screenshot.png" in result.pending_images
+
+
+@respx.mock
+async def test_full_mode_calls_process_attachments(app_config):
+    """skip_vision=False must call process_attachments for full pipeline."""
+    from icx_engine.models.output import IssueContext
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
+    )
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.connectors.jira.connector.JiraConnector.process_attachments", new_callable=AsyncMock) as mock_pa:
+            mock_pa.return_value = ({}, {})
+            with patch("icx_engine.memory.MemoryManager"):
+                result = await run("TEST-123", app_config, skip_vision=False)
+    mock_pa.assert_called_once()
+    assert isinstance(result, IssueContext)
+
+
+@respx.mock
+async def test_fast_mode_no_attachments_with_llm_returns_issue_context(app_config):
+    """skip_vision=True with no attachments and LLM configured returns IssueContext with empty pending lists."""
+    import copy as _copy
+    payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
+    payload["fields"]["attachment"] = []
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.memory.MemoryManager"):
+            result = await run("TEST-123", app_config, skip_vision=True)
+    assert isinstance(result, IssueContext)
+    assert result.pending_images == []
+    assert result.pending_audio == []
+    assert result.pending_documents == []
+    assert result.pending_unsupported == []
+
+
+@respx.mock
+async def test_fast_mode_no_llm_returns_raw_issue_response():
+    """skip_vision=True with no LLM configured returns RawIssueResponse(mode='fast_partial')."""
+    import copy as _copy
+    from icx_engine.models.output import RawIssueResponse
+    from icx_engine.models.config import AppConfig
+    from icx_engine.connectors.jira.config import JiraConnection, TokenAuth
+    config = AppConfig(
+        connections=[JiraConnection(
+            domain="test.atlassian.net",
+            auth=TokenAuth(auth_type="token", email="u@test.com", api_token="tok"),
+        )]
+    )
+    payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    result = await run("TEST-123", config, mcp_mode=True, skip_vision=True)
+    assert isinstance(result, RawIssueResponse)
+    assert result.mode == "fast_partial"
+    assert "screenshot.png" in result.pending_images
 
 
 # ── engine.run MCP mode memory guard ─────────────────────────────────────────
@@ -1277,6 +1543,31 @@ async def test_run_mcp_mode_skips_memory_enrichment(app_config):
 
 
 # ── engine.run contextual RAG ─────────────────────────────────────────────────
+
+@respx.mock
+async def test_run_cli_memory_query_timeout_does_not_crash(app_config):
+    """CLI memory query that exceeds 30s timeout must log and continue, not raise."""
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
+    )
+    mock_mem = MagicMock()
+
+    def _timeout_query(q):
+        raise asyncio.TimeoutError
+
+    mock_mem.query.side_effect = _timeout_query
+
+    logs: list[str] = []
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.memory.MemoryManager", return_value=mock_mem):
+            result = await run("TEST-123", app_config, log=logs.append)
+
+    assert isinstance(result, IssueContext)
+    assert any("memory" in m.lower() and "timed out" in m.lower() for m in logs)
+
 
 @respx.mock
 async def test_run_cli_mode_uses_contextual_rag(app_config):

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Graph build pipeline.
 
 Extraction strategy (hybrid):
@@ -25,7 +25,7 @@ _log = logging.getLogger(__name__)
 # File collection: git-first, fallback to filtered rglob
 # ---------------------------------------------------------------------------
 
-_GRAPHIFY_EXTENSIONS = frozenset({
+_PARSER_EXTENSIONS = frozenset({
     ".py", ".js", ".jsx", ".mjs", ".ts", ".tsx", ".go", ".rs", ".java",
     ".groovy", ".gradle", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
     ".rb", ".cs", ".kt", ".kts", ".scala", ".php", ".swift", ".lua",
@@ -33,13 +33,9 @@ _GRAPHIFY_EXTENSIONS = frozenset({
     ".dart", ".sql", ".md", ".mdx",
 })
 
-_SKIP_DIRS = frozenset({
-    "node_modules", "dist", "build", ".next", ".nuxt", "target", "vendor",
-    "__pycache__", ".gradle", ".mvn", "out", ".output", "coverage",
-    ".cache", "tmp", "temp", ".turbo", ".parcel-cache", "venv", ".venv",
-    "env", ".env", "site-packages", ".tox", "buck-out", "bazel-out",
-    ".dart_tool", "Pods", ".build", "DerivedData",
-})
+def _is_skip_dir(name: str) -> bool:
+    from icx_engine.graph.parser.detect import _is_noise_dir
+    return _is_noise_dir(name)
 
 # Directories whose names end with these suffixes are expanded archive artifacts.
 # Files inside .war/, .jar/, .ear/ etc. are compiled outputs - skip entirely.
@@ -114,9 +110,9 @@ def _detect_llm_backend() -> tuple[str, str | None] | None:
 
 def _collect_source_files(project_path: Path) -> list[Path]:
     """
-    Collect source files for graphify.
+    Collect source files for the graph parser.
     1. git ls-files (respects .gitignore - handles node_modules, dist, etc.)
-    2. Fallback: rglob filtered by _SKIP_DIRS
+    2. Fallback: rglob filtered by _is_noise_dir from detect.py
     Applies vendor-dir filter in both paths.
     """
     import subprocess
@@ -139,7 +135,7 @@ def _collect_source_files(project_path: Path) -> list[Path]:
                 if _is_inside_archive_dir(rel_path):
                     continue
                 p = project_path / rel_path
-                if p.suffix in _GRAPHIFY_EXTENSIONS and p.is_file():
+                if p.suffix in _PARSER_EXTENSIONS and p.is_file():
                     files.append(p)
             if files:
                 return _filter_vendor_files(files)
@@ -148,12 +144,12 @@ def _collect_source_files(project_path: Path) -> list[Path]:
 
     # Fallback: rglob with skip-dir filter
     files = []
-    for ext in _GRAPHIFY_EXTENSIONS:
+    for ext in _PARSER_EXTENSIONS:
         for p in project_path.rglob(f"*{ext}"):
             rel = p.relative_to(project_path)
             if _is_inside_archive_dir(rel):
                 continue
-            if any(part in _SKIP_DIRS or part.startswith(".") for part in rel.parts[:-1]):
+            if any(_is_skip_dir(part) or part.startswith(".") for part in rel.parts[:-1]):
                 continue
             if p.is_file():
                 files.append(p)
@@ -171,6 +167,7 @@ def _build_project_isolated(
     llm_backend: str | None = None,
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
+    progress_path: str | None = None,
 ) -> dict:
     """
     Runs inside an isolated subprocess spawned by ProcessPoolExecutor.
@@ -193,22 +190,23 @@ def _build_project_isolated(
         "error": None,
     }
 
+    from icx_engine.graph.progress import ProgressEmitter
+    progress = ProgressEmitter(progress_path)
+
     try:
-        import graphify.cache as _gcache
-        from graphify.extract import extract
-        from graphify.build import build_from_json
-        from graphify.cluster import cluster
-        from graphify.export import to_json
+        from icx_engine.graph.parser import cache as _gcache
+        from icx_engine.graph.parser.extract import extract
+        from icx_engine.graph.parser.build import build_from_json
+        from icx_engine.graph.parser.cluster import cluster
+        from icx_engine.graph.parser.export import to_json
 
         icx_cache = _Path(icx_cache_path_str)
         icx_cache.mkdir(parents=True, exist_ok=True)
 
-        # Move cwd away from project dir so graphify cannot create graphify-out/
-        # or any other relative-path artifacts inside the user's project.
+        # Move cwd away from project dir so the parser cannot create
+        # icx-graph-out/ or other relative-path artifacts inside the user repo.
         os.chdir(str(icx_cache))
 
-        # Redirect ALL cache writes to ~/.icx/graphs/<id>/cache/
-        # Safe here because this is an isolated subprocess.
         def _redirected_cache_dir(root=_Path("."), kind="ast"):
             d = icx_cache / kind
             d.mkdir(parents=True, exist_ok=True)
@@ -216,38 +214,299 @@ def _build_project_isolated(
         _gcache.cache_dir = _redirected_cache_dir
 
         project_path = _Path(project_path_str)
+
         files = _collect_source_files(project_path)
+
+        # Apply .icxignore exclusions from ~/.icx/graphs/<project_id>/.icxignore
+        try:
+            from icx_engine.graph import storage as _storage
+            from icx_engine.graph.parser.icxignore import load as _icx_load
+            _pid = _storage.derive_project_id(project_path)
+            _ipath = _storage.icxignore_path(_pid)
+            if _ipath.exists():
+                _icxignore = _icx_load(_ipath, project_path)
+                files = [
+                    f for f in files
+                    if not _icxignore.matches(f.relative_to(project_path).as_posix())
+                ]
+        except Exception:
+            pass
+
         result["file_count"] = len(files)
+        progress.emit("scan", current=len(files), total=len(files),
+                      message=f"{len(files)} files")
 
         if not files:
             result["error"] = "No source files found in project directory."
             return result
 
-        # ------------------------------------------------------------------
-        # Step 1: AST extraction - always runs, covers every file, no API cost.
-        # Produces nodes + intra-file call/import edges via tree-sitter.
-        # This is the foundation: zero misses regardless of project size.
-        #
-        # parallel=False: this function already runs inside a ProcessPoolExecutor
-        # subprocess. Spawning grandchild processes on Windows (spawn context)
-        # causes deadlocks - each grandchild re-imports parent modules which can
-        # try to acquire locks held by the parent, hanging indefinitely.
-        # ------------------------------------------------------------------
-        extraction = extract(files, cache_root=icx_cache, parallel=False)
+        # parallel=False: this function already runs in a ProcessPoolExecutor
+        # subprocess; grandchild spawn under Windows deadlocks during import.
+        _ast_total = len(files)
+        progress.emit("ast", current=0, total=_ast_total, message="parsing")
 
-        # ------------------------------------------------------------------
-        # Step 2: LLM edge enrichment - runs only when a model is configured.
-        # Sends file batches to the LLM to extract cross-file semantic edges.
-        # Only edges are taken from the LLM output; nodes and LLM-assigned
-        # community IDs are intentionally discarded.
-        #
-        # Why discard LLM communities?
-        # Each LLM chunk independently assigns community IDs 0,1,2...
-        # Community 0 in chunk A has no relation to community 0 in chunk B.
-        # When merged, they collide into one oversized cluster. Louvain in
-        # Step 3 derives communities from the full merged graph instead,
-        # giving globally consistent assignments at any project scale.
-        # ------------------------------------------------------------------
+        _ast_msg = ["parsing"]
+
+        def _ast_on_start(uncached: int, total: int) -> None:
+            cached = total - uncached
+            if uncached == 0:
+                _ast_msg[0] = "all cached"
+            elif cached == 0:
+                _ast_msg[0] = "parsing"
+            else:
+                _ast_msg[0] = f"{uncached} to parse, {cached} cached"
+            # Never emit completion here - post-processing still runs after extract().
+            # Clamp to total-1 so the bar stays visible until the final emit below.
+            display = min(cached, max(0, total - 1)) if total > 0 else cached
+            progress.emit("ast", current=display, total=total, message=_ast_msg[0])
+
+        def _ast_on_progress(done: int, total: int) -> None:
+            # Clamp to total-1: post-processing hasn't run yet when on_progress fires.
+            display = min(done, max(0, total - 1)) if total > 0 else done
+            progress.emit("ast", current=display, total=total, message=_ast_msg[0])
+
+        extraction = extract(
+            files, cache_root=icx_cache, parallel=False,
+            on_progress=_ast_on_progress, on_start=_ast_on_start,
+        )
+        progress.emit("ast", current=_ast_total, total=_ast_total,
+                      message=f"{len(extraction.get('nodes', []))} nodes")
+
+        lsp_edge_count = 0
+
+        _proj_posix = project_path.as_posix()
+
+        def _abs_edges(edges: list[dict]) -> list[dict]:
+            """Normalize resolver edges: relative source_file -> absolute."""
+            result = []
+            for e in edges:
+                sf = e.get("source_file", "")
+                if sf and not (sf.startswith("/") or (len(sf) > 1 and sf[1] == ":")):
+                    e = {**e, "source_file": f"{_proj_posix}/{sf}"}
+                result.append(e)
+            return result
+
+        _exts = {f.suffix.lower() for f in files}
+        _has_py = bool(_exts & {'.py'})
+        _has_java = bool(_exts & {'.java'})
+        _has_kotlin = bool(_exts & {'.kt', '.kts'})
+        _has_jsts = bool(_exts & {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.vue', '.svelte'})
+
+        _LSP_STEPS = max(1, (
+            (1 if _has_py else 0)        # python jedi
+            + (1 if _has_py else 0)      # pyright LSP
+            + (2 if _has_java else 0)    # lombok synth + java symbols
+            + (1 if _has_kotlin else 0)  # kotlin symbols
+            + (2 if _has_jsts else 0)    # jsts imports + typescript LSP
+            + 1                           # final edges summary
+        ))
+        _lsp_step = 0
+
+        def _lsp_pre(label: str) -> None:
+            progress.emit("lsp", current=_lsp_step, total=_LSP_STEPS, message=label)
+
+        def _lsp_tick(label: str) -> None:
+            nonlocal _lsp_step
+            _lsp_step += 1
+            progress.emit("lsp", current=_lsp_step, total=_LSP_STEPS, message=label)
+
+        progress.emit("lsp", current=0, total=_LSP_STEPS, message="starting")
+
+        if _has_py:
+            _lsp_pre("python jedi")
+            try:
+                from icx_engine.graph.parser.resolvers.python_jedi import (
+                    extract_python_edges,
+                )
+                jedi_edges = _abs_edges(extract_python_edges(files, project_path, extraction))
+                if jedi_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + jedi_edges,
+                    }
+                lsp_edge_count += len(jedi_edges)
+            except Exception as jedi_exc:
+                _log.debug("python_jedi resolver failed (%s)", type(jedi_exc).__name__)
+            _lsp_tick("python jedi")
+
+        if _has_java:
+            # Lombok synth must run BEFORE java_symbols so the synthetic
+            # getter/setter/toString nodes are in the node index when the
+            # symbol resolver looks them up.
+            _lsp_pre("lombok synth")
+            try:
+                from icx_engine.graph.parser.resolvers.lombok import apply_lombok_synth
+                apply_lombok_synth(files, project_path, extraction)
+            except Exception as lombok_exc:
+                _log.debug("lombok resolver failed (%s)", type(lombok_exc).__name__)
+            _lsp_tick("lombok synth")
+
+            _lsp_pre("java symbols")
+            try:
+                from icx_engine.graph.parser.resolvers.java_symbols import (
+                    extract_java_edges,
+                )
+                java_edges = _abs_edges(extract_java_edges(files, project_path, extraction))
+                if java_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + java_edges,
+                    }
+                lsp_edge_count += len(java_edges)
+            except Exception as java_exc:
+                _log.debug("java_symbols resolver failed (%s)", type(java_exc).__name__)
+            _lsp_tick("java symbols")
+            try:
+                from icx_engine.graph.parser.resolvers.java_symbols import (
+                    upgrade_inferred_edges,
+                )
+                upgrade_inferred_edges(extraction, project_path, files)
+            except Exception as _uie_exc:
+                _log.debug("upgrade_inferred_edges failed (%s)", type(_uie_exc).__name__)
+
+        if _has_kotlin:
+            _lsp_pre("kotlin symbols")
+            try:
+                from icx_engine.graph.parser.resolvers.kotlin_symbols import (
+                    extract_kotlin_edges,
+                )
+                kotlin_edges = _abs_edges(extract_kotlin_edges(files, project_path, extraction))
+                if kotlin_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + kotlin_edges,
+                    }
+                lsp_edge_count += len(kotlin_edges)
+            except Exception as kt_exc:
+                _log.debug("kotlin_symbols resolver failed (%s)", type(kt_exc).__name__)
+            _lsp_tick("kotlin symbols")
+
+        if _has_jsts:
+            _lsp_pre("js/ts imports")
+            try:
+                from icx_engine.graph.parser.resolvers.jsts_imports import (
+                    extract_jsts_imports,
+                )
+                jsts_edges = _abs_edges(extract_jsts_imports(files, project_path, extraction))
+                if jsts_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + jsts_edges,
+                    }
+                lsp_edge_count += len(jsts_edges)
+            except Exception as jsts_exc:
+                _log.debug("jsts_imports resolver failed (%s)", type(jsts_exc).__name__)
+            _lsp_tick("js/ts imports")
+
+            _lsp_pre("typescript LSP")
+            try:
+                from icx_engine.graph.parser.resolvers.ts_lsp import extract_ts_lsp_edges
+                ts_lsp_edges = _abs_edges(extract_ts_lsp_edges(files, project_path, extraction))
+                if ts_lsp_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + ts_lsp_edges,
+                    }
+                lsp_edge_count += len(ts_lsp_edges)
+            except Exception as ts_lsp_exc:
+                _log.debug("ts_lsp resolver failed (%s)", type(ts_lsp_exc).__name__)
+            _lsp_tick("typescript LSP")
+
+        if _has_py:
+            _lsp_pre("pyright LSP")
+            try:
+                from icx_engine.graph.parser.resolvers.pyright_lsp import extract_pyright_edges
+                pyright_edges = _abs_edges(extract_pyright_edges(files, project_path, extraction))
+                if pyright_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + pyright_edges,
+                    }
+                lsp_edge_count += len(pyright_edges)
+            except Exception as pyright_exc:
+                _log.debug("pyright_lsp resolver failed (%s)", type(pyright_exc).__name__)
+            _lsp_tick("pyright LSP")
+
+        _lsp_tick(f"{lsp_edge_count} edges")
+
+        _RESOLVERS = (
+            ("java_inheritance", "icx_engine.graph.parser.resolvers.java_inheritance", "extract_java_inheritance_edges"),
+            ("fastapi", "icx_engine.graph.parser.resolvers.fastapi", "extract_fastapi_edges"),
+            ("spring", "icx_engine.graph.parser.resolvers.spring", "extract_spring_edges"),
+            ("java_interface_impl", "icx_engine.graph.parser.resolvers.java_interface_impl", "extract_java_interface_impl_edges"),
+            ("jpa", "icx_engine.graph.parser.resolvers.jpa", "extract_jpa_edges"),
+            ("kotlin_spring", "icx_engine.graph.parser.resolvers.kotlin_spring", "extract_kotlin_spring_edges"),
+            ("react", "icx_engine.graph.parser.resolvers.react", "extract_react_edges"),
+            ("nextjs", "icx_engine.graph.parser.resolvers.nextjs", "extract_nextjs_edges"),
+            ("jsts_frameworks", "icx_engine.graph.parser.resolvers.jsts_frameworks", "extract_jsts_framework_edges"),
+            ("jaxrs", "icx_engine.graph.parser.resolvers.jaxrs", "extract_jaxrs_edges"),
+            ("build_deps", "icx_engine.graph.parser.resolvers.build_deps", "extract_build_dep_edges"),
+            ("java_clients", "icx_engine.graph.parser.resolvers.java_clients", "extract_java_client_edges"),
+            ("django", "icx_engine.graph.parser.resolvers.django", "extract_django_edges"),
+            ("flask", "icx_engine.graph.parser.resolvers.flask", "extract_flask_edges"),
+            ("vue", "icx_engine.graph.parser.resolvers.vue", "extract_vue_edges"),
+            ("remix", "icx_engine.graph.parser.resolvers.remix", "extract_remix_edges"),
+            ("svelte", "icx_engine.graph.parser.resolvers.svelte", "extract_svelte_edges"),
+            ("sqlalchemy", "icx_engine.graph.parser.resolvers.sqlalchemy", "extract_sqlalchemy_edges"),
+            ("celery", "icx_engine.graph.parser.resolvers.celery", "extract_celery_edges"),
+            ("pytest_fixtures", "icx_engine.graph.parser.resolvers.pytest_fixtures", "extract_pytest_edges"),
+            ("python_type_checking", "icx_engine.graph.parser.resolvers.python_type_checking", "extract_python_type_checking_edges"),
+            ("redux", "icx_engine.graph.parser.resolvers.redux", "extract_redux_edges"),
+            ("graphql_resolvers", "icx_engine.graph.parser.resolvers.graphql_resolvers", "extract_graphql_edges"),
+            ("vue_options", "icx_engine.graph.parser.resolvers.vue_options", "extract_vue_options_edges"),
+            ("spring_xml", "icx_engine.graph.parser.resolvers.spring_xml", "extract_spring_xml_edges"),
+        )
+
+        framework_edge_count = 0
+        progress.emit("framework", current=0, total=len(_RESOLVERS), message="starting")
+
+        for _i, (resolver_name, mod_path, fn_name) in enumerate(_RESOLVERS):
+            progress.emit("framework", current=_i, total=len(_RESOLVERS), message=resolver_name)
+            try:
+                module = __import__(mod_path, fromlist=[fn_name])
+                fn = getattr(module, fn_name)
+                new_edges = fn(files, project_path, extraction)
+                if new_edges:
+                    new_edges = _abs_edges(new_edges)
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + new_edges,
+                    }
+                framework_edge_count += len(new_edges)
+            except Exception as exc:
+                _log.debug("%s resolver failed (%s)", resolver_name, type(exc).__name__)
+
+        progress.emit("framework", current=len(_RESOLVERS), total=len(_RESOLVERS),
+                      message=f"{framework_edge_count} edges")
+
+        try:
+            from icx_engine.graph.parser.resolvers.universal_ast import (
+                extract_universal_ast_edges,
+            )
+            universal_edges = extract_universal_ast_edges(files, project_path, extraction)
+            if universal_edges:
+                universal_edges = _abs_edges(universal_edges)
+                extraction = {
+                    **extraction,
+                    "edges": list(extraction.get("edges", [])) + universal_edges,
+                }
+            _log.debug("universal_ast resolver: %d edges", len(universal_edges))
+        except Exception as universal_exc:
+            _log.debug("universal_ast resolver skipped (%s)", type(universal_exc).__name__)
+
+        try:
+            from icx_engine.graph.parser.resolvers.cross_service_rest import (
+                run_cross_service_linking,
+            )
+            from icx_engine.graph import storage as _xstorage
+            _out_dir = _xstorage._graphs_root() / _xstorage.derive_project_id(project_path)
+            run_cross_service_linking(files, project_path, extraction, _out_dir)
+        except Exception as _csl_exc:
+            _log.debug("cross_service_rest linker failed (%s)", type(_csl_exc).__name__)
+
+        # LLM enrichment: per-chunk LLM call. Chunk IDs are intentionally
+        # discarded; Louvain rederives communities globally so cluster IDs
+        # are consistent across the whole graph.
         resolved_backend = llm_backend
         resolved_key = llm_api_key
         if not resolved_backend:
@@ -258,62 +517,141 @@ def _build_project_isolated(
         if resolved_backend:
             if resolved_backend == "ollama" and llm_base_url:
                 os.environ["OLLAMA_BASE_URL"] = llm_base_url
+            llm_chunks = max(1, len(files) // 20)
+            progress.emit("llm", current=0, total=llm_chunks,
+                          message=f"{resolved_backend}")
             try:
-                from graphify.llm import extract_corpus_parallel as _llm_extract
-
-                llm_result = _llm_extract(
-                    files,
-                    backend=resolved_backend,
-                    api_key=resolved_key,
-                    root=project_path,
-                    # 20k token chunks: ~15-20 files each, fits any model's output window.
-                    # max_concurrency=1: safe for all free-tier providers (Gemini=15 RPM,
-                    # etc.). Graphify's adaptive retry handles 429s with backoff.
-                    token_budget=20_000,
-                    max_retry_depth=5,
-                    max_concurrency=1,
+                from icx_engine.graph.parser.llm import (
+                    extract_corpus_parallel as _llm_extract,
+                    extract_corpus_two_pass as _llm_two_pass,
+                    build_symbol_table_from_ast,
                 )
+
+                symbol_table = build_symbol_table_from_ast(extraction, project_path)
+
+                # Two-pass consensus is opt-in (doubles LLM cost). Set
+                # ICX_LLM_TWO_PASS=1 to enable; default is single pass.
+                two_pass = os.environ.get("ICX_LLM_TWO_PASS", "").strip() == "1"
+                keep_single = os.environ.get(
+                    "ICX_LLM_KEEP_SINGLE_PASS", "1",
+                ).strip() == "1"
+
+                if two_pass:
+                    llm_result = _llm_two_pass(
+                        files,
+                        backend=resolved_backend,
+                        api_key=resolved_key,
+                        root=project_path,
+                        token_budget=20_000,
+                        max_retry_depth=5,
+                        max_concurrency=1,
+                        symbol_table=symbol_table,
+                        keep_single_pass=keep_single,
+                    )
+                else:
+                    llm_result = _llm_extract(
+                        files,
+                        backend=resolved_backend,
+                        api_key=resolved_key,
+                        root=project_path,
+                        token_budget=20_000,
+                        max_retry_depth=5,
+                        max_concurrency=1,
+                        symbol_table=symbol_table,
+                    )
 
                 llm_edges = llm_result.get("edges", [])
                 if llm_edges:
-                    # Merge LLM edges into the AST extraction.
-                    # build_from_json normalizes node IDs and drops truly dangling
-                    # edges (where LLM naming differs from AST naming), so no
-                    # explicit filtering needed here.
                     extraction = {
                         **extraction,
                         "edges": list(extraction.get("edges", [])) + llm_edges,
                     }
 
+                # Embedding cross-check: reject LLM edges whose source and
+                # target snippets are semantically unrelated. Opt-out via
+                # ICX_LLM_EMBEDDING_FILTER=0. Drops rather than tags when
+                # ICX_LLM_EMBEDDING_DROP=1.
+                if os.environ.get("ICX_LLM_EMBEDDING_FILTER", "1").strip() != "0":
+                    try:
+                        from icx_engine.graph.parser.llm_embedding_filter import (
+                            filter_llm_edges_by_embedding,
+                        )
+                        drop = os.environ.get(
+                            "ICX_LLM_EMBEDDING_DROP", "0",
+                        ).strip() == "1"
+                        filter_llm_edges_by_embedding(
+                            extraction, project_path, drop_rejected=drop,
+                        )
+                    except Exception as embed_exc:
+                        _log.debug(
+                            "embedding filter failed (%s)",
+                            type(embed_exc).__name__,
+                        )
+
                 result["extraction_mode"] = "semantic"
+                progress.emit("llm", current=llm_chunks, total=llm_chunks,
+                              message=f"{len(llm_edges)} edges")
 
             except Exception as llm_exc:
-                # LLM step failed - AST result is still complete and usable.
-                _log.debug("LLM edge enrichment failed (%s); using AST only", type(llm_exc).__name__)
+                _log.debug("LLM edge enrichment failed (%s)", type(llm_exc).__name__)
+                progress.emit("llm", current=llm_chunks, total=llm_chunks,
+                              message="failed; AST result still usable")
+        else:
+            progress.emit("llm", current=0, total=0, message="no LLM configured")
 
-        # ------------------------------------------------------------------
-        # Step 3: Build NetworkX graph + Louvain community detection.
-        # cluster() runs on the full merged graph (AST nodes + all edges).
-        # With cross-file edges from LLM: rich communities reflecting real
-        # module structure. Without edges: directory-based grouping fallback
-        # in querier.py gives still-useful navigation clusters.
-        # ------------------------------------------------------------------
-        G = build_from_json(extraction)
-        communities = cluster(G)
+        # Cross-resolver edge dedup: multiple resolvers may emit edges for the
+        # same (source, target) pair with different relations. Keep only the
+        # highest-priority relation so the final graph has one canonical edge.
+        # Priority: imports(4) > inherits(3) > calls(2) > uses(1) > other(0).
+        _REL_PRIORITY = {"imports": 4, "inherits": 3, "calls": 2, "injects": 2, "uses": 1}
+        _best: dict[tuple, dict] = {}
+        for _e in extraction.get("edges", []):
+            if not isinstance(_e, dict):
+                continue
+            _k = (_e.get("source"), _e.get("target"))
+            if None in _k:
+                continue
+            _pri = _REL_PRIORITY.get(_e.get("relation", ""), 0)
+            _existing = _best.get(_k)
+            if _existing is None:
+                _best[_k] = _e
+            else:
+                _epri = _REL_PRIORITY.get(_existing.get("relation", ""), 0)
+                if _pri > _epri:
+                    _best[_k] = _e
+        extraction = {**extraction, "edges": list(_best.values())}
+
+        progress.emit("louvain", current=0, total=1, message="community detect")
+        # Directed graph preserves edge direction so opposite-direction
+        # cross-file edges (e.g. JPA ManyToOne + inverse OneToMany on the
+        # same entity pair) do not collapse into a single edge.
+        G = build_from_json(extraction, directed=True)
+        # exclude_hubs_percentile: barrel index.js / common utility files imported
+        # by hundreds of components have very high degree and cause louvain to
+        # thrash for hours. Excluding the top 1% hubs and reattaching them by
+        # majority-vote after partitioning gives faster + cleaner communities.
+        communities = cluster(G, exclude_hubs_percentile=99)
+        progress.emit("louvain", current=1, total=1,
+                      message=f"{len(communities) if isinstance(communities, dict) else 0} communities")
 
         result["node_count"] = G.number_of_nodes()
         result["edge_count"] = G.number_of_edges()
         result["community_count"] = len(communities) if isinstance(communities, dict) else 0
 
+        progress.emit("export", current=0, total=1, message="write graph.json")
         to_json(G, communities, output_path=graph_tmp_path_str)
+        progress.emit("export", current=1, total=1,
+                      message=f"{result['node_count']} nodes, {result['edge_count']} edges")
 
     except ImportError as exc:
         result["error"] = (
-            f"graphify package not installed: {exc}. "
-            "Run: pip install graphifyy"
+            f"icx graph parser failed to import: {exc}. "
+            "This indicates a broken icx-engine install - try `pip install --force-reinstall icx-engine`."
         )
-    except Exception as exc:
-        result["error"] = str(exc)
+    except BaseException as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        progress.close()
 
     return result
 

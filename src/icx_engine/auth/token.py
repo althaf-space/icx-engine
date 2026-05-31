@@ -1,4 +1,4 @@
-﻿"""
+"""
 Generic HTTP token-based authentication utilities (RFC 7617 Basic, RFC 6750 Bearer).
 
 These utilities eliminate duplicated base64 encoding across connectors and CLI

@@ -1,0 +1,38 @@
+{
+  "fixture": "vue_sample",
+  "language": "typescript",
+  "framework": "vue",
+  "notes": "Vue 3 + Pinia + Vue Router. Tests composable calls, template renders, router route definitions.",
+  "edges": [
+    {"source": "src/main.ts", "target": "src/App.vue", "kind": "import"},
+    {"source": "src/main.ts", "target": "src/router/index.ts", "kind": "import"},
+
+    {"source": "src/App.vue", "target": "src/components/NavBar.vue", "kind": "renders"},
+
+    {"source": "src/components/NavBar.vue", "target": "src/composables/useAuth.ts", "kind": "import"},
+    {"source": "src/components/NavBar.vue", "target": "src/composables/useAuth.ts:useauth", "kind": "call"},
+
+    {"source": "src/components/PostCard.vue", "target": "src/components/UserAvatar.vue", "kind": "renders"},
+
+    {"source": "src/composables/useAuth.ts", "target": "src/stores/user.ts", "kind": "import"},
+    {"source": "src/composables/useAuth.ts", "target": "src/stores/user.ts:useuserstore", "kind": "call"},
+
+    {"source": "src/composables/usePosts.ts", "target": "src/stores/posts.ts", "kind": "import"},
+    {"source": "src/composables/usePosts.ts", "target": "src/stores/posts.ts:usepostsstore", "kind": "call"},
+
+    {"source": "src/stores/user.ts", "target": "src/services/api.ts", "kind": "import"},
+    {"source": "src/stores/posts.ts", "target": "src/services/api.ts", "kind": "import"},
+
+    {"source": "src/router/index.ts", "target": "src/views/HomeView.vue", "kind": "route"},
+    {"source": "src/router/index.ts", "target": "src/views/LoginView.vue", "kind": "route"},
+
+    {"source": "src/views/HomeView.vue", "target": "src/composables/usePosts.ts", "kind": "import"},
+    {"source": "src/views/HomeView.vue", "target": "src/composables/usePosts.ts:useposts", "kind": "call"},
+    {"source": "src/views/HomeView.vue", "target": "src/components/PostCard.vue", "kind": "renders"},
+
+    {"source": "src/views/LoginView.vue", "target": "src/composables/useAuth.ts", "kind": "import"},
+    {"source": "src/views/LoginView.vue", "target": "src/stores/user.ts", "kind": "import"},
+    {"source": "src/views/LoginView.vue", "target": "src/composables/useAuth.ts:useauth", "kind": "call"},
+    {"source": "src/views/LoginView.vue", "target": "src/stores/user.ts:useuserstore", "kind": "call"}
+  ]
+}

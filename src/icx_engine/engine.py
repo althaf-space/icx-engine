@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from rich.console import Console as RichConsole
@@ -9,12 +10,16 @@ from urllib.parse import urlparse
 from icx_engine.exceptions import InvalidInput, NoConnectionError, NoLLMError
 from icx_engine.models.config import AppConfig, BaseConnection
 from icx_engine.models.output import RawIssueData, IssueContext, RawIssueResponse
+from icx_engine.connectors.attachments import (
+    IMAGE_EXTENSIONS as _IMAGE_EXTENSIONS,
+    AUDIO_EXTENSIONS as _AUDIO_EXTENSIONS,
+    VIDEO_EXTENSIONS as _VIDEO_EXTENSIONS,
+    DOCUMENT_EXTENSIONS as _DOCUMENT_EXTENSIONS,
+)
 
 _ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 
-_IMAGE_EXTENSIONS = frozenset({
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"
-})
+_AUDIO_VIDEO_EXTENSIONS = _AUDIO_EXTENSIONS | _VIDEO_EXTENSIONS
 
 
 def _extract_project_key(issue_key: str) -> str:
@@ -26,17 +31,26 @@ def _extract_project_key(issue_key: str) -> str:
 
 def _split_attachments(
     attachment_urls: dict[str, str],
-) -> tuple[dict[str, str], list[str]]:
-    """Return (non_image_urls, image_filenames)."""
-    import os
-    non_image: dict[str, str] = {}
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Split attachment filenames into (images, audio_video, documents, unsupported).
+
+    Returns filename lists only. Fast mode uses this without downloading any content.
+    """
     image_names: list[str] = []
-    for filename, url in attachment_urls.items():
-        if os.path.splitext(filename.lower())[1] in _IMAGE_EXTENSIONS:
+    av_names: list[str] = []
+    doc_names: list[str] = []
+    unsupported_names: list[str] = []
+    for filename in attachment_urls:
+        ext = Path(filename).suffix.lower()
+        if ext in _IMAGE_EXTENSIONS:
             image_names.append(filename)
+        elif ext in _AUDIO_VIDEO_EXTENSIONS:
+            av_names.append(filename)
+        elif ext in _DOCUMENT_EXTENSIONS:
+            doc_names.append(filename)
         else:
-            non_image[filename] = url
-    return non_image, image_names
+            unsupported_names.append(filename)
+    return image_names, av_names, doc_names, unsupported_names
 
 
 def extract_domain(input_str: str) -> str | None:
@@ -234,23 +248,27 @@ async def run(
     if log:
         log(f"  {issue_key}: {raw.summary[:72]}")
 
+    images_pending: list[str] = []
+    av_pending: list[str] = []
+    docs_pending: list[str] = []
+    unsupported_pending: list[str] = []
     images: dict[str, str] = {}
-    pending_images: list[str] = []
-    if raw.attachment_content_urls:
+
+    if skip_vision:
+        images_pending, av_pending, docs_pending, unsupported_pending = _split_attachments(
+            raw.attachment_content_urls or {}
+        )
+    elif raw.attachment_content_urls:
         if log:
             names = ", ".join(raw.attachment_content_urls)
             log(f"  attachments: {names}")
-        if skip_vision:
-            non_image_urls, pending_images = _split_attachments(raw.attachment_content_urls)
-            raw_for_attach = raw.model_copy(update={"attachment_content_urls": non_image_urls})
-            attachment_texts, images = await connector.process_attachments(raw_for_attach, active_llm, log=log)
-        else:
-            attachment_texts, images = await connector.process_attachments(raw, active_llm, log=log)
+        attachment_texts, images = await connector.process_attachments(raw, active_llm, log=log)
         raw = raw.model_copy(update={"attachment_texts": attachment_texts})
 
     if active_llm is None:
         if mcp_mode:
             return RawIssueResponse(
+                mode="fast_partial" if skip_vision else "raw",
                 issue_key=raw.issue_key,
                 issue_type=raw.issue_type,
                 summary=raw.summary,
@@ -263,6 +281,16 @@ async def run(
                 due_date=raw.due_date,
                 attachment_texts=raw.attachment_texts,
                 images=images,
+                pending_images=images_pending,
+                pending_audio=av_pending,
+                pending_documents=docs_pending,
+                pending_unsupported=unsupported_pending,
+                note=(
+                    "Fast mode: text analysis only. Call analyze_issue for full OCR/transcription/document extraction."
+                    if skip_vision else
+                    "No LLM analysis performed - no API key configured. "
+                    "Raw issue data, digested documents, and raw images are provided for your direct analysis."
+                ),
             )
         raise NoLLMError("No AI provider configured. Run `icx model --add` first.")
 
@@ -294,26 +322,31 @@ async def run(
             "Check your API key and network connection."
         )
 
-    from icx_engine.grounding import visual_grounding_pass
-    try:
-        result = await asyncio.wait_for(
-            visual_grounding_pass(result, raw, active_llm.image_config, connector, log=log),
-            timeout=45.0,
-        )
-    except asyncio.TimeoutError:
-        if log:
-            log("  Visual grounding timed out after 45s - using original analysis")
+    if not skip_vision:
+        from icx_engine.grounding import visual_grounding_pass
+        try:
+            result = await asyncio.wait_for(
+                visual_grounding_pass(result, raw, active_llm.image_config, connector, log=log),
+                timeout=45.0,
+            )
+        except asyncio.TimeoutError:
+            if log:
+                log("  Visual grounding timed out after 45s - using original analysis")
 
-
-    # Attach Base64 images when present - skipped automatically when skip_vision=True (images={}).
+    # Attach Base64 images (full mode only - fast mode has no images dict).
     if images:
         if log and _heuristic_confidence_triggered(result, raw, images):
             log("  Low confidence or poor OCR - raw images attached to output for verification")
         result = result.model_copy(update={"images": images})
 
-    # Set pending_images signal for fast/text-only mode.
-    if pending_images:
-        result = result.model_copy(update={"pending_images": pending_images})
+    # Attach pending attachment lists for fast mode with LLM.
+    if skip_vision:
+        result = result.model_copy(update={
+            "pending_images": images_pending,
+            "pending_audio": av_pending,
+            "pending_documents": docs_pending,
+            "pending_unsupported": unsupported_pending,
+        })
 
     # Memory enrichment - CLI mode only. MCP agents call search_memory deliberately.
     if not mcp_mode:
@@ -328,9 +361,19 @@ async def run(
                 description=result.detailed_description,
                 issue_type=raw.issue_type,
             )
-            _insights = _mem.query(_query)
+            _loop = asyncio.get_running_loop()
+            # wait_for cancels the asyncio Future at timeout but cannot stop the
+            # executor thread. The query thread runs to completion in the background.
+            # This is safe: LanceDB handles concurrent reads, and CLI mode is single-shot.
+            _insights = await asyncio.wait_for(
+                _loop.run_in_executor(None, _mem.query, _query),
+                timeout=30.0,
+            )
             if _insights:
                 result = result.model_copy(update={"past_insights": _insights})
+        except asyncio.TimeoutError:
+            if log:
+                log("[memory] query timed out after 30s - skipped")
         except Exception as _mem_exc:
             if log:
                 log(f"[memory] query skipped: {_mem_exc}")

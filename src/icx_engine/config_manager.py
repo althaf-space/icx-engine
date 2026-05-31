@@ -2,6 +2,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import os
 import random
 import re
@@ -13,6 +14,8 @@ from pathlib import Path
 
 from icx_engine.models.config import AppConfig, BaseConnection
 
+_log = logging.getLogger(__name__)
+
 CONFIG_PATH = Path.home() / ".icx" / "config.json"
 _SERVICE = "icx"
 _SENTINEL = "__keychain__"
@@ -21,6 +24,10 @@ _HEALTH_KEY = "_icx_healthcheck_"
 _MASTER_KEY_ACCOUNT = "icx_master_key"
 _DLOCK_PREFIX       = "dlock:v1:"
 _DLOCK_THRESHOLD    = 512  # bytes - Windows keyring credential size limit
+_MASTER_KEY_FILE    = CONFIG_PATH.parent / ".master_key"
+
+_master_key_cache: bytes | None = None
+_master_key_lock = threading.Lock()
 
 _LOCK_TIMEOUT = 10.0
 _LOCK_RETRY_BASE = 0.050   # 50 ms initial backoff
@@ -28,11 +35,119 @@ _LOCK_RETRY_MAX  = 1.0     # cap at 1 s
 _thread_lock = threading.Lock()  # in-process guard: threads share a PID so file-lock stale detection can't distinguish them
 
 
+# ---------------------------------------------------------------------------
+# DPAPI-protected master key file (Windows only)
+#
+# Windows Credential Manager uses DPAPI internally for the same user-bound
+# encryption. Storing the master key in a DPAPI blob on disk is identical in
+# security to storing it in the keyring -- both require the same user on the
+# same machine to decrypt. This lets background MCP processes (which may not
+# reach the Credential Manager service) still get the real master key.
+#
+# On macOS/Linux the keyring is reliably accessible from background processes,
+# so no file cache is needed there.
+# ---------------------------------------------------------------------------
+
+def _dpapi_protect(data: bytes) -> bytes:
+    """Encrypt bytes with Windows DPAPI (current user, no UI). Raises OSError on failure."""
+    import ctypes
+    import ctypes.wintypes
+
+    class _BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(data)
+    blob_in = _BLOB(len(data), buf)
+    blob_out = _BLOB()
+    # 0x01 = CRYPTPROTECT_UI_FORBIDDEN: fail instead of prompting for UI
+    if not ctypes.windll.crypt32.CryptProtectData(
+        ctypes.byref(blob_in), None, None, None, None, 0x01, ctypes.byref(blob_out),
+    ):
+        raise OSError(f"CryptProtectData failed (error {ctypes.GetLastError()})")
+    result = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    return result
+
+
+def _dpapi_unprotect(data: bytes) -> bytes:
+    """Decrypt a DPAPI blob (current user, no UI). Raises OSError on failure."""
+    import ctypes
+    import ctypes.wintypes
+
+    class _BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(data)
+    blob_in = _BLOB(len(data), buf)
+    blob_out = _BLOB()
+    if not ctypes.windll.crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in), None, None, None, None, 0x01, ctypes.byref(blob_out),
+    ):
+        raise OSError(f"CryptUnprotectData failed (error {ctypes.GetLastError()})")
+    result = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    return result
+
+
+def _write_master_key_file(key: bytes) -> None:
+    """Persist a DPAPI-encrypted copy of the master key. No-op on non-Windows."""
+    if sys.platform != "win32":
+        return
+    try:
+        protected = _dpapi_protect(key)
+        _MASTER_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _MASTER_KEY_FILE.with_suffix(".tmp")
+        tmp.write_bytes(protected)
+        tmp.replace(_MASTER_KEY_FILE)
+    except Exception as exc:
+        _log.warning("Could not write master key cache: %s", exc)
+
+
+def _read_master_key_file() -> bytes | None:
+    """Read and DPAPI-decrypt the cached master key. Returns None if absent or unreadable."""
+    if sys.platform != "win32":
+        return None
+    try:
+        return _dpapi_unprotect(_MASTER_KEY_FILE.read_bytes())
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        _log.warning("Could not read master key cache: %s", exc)
+        return None
+
+
+def _keyring_call(fn, timeout: float = 3.0):
+    """Run fn() in a daemon thread with hard timeout. Returns (result, timed_out).
+    Circuit-breaker: on timeout disables keychain for this process and returns (None, True).
+    Prevents Windows Credential Manager from blocking in sandboxed MCP processes.
+    """
+    global _keychain_ok
+    _result: list = [None]
+    _exc: list = [None]
+
+    def _run() -> None:
+        try:
+            _result[0] = fn()
+        except Exception as e:
+            _exc[0] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        _keychain_ok = False
+        _log.warning("keyring call timed out after %.0fs; falling back to env-var lookup", timeout)
+        return None, True
+    if _exc[0] is not None:
+        raise _exc[0]
+    return _result[0], False
+
+
 def _keyring_available() -> bool:
     try:
-        import keyring
-        keyring.get_password(_SERVICE, _HEALTH_KEY)
-        return True
+        import keyring as _kr
+        _, timed_out = _keyring_call(lambda: _kr.get_password(_SERVICE, _HEALTH_KEY))
+        return not timed_out
     except Exception:
         return False
 
@@ -87,53 +202,86 @@ def _warn_oauth_plaintext(field: str, acct_prefix: str, domain: str) -> None:
 
 
 def _kset(account: str, value: str) -> bool:
-    """Store value in keychain. Returns True on success, False if keychain rejects it."""
+    """Store value in keychain. Returns True on success, False if keychain rejects it or times out."""
     try:
-        import keyring
-        keyring.set_password(_SERVICE, account, value)
-        return True
+        import keyring as _kr
+        _, timed_out = _keyring_call(lambda: _kr.set_password(_SERVICE, account, value))
+        return not timed_out
     except Exception:
         return False
 
 
 def _kget(account: str) -> str | None:
     try:
-        import keyring
-        return keyring.get_password(_SERVICE, account)
+        import keyring as _kr
+        result, timed_out = _keyring_call(lambda: _kr.get_password(_SERVICE, account))
+        return None if timed_out else result
     except Exception:
         return None
 
 
 def _kdel(account: str) -> None:
-    import keyring
     try:
-        keyring.delete_password(_SERVICE, account)
+        import keyring as _kr
+        _keyring_call(lambda: _kr.delete_password(_SERVICE, account))
     except Exception:
         pass
 
 
 def _get_or_create_master_key() -> bytes:
-    """Return the 32-byte D-Lock Master Key, generating and storing it on first call."""
-    hex_key = _kget(_MASTER_KEY_ACCOUNT)
-    if not hex_key:
+    """Return the 32-byte D-Lock Master Key.
+
+    Priority order:
+    1. In-memory cache (fastest, same process).
+    2. OS keyring (authoritative store). On success, refreshes the DPAPI file cache.
+    3. DPAPI-encrypted file (~/.icx/.master_key) -- used when keyring is blocked in
+       background processes (e.g. MCP servers). Same user-bound security as the keyring.
+    4. Ephemeral random key (last resort -- existing D-Lock values will fail to decrypt).
+    """
+    global _master_key_cache
+    with _master_key_lock:
+        if _master_key_cache is not None:
+            return _master_key_cache
+
+        if _check_keychain():
+            hex_key = _kget(_MASTER_KEY_ACCOUNT)
+            if hex_key:
+                try:
+                    key = bytes.fromhex(hex_key)
+                    _master_key_cache = key
+                    _write_master_key_file(key)  # keep DPAPI cache in sync
+                    return key
+                except ValueError:
+                    print(
+                        "[config] D-Lock Master Key in keyring is not valid hex; "
+                        "using a temporary in-memory key. Re-authenticate with `icx connect` to fix.",
+                        file=sys.stderr,
+                    )
+                    # fall through to DPAPI file then ephemeral
+            else:
+                # Fresh system or first-time setup: generate and persist.
+                key = os.urandom(32)
+                if not _kset(_MASTER_KEY_ACCOUNT, key.hex()):
+                    print(
+                        "[config] D-Lock Master Key could not be stored in the keyring; "
+                        "using a temporary in-memory key for this session.",
+                        file=sys.stderr,
+                    )
+                _write_master_key_file(key)
+                _master_key_cache = key
+                return key
+
+        # Keyring unavailable (timed out or blocked): try DPAPI file cache.
+        cached = _read_master_key_file()
+        if cached is not None:
+            _master_key_cache = cached
+            return cached
+
+        # No file cache yet (user has never run the CLI on this machine).
+        # Ephemeral key -- existing D-Lock values cannot be decrypted.
         key = os.urandom(32)
-        if not _kset(_MASTER_KEY_ACCOUNT, key.hex()):
-            from icx_engine.exceptions import ConfigError
-            raise ConfigError(
-                "D-Lock setup failed: the OS keyring rejected the Master Key write. "
-                "The keyring appeared healthy during startup but refused the store - "
-                "this can happen when the keyring is locked or storage quota is exceeded. "
-                "Unlock your OS keyring and retry."
-            )
+        _master_key_cache = key
         return key
-    try:
-        return bytes.fromhex(hex_key)
-    except ValueError as exc:
-        from icx_engine.exceptions import ConfigError
-        raise ConfigError(
-            "D-Lock Master Key stored in the OS keyring is corrupted or not a valid hex string. "
-            "Re-authenticate with `icx connection --add` or `icx model --add` to reset credentials."
-        ) from exc
 
 
 def _dlock_encrypt(value: str) -> str:
@@ -172,12 +320,17 @@ def _llm_image_account(profile_name: str) -> str:
 def _pid_exists(pid: int) -> bool:
     """Return True if a process with the given PID appears to be running."""
     try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        return True   # process exists but we have no permission to signal it
-    except OSError:
-        return False
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        # psutil unavailable - fall back to Unix-only signal check
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            return False
 
 
 @contextlib.contextmanager
@@ -368,7 +521,23 @@ class ConfigManager:
                 if token_val == _SENTINEL:
                     auth["api_token"] = _resolve(f"{ctype}_token:{domain}") or ""
                 elif token_val.startswith(_DLOCK_PREFIX):
-                    auth["api_token"] = _dlock_decrypt(token_val)
+                    try:
+                        auth["api_token"] = _dlock_decrypt(token_val)
+                    except Exception as _exc:
+                        _fallback = _env_get(f"{ctype}_token:{domain}")
+                        if _fallback:
+                            print(
+                                f"[config] D-Lock decrypt failed for {ctype} token ({domain}); using env var.",
+                                file=sys.stderr,
+                            )
+                            auth["api_token"] = _fallback
+                        else:
+                            from icx_engine.exceptions import ConfigError
+                            raise ConfigError(
+                                f"D-Lock decryption failed for {ctype} token ({domain}). "
+                                "The keyring master key is unavailable (blocked in background process). "
+                                "Re-authenticate with `icx connect` or set the credential via environment variable."
+                            ) from _exc
                 elif token_val:
                     needs_secret_migration = True
             elif auth.get("auth_type") == "oauth":
@@ -381,7 +550,23 @@ class ConfigManager:
                     if val == _SENTINEL:
                         auth[field_name] = _resolve(f"{acct_prefix}:{domain}") or ""
                     elif val.startswith(_DLOCK_PREFIX):
-                        auth[field_name] = _dlock_decrypt(val)
+                        try:
+                            auth[field_name] = _dlock_decrypt(val)
+                        except Exception as _exc:
+                            _fallback = _env_get(f"{acct_prefix}:{domain}")
+                            if _fallback:
+                                print(
+                                    f"[config] D-Lock decrypt failed for OAuth {field_name} ({domain}); using env var.",
+                                    file=sys.stderr,
+                                )
+                                auth[field_name] = _fallback
+                            else:
+                                from icx_engine.exceptions import ConfigError
+                                raise ConfigError(
+                                    f"D-Lock decryption failed for OAuth {field_name} ({domain}). "
+                                    "The keyring master key is unavailable (blocked in background process). "
+                                    "Re-authenticate with `icx connect` or set the credential via environment variable."
+                                ) from _exc
                     elif val:
                         needs_secret_migration = True
 
@@ -397,7 +582,23 @@ class ConfigManager:
                     if api_key_val == _SENTINEL:
                         ch["api_key"] = _resolve(acct_fn(profile_name)) or ""
                     elif api_key_val.startswith(_DLOCK_PREFIX):
-                        ch["api_key"] = _dlock_decrypt(api_key_val)
+                        try:
+                            ch["api_key"] = _dlock_decrypt(api_key_val)
+                        except Exception as _exc:
+                            _fallback = _env_get(acct_fn(profile_name))
+                            if _fallback:
+                                print(
+                                    f"[config] D-Lock decrypt failed for LLM profile '{profile_name}' ({channel}); using env var.",
+                                    file=sys.stderr,
+                                )
+                                ch["api_key"] = _fallback
+                            else:
+                                from icx_engine.exceptions import ConfigError
+                                raise ConfigError(
+                                    f"D-Lock decryption failed for LLM profile '{profile_name}' ({channel}). "
+                                    "The keyring master key is unavailable (blocked in background process). "
+                                    "Re-authenticate with `icx model --add` or set the credential via environment variable."
+                                ) from _exc
 
         config = AppConfig.model_validate(raw)
 
@@ -552,6 +753,7 @@ class ConfigManager:
     @staticmethod
     def delete_all_secrets(config: AppConfig) -> None:
         """Remove all keychain entries for the given config before clearing it."""
+        global _master_key_cache
         if not _check_keychain():
             return
         for conn in config.connections:
@@ -564,6 +766,14 @@ class ConfigManager:
         for profile_name in config.llm_profiles:
             _kdel(_llm_text_account(profile_name))
             _kdel(_llm_image_account(profile_name))
+        # Delete the D-Lock master key from both keyring and DPAPI file cache.
+        _kdel(_MASTER_KEY_ACCOUNT)
+        try:
+            if _MASTER_KEY_FILE.exists():
+                _MASTER_KEY_FILE.unlink()
+        except Exception:
+            pass
+        _master_key_cache = None
 
     @staticmethod
     def delete_connection_secrets(conn: BaseConnection) -> None:

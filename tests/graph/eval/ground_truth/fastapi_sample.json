@@ -1,0 +1,34 @@
+{
+  "fixture": "fastapi_sample",
+  "language": "python",
+  "framework": "fastapi",
+  "notes": "Hand-annotated minimum-bar edges. Source/target use 'relative_path:symbol' or just 'relative_path' for file-level. Symbol names match the parser's labels (lowercase, no class prefix, no trailing parens). Method calls are tagged as 'call' edges, ORM/type references as 'reference'.",
+  "edges": [
+    {"source": "app/main.py", "target": "app/db.py", "kind": "import"},
+    {"source": "app/main.py", "target": "app/schemas.py", "kind": "import"},
+    {"source": "app/main.py", "target": "app/services/user_service.py", "kind": "import"},
+    {"source": "app/main.py:list_users", "target": "app/services/user_service.py:userservice", "kind": "call"},
+    {"source": "app/main.py:list_users", "target": "app/services/user_service.py:list_users", "kind": "call"},
+    {"source": "app/main.py:read_user", "target": "app/services/user_service.py:userservice", "kind": "call"},
+    {"source": "app/main.py:read_user", "target": "app/services/user_service.py:get_user", "kind": "call"},
+    {"source": "app/main.py:create_user", "target": "app/services/user_service.py:userservice", "kind": "call"},
+    {"source": "app/main.py:create_user", "target": "app/services/user_service.py:create_user", "kind": "call"},
+    {"source": "app/main.py:list_users", "target": "app/db.py:get_db", "kind": "di", "notes": "FastAPI Depends() injection"},
+    {"source": "app/main.py:read_user", "target": "app/db.py:get_db", "kind": "di"},
+    {"source": "app/main.py:create_user", "target": "app/db.py:get_db", "kind": "di"},
+    {"source": "app/models.py", "target": "app/db.py", "kind": "import"},
+    {"source": "app/models.py:user", "target": "app/db.py:base", "kind": "inherit"},
+    {"source": "app/services/user_service.py", "target": "app/models.py", "kind": "import"},
+    {"source": "app/services/user_service.py", "target": "app/schemas.py", "kind": "import"},
+    {"source": "app/services/user_service.py:create_user", "target": "app/models.py:user", "kind": "reference"},
+    {"source": "app/services/user_service.py:create_user", "target": "app/schemas.py:usercreate", "kind": "reference"},
+    {"source": "app/services/user_service.py:get_user", "target": "app/models.py:user", "kind": "reference"},
+    {"source": "app/services/user_service.py:list_users", "target": "app/models.py:user", "kind": "reference"},
+    {"source": "app/schemas.py:usercreate", "target": "app/schemas.py:userbase", "kind": "inherit"},
+    {"source": "app/schemas.py:userout", "target": "app/schemas.py:userbase", "kind": "inherit"},
+
+    {"source": "app/main.py", "target": "app/main.py:list_users", "kind": "route"},
+    {"source": "app/main.py", "target": "app/main.py:read_user", "kind": "route"},
+    {"source": "app/main.py", "target": "app/main.py:create_user", "kind": "route"}
+  ]
+}
