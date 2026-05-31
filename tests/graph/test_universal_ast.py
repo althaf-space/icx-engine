@@ -29,6 +29,7 @@ def test_skips_java_files():
 
 def test_go_imports():
     """Go import statement produces an import edge."""
+    pytest.importorskip("tree_sitter_go")
     src = '''package main
 import "fmt"
 func main() {}
@@ -42,6 +43,7 @@ func main() {}
 
 def test_go_confidence():
     """All edges from universal_ast have confidence_score == 0.55."""
+    pytest.importorskip("tree_sitter_go")
     src = 'package main\nimport "os"\nfunc run() {}'
     edges = _run(src, ".go")
     assert edges, "expected at least one edge"
@@ -51,6 +53,7 @@ def test_go_confidence():
 
 
 def test_rust_imports():
+    pytest.importorskip("tree_sitter_rust")
     src = "use std::io;\nfn main() {}"
     edges = _run(src, ".rs")
     import_edges = [e for e in edges if e["relation"] == "imports"]
@@ -58,12 +61,14 @@ def test_rust_imports():
 
 
 def test_csharp_imports():
+    pytest.importorskip("tree_sitter_c_sharp")
     src = "using System;\nclass Foo {}"
     edges = _run(src, ".cs")
     assert len(edges) >= 1
 
 
 def test_ruby_imports():
+    pytest.importorskip("tree_sitter_ruby")
     src = "require 'json'\nclass Foo; end"
     edges = _run(src, ".rb")
     import_edges = [e for e in edges if e["relation"] == "imports"]

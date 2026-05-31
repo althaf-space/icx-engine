@@ -9,7 +9,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/token")
 
 
 def hash_password(raw: str) -> str:
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()  # nosec B324
 
 
 def verify_password(raw: str, hashed: str) -> bool:
