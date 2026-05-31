@@ -89,7 +89,7 @@ def extract_svelte_edges(
             source, rel, project_root, project_files, ts_paths_map, _resolve_spec,
         )
 
-        template = re.sub(r"<script[^>]*>.*?</script>", "", source, flags=re.DOTALL)
+        template = re.sub(r"<script[^>]*>.*?</script>", "", source, flags=re.DOTALL | re.IGNORECASE)
         for match in _COMPONENT_TAG.finditer(template):
             symbol = match.group(1)
             target_file = symbol_to_file.get(symbol)
