@@ -17,13 +17,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from icx_engine.memory.schema import MemoryEntry
 
+from icx_engine.memory.schema import _sq
+
 _log = logging.getLogger(__name__)
 _PATTERNS_TABLE = "memory_patterns"
-
-
-def _sq(value: str) -> str:
-    """Escape a string for use in a LanceDB SQL filter (single-quote escape)."""
-    return value.replace("'", "''")
 _MIN_ENTRIES = 3
 _FREQUENT_FILE_THRESHOLD = 0.30
 _DOMINANT_TAG_THRESHOLD = 0.20
@@ -167,6 +164,11 @@ class PatternManager:
             table.add(rows)
         except Exception as exc:
             _log.warning("Pattern refresh failed for %s: %s", project_key, exc)
+
+    def reset(self) -> None:
+        """Disconnect from the LanceDB table so the next access reconnects cleanly."""
+        self._table = None
+        self._db = None
 
     def get_patterns(self, project_key: str | None = None) -> list[dict]:
         """Return stored patterns, optionally filtered to one project_key."""

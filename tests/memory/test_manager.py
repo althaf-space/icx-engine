@@ -187,6 +187,54 @@ def test_clear_removes_all(tmp_path):
     assert entries == []
 
 
+def test_clear_resets_sub_managers(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-100", id="id-1", files_changed=["src/a.py"]))
+        mgr.save(_make_entry(issue_key="PROJ-200", id="id-2", files_changed=["src/a.py"]))
+        # Force sub-manager table initialisation
+        _ = mgr._relations._get_table()
+        _ = mgr._patterns._get_table()
+        mgr.clear()
+
+    # Sub-manager caches cleared by reset()
+    assert mgr._relations._table is None
+    assert mgr._patterns._table is None
+
+
+def test_get_related_delegates_to_sub_manager(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-1", id="id-1", files_changed=["src/a.py"]))
+        mgr.save(_make_entry(issue_key="PROJ-2", id="id-2", files_changed=["src/a.py"]))
+        result = mgr.get_related(None, None, files=["src/a.py"])
+
+    assert any(r["issue_key"] in ("PROJ-1", "PROJ-2") for r in result)
+
+
+def test_get_patterns_delegates_to_sub_manager(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    hot = "src/auth/token.py"
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        for i in range(10):
+            mgr.save(_make_entry(
+                issue_key=f"PROJ-{i}",
+                id=str(uuid.uuid4()),
+                files_changed=[hot],
+                project_key="PROJ",
+            ))
+        patterns = mgr.get_patterns(project_key="PROJ")
+
+    assert len(patterns) > 0
+    assert all(p["project_key"] == "PROJ" for p in patterns)
+
+
 def test_status_returns_dict(tmp_path):
     from icx_engine.memory.manager import MemoryManager
 

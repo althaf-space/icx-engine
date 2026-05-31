@@ -26,12 +26,6 @@ _WHISPER_FILES = (
     "vocabulary.txt",
 )
 
-_DEFAULT_BASE_URLS = {
-    "nim": "https://integrate.api.nvidia.com/v1",
-    "ollama": "http://localhost:11434/v1",
-    "xai": "https://api.x.ai/v1",
-}
-
 _AUDIO_MIME: dict[str, str] = {
     ".mp3":  "audio/mpeg",
     ".wav":  "audio/wav",
@@ -62,6 +56,8 @@ def _is_whisper_ready() -> bool:
 def _mark_whisper_ready() -> None:
     AUDIO_DIR.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
     SENTINEL_PATH.write_text(WHISPER_MODEL, encoding="utf-8")
+    if sys.platform != "win32":
+        SENTINEL_PATH.chmod(0o600)
 
 
 class WhisperManager:
@@ -263,6 +259,7 @@ async def cleanup_transcript_llm(config: "ChannelConfig", transcript: str) -> st
             )
             return resp.content[0].text.strip() if resp.content else transcript
         from openai import AsyncOpenAI
+        from icx_engine.connectors.attachments import _DEFAULT_BASE_URLS
         kwargs: dict = {"api_key": config.api_key or "ollama"}
         base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
         if base_url:

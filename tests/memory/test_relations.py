@@ -244,6 +244,25 @@ def test_get_related_by_files_excludes_key(tmp_path):
     assert "PROJ-2" in keys
 
 
+def test_reset_clears_cached_state(tmp_path):
+    from icx_engine.memory.relations import RelationManager
+
+    rel = RelationManager(db_path=tmp_path)
+    # Force table initialisation
+    e1 = _make_entry(issue_key="PROJ-1", files_changed=["a.py"])
+    e2 = _make_entry(issue_key="PROJ-2", id=str(uuid.uuid4()), files_changed=["a.py"])
+    rel.auto_link(e1, [e2])
+    assert rel._table is not None
+
+    rel.reset()
+    assert rel._table is None
+    assert rel._db is None
+
+    # Should reconnect on next access
+    result = rel.get_related("PROJ-1")
+    assert any(r["issue_key"] == "PROJ-2" for r in result)
+
+
 def test_get_related_by_files_sorted_by_strength(tmp_path):
     from icx_engine.memory.relations import RelationManager
 

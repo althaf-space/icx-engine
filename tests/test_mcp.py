@@ -1823,28 +1823,17 @@ async def test_call_tool_memory_get_related_issue_key_edge_path():
     assert data["results"][0]["issue_key"] == "PROJ-50"
 
 
-def test_get_related_sync_files_fallback_when_no_edges(tmp_path):
-    """_get_related_sync falls back to file overlap when no stored edges exist."""
-    import uuid
+def test_get_related_sync_delegates_to_memory_manager(tmp_path):
+    """_get_related_sync delegates to MemoryManager.get_related() using the shared instance."""
     import icx_engine.mcp_server as _mcp
-    from icx_engine.memory.schema import MemoryEntry
 
-    saved_entry = MemoryEntry(
-        id=str(uuid.uuid4()), issue_key="PROJ-5", project_key="PROJ",
-        source_type="jira", issue_type="Bug", summary="Auth fix",
-        problem_description="Token expired", impact="", resolution_note="fixed TTL",
-        files_changed=["auth/token.py"], resolution_confirmed=True,
-        saved_at="2026-01-01T00:00:00Z", tags=[], work_item_type="bug", pattern_used="",
-    )
+    expected = [{"issue_key": "PROJ-5", "relation_type": "shares_file", "strength": 1.0}]
     mock_mem = MagicMock()
-    mock_mem._db_path = tmp_path
-    mock_mem.list_entries.return_value = [saved_entry]
+    mock_mem.get_related.return_value = expected
 
     with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
         result = _mcp._get_related_sync(None, None, ["auth/token.py"])
 
-    assert len(result) == 1
-    assert result[0]["issue_key"] == "PROJ-5"
-    assert result[0]["relation_type"] == "shares_file"
-    assert result[0]["strength"] == pytest.approx(1.0, abs=0.01)
+    mock_mem.get_related.assert_called_once_with(None, None, ["auth/token.py"])
+    assert result == expected
 

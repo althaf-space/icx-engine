@@ -42,7 +42,7 @@ server = Server("icx")
 
 _MEMORY_EXECUTOR: _ThreadPoolExecutor | None = None
 _MEMORY_EXECUTOR_LOCK = _threading.Lock()
-_SHARED_MEMORY_MANAGER = None  # MemoryManager; created inside memory thread on first use
+_SHARED_MEMORY_MANAGER: "MemoryManager | None" = None  # created inside memory thread on first use
 
 # Memory readiness state - transitions: cold -> warming -> ready | failed
 # Tool responses read this to decide whether to submit a search or return immediately.
@@ -1498,27 +1498,12 @@ def _get_related_sync(
     files: list[str] | None,
 ) -> list[dict]:
     """Return related work items via stored edges or file-overlap fallback."""
-    from icx_engine.memory.relations import RelationManager
-    rel = RelationManager(db_path=_ensure_memory_manager()._db_path)
-    related: list[dict] = []
-    if issue_key:
-        related = rel.get_related(issue_key)
-        if project_key:
-            mem = _ensure_memory_manager()
-            in_project = {e.issue_key for e in mem.list_entries(project_key=project_key)}
-            related = [r for r in related if r["issue_key"] in in_project]
-    if not related and files:
-        mem = _ensure_memory_manager()
-        all_entries = mem.list_entries(project_key=project_key)
-        related = rel.get_related_by_files(files, all_entries, exclude_key=issue_key)
-    return related
+    return _ensure_memory_manager().get_related(issue_key, project_key, files)
 
 
 def _get_patterns_sync(project_key: str | None) -> list[dict]:
     """Return stored patterns, optionally filtered by project_key."""
-    from icx_engine.memory.patterns import PatternManager
-    pm = PatternManager(db_path=_ensure_memory_manager()._db_path)
-    return pm.get_patterns(project_key=project_key)
+    return _ensure_memory_manager().get_patterns(project_key=project_key)
 
 
 # ---------------------------------------------------------------------------

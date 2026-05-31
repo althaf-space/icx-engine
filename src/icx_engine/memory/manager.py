@@ -15,15 +15,10 @@ _BARE_KEY_RE = re.compile(r'[A-Z][A-Z0-9]*-[0-9]+')
 from icx_engine.memory.embeddings import EmbeddingsManager, VECTOR_DIM, EMBEDDING_MODEL
 from icx_engine.memory.patterns import PatternManager
 from icx_engine.memory.relations import RelationManager
-from icx_engine.memory.schema import MemoryEntry, MemoryQueryInput
+from icx_engine.memory.schema import MemoryEntry, MemoryQueryInput, _sq
 from icx_engine.models.output import PastInsight
 
 _TABLE_NAME = "memory_entries"
-
-
-def _sq(value: str) -> str:
-    """Escape a string for use in a LanceDB SQL filter (single-quote escape)."""
-    return value.replace("'", "''")
 _FTS_FIELDS = ["summary", "problem_description"]
 _DEFAULT_TOP_K = 3
 _DEFAULT_MIN_SCORE = 0.65
@@ -450,10 +445,8 @@ class MemoryManager:
             self._fts_ready = False
             self._db = None  # force fresh connection on next access
             # Reset cached state in sub-managers so they reconnect cleanly.
-            self._relations._table = None
-            self._relations._db = None
-            self._patterns._table = None
-            self._patterns._db = None
+            self._relations.reset()
+            self._patterns.reset()
         except Exception as exc:
             raise MemoryError(f"Failed to clear memory: {exc}") from exc
 
@@ -500,6 +493,28 @@ class MemoryManager:
             if log:
                 log(f"  [{i}/{count}] {entry.issue_key}")
         return count
+
+    def get_related(
+        self,
+        issue_key: str | None,
+        project_key: str | None,
+        files: list[str] | None,
+    ) -> list[dict]:
+        """Return related work items via stored edges or file-overlap fallback."""
+        related: list[dict] = []
+        if issue_key:
+            related = self._relations.get_related(issue_key)
+            if project_key:
+                in_project = {e.issue_key for e in self.list_entries(project_key=project_key)}
+                related = [r for r in related if r["issue_key"] in in_project]
+        if not related and files:
+            all_entries = self.list_entries(project_key=project_key)
+            related = self._relations.get_related_by_files(files, all_entries, exclude_key=issue_key)
+        return related
+
+    def get_patterns(self, project_key: str | None = None) -> list[dict]:
+        """Return stored patterns, optionally filtered by project_key."""
+        return self._patterns.get_patterns(project_key=project_key)
 
     def prewarm(self) -> None:
         """Ensure ONNX model files are downloaded and eagerly load the ONNX session.

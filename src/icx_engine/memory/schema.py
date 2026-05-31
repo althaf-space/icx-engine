@@ -3,6 +3,11 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
 
+def _sq(value: str) -> str:
+    """Escape a string for use in a LanceDB SQL filter (single-quote escape)."""
+    return value.replace("'", "''")
+
+
 class MemoryEntry(BaseModel):
     """User-facing memory record. Never contains secrets or raw API data."""
 

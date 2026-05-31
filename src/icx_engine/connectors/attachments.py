@@ -5,8 +5,10 @@ import csv
 import io
 import logging
 import os
+import re
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -48,16 +50,20 @@ def _mime_type(filename: str) -> str:
 _DEFAULT_BASE_URLS = {
     "nim": "https://integrate.api.nvidia.com/v1",
     "ollama": "http://localhost:11434/v1",
+    "xai": "https://api.x.ai/v1",
 }
 
 _whisper_singleton: "WhisperManager | None" = None
+_whisper_singleton_lock = threading.Lock()
 
 
 def _get_whisper() -> "WhisperManager":
     global _whisper_singleton
     if _whisper_singleton is None:
-        from icx_engine.connectors.audio import WhisperManager
-        _whisper_singleton = WhisperManager()
+        with _whisper_singleton_lock:
+            if _whisper_singleton is None:
+                from icx_engine.connectors.audio import WhisperManager
+                _whisper_singleton = WhisperManager()
     return _whisper_singleton
 
 
@@ -500,15 +506,11 @@ _VIDEO_FRAME_PROMPT = (
     "discrepancies. Return only the description, nothing else."
 )
 
-_WHISPER_NOISE_RE = None
+_WHISPER_NOISE_RE = re.compile(r'^[\s\.…\,\!\?\-\_\(\)]*$')
 
 
 def _is_empty_transcript(transcript: str) -> bool:
     """Return True if Whisper output is noise/silence rather than real speech."""
-    global _WHISPER_NOISE_RE
-    import re
-    if _WHISPER_NOISE_RE is None:
-        _WHISPER_NOISE_RE = re.compile(r'^[\s\.…\,\!\?\-\_\(\)]*$')
     return not transcript.strip() or bool(_WHISPER_NOISE_RE.fullmatch(transcript.strip()))
 
 
@@ -558,10 +560,9 @@ async def _extract_frames_from_video(
             return []
         frames: list[bytes] = []
         for i in range(1, max_frames + 1):
-            frame_path = os.path.join(frame_dir, f"frame{i:04d}.jpg")
-            if os.path.exists(frame_path):
-                with open(frame_path, "rb") as f:
-                    frames.append(f.read())
+            frame_path = Path(frame_dir) / f"frame{i:04d}.jpg"
+            if frame_path.exists():
+                frames.append(frame_path.read_bytes())
         return frames
     except Exception:
         return []

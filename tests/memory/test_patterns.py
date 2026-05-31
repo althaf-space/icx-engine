@@ -190,6 +190,28 @@ def test_pattern_manager_get_returns_empty_before_refresh(tmp_path):
     assert pm.get_patterns("PROJ") == []
 
 
+def test_pattern_manager_reset_clears_cached_state(tmp_path):
+    from icx_engine.memory.patterns import PatternManager
+
+    hot = "src/auth/token.py"
+    entries = [
+        _make_entry(issue_key=f"PROJ-{i}", id=str(uuid.uuid4()), files_changed=[hot])
+        for i in range(4)
+    ] + [_make_entry(issue_key="PROJ-99", id=str(uuid.uuid4()), files_changed=["src/other.py"])]
+
+    pm = PatternManager(db_path=tmp_path)
+    pm.refresh(entries, "PROJ")
+    assert pm._table is not None
+
+    pm.reset()
+    assert pm._table is None
+    assert pm._db is None
+
+    # Reconnects on next access
+    patterns = pm.get_patterns("PROJ")
+    assert len(patterns) > 0
+
+
 # ── Integration: pattern trigger via MemoryManager ────────────────────────────
 
 def test_pattern_trigger_on_tenth_save(tmp_path):

@@ -261,7 +261,11 @@ def _write_registry(entries: list[dict]) -> None:
     path = _registry_path()
     tmp = path.with_suffix(".tmp")
     try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+        fd = os.open(
+            str(tmp),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(entries, f, indent=2)
         tmp.replace(path)
@@ -305,7 +309,11 @@ def write_meta(info: ProjectInfo) -> None:
     tmp = path.with_suffix(".tmp")
     data = asdict(info)
     try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+        fd = os.open(
+            str(tmp),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         tmp.replace(path)
@@ -337,7 +345,11 @@ def write_manifest(
         "file_mtimes": file_mtimes,
     }
     try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+        fd = os.open(
+            str(tmp),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         tmp.replace(path)

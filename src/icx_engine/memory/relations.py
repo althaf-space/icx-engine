@@ -14,13 +14,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from icx_engine.memory.schema import MemoryEntry
 
+from icx_engine.memory.schema import _sq
+
 _log = logging.getLogger(__name__)
 _EDGES_TABLE = "memory_edges"
-
-
-def _sq(value: str) -> str:
-    """Escape a string for use in a LanceDB SQL filter (single-quote escape)."""
-    return value.replace("'", "''")
 
 
 def _norm_file(path: str) -> str:
@@ -171,6 +168,11 @@ class RelationManager:
             table.delete(f"source_key = '{_sq(issue_key)}' OR target_key = '{_sq(issue_key)}'")
         except Exception as exc:
             _log.warning("Could not delete edges for %s: %s", issue_key, exc)
+
+    def reset(self) -> None:
+        """Disconnect from the LanceDB table so the next access reconnects cleanly."""
+        self._table = None
+        self._db = None
 
     def auto_link(self, entry: "MemoryEntry", all_entries: list["MemoryEntry"]) -> None:
         """Detect shares_file relations between entry and existing entries.
