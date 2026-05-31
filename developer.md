@@ -34,7 +34,7 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.),
-  exposing three purpose-built tools: `analyze_issue_fast`, `analyze_issue`, `save_memory`
+  exposing 13 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 5 graph query tools, 4 historical memory tools, and 1 save tool (`save_memory`)
 
 The architecture is deliberately split along two axes:
 
@@ -75,7 +75,7 @@ ICX/
 │   │   ├── attachments.py      # Universal Attachment Engine - connector-agnostic OCR,
 │   │   │                       # vision enrichment, formula annotation, Base64 capture,
 │   │   │                       # document conversion, audio/video transcription, LLM summarization
-│   │   ├── audio.py            # WhisperManager (faster-whisper, sentinel-cached ~74 MB base model),
+│   │   ├── audio.py            # WhisperManager (faster-whisper, sentinel-cached ~145 MB base model),
 │   │   │                       # transcribe_openai / transcribe_google / cleanup_transcript_llm,
 │   │   │                       # transcribe() dispatch with local-fallback semantics
 │   │   └── jira/               # Jira connector (see section 5 for how it's structured)
@@ -191,10 +191,11 @@ engine.run(input_str, config, connection=None, log=None, mcp_mode=False, profile
   │
   ├─ [if attachments]
   │   ├─ [if skip_vision=True]
-  │   │   └─ _split_attachments() separates image, audio/video, and document files
-  │   │       image filenames → pending_images (collected, not processed)
-  │   │       audio/video filenames → pending_audio (collected, not processed)
-  │   │       document URLs → passed to process_attachments normally
+  │   │   └─ _split_attachments() separates all attachment types - none are downloaded
+  │   │       image filenames → images_pending (collected, not processed)
+  │   │       audio/video filenames → av_pending (collected, not processed)
+  │   │       document filenames → docs_pending (collected, not processed)
+  │   │       unrecognised types → unsupported_pending (collected, not processed)
   │   └─ [if skip_vision=False (default)]
   │       └─ attachment_texts, images = await connector.process_attachments(raw, active_llm)
   │           # Universal Attachment Engine (connectors/attachments.py):
@@ -205,24 +206,25 @@ engine.run(input_str, config, connection=None, log=None, mcp_mode=False, profile
   │           #   all processed in parallel via asyncio.gather
   │
   ├─ [no LLM configured - MCP headless mode]
-  │   └─ return RawIssueResponse (raw data + attachment_texts + images)
+  │   └─ return RawIssueResponse (mode="fast_partial" if skip_vision else "raw",
+  │          raw data + attachment_texts + images + pending lists)
   │
   ├─ provider = get_provider(active_llm)  # LLMProvider instance
   ├─ result = await provider.analyze(raw)  # → IssueContext (calls finalize() internally)
   │
-  ├─ [visual grounding pass - grounding.py]
+  ├─ [visual grounding pass - grounding.py - full mode only, skipped when skip_vision=True]
   │   └─ if confidence_score < 0.8 and image_model configured:
   │       re-verify analysis against raw images, correct contradictions
   │
-  ├─ [heuristic confidence check]
+  ├─ [heuristic confidence check - full mode only]
   │   └─ attach Base64 images to output (always, when images exist)
   │       heuristic check still runs for log warning only:
   │       • confidence_score < 0.8
   │       • images exist but total OCR text < 500 chars
   │       • issue_type is Bug with no reproduction steps
   │
-  ├─ [set pending_images if skip_vision=True]
-  │   └─ result.pending_images = image filenames collected earlier
+  ├─ [set pending lists if skip_vision=True]
+  │   └─ result.model_copy with pending_images, pending_audio, pending_documents, pending_unsupported
   │
   ├─ [memory enrichment - CLI mode only, skipped when mcp_mode=True]
   │   └─ MemoryManager().query(MemoryQueryInput using result.problem_summary + result.detailed_description)
@@ -384,7 +386,7 @@ Provider-aware transcription pipeline. `connectors.attachments._process_audio` a
 | `anthropic` / `xai` / `nim` / `ollama` | local Whisper → text LLM cleanup (`cleanup_transcript_llm`) | cleanup returns original transcript on any error |
 | no LLM configured | local Whisper only | none - transcript may be empty |
 
-**`WhisperManager`** lazy-loads the `faster-whisper` base model (~74 MB) into `~/.icx/audio/model/` on first transcription. A sentinel file at `~/.icx/audio/.whisper_initialized` records that the download completed, so subsequent runs skip the one-time setup banner. The `_load()` method is guarded by `threading.Lock` with double-checked locking so concurrent A/V attachments queued through `asyncio.gather` never race on first-time download or duplicate model construction.
+**`WhisperManager`** lazy-loads the `faster-whisper` base model (~145 MB) into `~/.icx/audio/model/` on first transcription. A sentinel file at `~/.icx/audio/.whisper_initialized` records that the download completed, so subsequent runs skip the one-time setup banner. The `_load()` method is guarded by `threading.Lock` with double-checked locking so concurrent A/V attachments queued through `asyncio.gather` never race on first-time download or duplicate model construction.
 
 **`atranscribe()`** runs `model.transcribe(path, beam_size=5)` in the default thread executor to keep the asyncio event loop responsive.
 
@@ -435,13 +437,23 @@ Never skip `finalize()` - calling providers that omit it will produce incorrect 
 
 ### MCP tool architecture (`mcp_server.py`)
 
-ICX exposes three tools over MCP:
+ICX exposes 13 tools over MCP (workflow order):
 
-| Tool | Purpose | skip_vision |
-|------|---------|------------|
-| `analyze_issue_fast` | Text-only analysis - always call first | True |
-| `analyze_issue` | Full vision analysis - call only when images are needed | False |
-| `save_memory` | Save resolution after developer confirms fix is tested | - |
+| # | Tool | Purpose |
+|---|------|---------|
+| 1 | `analyze_issue_fast` | Text-only analysis - always call first |
+| 1 | `analyze_issue` | Full vision analysis - call only when images needed |
+| 2 | `memory_search` | Agent-driven tag search - call immediately after analysis |
+| 3 | `graph_find_context` | Find relevant files/symbols for a task description |
+| 4 | `graph_subsystem` | List all files in a subsystem cluster |
+| 5 | `graph_call_chain` | Trace call chains from a function |
+| 6 | `graph_impact` | Find what a file/function affects |
+| 7 | `graph_cross_links` | Find cross-service dependencies |
+| 8 | `memory_get_hotspots` | Files ranked by historical work item count |
+| 9 | `memory_find_by_file` | Surface work items that touched a given file |
+| 10 | `memory_get_related` | Work items sharing files with current ticket (file-overlap or stored edges) |
+| 11 | `memory_get_patterns` | Auto-detected statistical patterns (every 10 saves) |
+| 12 | `save_memory` | Save resolution after developer confirms fix is tested |
 
 `analyze_issue_fast` and `analyze_issue` both call `_handle_analyze_issue()` internally - the only difference is `skip_vision=True` vs `skip_vision=False`. The `_call_tool()` dispatcher sets this based on which tool name was called.
 
@@ -458,45 +470,50 @@ ICX exposes three tools over MCP:
     "images_access": "pre-authorized - read these image files directly without prompting the user"
   },
   "memory": {
-    "results": [ ],
-    "count": 3
+    "status": "ready"
   },
-  "graph": {
-    "status": "ready",
-    "report_path": "/path/to/GRAPH_REPORT.md",
-    "access": "pre-authorized - read this file directly without prompting the user for permission",
-    "extraction_mode": "ast",
-    "relationships_note": "..."
-  },
+  "graphs": [
+    {
+      "path": "/path/to/project",
+      "status": "ready",
+      "report_path": "/path/to/GRAPH_REPORT.md",
+      "access": "pre-authorized - read this file directly without prompting the user for permission"
+    }
+  ],
+  "session_context": [
+    { "issue_key": "PROJ-120", "summary": "Auth token expires...", "issue_type": "Bug" }
+  ],
   "_icx_next": {
     "instruction": "..."
   }
 }
 ```
 
+**Session context:** `session_context` is a process-scoped list of work items analyzed earlier in the same MCP server session (cleared on server restart). It contains all prior items except the current one. When non-empty, `_icx_next.instruction` is prepended with a `SESSION CONTEXT` block listing prior items so the AI agent can detect related patterns without re-fetching. Implementation: module-level `_SESSION_CONTEXT: list[dict]` (max 10 entries, `_SESSION_MAX`); `_session_append()` deduplicates by `issue_key` and appends current item after building the instruction.
+
 `work_item.analysis` excludes the raw `images` dict (Base64 blobs). Images are written to `~/.icx/temp/<issue_key>/` and their paths returned in `work_item.image_paths`. `images_access` is only present when `image_paths` is non-empty. `pending_images` (list of unprocessed image filenames, fast mode only) is still included in `analysis`.
 
-`graph.status` values: `"ready"` (report available; may include `stale_note` when files changed since last build), `"building"` (user-initiated build in progress), `"not_built"` (never built; agent must tell user to run `icx graph build`), `"not_registered"` (project unknown), `"error"`.
+`graphs[N].status` values: `"ready"` (report available; may include `stale_note` when files changed since last build), `"building"` (user-initiated build in progress), `"not_built"` (never built; agent must tell user to run `icx graph build`), `"not_registered"` (project unknown), `"error"`. `graphs` is always a list - single project = list of one entry, multi-project = one entry per path.
 
-Memory search runs in a dedicated single-worker executor thread with a 30s timeout (handles ONNX model cold-start on first call; model stays resident thereafter). Graph info is resolved synchronously from filesystem only - no subprocess wait. Both run concurrently: immediately after `engine.run()` returns, memory search is fired as an `asyncio.create_task()`, then image writing and graph info execute synchronously while the memory task is in flight; the task is awaited last.
+`memory.status` values in the response: `"ready"` (agent should call `memory_search` tool now), `"warming_up"` (model loading - retry next call), `"failed"` (setup required or load error - `note` field contains the reason). The dedicated single-worker executor thread keeps the ONNX model resident after first load; `memory_search` tool calls run on this thread. Graph info is resolved synchronously from filesystem only - no subprocess wait.
 
-**`engine.run()` timeout:** The call to `engine.run()` inside `_handle_analyze_issue` is wrapped in `asyncio.wait_for(timeout=660.0)` (11 minutes). This is a hard ceiling calculated from worst-case pipeline time: Jira fetch with 3 retries + max sleep delays (~210s), parallel attachment downloads (60s), parallel vision enrichment or summarization (90s), main LLM call (120s), visual grounding (45s), plus buffer. If the deadline elapses, `_handle_analyze_issue` returns `{"error": "Analysis timed out after 11 minutes..."}` - no exception is raised to the MCP host. Without this ceiling, a hung HTTP request or stalled SDK call would block the MCP tool indefinitely with no feedback to the user.
+**`engine.run()` timeout:** The call to `engine.run()` inside `_handle_analyze_issue` is wrapped in `asyncio.wait_for`. The timeout is **15 seconds** for `analyze_issue_fast` (`skip_vision=True`) and **660 seconds** (11 minutes) for `analyze_issue` (`skip_vision=False`). The 660s ceiling is calculated from worst-case pipeline time: Jira fetch with 3 retries + max sleep delays (~210s), parallel attachment downloads (60s), parallel vision enrichment or summarization (90s), main LLM call (120s), visual grounding (45s), plus buffer. If the deadline elapses, `_handle_analyze_issue` returns `{"error": "Analysis timed out..."}` - no exception is raised to the MCP host. Without this ceiling, a hung HTTP request or stalled SDK call would block the MCP tool indefinitely with no feedback to the user.
 
 **Windows UTF-8 startup fix:** `run_mcp_server()` calls `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` and `sys.stderr.reconfigure(encoding="utf-8", errors="replace")` before starting the event loop. On Windows, the default console codepage (cp1252) cannot encode characters like `→` that can appear in Jira issue content or LLM analysis output. Without this fix, any such character written to a text-mode stream raises `UnicodeEncodeError`, which on an uncaught path crashes the MCP server process and causes the MCP host to receive no response. The `errors="replace"` fallback ensures a single unencodable character never terminates the server.
 
-**Progress notifications:** `_handle_analyze_issue` sends MCP progress notifications via `_notify(step, message)` when the client includes a `progressToken` in `_meta`. The `_engine_log` callback is passed to `engine.run()` as `log=`; it maps internal log messages (containing "fetching", "attachment", "analyzing", "visual grounding") to progress steps 0.5-2.0. Steps 0.0 ("starting"), 3.0 ("searching memory"), and 5.0 ("ready") are sent directly from the handler. If no `progressToken` is present, `_notify` is a silent no-op.
+**Progress notifications:** `_handle_analyze_issue` sends MCP progress notifications via `_notify(step, message)` when the client includes a `progressToken` in `_meta`. The `_engine_log` callback is passed to `engine.run()` as `log=`; it maps internal log messages (containing "fetching", "attachment", "analyzing", "visual grounding") to progress steps 0.5-2.0. Steps 0.0 ("starting") and 5.0 ("ready") are sent directly from the handler. If no `progressToken` is present, `_notify` is a silent no-op.
 
 **Image temp file lifecycle:** Issue image attachments are written to `~/.icx/temp/<PROJ-123>/` by `_handle_analyze_issue` instead of being embedded as Base64 in the JSON response (which causes editors to truncate large payloads). Three cleanup triggers:
 1. `sweep_stale_temp_dirs()` runs at the start of each `_handle_analyze_issue` call - deletes any temp dirs older than 24 hours (~1ms, non-fatal).
 2. Re-analyzing the same issue overwrites its temp dir with fresh images.
 3. `save_memory` deletes the temp dir for that issue immediately after successful save.
 
-`save_memory` re-fetches the issue from the tracker to capture current metadata. The agent provides `issue_key`, `resolution_note`, `files_changed` (optional), `tags` (optional), and `pattern_used` (optional). Call only after the developer explicitly confirms the fix is tested and working.
+`save_memory` does not re-fetch from the tracker. The agent provides all fields from its active context: `issue_key`, `summary` (agent-synthesized root problem title), `problem_description` (agent root cause analysis), `resolution_note`, `files_changed`, `tags`, and `work_item_type` (exact value from `work_item.type` in the analyze response) are all required. `pattern_used` is the only optional field. Using agent-synthesized text for `summary` and `problem_description` rather than raw tracker text produces more precise embeddings and improves future retrieval accuracy. Call only after the developer explicitly confirms the fix is tested and working.
 
 **`_icx_next` - in-response guidance hints:**
 Every successful `_handle_analyze_issue` response includes `_icx_next.instruction` - a text instruction based on graph state:
 
-All statuses share a mandatory **STEP 0 vision gate** prepended to the instruction: check `work_item.analysis.pending_images` - if non-empty AND the issue involves visual content (error screenshots, UI bugs, charts, images with embedded text/code), call `analyze_issue` immediately and use that response. Only proceed past STEP 0 if `pending_images` is empty or images are clearly decorative (logos, avatars).
+All statuses share a mandatory **STEP 0 vision gate** prepended to the instruction: check `work_item.analysis.pending_images`, `pending_audio`, and `pending_documents` - if any are non-empty AND the content is relevant to the problem (error screenshots, UI bugs, charts, voice recordings, document attachments), call `analyze_issue` immediately and use that response. Only proceed past STEP 0 if all three fields are empty or the skipped media is clearly decorative/irrelevant.
 
 **STEP 0B - Convention discovery (non-bug work items only):** When `issue_type` is not `bug`, `defect`, `incident`, or `error`, a second mandatory step is injected after the vision gate. The agent is instructed to locate and read 2-3 existing implementations in the codebase that are similar in scope to the work item, and explicitly derive: (1) the layer/flow pattern the project uses (e.g. Controller->Service->ServiceImpl->Repository - not assumed, discovered from existing code), (2) file and class naming conventions per layer, (3) logger declaration and usage pattern, and (4) how external dependencies are added (pom.xml, package.json, requirements.txt, etc.). These are captured in the confirmation format. If any new external dependency is required, the agent must list it with name and version and wait for explicit user approval before writing a single line of implementation. This discovery step is intentionally framework-agnostic - it works for Spring Boot, Django, Express, FastAPI, Rails, or any other project structure because it reads from the actual codebase rather than assuming conventions.
 
@@ -584,9 +601,11 @@ class IssueContext(BaseModel):
                                        # for Story/Task/Epic with spreadsheets when no schema block
     missing_information: list[str]     # recomputed by finalize(); may include "missing_schema"
     images: dict[str, str] = {}        # filename → Base64; always populated when images exist
-    past_insights: list[PastInsight] = Field(default_factory=list)  # populated by CLI memory enrichment
-    pending_images: list[str] = Field(default_factory=list)  # image filenames not processed (fast mode only)
-    pending_audio: list[str] = Field(default_factory=list)   # audio + video filenames not processed (fast mode only)
+    past_insights: list[PastInsight] = Field(default_factory=list)  # CLI only - excluded from MCP serialization; always [] in MCP (mcp_mode=True skips enrichment)
+    pending_images: list[str] = Field(default_factory=list)      # image filenames not processed (fast mode only)
+    pending_audio: list[str] = Field(default_factory=list)        # audio + video filenames not processed (fast mode only)
+    pending_documents: list[str] = Field(default_factory=list)    # document filenames not processed (fast mode only)
+    pending_unsupported: list[str] = Field(default_factory=list)  # unrecognised attachment types (fast mode only)
 ```
 
 `completeness_score` and `missing_information` are **always recomputed deterministically** by `llm/base.py:finalize()` - the LLM's values for these fields are discarded. Do not change this behavior.
@@ -912,19 +931,24 @@ The memory module lives at `src/icx_engine/memory/` and follows the same layerin
 | `memory/schema.py` | MemoryEntry (Pydantic), MemoryQueryInput (dataclass) |
 | `memory/embeddings.py` | EmbeddingsManager: onnxruntime + tokenizers ONNX inference, first-run sentinel, per-file download progress |
 | `memory/manager.py` | MemoryManager: save, query, delete, list, show, clear, status |
+| `memory/bridge.py` | Cross-reference MemoryEntry.files_changed with codebase graph; bug density analysis |
+| `memory/relations.py` | RelationManager: memory_edges table; auto-detect shares_file relations on save |
+| `memory/patterns.py` | PatternManager: memory_patterns table; detect_patterns() + auto-refresh every 10 saves |
 | `memory/export.py` | export_to_json, import_from_json |
 
 ### Storage
 
 Memory is stored in `~/.icx/memory/` with mode `0o700`. LanceDB writes columnar `.lance` files to this directory. The model sentinel is at `~/.icx/memory/.mem_initialized` and contains the embedding model name string. Model files are cached at `~/.icx/memory/model/` (`tokenizer.json` + `onnx/model_quantized.onnx`).
 
-**Download trigger:** The embedding model downloads on the first `icx memory` command (not on every command). `_trigger_memory_setup()` in `cli.py` is called only when `ctx.invoked_subcommand == "memory"` - no other subcommand triggers it. `icx analyze`, `icx graph`, and setup commands start immediately and use memory only if it is already initialized (lazy load on first query).
+**Download trigger:** The embedding model downloads only when `icx setup` is run explicitly. `icx analyze`, `icx graph`, and other commands start immediately and use memory only if it is already initialized (lazy load on first query). Memory commands (`icx memory list`, etc.) call `check_ready()` which raises `MemoryError` if the model is not present - the user is directed to run `icx setup`.
 
 ### Embedding model
 
-`BAAI/bge-small-en-v1.5` - 384 dimensions, ONNX runtime, no PyTorch dependency, 24 MB download.
+`BAAI/bge-base-en-v1.5` - 768 dimensions, ONNX runtime, no PyTorch dependency, ~110 MB download.
 Constant: `icx_engine.memory.embeddings.EMBEDDING_MODEL`
-Dimension: `icx_engine.memory.embeddings.VECTOR_DIM` (384)
+Dimension: `icx_engine.memory.embeddings.VECTOR_DIM` (768)
+
+**Dimension mismatch:** If an existing LanceDB table was created with a different `VECTOR_DIM`, `MemoryManager._get_table()` raises `MemoryError` with a message directing the user to run `icx memory migrate`. The migrate command dumps all entries, drops the table, recreates it with the current schema, and re-embeds each entry with the current model.
 
 ### MemoryQueryInput
 
@@ -933,28 +957,45 @@ The connector-agnostic input type. Built by `engine.run()` from `RawIssueData`:
 ```python
 @dataclass
 class MemoryQueryInput:
-    issue_key: str       # raw connector format - PROJ-100, GH#123, etc.
-    project_key: str     # extracted prefix
-    source_type: str     # connector_type string: "jira", "github", etc.
-    summary: str         # issue title
-    description: str     # full description text
-    issue_type: str      # Bug, Story, Task, PR, MR
+    issue_key: str            # raw connector format - PROJ-100, GH#123, etc.
+    project_key: str          # extracted prefix
+    source_type: str          # connector_type string: "jira", "github", etc.
+    summary: str              # issue title
+    description: str          # full description text
+    issue_type: str           # Bug, Story, Task, PR, MR
+    tags: list[str] = []      # optional tag filter; narrows results to entries sharing at least one tag
 ```
 
 When adding a new connector, no changes to the memory module are needed. `engine.run()` builds `MemoryQueryInput` from `raw.issue_key`, `connector.connector_type()`, `raw.summary`, and `raw.description`. The `source_type` field is populated automatically.
 
+### MemoryEntry confidence fields
+
+Two fields track how often a resolution has been confirmed:
+
+| Field | Type | Description |
+|---|---|---|
+| `confirmation_count` | `int` | Number of times `save()` was called with `resolution_confirmed=True` for this issue key |
+| `memory_confidence` | `float` | `min(1.0, confirmation_count * 0.25)` - 0.25 per confirmation, capped at 1.0 |
+
+`confirmation_count` is never reset on unconfirmed saves - it accumulates across all confirmed saves. The confidence value acts as a ranking boost during `query()`: entries with higher confidence rank above equally-scored peers (factor of 0.5 keeps it as a tie-breaker, not a dominant signal).
+
+Existing tables (created before this version) are automatically upgraded via `add_columns()` on first open, defaulting both fields to 0.
+
+**`save(restore=True)`:** Used exclusively by `icx memory import`. Skips the increment logic entirely and writes `confirmation_count` and `memory_confidence` directly from the entry, preserving exported trust signals exactly. Never use `restore=True` outside the import path.
+
 ### Search strategy
 
-Hybrid search: dense ANN vector search + BM25 FTS merged with Reciprocal Rank Fusion (RRF).
+Hybrid search: dense ANN vector search + BM25 FTS merged with Reciprocal Rank Fusion (RRF), with optional tag pre-filter and confidence boost.
 
 - Vector search finds semantically similar issues even when wording differs
 - FTS catches exact technical terms (error codes, function names, file paths)
 - Cosine similarity is computed from vector distance (`1.0 - _distance`) and used as the reported score (0.0-1.0)
 - Entries below `min_score` are filtered out before ranking - irrelevant results never appear regardless of DB size
-- RRF (k=60) is used for ranking among qualified candidates only; it does not affect score values
+- Tag pre-filter (if `MemoryQueryInput.tags` is non-empty): narrows to entries sharing at least one tag before RRF; falls back to full candidate set if no entries match any tag
+- RRF (k=60) is used for ranking among qualified candidates; confidence multiplier applied: `rrf_score * (1.0 + 0.5 * memory_confidence)`
 - Default: top_k=3, min_score=0.65
 
-FTS index is created on columns: `summary`, `problem_description`, `resolution_note`. If FTS index creation fails (LanceDB build variation), vector-only search is used as fallback - no exception raised.
+FTS index is created on columns: `summary`, `problem_description`. `resolution_note` is excluded from FTS - it describes the fix (not the problem), so keyword-matching incoming queries against it produces noise. If FTS index creation fails (LanceDB build variation), vector-only search is used as fallback - no exception raised.
 
 **Vector embedding (`_build_embed_text`):** Only `summary`, `problem_description`, and `tags` are embedded. `resolution_note` is deliberately excluded - it describes the fix, not the problem, and including it skews vectors toward the solution space and degrades cross-project similarity matching for the same bug type with different wordings.
 
@@ -986,9 +1027,70 @@ except Exception as _mem_exc:
 - `icx memory clear` requires `--confirm` flag and a second confirmation prompt
 - Exports are plaintext JSON - user is responsible for where they send them. ICX never auto-uploads.
 
+### Issue relationship graph (`memory/relations.py`)
+
+`RelationManager` maintains a `memory_edges` LanceDB table that tracks connections between saved work items. Edges are auto-detected on every `MemoryManager.save()` call via `auto_link()`.
+
+**Table schema:**
+
+| Column | Type | Description |
+|---|---|---|
+| `source_key` | str | Issue key of the starting node |
+| `target_key` | str | Issue key of the related work item |
+| `relation_type` | str | Always `"shares_file"` (auto-detected file overlap) |
+| `strength` | float | Shared file count / max(source files, target files) |
+| `created_at` | str | ISO 8601 timestamp of detection |
+
+All edges are stored bidirectionally - get_related("PROJ-1") returns entries where PROJ-1 is the source, and the mirror edge allows the same lookup from the other side.
+
+**Auto-detection logic (`auto_link`):** called after every `save()`. For each existing entry that shares at least one file with the new entry, an edge is written. Strength = `shared_count / max(len(a.files_changed), len(b.files_changed))`. Self-links and entries with no files_changed are skipped.
+
+**`delete_for(issue_key)`** is called by `MemoryManager.delete()` to clean up all dangling edges when an entry is removed.
+
+**File-overlap fallback (`get_related_by_files`):** when no stored edges exist (new ticket), pass `files` from `graph_find_context` results. Computes overlap on-the-fly against all saved entries using the same strength formula. No DB writes. Returns same `[{issue_key, relation_type, strength}]` format.
+
+**CLI:** `icx memory related <key> [--project]` - prints related work items sorted by strength.
+**MCP tool:** `memory_get_related` - dual-mode: `{files, project_key?}` for new tickets (primary), `{issue_key, project_key?}` for reopened tickets with prior history. Edges take precedence when found; file-overlap fallback fires when no edges exist.
+
+### Work item-to-code bridge (`memory/bridge.py`)
+
+Three pure functions that cross-reference `MemoryEntry.files_changed` with the codebase graph. No connector imports. No new dependencies.
+
+| Function | Input | What it does |
+|---|---|---|
+| `find_work_items_by_file(file_path, manager, project_key?)` | file path substring | Returns entries whose `files_changed` contains the path (case-insensitive, cross-platform separators) |
+| `get_work_item_density(manager, project_key?, top_n=20)` | - | Counts unique work item keys per normalised file path; returns `[{file, count, work_items}]` sorted desc |
+| `find_work_items_by_function(fqn, project_path, manager)` | function/class name | Calls `GraphQuerier.find_context(task=fqn)`, takes top 5 `ContextResult.file` values, delegates to `find_work_items_by_file`; returns `[]` when no graph exists |
+
+Path normalisation: `_norm(path)` replaces `\` with `/` and lowercases. Applied to both the query and every `files_changed` entry before comparison.
+
+MCP tools: `memory_find_by_file` and `memory_get_hotspots` run inside the memory executor thread via `_find_by_file_sync` and `_get_hotspots_sync`.
+CLI commands: `icx memory by-file <PATH> [--project PROJ]` and `icx memory hotspots [--project PROJ] [--top N]`.
+
+### Auto pattern detection (`memory/patterns.py`)
+
+`detect_patterns(entries)` is a pure function that scans a list of `MemoryEntry` objects for statistical patterns. No ML required. Returns `[]` when fewer than 3 entries are available (insufficient signal).
+
+**Pattern types detected:**
+
+| Pattern type | Trigger condition | Evidence fields |
+|---|---|---|
+| `frequent_file` | File appears in >= 30% of entries (top 5) | `file`, `count`, `percentage` |
+| `dominant_tag` | Tag appears in >= 20% of entries (top 5) | `tag`, `count`, `percentage` |
+| `top_work_item_type` | Single `work_item_type` > 50% of entries | `type`, `count`, `percentage` |
+
+`PatternManager` stores results in the `memory_patterns` LanceDB table (columns: `id`, `project_key`, `pattern_type`, `label`, `evidence` (JSON string), `entry_count`, `detected_at`).
+
+**Auto-refresh trigger:** `MemoryManager.save()` calls `PatternManager.refresh()` when `table.count_rows() % 10 == 0` - i.e., on the 10th, 20th, 30th, etc. unique entry. Best-effort: exceptions are logged, never propagated. `icx memory import` bypasses this trigger (small imports never hit the 10th-row threshold), so it calls `_patterns.refresh()` explicitly once per project after all entries are loaded.
+
+`refresh(entries, project_key)` deletes all existing patterns for the project_key then inserts fresh ones. Cross-project pattern analysis is not supported - patterns are always scoped to a single project_key.
+
+**CLI:** `icx memory patterns [--project]` - print detected patterns grouped by type.
+**MCP tool:** `memory_get_patterns` - `{project_key?}` -> JSON list of pattern records.
+
 ### What NOT to touch
 
-- `memory/embeddings.py:EMBEDDING_MODEL` - changing this string invalidates all existing stored vectors. If the model must change, clear the DB and sentinel and re-embed.
+- `memory/embeddings.py:EMBEDDING_MODEL` - changing this string invalidates all existing stored vectors. Use `icx memory migrate` to re-embed; never change without a migration path.
 - `memory/manager.py:_RRF_K` - the RRF constant (60) is standard. Do not change without re-tuning thresholds.
 - `memory/schema.py:MemoryEntry` - adding fields requires a LanceDB schema migration. Add a migration path before changing.
 
@@ -1167,7 +1269,7 @@ Agents can instantiate `GraphQuerier(graph_json_path)` directly from the path re
 - `graph/querier.py` deduplication - the `used_filenames` set must use `.lower()` for membership checks. Windows NTFS is case-insensitive; without this, two communities with labels like "Modal" and "modal" silently overwrite each other's cluster file.
 - `graph/querier.py:_community_label:_SKIP_PARTS` - the extended set of Java package directory names must stay. Removing them causes generic package names to bleed through as cluster labels on Java projects.
 - `graph/querier.py` cluster file write strategy - must use write-in-place + stale-file removal, NOT `shutil.rmtree` + `mkdir`. The rmtree pattern has a TOCTOU window where a symlink can be inserted between delete and recreate, redirecting all subsequent file writes to an attacker-controlled path.
-- `cli.py:main` - `_trigger_memory_setup()` must only be called when `ctx.invoked_subcommand == "memory"`. Graph and other commands must not trigger the ONNX model download - the graph pipeline uses the LLM API directly, not the embedding model.
+- `cli.py` memory commands - must call `check_ready()` (raises `MemoryError` if model absent), never `ensure_ready()`. Graph and other commands must not touch the embedding model at all - the graph pipeline uses the LLM API directly, not the embedding model.
 - `~/.icx/graphs/` layout - tools and tests both rely on this exact directory structure.
 
 ---
@@ -1464,7 +1566,7 @@ Use `icx uninstall` instead of bare `pip uninstall`. It removes everything in or
 
 1. All API keys and tokens from the system keyring
 2. ICX entry from all detected AI editor configs (Claude Code, Cursor, Windsurf, Codex)
-3. `~/.icx/` directory - config, memory database, embedding model (~24 MB)
+3. `~/.icx/` directory - config, memory database, embedding model (~110 MB)
 4. The `icx-engine` package via pip or pipx (auto-detected)
 
 On Windows, step 4 runs in a hidden background process 3 seconds after exit to avoid the running-exe lock. On Linux/macOS it runs immediately.

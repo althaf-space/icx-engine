@@ -1054,7 +1054,7 @@ def test_system_prompt_mandates_technical_logic_tagged_block():
     assert "formula" in p
 
 
-def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
+async def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
     """When debug_console is provided, engine.run emits Rule output to it."""
     from io import StringIO
     from rich.console import Console
@@ -1087,13 +1087,12 @@ def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
 
         mock_vg.return_value = mock_context
 
-        import asyncio
-        asyncio.run(run(
+        await run(
             "https://test.atlassian.net/browse/TEST-1",
             app_config,
             log=lambda m: None,
             debug_console=debug_con,
-        ))
+        )
 
     output = buf.getvalue()
     assert "Prompt" in output or "LLM" in output or "──" in output
@@ -1323,23 +1322,25 @@ def test_split_attachments_four_buckets():
 
 @respx.mock
 async def test_run_skip_vision_populates_pending_images(app_config):
-    """With skip_vision=True, returns RawIssueResponse(mode='fast_partial') with pending_images."""
-    from icx_engine.models.output import RawIssueResponse
+    """With skip_vision=True and LLM configured, returns IssueContext with pending_images."""
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
     )
-    result = await run("TEST-123", app_config, skip_vision=True)
-    assert isinstance(result, RawIssueResponse)
-    assert result.mode == "fast_partial"
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.memory.MemoryManager"):
+            result = await run("TEST-123", app_config, skip_vision=True)
+    assert isinstance(result, IssueContext)
     assert "screenshot.png" in result.pending_images
     assert result.images == {}
 
 
 @respx.mock
 async def test_run_skip_vision_populates_pending_audio(app_config):
-    """With skip_vision=True, returns RawIssueResponse(mode='fast_partial') with pending_audio."""
+    """With skip_vision=True and LLM configured, returns IssueContext with pending_audio."""
     import copy as _copy
-    from icx_engine.models.output import RawIssueResponse
     payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
     payload["fields"]["attachment"] = [
         {
@@ -1356,9 +1357,13 @@ async def test_run_skip_vision_populates_pending_audio(app_config):
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=payload)
     )
-    result = await run("TEST-123", app_config, skip_vision=True)
-    assert isinstance(result, RawIssueResponse)
-    assert result.mode == "fast_partial"
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.memory.MemoryManager"):
+            result = await run("TEST-123", app_config, skip_vision=True)
+    assert isinstance(result, IssueContext)
     assert sorted(result.pending_audio) == ["demo.mp4", "meeting.mp3"]
     assert result.pending_images == []
 
@@ -1413,7 +1418,6 @@ async def test_run_full_vision_leaves_pending_images_empty(app_config):
 async def test_fast_mode_skips_all_attachment_processing(app_config):
     """skip_vision=True must not call process_attachments regardless of attachment type."""
     import copy as _copy
-    from icx_engine.models.output import RawIssueResponse
     payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
     payload["fields"]["attachment"] = [
         {"filename": "report.pdf", "content": "https://test.atlassian.net/rest/api/3/attachment/content/30001", "mimeType": "application/pdf"},
@@ -1426,10 +1430,14 @@ async def test_fast_mode_skips_all_attachment_processing(app_config):
         return_value=httpx.Response(200, json=payload)
     )
     with patch("icx_engine.connectors.jira.connector.JiraConnector.process_attachments", new_callable=AsyncMock) as mock_pa:
-        result = await run("TEST-123", app_config, skip_vision=True)
+        with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+            with patch("icx_engine.memory.MemoryManager"):
+                result = await run("TEST-123", app_config, skip_vision=True)
     mock_pa.assert_not_called()
-    assert isinstance(result, RawIssueResponse)
-    assert result.mode == "fast_partial"
+    assert isinstance(result, IssueContext)
     assert result.pending_images == ["screen.png"]
     assert result.pending_audio == ["note.mp3"]
     assert sorted(result.pending_documents) == ["data.xlsx", "report.pdf"]
@@ -1437,9 +1445,8 @@ async def test_fast_mode_skips_all_attachment_processing(app_config):
 
 
 @respx.mock
-async def test_fast_mode_skips_llm_even_when_configured(app_config):
-    """skip_vision=True must not call LLM even when an LLM profile is configured."""
-    from icx_engine.models.output import RawIssueResponse
+async def test_fast_mode_calls_llm_when_configured(app_config):
+    """skip_vision=True calls LLM when configured - returns IssueContext with pending lists."""
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
     )
@@ -1447,10 +1454,11 @@ async def test_fast_mode_skips_llm_even_when_configured(app_config):
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
         mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
-        result = await run("TEST-123", app_config, skip_vision=True)
-    mock_client.chat.completions.create.assert_not_called()
-    assert isinstance(result, RawIssueResponse)
-    assert result.mode == "fast_partial"
+        with patch("icx_engine.memory.MemoryManager"):
+            result = await run("TEST-123", app_config, skip_vision=True)
+    mock_client.chat.completions.create.assert_called_once()
+    assert isinstance(result, IssueContext)
+    assert "screenshot.png" in result.pending_images
 
 
 @respx.mock
@@ -1473,22 +1481,48 @@ async def test_full_mode_calls_process_attachments(app_config):
 
 
 @respx.mock
-async def test_fast_mode_no_attachments_returns_fast_partial(app_config):
-    """skip_vision=True with no attachments still returns RawIssueResponse(mode='fast_partial')."""
+async def test_fast_mode_no_attachments_with_llm_returns_issue_context(app_config):
+    """skip_vision=True with no attachments and LLM configured returns IssueContext with empty pending lists."""
     import copy as _copy
-    from icx_engine.models.output import RawIssueResponse
     payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
     payload["fields"]["attachment"] = []
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=payload)
     )
-    result = await run("TEST-123", app_config, skip_vision=True)
-    assert isinstance(result, RawIssueResponse)
-    assert result.mode == "fast_partial"
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.memory.MemoryManager"):
+            result = await run("TEST-123", app_config, skip_vision=True)
+    assert isinstance(result, IssueContext)
     assert result.pending_images == []
     assert result.pending_audio == []
     assert result.pending_documents == []
     assert result.pending_unsupported == []
+
+
+@respx.mock
+async def test_fast_mode_no_llm_returns_raw_issue_response():
+    """skip_vision=True with no LLM configured returns RawIssueResponse(mode='fast_partial')."""
+    import copy as _copy
+    from icx_engine.models.output import RawIssueResponse
+    from icx_engine.models.config import AppConfig
+    from icx_engine.connectors.jira.config import JiraConnection, TokenAuth
+    config = AppConfig(
+        connections=[JiraConnection(
+            domain="test.atlassian.net",
+            auth=TokenAuth(auth_type="token", email="u@test.com", api_token="tok"),
+        )]
+    )
+    payload = _copy.deepcopy(JIRA_ISSUE_PAYLOAD)
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    result = await run("TEST-123", config, mcp_mode=True, skip_vision=True)
+    assert isinstance(result, RawIssueResponse)
+    assert result.mode == "fast_partial"
+    assert "screenshot.png" in result.pending_images
 
 
 # ── engine.run MCP mode memory guard ─────────────────────────────────────────

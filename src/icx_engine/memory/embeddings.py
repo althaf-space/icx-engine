@@ -9,10 +9,10 @@ from rich.progress import (
 )
 from icx_engine.exceptions import MemoryError
 
-EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
-_ONNX_REPO = "Xenova/bge-small-en-v1.5"
+EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
+_ONNX_REPO = "Xenova/bge-base-en-v1.5"
 _ONNX_FILE = "onnx/model_quantized.onnx"
-VECTOR_DIM = 384
+VECTOR_DIM = 768
 MEMORY_DIR = Path.home() / ".icx" / "memory"
 MODEL_DIR = MEMORY_DIR / "model"
 SENTINEL_PATH = MEMORY_DIR / ".mem_initialized"
@@ -59,7 +59,7 @@ class EmbeddingsManager:
     def _download_and_init(self, console: Console) -> None:
         console.print(
             "\n[bold cyan]ICX Memory Engine[/bold cyan] - one-time setup\n"
-            f"Downloading embedding model [dim]({EMBEDDING_MODEL}, ~24 MB)[/dim]\n"
+            f"Downloading embedding model [dim]({EMBEDDING_MODEL}, ~110 MB)[/dim]\n"
             "Cached at [dim]~/.icx/memory/model/[/dim] - every subsequent start is instant.\n"
         )
         _saved = {k: os.environ.get(k) for k in ("TQDM_DISABLE", "HF_HUB_DISABLE_PROGRESS_BARS")}

@@ -245,10 +245,89 @@ def test_no_auto_download_on_graph_command(cli_runner):
 
 
 def test_no_auto_download_on_memory_command(cli_runner):
-    """icx memory <cmd> must not auto-download the model - only `icx setup` does."""
+    """icx memory list --help must not auto-download the model - only `icx setup` does."""
     with patch("icx_engine.memory.embeddings.EmbeddingsManager.ensure_ready") as mock_dl:
-        cli_runner.invoke(app, ["memory", "--help"])
+        cli_runner.invoke(app, ["memory", "list", "--help"])
     mock_dl.assert_not_called()
+
+
+def test_memory_migrate_help(cli_runner):
+    result = cli_runner.invoke(app, ["memory", "migrate", "--help"])
+    assert result.exit_code == 0
+
+
+def test_memory_by_file_help(cli_runner):
+    result = cli_runner.invoke(app, ["memory", "by-file", "--help"])
+    assert result.exit_code == 0
+
+
+def test_memory_hotspots_help(cli_runner):
+    result = cli_runner.invoke(app, ["memory", "hotspots", "--help"])
+    assert result.exit_code == 0
+
+
+def test_memory_related_help(cli_runner):
+    result = cli_runner.invoke(app, ["memory", "related", "--help"])
+    assert result.exit_code == 0
+
+
+def test_memory_patterns_help(cli_runner):
+    result = cli_runner.invoke(app, ["memory", "patterns", "--help"])
+    assert result.exit_code == 0
+
+
+def test_memory_export_import_roundtrip_preserves_confirmation_count(tmp_path):
+    """Export then import must preserve confirmation_count exactly (no double-increment)."""
+    import json
+    import uuid
+    from unittest.mock import patch, MagicMock
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.schema import MemoryEntry
+    from icx_engine.memory.export import export_to_json, import_from_json
+
+    mock_emb = MagicMock()
+    mock_emb.embed.return_value = [0.1] * 768
+    mock_emb.check_ready.return_value = None
+    mock_emb.ensure_ready.return_value = None
+
+    db_a = tmp_path / "db_a"
+    db_b = tmp_path / "db_b"
+    export_file = tmp_path / "export.json"
+
+    entry = MemoryEntry(
+        id=str(uuid.uuid4()),
+        issue_key="PROJ-99",
+        project_key="PROJ",
+        source_type="jira",
+        issue_type="Bug",
+        summary="Auth fails",
+        problem_description="JWT expired",
+        resolution_note="Updated TTL",
+        files_changed=["src/auth/token.py"],
+        resolution_confirmed=True,
+        saved_at="2026-05-12T10:00:00Z",
+        confirmation_count=4,
+        memory_confidence=1.0,
+    )
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=mock_emb):
+        # Export from db_a
+        mgr_a = MemoryManager(db_path=db_a)
+        mgr_a.save(entry, restore=True)
+        entries = mgr_a.list_entries()
+        export_to_json(entries, export_file)
+
+        # Import into db_b
+        imported = import_from_json(export_file)
+        mgr_b = MemoryManager(db_path=db_b)
+        for e in imported:
+            mgr_b.save(e, restore=True)
+
+        result = mgr_b.show("PROJ-99")
+
+    assert result is not None
+    assert result.confirmation_count == 4
+    assert result.memory_confidence == 1.0
 
 
 def test_connection_add_duplicate_domain_prompts_overwrite(cli_runner):

@@ -320,12 +320,17 @@ def _llm_image_account(profile_name: str) -> str:
 def _pid_exists(pid: int) -> bool:
     """Return True if a process with the given PID appears to be running."""
     try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        return True   # process exists but we have no permission to signal it
-    except OSError:
-        return False
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        # psutil unavailable - fall back to Unix-only signal check
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            return False
 
 
 @contextlib.contextmanager
@@ -748,6 +753,7 @@ class ConfigManager:
     @staticmethod
     def delete_all_secrets(config: AppConfig) -> None:
         """Remove all keychain entries for the given config before clearing it."""
+        global _master_key_cache
         if not _check_keychain():
             return
         for conn in config.connections:
@@ -760,6 +766,14 @@ class ConfigManager:
         for profile_name in config.llm_profiles:
             _kdel(_llm_text_account(profile_name))
             _kdel(_llm_image_account(profile_name))
+        # Delete the D-Lock master key from both keyring and DPAPI file cache.
+        _kdel(_MASTER_KEY_ACCOUNT)
+        try:
+            if _MASTER_KEY_FILE.exists():
+                _MASTER_KEY_FILE.unlink()
+        except Exception:
+            pass
+        _master_key_cache = None
 
     @staticmethod
     def delete_connection_secrets(conn: BaseConnection) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import os
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -21,9 +22,8 @@ _WHISPER_HF_REPO = f"Systran/faster-whisper-{WHISPER_MODEL}"
 _WHISPER_FILES = (
     "config.json",
     "model.bin",
-    "vocabulary.json",
     "tokenizer.json",
-    "preprocessor_config.json",
+    "vocabulary.txt",
 )
 
 _DEFAULT_BASE_URLS = {
@@ -60,12 +60,12 @@ def _is_whisper_ready() -> bool:
 
 
 def _mark_whisper_ready() -> None:
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
     SENTINEL_PATH.write_text(WHISPER_MODEL, encoding="utf-8")
 
 
 class WhisperManager:
-    """Manages local faster-whisper model. Downloads base model (~74 MB) on first use."""
+    """Manages local faster-whisper model. Downloads base model (~145 MB) on first use."""
 
     def __init__(self) -> None:
         self._model = None
@@ -92,19 +92,38 @@ class WhisperManager:
                     str(MODEL_DIR), device="cpu", compute_type="int8"
                 )
 
+    def _verify_model_files(self) -> None:
+        """Confirm downloaded files exist and are non-empty. Raises OSError on failure.
+
+        Prevents a partial download (urlretrieve failing mid-transfer) from writing
+        a sentinel that marks the model as ready with a corrupt file on disk.
+        """
+        for fname in _WHISPER_FILES:
+            path = MODEL_DIR / fname
+            if not path.exists() or path.stat().st_size == 0:
+                raise OSError(f"Whisper model file missing or empty after download: {path}")
+
     def _download_model_files(self, progress) -> None:
         import socket
         import urllib.request
 
-        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        MODEL_DIR.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
         base_url = f"https://huggingface.co/{_WHISPER_HF_REPO}/resolve/main/"
         _old_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(60)
         try:
             for fname in _WHISPER_FILES:
                 dest = MODEL_DIR / fname
+                # Only skip if the file is present AND non-empty. A zero-byte or
+                # missing file means a previous download was interrupted - re-fetch.
                 if dest.exists() and dest.stat().st_size > 0:
-                    continue  # already present - skip (supports partial re-runs)
+                    continue
+                # Remove any partial file before re-downloading so urlretrieve
+                # writes a fresh copy rather than appending/overwriting partially.
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 task = progress.add_task(f"[cyan]{fname}", total=None)
 
                 def _reporthook(count: int, block: int, total: int, _task=task) -> None:
@@ -133,7 +152,7 @@ class WhisperManager:
 
             con.print(
                 "\n[bold cyan]ICX Audio Engine[/bold cyan] - one-time setup\n"
-                f"Downloading Whisper {WHISPER_MODEL} model (~74 MB)\n"
+                f"Downloading Whisper {WHISPER_MODEL} model (~145 MB)\n"
                 "Cached at [dim]~/.icx/audio/model/[/dim] - one-time download.\n"
             )
 
@@ -158,6 +177,8 @@ class WhisperManager:
                         os.environ.pop(k, None)
                     else:
                         os.environ[k] = v
+
+            self._verify_model_files()
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*HF_TOKEN.*")

@@ -67,7 +67,13 @@ def _graphs_root() -> Path:
     return root
 
 
+def _project_dir_path(project_id: str) -> Path:
+    """Return project directory path without creating it. Use for read operations."""
+    return _graphs_root() / project_id
+
+
 def _project_dir(project_id: str) -> Path:
+    """Return project directory path, creating it if needed. Use for write operations only."""
     d = _graphs_root() / project_id
     if not d.exists():
         d.mkdir(parents=True, exist_ok=True)
@@ -86,31 +92,35 @@ def _registry_path() -> Path:
 
 
 def _meta_path(project_id: str) -> Path:
-    return _project_dir(project_id) / _META_FILE
+    return _project_dir_path(project_id) / _META_FILE
 
 
 def graph_path(project_id: str) -> Path:
-    return _project_dir(project_id) / _GRAPH_FILE
+    return _project_dir_path(project_id) / _GRAPH_FILE
 
 
 def graph_tmp_path(project_id: str) -> Path:
-    return _project_dir(project_id) / _GRAPH_TMP_FILE
+    return _project_dir_path(project_id) / _GRAPH_TMP_FILE
 
 
 def manifest_path(project_id: str) -> Path:
-    return _project_dir(project_id) / _MANIFEST_FILE
+    return _project_dir_path(project_id) / _MANIFEST_FILE
 
 
 def icxignore_path(project_id: str) -> Path:
-    return _project_dir(project_id) / _ICXIGNORE_FILE
+    return _project_dir_path(project_id) / _ICXIGNORE_FILE
+
+
+def cross_links_path(project_id: str) -> Path:
+    return _project_dir_path(project_id) / "cross_links.json"
 
 
 def report_path(project_id: str) -> Path:
-    return _project_dir(project_id) / "GRAPH_REPORT.md"
+    return _project_dir_path(project_id) / "GRAPH_REPORT.md"
 
 
 def clusters_dir_path(project_id: str) -> Path:
-    return _project_dir(project_id) / "GRAPH_CLUSTERS"
+    return _project_dir_path(project_id) / "GRAPH_CLUSTERS"
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +301,7 @@ def read_meta(project_id: str) -> ProjectInfo | None:
 
 def write_meta(info: ProjectInfo) -> None:
     path = _meta_path(info.project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     data = asdict(info)
     try:
@@ -316,6 +327,7 @@ def write_manifest(
     """Write build_manifest.json for staleness checking."""
     from datetime import datetime, timezone
     path = manifest_path(project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     data = {
         "built_at": datetime.now(timezone.utc).isoformat(),

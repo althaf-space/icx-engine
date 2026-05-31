@@ -127,6 +127,15 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx memory import <FILE>[/cyan]                               Import from a JSON export file
   [cyan]icx memory clear --confirm[/cyan]                             Delete all saved entries
   [cyan]icx memory status[/cyan]                                      Show entry count, storage size, model info
+  [cyan]icx memory migrate[/cyan]                                     Re-embed all saved work items after an embedding model upgrade
+  [cyan]icx memory by-file <PATH>[/cyan]                              List all work items that touched a file path
+  [cyan]icx memory by-file <PATH> --project <KEY>[/cyan]              Filter by project key
+  [cyan]icx memory hotspots[/cyan]                                    Show files with most historical work items
+  [cyan]icx memory hotspots --project <KEY> --top <N>[/cyan]          Filter by project, show top N files
+  [cyan]icx memory related <KEY>[/cyan]                               Show work items related via shared file history
+  [cyan]icx memory related <KEY> --project <KEY>[/cyan]               Filter related items to one project
+  [cyan]icx memory patterns[/cyan]                                    Show auto-detected patterns across work items
+  [cyan]icx memory patterns --project <KEY>[/cyan]                    Filter patterns by project key
 
 [bold]Codebase Graph[/bold]
   [cyan]icx graph add --name <NAME> --path <PATH>[/cyan]              Register a project for graph indexing
@@ -230,11 +239,10 @@ app.add_typer(graph_app, name="graph", rich_help_panel="Codebase Graph")
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 # Ensure UTF-8 output on Windows (cp1252 can't encode ✓, →, etc.)
-import sys as _sys
-if hasattr(_sys.stdout, "reconfigure"):
+if hasattr(sys.stdout, "reconfigure"):
     try:
-        _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -474,6 +482,153 @@ def memory_status() -> None:
         raise typer.Exit(1)
 
 
+@memory_app.command("migrate")
+def memory_migrate(
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Re-embed all saved work items with the current embedding model.
+
+    Run this after upgrading ICX when the embedding model version changes.
+    All saved entries are preserved - only the internal vector representation
+    is updated to match the new model.
+    """
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.embeddings import EMBEDDING_MODEL, VECTOR_DIM
+
+    try:
+        mgr = MemoryManager()
+        entry_count = len(mgr.list_entries())
+        if entry_count == 0:
+            console.print("  No saved work items found. Nothing to migrate.")
+            return
+
+        console.print(
+            f"\n  [bold]Memory migration[/bold]\n"
+            f"  Model:   [cyan]{EMBEDDING_MODEL}[/cyan] ({VECTOR_DIM}-dim)\n"
+            f"  Entries: {entry_count} saved work items\n"
+        )
+        confirmed = typer.confirm("  Re-embed all entries with the new model?", default=True)
+        if not confirmed:
+            console.print("Cancelled.")
+            return
+
+        migrated = 0
+        with console.status("[bold]Migrating...[/bold]", spinner="dots"):
+            def _log(msg: str) -> None:
+                pass  # suppress per-entry logs in spinner mode
+
+            migrated = mgr.migrate(log=_log if not debug else console.print)
+
+        console.print(f"[green]Migrated {migrated} work items.[/green] Memory is ready.")
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=traceback)
+        raise typer.Exit(1)
+
+
+@memory_app.command("by-file")
+def memory_by_file(
+    path: Annotated[str, typer.Argument(help="File path to look up (substring match)")],
+    project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
+) -> None:
+    """List all saved work items that touched a given file path."""
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.bridge import find_work_items_by_file
+    try:
+        mgr = MemoryManager()
+        entries = find_work_items_by_file(path, mgr, project_key=project)
+        if not entries:
+            console.print(f"  No saved work items found for [cyan]{path}[/cyan].")
+            return
+        console.print(f"\n  [bold]{len(entries)} work item(s)[/bold] touching [cyan]{path}[/cyan]\n")
+        for e in entries:
+            console.print(f"  [bold]{e.issue_key}[/bold]  [{e.work_item_type}]  {e.summary}")
+            console.print(f"    {e.resolution_note[:120]}")
+            console.print()
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@memory_app.command("hotspots")
+def memory_hotspots(
+    project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
+    top: Annotated[int, typer.Option("--top", help="Number of files to show")] = 20,
+) -> None:
+    """Show files with the most saved work items (churn hotspots)."""
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.bridge import get_work_item_density
+    try:
+        mgr = MemoryManager()
+        rows = get_work_item_density(mgr, project_key=project, top_n=max(1, min(100, top)))
+        if not rows:
+            console.print("  No memory entries found.")
+            return
+        console.print(f"\n  [bold]Top {len(rows)} file(s) by work item count[/bold]\n")
+        for row in rows:
+            console.print(f"  [bold]{row['count']:>3}[/bold]  {row['file']}")
+            console.print(f"       {', '.join(row['work_items'][:5])}")
+            console.print()
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@memory_app.command("patterns")
+def memory_patterns(
+    project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
+) -> None:
+    """Show auto-detected patterns across saved work items."""
+    from icx_engine.memory.patterns import PatternManager
+    try:
+        pm = PatternManager()
+        pats = pm.get_patterns(project_key=project)
+        if not pats:
+            console.print("  No patterns detected yet. Patterns are computed every 10 saved work items.")
+            return
+        console.print(f"\n  [bold]{len(pats)} pattern(s) detected[/bold]\n")
+        for p in pats:
+            console.print(f"  [bold]{p['pattern_type']}[/bold]  [dim]{p['project_key']}[/dim]")
+            console.print(f"    {p['label']}")
+            console.print()
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@memory_app.command("related")
+def memory_related(
+    key: Annotated[str, typer.Argument(help="Issue key, e.g. PROJ-456")],
+    project: Annotated[Optional[str], typer.Option("--project", help="Filter results to a project key")] = None,
+) -> None:
+    """Show work items related to the given issue key via shared files."""
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.relations import RelationManager
+    try:
+        normalised = key.strip().upper()
+        rel = RelationManager()
+        related = rel.get_related(normalised)
+        if project:
+            mgr = MemoryManager()
+            in_project = {e.issue_key for e in mgr.list_entries(project_key=project)}
+            related = [r for r in related if r["issue_key"] in in_project]
+        if not related:
+            console.print(f"  No related work items found for [cyan]{normalised}[/cyan].")
+            return
+        console.print(f"\n  [bold]{len(related)} related work item(s)[/bold] for [cyan]{normalised}[/cyan]\n")
+        for r in related:
+            console.print(
+                f"  [bold]{r['issue_key']}[/bold]  {r['relation_type']}  "
+                f"[dim]strength={r['strength']:.2f}[/dim]"
+            )
+        console.print()
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
 @memory_app.command("export")
 def memory_export(
     output: Annotated[Optional[str], typer.Option("--output", help="Output file path")] = None,
@@ -529,7 +684,18 @@ def memory_import_cmd(
             return
         mgr = MemoryManager()
         for entry in entries:
-            mgr.save(entry)
+            mgr.save(entry, restore=True)
+        # Pattern refresh doesn't fire on small imports (every-10th trigger).
+        # Rebuild explicitly per project after all entries are loaded.
+        from collections import defaultdict
+        by_project: dict[str, list] = defaultdict(list)
+        for entry in entries:
+            by_project[entry.project_key].append(entry)
+        for proj_key, proj_entries in by_project.items():
+            try:
+                mgr._patterns.refresh(proj_entries, proj_key)
+            except Exception:
+                pass
         console.print(f"[green]Imported {len(entries)} entries.[/green]")
     except Exception as exc:
         render_icx_error(exc, err_console)
@@ -592,13 +758,23 @@ def setup(
     any_failed = False
 
     # Step 1: ONNX embedding model (memory features)
-    con.print("\n[bold]Step 1/3[/bold] Embedding model [dim](memory features, ~24 MB)[/dim]")
+    con.print("\n[bold]Step 1/3[/bold] Embedding model [dim](memory features, ~110 MB)[/dim]")
     try:
-        from icx_engine.memory.embeddings import EmbeddingsManager, _is_initialized
+        from icx_engine.memory.embeddings import EmbeddingsManager, _is_initialized, MEMORY_DIR
         if _is_initialized():
             con.print("[green]✓[/green] Already downloaded.")
         else:
             EmbeddingsManager().ensure_ready(console=con)
+            # Advisory: existing LanceDB data uses old vectors - needs re-embedding.
+            try:
+                _has_old_data = any(MEMORY_DIR.glob("*.lance")) if MEMORY_DIR.exists() else False
+                if _has_old_data:
+                    con.print(
+                        "\n[yellow]Advisory:[/yellow] Existing memory data uses the old vector format.\n"
+                        "Run [bold cyan]icx memory migrate[/bold cyan] to re-embed your saved work items."
+                    )
+            except Exception:
+                pass
     except Exception as exc:
         any_failed = True
         con.print(f"[red]✗[/red] Failed: {exc}")
@@ -606,7 +782,7 @@ def setup(
             _tb_mod.print_exc()
 
     # Step 2: Whisper audio model (audio/video transcription)
-    con.print("\n[bold]Step 2/3[/bold] Whisper model [dim](audio/video transcription, ~74 MB)[/dim]")
+    con.print("\n[bold]Step 2/3[/bold] Whisper model [dim](audio/video transcription, ~145 MB)[/dim]")
     try:
         from icx_engine.connectors.audio import WhisperManager, _is_whisper_ready
         if _is_whisper_ready():
@@ -848,7 +1024,6 @@ def _validate_and_save_model(
     traceback: bool,
 ) -> None:
     """Validate text then image channel separately; offer skip on image failure."""
-    import asyncio
     from icx_engine.llm.base import get_provider
     from icx_engine.models.output import RawIssueData
     from icx_engine.config_manager import ConfigManager
@@ -1223,7 +1398,7 @@ def analyze(
         try:
             import base64 as _b64
             from icx_engine.graph.storage import temp_images_dir as _tid, sweep_stale_temp_dirs as _sweep
-            _ALLOWED_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"})
+            _ALLOWED_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"})
             _sweep()
             img_dir = _tid(url)
             img_dir.mkdir(parents=True, exist_ok=True)
@@ -1474,6 +1649,10 @@ def _uninstall_package(console: Console) -> None:
         tf.write(ps_script)
         script_path = tf.name
 
+    fallback_cmd = " ".join(cmd)
+    console.print(
+        f"[dim]If background uninstall fails, run manually: [bold]{fallback_cmd}[/bold][/dim]\n"
+    )
     subprocess.Popen(
         [
             "powershell",

@@ -432,14 +432,14 @@ async def test_handle_analyze_issue_returns_work_item_json(mcp_config_with_llm):
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
             mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "not_registered", "path": "/projects/my-svc", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
     data = json.loads(result)
     assert "work_item" in data
     assert data["work_item"]["type"] == "Bug"
     assert "problem_summary" in data["work_item"]["analysis"]
     assert "memory" in data
-    assert "graph" in data
+    assert "graphs" in data
 
 
 async def test_handle_analyze_issue_returns_error_json_when_no_connection():
@@ -487,7 +487,7 @@ async def test_handle_analyze_issue_with_profile_override(mcp_config_with_llm):
                 acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
                 confidence_score=0.9, completeness_score=0.8, missing_information=[],
             )
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "not_registered", "path": "/projects/my-svc", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}]):
                 await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"], profile="personal")
 
     _, kwargs = mock_run.call_args
@@ -544,19 +544,22 @@ async def test_list_tools_returns_core_tools():
 
 @respx.mock
 async def test_handle_analyze_issue_fast_returns_work_item_json(mcp_config_with_llm):
-    """Fast mode returns RawIssueResponse(mode='fast_partial') with attachment_processing='skipped_all'."""
+    """Fast mode with LLM returns IssueContext with attachment_processing='text_only'."""
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
         return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
     )
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = mcp_config_with_llm
-        with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
-            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"], skip_vision=True)
+        with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "not_registered", "path": "/projects/my-svc", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}]):
+                result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"], skip_vision=True)
     data = json.loads(result)
     assert "work_item" in data
     assert data["work_item"]["type"] == "Bug"
-    assert data["work_item"]["analysis"]["mode"] == "fast_partial"
-    assert data["work_item"]["attachment_processing"] == "skipped_all"
+    assert data["work_item"]["attachment_processing"] == "text_only"
     assert "pending_images" in data["work_item"]["analysis"]
     assert "pending_audio" in data["work_item"]["analysis"]
     assert "pending_documents" in data["work_item"]["analysis"]
@@ -567,8 +570,8 @@ async def test_handle_analyze_issue_fast_returns_work_item_json(mcp_config_with_
     assert "images" not in data["work_item"]["analysis"]
 
 
-async def test_mcp_fast_tool_uses_15s_timeout():
-    """analyze_issue_fast must use a 15s timeout."""
+async def test_mcp_fast_tool_uses_45s_timeout():
+    """analyze_issue_fast must use a 45s timeout."""
     timeout_used = {}
 
     async def _capture_timeout(coro, timeout):
@@ -580,7 +583,7 @@ async def test_mcp_fast_tool_uses_15s_timeout():
             mock_cm.load.return_value = AppConfig()
             result = await _handle_analyze_issue("TEST-123", project_paths=["/p"], skip_vision=True)
 
-    assert timeout_used.get("value") == 15.0
+    assert timeout_used.get("value") == 45.0
     data = json.loads(result)
     assert "error" in data
 
@@ -622,7 +625,7 @@ async def test_image_paths_written_to_disk_not_inline(mcp_config_with_llm, tmp_p
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
             mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "not_registered", "path": "/projects/my-svc", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}]):
                 with patch("icx_engine.graph.storage.sweep_stale_temp_dirs"):
                     with patch("icx_engine.graph.storage.temp_images_dir", return_value=tmp_path):
                         with patch("icx_engine.engine.run") as mock_run:
@@ -666,13 +669,29 @@ async def test_save_memory_tool_has_required_inputs():
 
     save_tool = next(t for t in tools if t.name == "save_memory")
     schema = save_tool.inputSchema
-    assert "issue_key" in schema["required"]
-    assert "resolution_note" in schema["required"]
-    assert "files_changed" not in schema.get("required", [])
-    assert "tags" not in schema.get("required", [])
+    required = schema["required"]
+    assert "issue_key" in required
+    assert "summary" in required
+    assert "problem_description" in required
+    assert "resolution_note" in required
+    assert "files_changed" in required
+    assert "tags" in required
+    assert "work_item_type" in required
+    assert "pattern_used" not in required
 
 
 # ── save_memory per-item input validation ─────────────────────────────────────
+
+_SAVE_REQUIRED_BASE = {
+    "issue_key": "TEST-1",
+    "summary": "Root cause summary",
+    "problem_description": "Detailed root cause analysis of the failure mechanism.",
+    "resolution_note": "Changed comparison operator in auth.py:validate_token() line 47.",
+    "files_changed": ["src/auth.py"],
+    "tags": ["auth-middleware", "token-validation"],
+    "work_item_type": "bug",
+}
+
 
 async def test_call_tool_save_memory_rejects_non_string_files_changed():
     """files_changed entries that are not strings must return an error."""
@@ -680,8 +699,7 @@ async def test_call_tool_save_memory_rejects_non_string_files_changed():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         result = await _call_tool("save_memory", {
-            "issue_key": "TEST-1",
-            "resolution_note": "fixed it",
+            **_SAVE_REQUIRED_BASE,
             "files_changed": [{"not": "a string"}],
         })
     data = json.loads(result[0].text)
@@ -695,8 +713,7 @@ async def test_call_tool_save_memory_rejects_oversized_files_changed_entry():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         result = await _call_tool("save_memory", {
-            "issue_key": "TEST-1",
-            "resolution_note": "fixed it",
+            **_SAVE_REQUIRED_BASE,
             "files_changed": ["x" * 4097],
         })
     data = json.loads(result[0].text)
@@ -710,8 +727,7 @@ async def test_call_tool_save_memory_rejects_non_string_tags():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         result = await _call_tool("save_memory", {
-            "issue_key": "TEST-1",
-            "resolution_note": "fixed it",
+            **_SAVE_REQUIRED_BASE,
             "tags": [42],
         })
     data = json.loads(result[0].text)
@@ -725,8 +741,7 @@ async def test_call_tool_save_memory_rejects_oversized_tag_entry():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         result = await _call_tool("save_memory", {
-            "issue_key": "TEST-1",
-            "resolution_note": "fixed it",
+            **_SAVE_REQUIRED_BASE,
             "tags": ["x" * 257],
         })
     data = json.loads(result[0].text)
@@ -734,20 +749,64 @@ async def test_call_tool_save_memory_rejects_oversized_tag_entry():
     assert "tags" in data["error"]
 
 
+async def test_call_tool_save_memory_rejects_empty_summary():
+    """summary must be a non-empty string."""
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        result = await _call_tool("save_memory", {
+            **_SAVE_REQUIRED_BASE,
+            "summary": "",
+        })
+    data = json.loads(result[0].text)
+    assert "error" in data
+    assert "summary" in data["error"]
+
+
+async def test_call_tool_save_memory_rejects_empty_problem_description():
+    """problem_description must be a non-empty string."""
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        result = await _call_tool("save_memory", {
+            **_SAVE_REQUIRED_BASE,
+            "problem_description": "",
+        })
+    data = json.loads(result[0].text)
+    assert "error" in data
+    assert "problem_description" in data["error"]
+
+
+async def test_call_tool_save_memory_rejects_empty_work_item_type():
+    """work_item_type must be a non-empty string."""
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        result = await _call_tool("save_memory", {
+            **_SAVE_REQUIRED_BASE,
+            "work_item_type": "",
+        })
+    data = json.loads(result[0].text)
+    assert "error" in data
+    assert "work_item_type" in data["error"]
+
+
 # ── Tool count and schema ─────────────────────────────────────────────────────
 
-async def test_list_tools_returns_eight_tools():
+async def test_list_tools_returns_twelve_tools():
     from icx_engine.mcp_server import _list_tools
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 8
+    assert len(tools) == 13
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory",
         "graph_find_context", "graph_call_chain", "graph_impact", "graph_subsystem",
         "graph_cross_links",
+        "memory_find_by_file", "memory_get_hotspots", "memory_get_related",
+        "memory_get_patterns", "memory_search",
     }
 
 
@@ -798,22 +857,18 @@ async def test_handle_analyze_issue_success_includes_icx_next():
                 acceptance_criteria=[], impact="high", priority="High", issue_type="Bug",
                 confidence_score=0.9, completeness_score=0.9, missing_information=[],
             )
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "ready", "report_path": "/projects/my-svc/.icx/graphs/GRAPH_REPORT.md", "access": "pre-authorized", "eta_seconds": None}):
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "ready", "path": "/projects/my-svc", "report_path": "/projects/my-svc/.icx/graphs/GRAPH_REPORT.md", "access": "pre-authorized", "eta_seconds": None}]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
     data = json.loads(result)
     assert "_icx_next" in data
     assert "instruction" in data["_icx_next"]
-    assert "graph" in data
-    assert data["graph"]["status"] == "ready"
+    assert "graphs" in data
+    assert data["graphs"][0]["status"] == "ready"
     assert "memory" in data
     assert "work_item" in data
 
 
-@respx.mock
 async def test_handle_save_memory_returns_saved_true(mcp_config):
-    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
-        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
-    )
     mock_mem = MagicMock()
     mock_mem.save.return_value = None
 
@@ -822,9 +877,12 @@ async def test_handle_save_memory_returns_saved_true(mcp_config):
         with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
             result = await _handle_save_memory(
                 "TEST-123",
-                "Fixed by increasing JWT TTL from 1h to 24h",
+                "JWT expiry check uses < instead of <= rejecting tokens at exact expiry second",
+                "auth/middleware.py:validate_token() used strict less-than on token.exp field.",
+                "Changed < to <= in validate_token() in auth/middleware.py line 47.",
                 ["src/auth/token.py"],
-                ["auth", "jwt"],
+                ["jwt-expiry", "auth-middleware"],
+                "bug",
             )
 
     data = json.loads(result)
@@ -836,29 +894,41 @@ async def test_handle_save_memory_returns_saved_true(mcp_config):
 async def test_handle_save_memory_no_connection_returns_error():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        result = await _handle_save_memory("TEST-123", "some fix", [], [])
+        result = await _handle_save_memory(
+            "TEST-123",
+            "Root cause summary",
+            "Detailed problem description.",
+            "Resolution note.",
+            [],
+            ["some-tag"],
+            "bug",
+        )
 
     data = json.loads(result)
     assert "error" in data
 
 
-@respx.mock
-async def test_handle_save_memory_optional_fields_default_to_empty(mcp_config):
-    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
-        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
-    )
+async def test_handle_save_memory_pattern_used_defaults_to_empty(mcp_config):
+    """pattern_used is the only optional field - omitting it saves entry with empty string."""
     mock_mem = MagicMock()
 
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = mcp_config
         with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
-            result = await _handle_save_memory("TEST-123", "some fix", [], [])
+            result = await _handle_save_memory(
+                "TEST-123",
+                "Root cause summary",
+                "Detailed problem description.",
+                "Resolution note describing the exact change.",
+                [],
+                ["some-tag"],
+                "bug",
+            )
 
     data = json.loads(result)
     assert data["saved"] is True
     saved_entry = mock_mem.save.call_args[0][0]
-    assert saved_entry.files_changed == []
-    assert saved_entry.tags == []
+    assert saved_entry.pattern_used == ""
 
 
 # ── Profile override - CLI ────────────────────────────────────────────────────
@@ -889,6 +959,7 @@ def test_analyze_profile_flag_rejected_when_unknown():
     assert "personal" in result.output
 
 
+@pytest.mark.filterwarnings("ignore:coroutine 'run' was never awaited:RuntimeWarning")
 @respx.mock
 def test_analyze_profile_flag_passed_to_engine():
     """--profile accepted and forwarded; active profile in config unchanged after run."""
@@ -1040,12 +1111,13 @@ async def test_icx_next_instruction_contains_confirmation_block():
                 acceptance_criteria=[], impact="high", priority="High", issue_type="Bug",
                 confidence_score=0.9, completeness_score=0.9, missing_information=[],
             )
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
                 "status": "ready",
+                "path": "/projects/my-svc",
                 "report_path": "/projects/my-svc/GRAPH_REPORT.md",
                 "access": "pre-authorized",
                 "eta_seconds": None,
-            }):
+            }]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     data = json.loads(result)
@@ -1075,7 +1147,7 @@ async def test_icx_next_instruction_contains_vision_gate():
         with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
             mock_cm.load.return_value = AppConfig()
             with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-                with patch("icx_engine.mcp_server._get_graph_info", return_value=graph_info):
+                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{**graph_info, "path": "/projects/my-svc"}]):
                     result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
         data = json.loads(result)
@@ -1101,12 +1173,11 @@ async def test_handle_analyze_multi_path_response_includes_graphs():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-            with patch("icx_engine.mcp_server._get_graph_info", return_value=ready_info):
-                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, not_built_info]):
-                    result = await _handle_analyze_issue(
-                        "TEST-123",
-                        project_paths=["/projects/svc", "/projects/ui"],
-                    )
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, not_built_info]):
+                result = await _handle_analyze_issue(
+                    "TEST-123",
+                    project_paths=["/projects/svc", "/projects/ui"],
+                )
 
     data = json.loads(result)
     assert "graphs" in data
@@ -1114,7 +1185,6 @@ async def test_handle_analyze_multi_path_response_includes_graphs():
     paths_in_response = [g["path"] for g in data["graphs"]]
     assert "/projects/svc" in paths_in_response
     assert "/projects/ui" in paths_in_response
-    assert "graph" in data  # primary path still present for backward compat
 
 
 async def test_handle_analyze_single_path_no_graphs_key():
@@ -1129,12 +1199,13 @@ async def test_handle_analyze_single_path_no_graphs_key():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={"status": "not_registered", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}):
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "not_registered", "path": "/projects/my-svc", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     data = json.loads(result)
-    assert "graphs" not in data
-    assert "graph" in data
+    assert "graphs" in data
+    assert len(data["graphs"]) == 1
+    assert "graph" not in data
 
 
 async def test_handle_analyze_multi_path_icx_next_mentions_all_paths():
@@ -1152,12 +1223,11 @@ async def test_handle_analyze_multi_path_icx_next_mentions_all_paths():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-            with patch("icx_engine.mcp_server._get_graph_info", return_value=ready_info):
-                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, not_built_info]):
-                    result = await _handle_analyze_issue(
-                        "TEST-123",
-                        project_paths=["/projects/svc", "/projects/ui"],
-                    )
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, not_built_info]):
+                result = await _handle_analyze_issue(
+                    "TEST-123",
+                    project_paths=["/projects/svc", "/projects/ui"],
+                )
 
     data = json.loads(result)
     instruction = data["_icx_next"]["instruction"]
@@ -1181,12 +1251,11 @@ async def test_handle_analyze_multi_path_not_registered_suggests_graph_add():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-            with patch("icx_engine.mcp_server._get_graph_info", return_value=ready_info):
-                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, not_reg_info]):
-                    result = await _handle_analyze_issue(
-                        "TEST-123",
-                        project_paths=["/projects/svc", "/projects/ui"],
-                    )
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, not_reg_info]):
+                result = await _handle_analyze_issue(
+                    "TEST-123",
+                    project_paths=["/projects/svc", "/projects/ui"],
+                )
 
     data = json.loads(result)
     instruction = data["_icx_next"]["instruction"]
@@ -1206,10 +1275,10 @@ async def test_handle_analyze_single_path_not_registered_suggests_graph_add():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={
-                "status": "not_registered", "report_path": None,
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
+                "status": "not_registered", "path": "/projects/my-svc", "report_path": None,
                 "access": "", "report_inline": "", "eta_seconds": None,
-            }):
+            }]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     data = json.loads(result)
@@ -1233,12 +1302,11 @@ async def test_handle_analyze_multi_path_vision_gate_includes_additional_paths()
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-            with patch("icx_engine.mcp_server._get_graph_info", return_value=ready_info):
-                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, extra_info]):
-                    result = await _handle_analyze_issue(
-                        "TEST-123",
-                        project_paths=["/projects/svc", "/projects/ui"],
-                    )
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready_info, extra_info]):
+                result = await _handle_analyze_issue(
+                    "TEST-123",
+                    project_paths=["/projects/svc", "/projects/ui"],
+                )
 
     data = json.loads(result)
     instruction = data["_icx_next"]["instruction"]
@@ -1257,10 +1325,10 @@ async def test_handle_analyze_issue_passes_log_callback_to_engine():
                 acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
                 confidence_score=0.9, completeness_score=0.8, missing_information=[],
             )
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={
-                "status": "not_registered", "report_path": None,
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
+                "status": "not_registered", "path": "/projects/my-svc", "report_path": None,
                 "access": "", "report_inline": "", "eta_seconds": None,
-            }):
+            }]):
                 await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     _, kwargs = mock_run.call_args
@@ -1512,12 +1580,13 @@ async def test_non_bug_instruction_includes_convention_discovery():
                 impact="medium", priority="Medium", issue_type="Story",
                 confidence_score=0.9, completeness_score=0.9, missing_information=[],
             )
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
                 "status": "ready",
+                "path": "/projects/my-svc",
                 "report_path": "/projects/my-svc/GRAPH_REPORT.md",
                 "access": "pre-authorized",
                 "eta_seconds": None,
-            }):
+            }]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     data = json.loads(result)
@@ -1544,12 +1613,13 @@ async def test_bug_instruction_does_not_include_convention_discovery():
                 acceptance_criteria=[], impact="high", priority="High", issue_type="Bug",
                 confidence_score=0.9, completeness_score=0.9, missing_information=[],
             )
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
                 "status": "ready",
+                "path": "/projects/my-svc",
                 "report_path": "/projects/my-svc/GRAPH_REPORT.md",
                 "access": "pre-authorized",
                 "eta_seconds": None,
-            }):
+            }]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     data = json.loads(result)
@@ -1573,17 +1643,208 @@ async def test_task_instruction_includes_convention_discovery():
                 acceptance_criteria=[], impact="high", priority="High", issue_type="Task",
                 confidence_score=0.9, completeness_score=0.9, missing_information=[],
             )
-            with patch("icx_engine.mcp_server._get_graph_info", return_value={
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
                 "status": "not_built",
+                "path": "/projects/my-svc",
                 "report_path": None,
                 "access": "",
                 "report_inline": "",
                 "eta_seconds": None,
-            }):
+            }]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     data = json.loads(result)
     instruction = data["_icx_next"]["instruction"]
     assert "CONVENTION DISCOVERY" in instruction
     assert "New external dependencies required" in instruction
+
+
+# ── Session context accumulation ──────────────────────────────────────────────
+
+def _make_issue_ctx(summary: str = "p", issue_type: str = "Bug"):
+    from icx_engine.models.output import IssueContext
+    return IssueContext(
+        problem_summary=summary, detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type=issue_type,
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+
+_GRAPH_NOT_REG = {"status": "not_registered", "path": "/p", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}
+
+
+async def test_session_context_first_call_is_empty(monkeypatch):
+    """First call in a fresh session: session_context in response is empty list."""
+    import icx_engine.mcp_server as _mcp
+    monkeypatch.setattr(_mcp, "_SESSION_CONTEXT", [])
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_make_issue_ctx("Auth token expired"))):
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[_GRAPH_NOT_REG]):
+                result = await _handle_analyze_issue("PROJ-1", project_paths=["/p"])
+
+    data = json.loads(result)
+    assert "session_context" in data
+    assert data["session_context"] == []
+
+
+async def test_session_context_second_call_sees_first(monkeypatch):
+    """Second call: session_context contains the first item; instruction references it."""
+    import icx_engine.mcp_server as _mcp
+    monkeypatch.setattr(_mcp, "_SESSION_CONTEXT", [])
+
+    _graph = _GRAPH_NOT_REG
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._get_graphs_info", return_value=[_graph]):
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_make_issue_ctx("Auth token expired"))):
+                await _handle_analyze_issue("PROJ-1", project_paths=["/p"])
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_make_issue_ctx("Login page crash"))):
+                result2 = await _handle_analyze_issue("PROJ-2", project_paths=["/p"])
+
+    data = json.loads(result2)
+    assert len(data["session_context"]) == 1
+    assert data["session_context"][0]["issue_key"] == "PROJ-1"
+    assert data["session_context"][0]["issue_type"] == "Bug"
+    assert "SESSION CONTEXT" in data["_icx_next"]["instruction"]
+    assert "PROJ-1" in data["_icx_next"]["instruction"]
+
+
+async def test_session_context_capped_at_session_max(monkeypatch):
+    """Accumulating more than _SESSION_MAX items keeps only the last _SESSION_MAX."""
+    import icx_engine.mcp_server as _mcp
+    monkeypatch.setattr(_mcp, "_SESSION_CONTEXT", [])
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._get_graphs_info", return_value=[_GRAPH_NOT_REG]):
+            for i in range(_mcp._SESSION_MAX + 1):
+                with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_make_issue_ctx(f"issue {i}"))):
+                    await _handle_analyze_issue(f"PROJ-{i}", project_paths=["/p"])
+
+    assert len(_mcp._SESSION_CONTEXT) == _mcp._SESSION_MAX
+
+
+async def test_session_context_deduplicates_same_key(monkeypatch):
+    """Re-analyzing the same key removes the old entry and adds it at the end."""
+    import icx_engine.mcp_server as _mcp
+    monkeypatch.setattr(_mcp, "_SESSION_CONTEXT", [])
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._get_graphs_info", return_value=[_GRAPH_NOT_REG]):
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_make_issue_ctx("First look"))):
+                await _handle_analyze_issue("PROJ-1", project_paths=["/p"])
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_make_issue_ctx("Second look"))):
+                await _handle_analyze_issue("PROJ-2", project_paths=["/p"])
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_make_issue_ctx("Revisit"))):
+                await _handle_analyze_issue("PROJ-1", project_paths=["/p"])
+
+    # PROJ-1 should appear only once, at the end
+    keys = [e["issue_key"] for e in _mcp._SESSION_CONTEXT]
+    assert keys.count("PROJ-1") == 1
+    assert keys[-1] == "PROJ-1"
+
+
+# ── memory_search tool ────────────────────────────────────────────────────────
+
+async def test_memory_search_tool_present_in_list_tools():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    names = {t.name for t in tools}
+    assert "memory_search" in names
+
+
+async def test_memory_search_tool_has_required_inputs():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    tool = next(t for t in tools if t.name == "memory_search")
+    assert "query" in tool.inputSchema["required"]
+    assert "tags" in tool.inputSchema["required"]
+    assert "top_k" not in tool.inputSchema.get("required", [])
+
+
+async def test_call_tool_memory_search_rejects_empty_query():
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        result = await _call_tool("memory_search", {"query": "", "tags": ["jwt"]})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+async def test_call_tool_memory_search_returns_empty_when_memory_not_ready():
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server._get_memory_state", return_value="cold"):
+        result = await _call_tool("memory_search", {"query": "auth token", "tags": ["jwt"]})
+    data = json.loads(result[0].text)
+    assert data["count"] == 0
+    assert data["results"] == []
+    assert data["status"] == "cold"
+
+
+# ── memory_get_related tool ───────────────────────────────────────────────────
+
+async def test_call_tool_memory_get_related_no_params_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        result = await _call_tool("memory_get_related", {})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+async def test_call_tool_memory_get_related_files_primary_path():
+    from icx_engine.mcp_server import _call_tool
+    fake_results = [{"issue_key": "PROJ-99", "relation_type": "shares_file", "strength": 0.75}]
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._get_related_sync", return_value=fake_results):
+            result = await _call_tool("memory_get_related", {"files": ["auth/token.py"]})
+    data = json.loads(result[0].text)
+    assert data["count"] == 1
+    assert data["results"][0]["issue_key"] == "PROJ-99"
+
+
+async def test_call_tool_memory_get_related_issue_key_edge_path():
+    from icx_engine.mcp_server import _call_tool
+    fake_results = [{"issue_key": "PROJ-50", "relation_type": "shares_file", "strength": 0.9}]
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._get_related_sync", return_value=fake_results):
+            result = await _call_tool("memory_get_related", {"issue_key": "PROJ-100"})
+    data = json.loads(result[0].text)
+    assert data["count"] == 1
+    assert data["results"][0]["issue_key"] == "PROJ-50"
+
+
+def test_get_related_sync_files_fallback_when_no_edges(tmp_path):
+    """_get_related_sync falls back to file overlap when no stored edges exist."""
+    import uuid
+    import icx_engine.mcp_server as _mcp
+    from icx_engine.memory.schema import MemoryEntry
+
+    saved_entry = MemoryEntry(
+        id=str(uuid.uuid4()), issue_key="PROJ-5", project_key="PROJ",
+        source_type="jira", issue_type="Bug", summary="Auth fix",
+        problem_description="Token expired", impact="", resolution_note="fixed TTL",
+        files_changed=["auth/token.py"], resolution_confirmed=True,
+        saved_at="2026-01-01T00:00:00Z", tags=[], work_item_type="bug", pattern_used="",
+    )
+    mock_mem = MagicMock()
+    mock_mem._db_path = tmp_path
+    mock_mem.list_entries.return_value = [saved_entry]
+
+    with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+        result = _mcp._get_related_sync(None, None, ["auth/token.py"])
+
+    assert len(result) == 1
+    assert result[0]["issue_key"] == "PROJ-5"
+    assert result[0]["relation_type"] == "shares_file"
+    assert result[0]["strength"] == pytest.approx(1.0, abs=0.01)
 

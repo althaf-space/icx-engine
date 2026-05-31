@@ -8,7 +8,7 @@ from icx_engine.connectors.attachments import (
     _is_image, _is_document, _convert_csv, _convert_txt, _rows_to_markdown,
     _convert_xlsx, _VISION_PROMPT, _SUMMARIZE_SYSTEM,
     ocr_image, vision_enrich, process_attachments,
-    _convert_document, _process_image, _process_document,
+    _convert_document,
 )
 from icx_engine.connectors.jira.client import JiraClient
 from icx_engine.models.config import LLMConfig, ChannelConfig

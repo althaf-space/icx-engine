@@ -53,6 +53,7 @@ class IssueContext(BaseModel):
     pending_images: list[str] = Field(default_factory=list)
     pending_audio: list[str] = Field(default_factory=list)
     pending_documents: list[str] = Field(default_factory=list)
+    pending_unsupported: list[str] = Field(default_factory=list)
 
 
 class RawIssueResponse(BaseModel):

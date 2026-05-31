@@ -103,7 +103,12 @@ def test_tqdm_env_restored_after_download(tmp_path, monkeypatch):
         os.environ.pop("TQDM_DISABLE", None)
 
 
-def test_embed_returns_384_dim_list(tmp_path, monkeypatch):
+def test_vector_dim_constant_is_768():
+    from icx_engine.memory.embeddings import VECTOR_DIM
+    assert VECTOR_DIM == 768
+
+
+def test_embed_returns_768_dim_list(tmp_path, monkeypatch):
     from icx_engine.memory import embeddings as emb_mod
     monkeypatch.setattr(emb_mod, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(emb_mod, "SENTINEL_PATH", tmp_path / ".mem_initialized")
@@ -116,7 +121,7 @@ def test_embed_returns_384_dim_list(tmp_path, monkeypatch):
     mock_tokenizer = MagicMock()
     mock_tokenizer.encode.return_value = mock_encoding
 
-    fake_hidden = np.random.rand(1, 6, 384).astype(np.float32)
+    fake_hidden = np.random.rand(1, 6, 768).astype(np.float32)
     mock_session = MagicMock()
     mock_session.run.return_value = [fake_hidden]
     mock_session.get_inputs.return_value = []  # no token_type_ids
@@ -128,7 +133,7 @@ def test_embed_returns_384_dim_list(tmp_path, monkeypatch):
     result = mgr.embed("auth token expired")
 
     assert isinstance(result, list)
-    assert len(result) == 384
+    assert len(result) == 768
     assert isinstance(result[0], float)
 
 
@@ -145,7 +150,7 @@ def test_embed_passes_token_type_ids_when_model_expects_it(tmp_path, monkeypatch
     mock_tokenizer = MagicMock()
     mock_tokenizer.encode.return_value = mock_encoding
 
-    fake_hidden = np.random.rand(1, 3, 384).astype(np.float32)
+    fake_hidden = np.random.rand(1, 3, 768).astype(np.float32)
     mock_session = MagicMock()
     mock_session.run.return_value = [fake_hidden]
 
@@ -177,7 +182,7 @@ def test_embed_empty_string_returns_zero_vector(tmp_path, monkeypatch):
     result = mgr.embed("")
 
     assert isinstance(result, list)
-    assert len(result) == 384
+    assert len(result) == 768
     assert all(v == 0.0 for v in result)
 
 
@@ -190,5 +195,5 @@ def test_embed_whitespace_only_returns_zero_vector(tmp_path, monkeypatch):
     mgr = emb_mod.EmbeddingsManager()
     result = mgr.embed("   ")
 
-    assert len(result) == 384
+    assert len(result) == 768
     assert all(v == 0.0 for v in result)

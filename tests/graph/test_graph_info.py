@@ -156,6 +156,7 @@ def test_paths_check_staleness_git_timeout_returns_freshness_unknown(tmp_path):
     project_dir.mkdir()
     pid = derive_project_id(project_dir)
 
+    storage.graph_path(pid).parent.mkdir(parents=True, exist_ok=True)
     storage.graph_path(pid).write_text("{}", encoding="utf-8")
     storage.write_manifest(
         project_id=pid,
