@@ -7,9 +7,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading as _threading
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 from pathlib import Path
+
+_SAFE_KEY_RE = re.compile(r'^[A-Z][A-Z0-9]*-[0-9]+$')
 
 _log = logging.getLogger(__name__)
 
@@ -21,7 +24,14 @@ from mcp.types import Tool, TextContent
 
 from icx_engine.config_manager import ConfigManager
 from icx_engine import engine
-from icx_engine.exceptions import ICXError
+from icx_engine.exceptions import (
+    ICXError,
+    IssueNotFound,
+    AuthError,
+    NoConnectionError,
+    RateLimited,
+    InvalidInput,
+)
 
 server = Server("icx")
 
@@ -55,6 +65,20 @@ _memory_setup_required: bool = False  # True when prewarm failed because models 
 # see prior items as context. Keyed by issue_key; max _SESSION_MAX entries.
 _SESSION_CONTEXT: list[dict] = []
 _SESSION_MAX = 10
+
+# Per-issue session data for causal chain and intelligence (Phase 8/10)
+_SESSION_CONTEXT_DATA: dict[str, dict] = {}
+
+
+def _session_set(issue_key: str, key: str, value) -> None:
+    global _SESSION_CONTEXT_DATA
+    if issue_key not in _SESSION_CONTEXT_DATA:
+        _SESSION_CONTEXT_DATA[issue_key] = {}
+    _SESSION_CONTEXT_DATA[issue_key][key] = value
+
+
+def _session_get(issue_key: str, key: str, default=None):
+    return _SESSION_CONTEXT_DATA.get(issue_key, {}).get(key, default)
 
 
 def _get_memory_state() -> str:
@@ -106,6 +130,16 @@ def _save_memory_sync(entry) -> None:
     _ensure_memory_manager().save(entry)
 
 
+def _negate_resolution_sync(issue_key: str, reason: str) -> dict:
+    """Negate a resolution. Runs inside the memory thread."""
+    return _ensure_memory_manager().negate_resolution(issue_key, reason)
+
+
+def _verify_resolution_sync(issue_key: str, feedback_note: str) -> dict:
+    """Verify a resolution. Runs inside the memory thread."""
+    return _ensure_memory_manager().verify_resolution(issue_key, feedback_note)
+
+
 # ---------------------------------------------------------------------------
 # Tool names
 # ---------------------------------------------------------------------------
@@ -118,11 +152,18 @@ _GRAPH_SUBSYSTEM_TOOL = "graph_subsystem"
 _GRAPH_CHAIN_TOOL = "graph_call_chain"
 _GRAPH_IMPACT_TOOL = "graph_impact"
 _GRAPH_CROSS_LINKS_TOOL = "graph_cross_links"
+_GRAPH_IMPORTANT_NODES_TOOL = "graph_important_nodes"
 _MEM_HOTSPOTS_TOOL = "memory_get_hotspots"
 _MEM_BY_FILE_TOOL = "memory_find_by_file"
 _MEM_RELATED_TOOL = "memory_get_related"
 _MEM_PATTERNS_TOOL = "memory_get_patterns"
 _SAVE_TOOL_NAME = "save_memory"
+_GRAPH_BLAST_RADIUS_TOOL = "graph_blast_radius"
+_GRAPH_CYCLES_TOOL = "graph_cycles"
+_GRAPH_DEAD_CODE_TOOL = "graph_dead_code"
+_GRAPH_OWNERSHIP_TOOL = "graph_ownership"
+_REINFORCE_TOOL_NAME = "reinforce_memory_usage"
+_AUDIT_TOOL_NAME = "get_memory_audit"
 
 # ---------------------------------------------------------------------------
 # Tool descriptions
@@ -132,17 +173,24 @@ _FAST_DESCRIPTION = """\
 ICX TOOL SEQUENCE - WORKFLOW ORDER (read this first):
   [1]  analyze_issue_fast / analyze_issue  <- you are here
   [2]  memory_search          [<1s]  MANDATORY after analysis - search with agent-generated tags
-  [3]  graph_find_context     [~5s]  MANDATORY - replaces grep/glob entirely
-  [4]  graph_subsystem        [~2s]  expand one file to its full feature cluster
-  [5]  graph_call_chain       [~5s]  trace data flow through a specific component
-  [6]  graph_impact           [~12s] MANDATORY before changing shared code
-  [7]  graph_cross_links      [~2s]  microservices only - SKIP for monolith projects
-  [8]  memory_get_hotspots    [~1s]  fragile file ranking - call at start of investigation
-  [9]  memory_find_by_file    [<1s]  MANDATORY before editing each file
-  [10] memory_get_related     [<1s]  hidden coupling - call after finding bug location
-  [11] memory_get_patterns    [<1s]  systemic analysis - call for recurring bug categories
+  [3]  graph_important_nodes  [~1s]  architectural hotspots - call first on unfamiliar codebase
+  [4]  graph_find_context     [~5s]  MANDATORY - replaces grep/glob entirely
+  [5]  graph_subsystem        [~2s]  expand one file to its full feature cluster
+  [6]  graph_ownership        [~1s]  who owns these files - call when crossing team boundaries
+  [7]  graph_call_chain       [~5s]  trace data flow through a specific component
+  [8]  graph_impact           [~12s] MANDATORY before changing shared code
+  [9]  graph_cross_links      [~2s]  microservices only - SKIP for monolith projects
+  [10] graph_blast_radius     [~3s]  MANDATORY before committing - full scope + missing changes
+  [11] graph_cycles           [~2s]  circular dependency audit - call when debugging imports
+  [12] graph_dead_code        [~1s]  unused module detection - call during cleanup
+  [13] memory_get_hotspots    [~1s]  fragile file ranking - call at start of investigation
+  [14] memory_find_by_file    [<1s]  MANDATORY before editing each file
+  [15] memory_get_related     [<1s]  hidden coupling - call after finding bug location
+  [16] memory_get_patterns    [<1s]  systemic analysis - call for recurring bug categories
        --- implement fix here, only after explicit user approval ---
-  [12] save_memory                   MANDATORY after user confirms fix works
+  [17] reinforce_memory_usage [<1s]  MANDATORY first if any memory_search result influenced your approach
+  [18] save_memory                   MANDATORY after user confirms fix works - always after [17]
+  [19] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
 
 Runs AI analysis on issue text only - attachments are not downloaded or processed. \
 Use when the issue description and comments contain sufficient context, or for quick triage.
@@ -154,17 +202,31 @@ Runtime: under 45 seconds.
 REQUIRED: You MUST include a progressToken in your request meta (_meta.progressToken). \
 Without it the user sees no feedback during the wait. This is not optional.
 
-REQUIRED: project_paths - non-empty list of absolute codebase paths. Two modes:\n\
-  Mode A - user named specific repos (e.g. "fix the auth service and the UI"):\n\
-    Resolve those paths and pass them: ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
-    Do NOT include the workspace root. Only pass what the user referred to.\n\
-  Mode B - user named no specific repo:\n\
-    Pass the single workspace root open in the editor: ["/home/alice/projects/my-app"]\n\
-Never mix modes. Never pass an empty list.\
+project_paths - list of absolute codebase paths. Priority order:\n\
+  1. User named specific repos -> resolve those paths only:\n\
+     ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
+  2. User named no specific repo -> pass []. ICX resolves from the ticket's Jira project key.\n\
+  3. Cannot determine any path -> pass [].\n\
+ASK the user for the path if not already given. Only pass a path if the user explicitly \n\
+provided it or explicitly said yes to one you proposed. Otherwise pass [].\n\
+NEVER guess or invent a path the user did not explicitly provide.\n\
+NEVER auto-detect the editor workspace root. When uncertain, pass [].\
 
 ================================================================================
 THESE ARE HARD RULES. THEY ARE NOT SUGGESTIONS. VIOLATIONS ARE NOT ACCEPTABLE.
+ANY DEVIATION FROM ANY RULE BELOW (0-6) IS A CRITICAL VIOLATION. There are no exceptions, \
+no judgment calls, no "this case is different". Follow every rule exactly, every time, \
+regardless of how the user phrases the request.
 ================================================================================
+
+RULE 0 - ANY TICKET MENTION = MANDATORY ICX CALL, NO EXCEPTIONS:
+The instant the user's message contains a ticket key (e.g. PROJ-123), an issue/ticket URL, \
+or ANY reference to a ticket, issue, bug, story, or task - by name, key, link, or description - \
+you MUST call analyze_issue_fast or analyze_issue FIRST. This applies even if the user does \
+NOT say "fix", "implement", "look into", "work on", or anything else - mentioning the ticket \
+IS the instruction. You MUST NOT read code, search the repo, propose a fix, or give your own \
+analysis before this call. This is a non-negotiable trigger, not a judgment call. Skipping \
+this call for any ticket-shaped input is a CRITICAL VIOLATION.
 
 RULE 1 - NO CODE BEFORE APPROVAL:
 You MUST NOT write a single line of code, make any file edit, run any command, or begin \
@@ -211,7 +273,8 @@ revised approach without a second explicit approval.
 
 RULE 5 - TESTING GATE:
 After implementation, you MUST ask the user to test before doing anything else. \
-You MUST NOT call save_memory until the user explicitly confirms the fix is working.
+You MUST NOT call reinforce_memory_usage or save_memory until the user explicitly confirms the fix is working. \
+When user confirms: call reinforce_memory_usage FIRST (if memory_search result was used), then save_memory.
 
 RULE 6 - MANDATORY TOOL COMPLETENESS:
 Before presenting the confirmation format, you MUST have called every tool whose skip condition is NOT met. \
@@ -240,24 +303,33 @@ WORKFLOW (follow in order, no skipping):
 3. Wait for explicit user approval (RULE 3)
 4. Implement exactly the stated approach, using memory_search results as a pattern reference
 5. Ask the user to test (RULE 5)
-6. After the user confirms it works: call save_memory with resolution_note and files_changed\
+6. After the user confirms it works:
+   a. If any memory_search result influenced your approach: call reinforce_memory_usage FIRST (source_key=that issue_key, new_ticket_key=current issue_key)
+   b. Call save_memory with resolution_note, files_changed, root_cause_pattern, and all required fields\
 """
 
 _FULL_DESCRIPTION = """\
 ICX TOOL SEQUENCE - WORKFLOW ORDER (read this first):
   [1]  analyze_issue_fast / analyze_issue  <- you are here
   [2]  memory_search          [<1s]  MANDATORY after analysis - search with agent-generated tags
-  [3]  graph_find_context     [~5s]  MANDATORY - replaces grep/glob entirely
-  [4]  graph_subsystem        [~2s]  expand one file to its full feature cluster
-  [5]  graph_call_chain       [~5s]  trace data flow through a specific component
-  [6]  graph_impact           [~12s] MANDATORY before changing shared code
-  [7]  graph_cross_links      [~2s]  microservices only - SKIP for monolith projects
-  [8]  memory_get_hotspots    [~1s]  fragile file ranking - call at start of investigation
-  [9]  memory_find_by_file    [<1s]  MANDATORY before editing each file
-  [10] memory_get_related     [<1s]  hidden coupling - call after finding bug location
-  [11] memory_get_patterns    [<1s]  systemic analysis - call for recurring bug categories
+  [3]  graph_important_nodes  [~1s]  architectural hotspots - call first on unfamiliar codebase
+  [4]  graph_find_context     [~5s]  MANDATORY - replaces grep/glob entirely
+  [5]  graph_subsystem        [~2s]  expand one file to its full feature cluster
+  [6]  graph_ownership        [~1s]  who owns these files - call when crossing team boundaries
+  [7]  graph_call_chain       [~5s]  trace data flow through a specific component
+  [8]  graph_impact           [~12s] MANDATORY before changing shared code
+  [9]  graph_cross_links      [~2s]  microservices only - SKIP for monolith projects
+  [10] graph_blast_radius     [~3s]  MANDATORY before committing - full scope + missing changes
+  [11] graph_cycles           [~2s]  circular dependency audit - call when debugging imports
+  [12] graph_dead_code        [~1s]  unused module detection - call during cleanup
+  [13] memory_get_hotspots    [~1s]  fragile file ranking - call at start of investigation
+  [14] memory_find_by_file    [<1s]  MANDATORY before editing each file
+  [15] memory_get_related     [<1s]  hidden coupling - call after finding bug location
+  [16] memory_get_patterns    [<1s]  systemic analysis - call for recurring bug categories
        --- implement fix here, only after explicit user approval ---
-  [12] save_memory                   MANDATORY after user confirms fix works
+  [17] reinforce_memory_usage [<1s]  MANDATORY first if any memory_search result influenced your approach
+  [18] save_memory                   MANDATORY after user confirms fix works - always after [17]
+  [19] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
 
 Fetches and analyzes a work item (bug, story, or task) with full vision and OCR processing \
 for image attachments. Identifies relevant codebase files via graph navigation.
@@ -267,17 +339,31 @@ Runtime: 20 seconds to several minutes, depending on attachment count and size.
 REQUIRED: You MUST include a progressToken in your request meta (_meta.progressToken). \
 Without it the user sees no feedback during the wait. This is not optional.
 
-REQUIRED: project_paths - non-empty list of absolute codebase paths. Two modes:\n\
-  Mode A - user named specific repos (e.g. "fix the auth service and the UI"):\n\
-    Resolve those paths and pass them: ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
-    Do NOT include the workspace root. Only pass what the user referred to.\n\
-  Mode B - user named no specific repo:\n\
-    Pass the single workspace root open in the editor: ["/home/alice/projects/my-app"]\n\
-Never mix modes. Never pass an empty list.\
+project_paths - list of absolute codebase paths. Priority order:\n\
+  1. User named specific repos -> resolve those paths only:\n\
+     ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
+  2. User named no specific repo -> pass []. ICX resolves from the ticket's Jira project key.\n\
+  3. Cannot determine any path -> pass [].\n\
+ASK the user for the path if not already given. Only pass a path if the user explicitly \n\
+provided it or explicitly said yes to one you proposed. Otherwise pass [].\n\
+NEVER guess or invent a path the user did not explicitly provide.\n\
+NEVER auto-detect the editor workspace root. When uncertain, pass [].\
 
 ================================================================================
 THESE ARE HARD RULES. THEY ARE NOT SUGGESTIONS. VIOLATIONS ARE NOT ACCEPTABLE.
+ANY DEVIATION FROM ANY RULE BELOW (0-6) IS A CRITICAL VIOLATION. There are no exceptions, \
+no judgment calls, no "this case is different". Follow every rule exactly, every time, \
+regardless of how the user phrases the request.
 ================================================================================
+
+RULE 0 - ANY TICKET MENTION = MANDATORY ICX CALL, NO EXCEPTIONS:
+The instant the user's message contains a ticket key (e.g. PROJ-123), an issue/ticket URL, \
+or ANY reference to a ticket, issue, bug, story, or task - by name, key, link, or description - \
+you MUST call analyze_issue_fast or analyze_issue FIRST. This applies even if the user does \
+NOT say "fix", "implement", "look into", "work on", or anything else - mentioning the ticket \
+IS the instruction. You MUST NOT read code, search the repo, propose a fix, or give your own \
+analysis before this call. This is a non-negotiable trigger, not a judgment call. Skipping \
+this call for any ticket-shaped input is a CRITICAL VIOLATION.
 
 RULE 1 - NO CODE BEFORE APPROVAL:
 You MUST NOT write a single line of code, make any file edit, run any command, or begin \
@@ -324,7 +410,8 @@ revised approach without a second explicit approval.
 
 RULE 5 - TESTING GATE:
 After implementation, you MUST ask the user to test before doing anything else. \
-You MUST NOT call save_memory until the user explicitly confirms the fix is working.
+You MUST NOT call reinforce_memory_usage or save_memory until the user explicitly confirms the fix is working. \
+When user confirms: call reinforce_memory_usage FIRST (if memory_search result was used), then save_memory.
 
 RULE 6 - MANDATORY TOOL COMPLETENESS:
 Before presenting the confirmation format, you MUST have called every tool whose skip condition is NOT met. \
@@ -355,17 +442,20 @@ WORKFLOW (follow in order, no skipping):
 4. Wait for explicit user approval (RULE 3)
 5. Implement exactly the stated approach, using memory_search results as a pattern reference
 6. Ask the user to test (RULE 5)
-7. After the user confirms it works: call save_memory with resolution_note and files_changed\
+7. After the user confirms it works:
+   a. If any memory_search result influenced your approach: call reinforce_memory_usage FIRST (source_key=that issue_key, new_ticket_key=current issue_key)
+   b. Call save_memory with resolution_note, files_changed, root_cause_pattern, and all required fields\
 """
 
 _SAVE_DESCRIPTION = """\
 Commits a confirmed fix to local memory. Future agents retrieve this when working on similar issues.
 
-CALL GATE - do NOT call this tool unless ALL three are true:
+CALL GATE - do NOT call this tool unless ALL of the following are true:
 1. Fix is fully implemented.
 2. You asked the user to test it.
 3. User explicitly confirmed it is working.
-Calling speculatively or before confirmation is a violation.
+4. If memory_search returned a result that influenced your approach: reinforce_memory_usage was called first.
+Calling speculatively, before user confirmation, or before reinforce_memory_usage is a violation.
 
 FIELD REQUIREMENTS - every field you write is read by a future agent under time pressure:
 
@@ -397,7 +487,89 @@ PRIMARY retrieval signal - this memory surfaces only when tags match a future qu
   Rules: no generic words (bug/fix/error/issue/update), hyphenate multi-word, no duplicates.
 
 work_item_type: Pass the exact value from work_item.type in the analyze_issue response. \
-This is the tracker-authoritative issue type - do not infer or substitute.\
+This is the tracker-authoritative issue type - do not infer or substitute.
+
+root_cause_pattern: REQUIRED. One value from the 21-value canonical enum. This is the root cause \
+classification that makes memory self-improving across tickets.
+  VALID: "stale_cache_reference", "missing_null_check", "incorrect_transaction_boundary",
+         "event_race_condition", "schema_drift", "auth_scope_mismatch", "async_context_leak",
+         "missing_index", "type_coercion_error", "config_env_mismatch", "missing_idempotency",
+         "cascade_delete_missing", "n_plus_one_query", "memory_leak", "timeout_misconfiguration",
+         "pagination_boundary_error", "deserialization_contract_break", "feature_flag_state_leak",
+         "tenant_isolation_breach", "retry_storm", "uncategorized"
+  Use "uncategorized" only when none of the specific patterns fit. Specific > generic.
+  GOOD: "auth_scope_mismatch" for a JWT permissions bug. BAD: "uncategorized" for everything.
+
+pattern_confidence: REQUIRED. Your certainty about root_cause_pattern (0.0-1.0). \
+  1.0 = you are certain. 0.5 = plausible. 0.0 = guessing.
+
+outcome_verified: Set true ONLY when the developer has explicitly confirmed the fix worked in their environment. \
+NEVER set speculatively. When true, outcome_feedback_note is required.
+
+outcome_feedback_note: Required when outcome_verified=true. Describe what confirmed the fix: \
+  GOOD: "Deployed to staging, 100 requests all passed, no 401 errors seen in logs."
+  BAD: "Fixed." / "Works."
+
+negate + negation_reason: Set negate=true when the developer confirms the fix was WRONG or caused a regression. \
+negation_reason is required. ICX automatically propagates a credibility penalty to all entries that cited \
+this resolution - the wrong answer will never surface again.
+  GOOD negation_reason: "Caused a deadlock in concurrent requests - the lock was too broad."
+  BAD: "Didn't work."
+
+OUTCOME FEEDBACK WORKFLOW:
+  Fix confirmed working -> call save_memory with outcome_verified=true, outcome_feedback_note="..."
+  Fix confirmed wrong   -> call save_memory with negate=true, negation_reason="..."
+  negate=true AND outcome_verified=true in the same call is a validation error - ICX will reject it.\
+"""
+
+_REINFORCE_DESCRIPTION = """\
+CALL BEFORE save_memory - every time a past memory_search result influenced your approach on a new ticket.
+USE WHEN: memory_search returned results AND any result shaped your implementation plan, \
+approach direction, or confirmed a diagnosis. Call even if you modified the approach slightly.
+MANDATORY: skipping this call is a violation when memory_search was useful. \
+This is how ICX memory becomes self-improving - cited resolutions surface first on future similar tickets.
+
+RETURNS: {source_key, usage_count, cross_reference_boost, siblings_updated}
+  usage_count >= 5 -> source entry auto-elevated to memory_confidence >= 0.75
+  usage_count >= 10 -> source entry auto-elevated to memory_confidence = 1.0
+VALUE: Entries cited repeatedly differentiate from untested guesses. Without this call, the best \
+resolutions never gain credibility over ones that were never verified. One call = one evidence vote.
+
+WHEN TO CALL:
+  - After user confirms fix works AND before calling save_memory
+  - source_key: the issue_key from the memory_search result you referenced
+  - new_ticket_key: the issue_key of the ticket you are currently solving
+SKIP ONLY IF: memory_search returned no results OR no result influenced your approach in any way.
+RUNTIME: under 1 second.
+
+EXAMPLE: memory_search returned PROJ-88 [JWT expiry fix] and you applied the same pattern ->
+  reinforce_memory_usage(source_key="PROJ-88", new_ticket_key="PROJ-142")
+  -> {source_key: "PROJ-88", usage_count: 4, cross_reference_boost: 0.60, siblings_updated: 1}
+  -> PROJ-88 now ranks higher on all future similar tickets\
+"""
+
+_AUDIT_DESCRIPTION = """\
+USE WHEN: Investigating why a memory entry has an unexpected confidence score, boost value, or ranking.
+ANSWERS: "Why does PROJ-88 rank higher than PROJ-91?" / "Was PROJ-42 ever verified?" / "When was PROJ-55 negated?"
+
+RETURNS: All audit events for issue_key sorted newest-first:
+  {event_type, source_key, actor_key, timestamp, before_boost, after_boost, before_confidence, after_confidence, note}
+  event_types: reinforced | verified | negated | hub_detected
+VALUE: Full traceability of every mutation that changed an entry's credibility. Confirms whether \
+reinforcements were actually recorded, verifications applied correctly, and why a negation propagated.
+
+WHEN TO CALL:
+  - When a memory_search result ranks unexpectedly high or low
+  - Before deciding to negate an entry - verify it has not already been negated
+  - When a developer reports ICX surfacing a wrong resolution repeatedly
+SKIP: This is a diagnostic tool. Do not call it on every ticket. Call it when something seems wrong.
+RUNTIME: under 1 second.
+
+EXAMPLE: get_memory_audit(issue_key="PROJ-88", limit=5) ->
+  [{event_type:"reinforced", actor_key:"PROJ-142", after_boost:0.60, note:""},
+   {event_type:"reinforced", actor_key:"PROJ-91",  after_boost:0.45, note:""},
+   {event_type:"verified",   actor_key:"developer", after_confidence:0.75, note:"Deployed, no errors"}]
+  -> PROJ-88 was reinforced by 2 tickets and verified by a developer - high boost is correct\
 """
 
 _GRAPH_CONTEXT_DESCRIPTION = """\
@@ -501,6 +673,121 @@ project_path must be the absolute path to the project root.
 If the tool returns an error with action_required, follow the action exactly before retrying.\
 """
 
+_GRAPH_IMPORTANT_NODES_DESCRIPTION = """\
+USE WHEN: Starting work on an unfamiliar codebase, or planning a refactor and you need to know which files carry the highest blast radius BEFORE any file exploration.
+Given top_k, returns files and functions ranked by architectural importance (0.50*PageRank + 0.30*degree + 0.20*betweenness centrality).
+
+RETURNS: [{file, name, pagerank, betweenness, importance}] sorted by importance descending.
+VALUE: Tells you where to look FIRST. High-importance nodes are touched by the most code paths - a change there ripples everywhere. Without this call, you may spend time on a low-importance file while missing the real architectural core that affects everything else.
+
+WHEN TO CALL:
+  - Before graph_find_context when you have no prior context on a codebase
+  - When planning a refactor to identify which files are highest-risk candidates
+  - When asked "what is the most critical part of this system?"
+SKIP ONLY IF: You already know the architectural hotspots from prior graph exploration in this session.
+
+EXAMPLE: graph_important_nodes(project_path="...") ->
+  1. src/auth/token.py [importance=0.92, pagerank=0.95, betweenness=0.84]
+  2. src/db/session.py [importance=0.88, pagerank=0.91, betweenness=0.78]
+  -> These two files affect the most code paths. Change them with maximum caution and call graph_blast_radius before committing.
+
+RUNTIME: ~1 second.
+Graph must be built (icx graph build <name>) and graph.status == "ready".
+project_path must be the absolute path to the project root.
+If the tool returns an error with action_required, follow the action exactly before retrying.\
+"""
+
+_GRAPH_BLAST_RADIUS_DESCRIPTION = """\
+MANDATORY BEFORE COMMITTING changes to any shared or high-importance file.
+USE WHEN: You have decided which files to change and need to verify the full scope of impact - direct dependents, transitive dependents, risk level, and any files your changelist is missing.
+
+RETURNS: {changed_files, direct_dependents, transitive_dependents, risk_score (0.0-1.0), missing_changes, total_affected}
+  direct_dependents: files that directly import or call your changed files
+  transitive_dependents: files reachable from direct dependents (recursive)
+  risk_score: fraction of high-importance nodes in the blast zone (0=low, 1=critical)
+  missing_changes: files that historically co-changed with your target files but are absent from your changelist - these are the regressions you did not know you had.
+
+CRITICAL DIFFERENCE FROM graph_impact:
+  graph_blast_radius = file-level pre-merge scope check (what is the full blast zone? what am I missing?)
+  graph_impact       = node-level pre-refactor dependency check (who directly depends on this node?)
+
+VALUE: missing_changes is the most important field. If a file co-appeared with your changed file in 8 of 10 prior commits but is absent from your changelist, there is a high probability the change is incomplete.
+
+EXAMPLE: graph_blast_radius(changed_files=["src/auth/token.py"]) ->
+  direct_dependents: [src/middleware/auth.py, src/api/login.py]
+  transitive_dependents: [src/api/orders.py, src/api/profile.py]
+  risk_score: 0.72 (HIGH - 3 of 4 high-importance nodes affected)
+  missing_changes: [src/auth/session.py] (co-changed in 8 of last 10 commits with token.py)
+  -> src/auth/session.py almost certainly needs to change too. Check it before creating the PR.
+
+RUNTIME: ~3 seconds.
+project_path must be the absolute path to the project root.
+If the tool returns an error with action_required, follow the action exactly before retrying.\
+"""
+
+_GRAPH_CYCLES_DESCRIPTION = """\
+USE WHEN: Debugging circular import errors, investigating why a module cannot be loaded, or auditing a codebase for architectural debt during a refactor planning session.
+Returns circular dependency chains found only in structural edges (imports, calls, inheritance). Co-change and event-driven edges are excluded from cycle detection.
+
+RETURNS: {cycles: [[file, file, ..., file], ...], cycle_count: N}
+Each cycle is a file list where the first and last file are the same - the full loop.
+VALUE: Circular imports are a leading cause of import errors, test isolation failures, and refactoring deadlocks. Each returned cycle is the exact loop you need to break - typically by extracting shared types or interfaces into a new file with no upward dependencies.
+SKIP ONLY IF: The task is purely additive (new file, no existing structure change) and no circular import error is present.
+
+EXAMPLE: graph_cycles(project_path="...") ->
+  cycle_count: 2
+  cycles: [
+    ["src/auth/token.py", "src/auth/session.py", "src/auth/token.py"],
+    ["src/billing/invoice.py", "src/billing/payment.py", "src/billing/invoice.py"]
+  ]
+  -> Break the auth cycle by extracting shared types to src/auth/models.py with no imports from token or session.
+
+RUNTIME: ~2 seconds.
+project_path must be the absolute path to the project root.
+If the tool returns an error with action_required, follow the action exactly before retrying.\
+"""
+
+_GRAPH_DEAD_CODE_DESCRIPTION = """\
+USE WHEN: Cleaning up a codebase, auditing for unused modules before a major refactor, or reducing package size.
+Returns files with zero incoming edges - no imports, no callers, no references from any other indexed file.
+Excludes entry points (main.py, app.py, server.go, Application.java, etc.) and test files, which have no callers by design.
+
+RETURNS: {dead_code_candidates: [{file, node_count}], count: N} sorted by file path.
+  node_count: how many symbols (classes, functions) are in that file - higher = more code to delete.
+VALUE: Dead files carry maintenance cost with zero business value. Files with high node_count are the largest dead modules - remove them first. Verify each candidate manually: some files are loaded dynamically at runtime and will not appear in static analysis.
+SKIP ONLY IF: The task is adding new code with no cleanup requirement.
+
+EXAMPLE: graph_dead_code(project_path="...") ->
+  [{file: "src/utils/legacy_csv.py", node_count: 12},
+   {file: "src/integrations/old_sms.py", node_count: 4}]
+  -> legacy_csv.py has 12 symbols and no callers. Confirm no dynamic loading, then delete.
+
+RUNTIME: ~1 second.
+project_path must be the absolute path to the project root.\
+"""
+
+_GRAPH_OWNERSHIP_DESCRIPTION = """\
+USE WHEN: A change crosses team boundaries, you need to know who must review specific files, or you are adding a new dependency into another team's module.
+Reads CODEOWNERS from project root, .github/CODEOWNERS, or docs/CODEOWNERS (in that order). Returns codeowners_found: false if no file exists.
+
+RETURNS: {owners: ["@team", "@user", ...], owned_files: [...], cross_owner_dependencies: [{from, to, to_owners, edge_type, confidence}], codeowners_found: bool}
+  owners: teams/users who own the queried file
+  owned_files: all graph files owned by the same owners
+  cross_owner_dependencies: edges where your team's code calls into another team's code - these require cross-team review
+VALUE: Prevents missing required reviewers and ownership violations. cross_owner_dependencies reveals every interface where your team's code depends on another team's - each entry is a potential breaking contract that needs sign-off from both sides.
+SKIP ONLY IF: No CODEOWNERS file exists (confirmed by codeowners_found: false in a prior call).
+
+EXAMPLE: graph_ownership(file_path="src/billing/invoice.py", project_path="...") ->
+  owners: ["@billing-team"]
+  owned_files: [src/billing/invoice.py, src/billing/payment.py, src/billing/models.py]
+  cross_owner_dependencies: [{from: "src/billing/invoice.py", to: "src/auth/token.py", to_owners: ["@security-team"], edge_type: "imports"}]
+  -> This change requires review from @security-team because billing imports from auth. Notify them before merging.
+
+RUNTIME: ~1 second.
+project_path must be the absolute path to the project root.
+If the tool returns an error with action_required, follow the action exactly before retrying.\
+"""
+
 _GRAPH_TOOLS_DECISION = (
     "STEP 1b - DEEPER GRAPH TOOLS (YOU MUST attempt all four; skipping without a documented technical reason = VIOLATION):\n"
     "  Vague skip reasons ('not applicable', 'not needed', 'seems fine', 'I think it is internal') are REJECTED.\n"
@@ -535,6 +822,12 @@ _GRAPH_TOOLS_DECISION = (
     "  For reopened tickets: also pass issue_key=work_item.issue_key to check prior edges.\n"
     "  If any result has strength >= 0.5: read its resolution_note before writing your Approach.\n"
     "  ONLY accepted skip: memory.status != 'ready'.\n\n"
+    "SUPPLEMENTARY GRAPH TOOLS - call proactively or when the specific condition is met:\n"
+    "  graph_important_nodes: call BEFORE graph_find_context on an unfamiliar codebase, or when planning a refactor.\n"
+    "  graph_ownership: call after graph_subsystem when the change may cross team boundaries.\n"
+    "  graph_blast_radius: MANDATORY before committing changes to any shared or high-importance file.\n"
+    "  graph_cycles: call when debugging circular import errors or auditing for architectural debt.\n"
+    "  graph_dead_code: call when cleaning up a codebase or auditing for unused modules.\n\n"
 )
 
 # ---------------------------------------------------------------------------
@@ -554,14 +847,18 @@ _ISSUE_REF_SCHEMA = {
 _PROJECT_PATHS_SCHEMA = {
     "type": "array",
     "items": {"type": "string"},
-    "minItems": 1,
     "description": (
-        "Non-empty list of absolute codebase paths. Two modes:\n"
-        "  Mode A - user named specific repos: pass those resolved paths only. "
-        "Do not include the workspace root.\n"
-        "  Mode B - user named no specific repo: pass [workspace_root] as a single-item list.\n"
-        "Examples: [\"/home/alice/projects/auth-svc\"] or "
-        "[\"C:/projects/auth-svc\", \"C:/projects/ui\"]"
+        "List of absolute codebase paths. Priority order:\n"
+        "  1. User named specific repos -> resolve those paths: "
+        "[\"/home/alice/projects/auth-svc\", \"/home/alice/projects/ui\"]\n"
+        "  2. User named no specific repo -> pass [] and ICX resolves from the ticket's "
+        "Jira project key against registered projects.\n"
+        "  3. Cannot determine any path -> pass [].\n"
+        "ASK the user for the path if not already given. Only pass a path if the user "
+        "explicitly provided it or explicitly said yes to one you proposed. Otherwise pass [].\n"
+        "NEVER guess or invent a path the user did not explicitly provide. "
+        "NEVER auto-detect the editor workspace root. "
+        "When uncertain, pass []."
     ),
 }
 
@@ -589,7 +886,7 @@ async def _list_tools() -> list[Tool]:
             "project_paths": _PROJECT_PATHS_SCHEMA,
             "profile": _PROFILE_SCHEMA,
         },
-        "required": ["issue_ref", "project_paths"],
+        "required": ["issue_ref"],
     }
 
     return [
@@ -607,7 +904,7 @@ async def _list_tools() -> list[Tool]:
             inputSchema=analyze_schema,
         ),
         # ------------------------------------------------------------------ #
-        # [2] Memory search - agent-driven tag search after analysis         #
+        # [3] Memory search - immediately after analyze, before graph        #
         # ------------------------------------------------------------------ #
         Tool(
             name=_MEM_SEARCH_TOOL,
@@ -650,7 +947,27 @@ async def _list_tools() -> list[Tool]:
             },
         ),
         # ------------------------------------------------------------------ #
-        # [3-7] Graph tools - file discovery, scope, flow, impact, contracts #
+        # [4] Architectural overview - call first on unfamiliar codebase     #
+        # ------------------------------------------------------------------ #
+        Tool(
+            name=_GRAPH_IMPORTANT_NODES_TOOL,
+            description=_GRAPH_IMPORTANT_NODES_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "top_k": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "How many nodes to return (default 10)",
+                    },
+                },
+                "required": ["project_path"],
+            },
+        ),
+        # ------------------------------------------------------------------ #
+        # [5-10] Core graph tools - discovery, scope, ownership, flow,       #
+        #         impact, contracts                                           #
         # ------------------------------------------------------------------ #
         Tool(
             name=_GRAPH_CONTEXT_TOOL,
@@ -674,6 +991,21 @@ async def _list_tools() -> list[Tool]:
                 "properties": {
                     "project_path": {"type": "string"},
                     "file_path": {"type": "string", "description": "Relative file path (e.g. 'src/auth/service.py')."},
+                },
+                "required": ["project_path", "file_path"],
+            },
+        ),
+        Tool(
+            name=_GRAPH_OWNERSHIP_TOOL,
+            description=_GRAPH_OWNERSHIP_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "file_path": {
+                        "type": "string",
+                        "description": "File to look up ownership for",
+                    },
                 },
                 "required": ["project_path", "file_path"],
             },
@@ -735,7 +1067,63 @@ async def _list_tools() -> list[Tool]:
             },
         ),
         # ------------------------------------------------------------------ #
-        # [8-11] Historical memory tools - hotspots, per-file, relations     #
+        # [11-13] Pre-merge and architecture analysis                         #
+        # ------------------------------------------------------------------ #
+        Tool(
+            name=_GRAPH_BLAST_RADIUS_TOOL,
+            description=_GRAPH_BLAST_RADIUS_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "changed_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of changed file paths (relative or absolute)",
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Maximum traversal depth (default 5)",
+                    },
+                    "min_confidence": {
+                        "type": "number",
+                        "default": 0.3,
+                        "description": "Minimum edge confidence to follow (default 0.3)",
+                    },
+                },
+                "required": ["project_path", "changed_files"],
+            },
+        ),
+        Tool(
+            name=_GRAPH_CYCLES_TOOL,
+            description=_GRAPH_CYCLES_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "max_cycles": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Maximum number of cycles to return (default 20)",
+                    },
+                },
+                "required": ["project_path"],
+            },
+        ),
+        Tool(
+            name=_GRAPH_DEAD_CODE_TOOL,
+            description=_GRAPH_DEAD_CODE_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                },
+                "required": ["project_path"],
+            },
+        ),
+        # ------------------------------------------------------------------ #
+        # [14-17] Historical memory tools - hotspots, per-file, relations    #
         # ------------------------------------------------------------------ #
         Tool(
             name=_MEM_HOTSPOTS_TOOL,
@@ -942,8 +1330,104 @@ async def _list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Implementation pattern applied (e.g. 'repository pattern', 'event sourcing'). Optional - omit if none applies.",
                     },
+                    "root_cause_pattern": {
+                        "type": "string",
+                        "description": "Canonical root cause from ROOT_CAUSE_PATTERNS enum. Use 'uncategorized' if none fits. Required for memory intelligence.",
+                    },
+                    "pattern_confidence": {
+                        "type": "number",
+                        "description": "0.0-1.0: how certain you are about the pattern classification.",
+                    },
+                    "outcome_verified": {
+                        "type": "boolean",
+                        "description": "Set true only after developer explicitly confirms fix worked.",
+                    },
+                    "outcome_feedback_note": {
+                        "type": "string",
+                        "description": "Required when outcome_verified=true. What confirmed the fix worked.",
+                    },
+                    "negate": {
+                        "type": "boolean",
+                        "description": "Set true if this resolution was confirmed WRONG. Propagates penalty to all citers.",
+                    },
+                    "negation_reason": {
+                        "type": "string",
+                        "description": "Required when negate=true. Why this approach failed.",
+                    },
+                    "graph_cluster": {
+                        "type": "string",
+                        "description": "Cluster name from graph report. Part of causal chain record.",
+                    },
+                    "files_agent_opened": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Files you opened during investigation, in order.",
+                    },
+                    "prior_resolution_used": {
+                        "type": "string",
+                        "description": "Issue key of past resolution you referenced (from memory_search), if any.",
+                    },
+                    "root_cause_confirmed": {
+                        "type": "boolean",
+                        "description": "True if root_cause_pattern matched what you actually found.",
+                    },
+                    "diagnosis_steps": {
+                        "type": "integer",
+                        "description": "Number of tool calls before you started writing code.",
+                    },
+                    "full_ticket_text": {
+                        "type": "string",
+                        "description": "LLM-analysed problem summary + detailed description. Max 2000 chars.",
+                    },
+                    "attachment_summary": {
+                        "type": "string",
+                        "description": "One-paragraph summary of what attachments showed. Max 500 chars.",
+                    },
                 },
                 "required": ["issue_key", "summary", "problem_description", "resolution_note", "files_changed", "tags", "work_item_type"],
+            },
+        ),
+        # ------------------------------------------------------------------ #
+        # [18] Reference reinforcement - call when using a past result       #
+        # ------------------------------------------------------------------ #
+        Tool(
+            name=_REINFORCE_TOOL_NAME,
+            description=_REINFORCE_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_key": {
+                        "type": "string",
+                        "description": "Issue key of the past resolution you referenced (from memory_search results).",
+                    },
+                    "new_ticket_key": {
+                        "type": "string",
+                        "description": "Issue key of the ticket you are currently solving.",
+                    },
+                },
+                "required": ["source_key", "new_ticket_key"],
+            },
+        ),
+        # ------------------------------------------------------------------ #
+        # [19] Audit trail - investigate memory entry history                #
+        # ------------------------------------------------------------------ #
+        Tool(
+            name=_AUDIT_TOOL_NAME,
+            description=_AUDIT_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key of the memory entry to audit.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Maximum events to return.",
+                    },
+                },
+                "required": ["issue_key"],
             },
         ),
     ]
@@ -960,25 +1444,30 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(
                 {"error": "issue_ref must be a non-empty string under 2048 characters."}
             ))]
-        # Validate project_paths
+        # Validate project_paths - empty list is allowed (ICX resolves from ticket key)
         project_paths_raw = args.get("project_paths")
-        if not isinstance(project_paths_raw, list) or not project_paths_raw:
-            return [TextContent(type="text", text=json.dumps(
-                {"error": "project_paths must be a non-empty list of strings."}
-            ))]
+        if project_paths_raw is None:
+            project_paths_raw = []
+        if not isinstance(project_paths_raw, list):
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "INVALID_PROJECT_PATH",
+                "message": "project_paths must be a list of strings.",
+                "action_required": "ask_user_for_project_path",
+            }))]
         project_paths: list[str] = []
         for p in project_paths_raw:
             if not isinstance(p, str) or len(p) > 4096:
-                return [TextContent(type="text", text=json.dumps(
-                    {"error": "Each path in project_paths must be a string under 4096 characters."}
-                ))]
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "error",
+                    "code": "INVALID_PROJECT_PATH",
+                    "message": "Each path in project_paths must be a string under 4096 characters.",
+                    "action_required": "ask_user_for_project_path",
+                }))]
             stripped = p.strip()
             if stripped:
                 project_paths.append(stripped)
-        if not project_paths:
-            return [TextContent(type="text", text=json.dumps(
-                {"error": "project_paths must contain at least one non-empty path."}
-            ))]
+        # Empty project_paths is valid - handler resolves from ticket's Jira project key
 
         # Validate profile
         profile = args.get("profile")
@@ -1044,13 +1533,18 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         )
         try:
             loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(
+            smart = await loop.run_in_executor(
                 _get_memory_executor(),
                 functools.partial(_search_memory_sync, qi, top_k),
             )
-            return [TextContent(type="text", text=json.dumps(
-                {"results": results, "count": len(results), "status": "ok"}
-            ))]
+            results = smart.get("results", [])
+            return [TextContent(type="text", text=json.dumps({
+                "results": results,
+                "negative_signals": smart.get("negative_signals", []),
+                "count": len(results),
+                "status": "ok",
+                "decay_applied": smart.get("decay_applied", False),
+            }))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
@@ -1179,6 +1673,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
 
         _raw_path_cl = project_path_raw.strip()
 
+        _cochange_file = (args.get("file_path") or "").strip()
+
         def _run_cross_links() -> dict:
             from icx_engine.graph import storage as _st
 
@@ -1195,6 +1691,19 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             data["status"] = "ok"
             if staleness_warning:
                 data["staleness_warning"] = staleness_warning
+
+            if _cochange_file:
+                try:
+                    from icx_engine.graph.query import GraphQuerier
+                    _graph_json = _st.graph_path(_project_id)
+                    if _graph_json.exists():
+                        _q = GraphQuerier(_graph_json)
+                        data["co_changed_files"] = _q.get_cochange_partners(_cochange_file)
+                    else:
+                        data["co_changed_files"] = []
+                except Exception:
+                    data["co_changed_files"] = []
+
             return data
 
         try:
@@ -1210,6 +1719,164 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                 "message": str(_e),
                 "action_required": "report_error_to_user",
             }))]
+
+    if name == _GRAPH_IMPORTANT_NODES_TOOL:
+        project_path = args.get("project_path", "")
+        if not isinstance(project_path, str) or not project_path.strip():
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error",
+                "code": "NO_PATH",
+                "message": "project_path is required.",
+            }))]
+        top_k_raw = args.get("top_k", 10)
+        try:
+            top_k = max(1, min(100, int(top_k_raw)))
+        except (TypeError, ValueError):
+            top_k = 10
+
+        def _run_important_nodes() -> dict:
+            _r = _load_querier_simple(project_path)
+            if isinstance(_r, dict):
+                return _r
+            q, _proj = _r
+            important = q.get_important_nodes(top_k)
+            result_nodes = [
+                {
+                    "file": n.get("source_file", n.get("file", "")),
+                    "name": n.get("label", n.get("id", "")),
+                    "pagerank": n.get("pagerank", 0.0),
+                    "betweenness": n.get("betweenness", 0.0),
+                    "importance": n.get("importance", 0.0),
+                }
+                for n in important
+            ]
+            return {"important_nodes": result_nodes, "total": len(result_nodes)}
+
+        try:
+            loop = asyncio.get_running_loop()
+            result_dict = await loop.run_in_executor(None, _run_important_nodes)
+            return [TextContent(type="text", text=json.dumps(result_dict))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+
+    if name == _GRAPH_BLAST_RADIUS_TOOL:
+        project_path = args.get("project_path", "")
+        if not isinstance(project_path, str) or not project_path.strip():
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error", "code": "NO_PATH",
+                "message": "project_path is required.",
+                "action_required": "ask_user_for_path",
+            }))]
+        changed_files_raw = args.get("changed_files", [])
+        if not isinstance(changed_files_raw, list):
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "changed_files must be a list of strings."}
+            ))]
+        changed_files = [str(f) for f in changed_files_raw]
+        try:
+            max_depth = max(1, min(20, int(args.get("max_depth", 5))))
+        except (TypeError, ValueError):
+            max_depth = 5
+        try:
+            min_confidence = float(args.get("min_confidence", 0.3))
+            min_confidence = max(0.0, min(1.0, min_confidence))
+        except (TypeError, ValueError):
+            min_confidence = 0.3
+
+        def _run_blast_radius() -> dict:
+            _r = _load_querier_simple(project_path)
+            if isinstance(_r, dict):
+                return _r
+            q, _proj = _r
+            return q.get_blast_radius(changed_files, max_depth=max_depth, min_confidence=min_confidence)
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, _run_blast_radius)
+            return [TextContent(type="text", text=json.dumps(result))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+
+    if name == _GRAPH_CYCLES_TOOL:
+        project_path = args.get("project_path", "")
+        if not isinstance(project_path, str) or not project_path.strip():
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error", "code": "NO_PATH",
+                "message": "project_path is required.",
+                "action_required": "ask_user_for_path",
+            }))]
+        try:
+            max_cycles = max(1, min(100, int(args.get("max_cycles", 20))))
+        except (TypeError, ValueError):
+            max_cycles = 20
+
+        def _run_cycles() -> dict:
+            _r = _load_querier_simple(project_path)
+            if isinstance(_r, dict):
+                return _r
+            q, _proj = _r
+            cycles = q.get_cycles(max_cycles=max_cycles)
+            return {"cycles": cycles, "cycle_count": len(cycles)}
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, _run_cycles)
+            return [TextContent(type="text", text=json.dumps(result))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+
+    if name == _GRAPH_DEAD_CODE_TOOL:
+        project_path = args.get("project_path", "")
+        if not isinstance(project_path, str) or not project_path.strip():
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error", "code": "NO_PATH",
+                "message": "project_path is required.",
+                "action_required": "ask_user_for_path",
+            }))]
+
+        def _run_dead_code() -> dict:
+            _r = _load_querier_simple(project_path)
+            if isinstance(_r, dict):
+                return _r
+            q, _proj = _r
+            dead = q.get_dead_code()
+            return {"dead_code_candidates": dead, "count": len(dead)}
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, _run_dead_code)
+            return [TextContent(type="text", text=json.dumps(result))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+
+    if name == _GRAPH_OWNERSHIP_TOOL:
+        project_path = args.get("project_path", "")
+        if not isinstance(project_path, str) or not project_path.strip():
+            return [TextContent(type="text", text=json.dumps({
+                "status": "error", "code": "NO_PATH",
+                "message": "project_path is required.",
+                "action_required": "ask_user_for_path",
+            }))]
+        file_path = args.get("file_path", "")
+        if not isinstance(file_path, str) or not file_path.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "file_path must be a non-empty string."}
+            ))]
+        file_path = file_path.strip()
+
+        def _run_ownership() -> dict:
+            _r = _load_querier_simple(project_path)
+            if isinstance(_r, dict):
+                return _r
+            q, _proj = _r
+            return q.get_ownership(file_path, str(_proj))
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, _run_ownership)
+            return [TextContent(type="text", text=json.dumps(result))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
     if name == _MEM_HOTSPOTS_TOOL:
         project_key = args.get("project_key") or None
@@ -1364,6 +2031,50 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(
                 {"error": "pattern_used must be a string under 2000 characters."}
             ))]
+
+        # Phase 1: root_cause_pattern validation
+        from icx_engine.memory.schema import ROOT_CAUSE_PATTERNS
+        root_cause_pattern = args.get("root_cause_pattern") or "uncategorized"
+        if root_cause_pattern not in ROOT_CAUSE_PATTERNS:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "root_cause_pattern must be one of the canonical patterns. Use 'uncategorized' if none fit.",
+                 "valid_patterns": sorted(ROOT_CAUSE_PATTERNS)}
+            ))]
+        pattern_confidence = float(args.get("pattern_confidence") or 0.0)
+        outcome_verified = bool(args.get("outcome_verified", False))
+        outcome_feedback_note = args.get("outcome_feedback_note") or ""
+        negate = bool(args.get("negate", False))
+        negation_reason = args.get("negation_reason") or ""
+
+        if outcome_verified and not outcome_feedback_note.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "outcome_feedback_note is required when outcome_verified is true."}
+            ))]
+        if negate and not negation_reason.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "negation_reason is required when negate is true."}
+            ))]
+        if negate and outcome_verified:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "A resolution cannot be simultaneously verified and negated."}
+            ))]
+
+        extra = {
+            "root_cause_pattern": root_cause_pattern,
+            "pattern_confidence": pattern_confidence,
+            "outcome_verified": outcome_verified,
+            "outcome_feedback_note": outcome_feedback_note[:500],
+            "negate": negate,
+            "negation_reason": negation_reason[:500],
+            "graph_cluster": args.get("graph_cluster") or "",
+            "files_agent_opened": [str(f) for f in (args.get("files_agent_opened") or [])],
+            "prior_resolution_used": args.get("prior_resolution_used") or "",
+            "root_cause_confirmed": bool(args.get("root_cause_confirmed", False)),
+            "diagnosis_steps": int(args.get("diagnosis_steps") or 0),
+            "full_ticket_text": (args.get("full_ticket_text") or "")[:2000],
+            "attachment_summary": (args.get("attachment_summary") or "")[:500],
+        }
+
         text = await _handle_save_memory(
             issue_key.strip(),
             summary.strip(),
@@ -1373,8 +2084,61 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             [str(t) for t in tags],
             work_item_type.strip(),
             pattern_used=pattern_used.strip(),
+            extra=extra,
         )
         return [TextContent(type="text", text=text)]
+
+    if name == _REINFORCE_TOOL_NAME:
+        source_key = args.get("source_key", "")
+        new_ticket_key = args.get("new_ticket_key", "")
+        if not isinstance(source_key, str) or not source_key.strip():
+            return [TextContent(type="text", text=json.dumps({"error": "source_key is required."}))]
+        if not _SAFE_KEY_RE.match(source_key.strip().upper()):
+            return [TextContent(type="text", text=json.dumps({"error": "source_key must be in PROJ-123 format."}))]
+        if not isinstance(new_ticket_key, str) or not new_ticket_key.strip():
+            return [TextContent(type="text", text=json.dumps({"error": "new_ticket_key is required."}))]
+        if not _SAFE_KEY_RE.match(new_ticket_key.strip().upper()):
+            return [TextContent(type="text", text=json.dumps({"error": "new_ticket_key must be in PROJ-123 format."}))]
+        mem_state = _get_memory_state()
+        if mem_state != "ready":
+            return [TextContent(type="text", text=json.dumps({"error": f"Memory not ready (status={mem_state!r})."}
+            ))]
+        import functools
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                _get_memory_executor(),
+                functools.partial(_reinforce_usage_sync, source_key.strip(), new_ticket_key.strip()),
+            )
+            return [TextContent(type="text", text=json.dumps(result))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+
+    if name == _AUDIT_TOOL_NAME:
+        issue_key_audit = args.get("issue_key", "")
+        if not isinstance(issue_key_audit, str) or not issue_key_audit.strip():
+            return [TextContent(type="text", text=json.dumps({"error": "issue_key is required."}))]
+        if not _SAFE_KEY_RE.match(issue_key_audit.strip().upper()):
+            return [TextContent(type="text", text=json.dumps({"error": "issue_key must be in PROJ-123 format."}))]
+        limit_raw = args.get("limit", 20)
+        try:
+            audit_limit = max(1, min(100, int(limit_raw)))
+        except (TypeError, ValueError):
+            audit_limit = 20
+        mem_state = _get_memory_state()
+        if mem_state != "ready":
+            return [TextContent(type="text", text=json.dumps({"error": f"Memory not ready (status={mem_state!r})."}
+            ))]
+        import functools
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                _get_memory_executor(),
+                functools.partial(_get_audit_trail_sync, issue_key_audit.strip(), audit_limit),
+            )
+            return [TextContent(type="text", text=json.dumps(result))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
@@ -1382,6 +2146,25 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
 # ---------------------------------------------------------------------------
 # Graph helpers (synchronous - filesystem + maybe subprocess spawn)
 # ---------------------------------------------------------------------------
+
+def _load_querier_simple(project_path: str) -> tuple | dict:
+    """Validate path, derive project_id, load GraphQuerier.
+
+    Returns (GraphQuerier, validated_path) or an error dict.
+    """
+    from icx_engine.graph import storage as _st
+    from icx_engine.graph.query import GraphQuerier
+    from icx_engine.graph.storage import validate_project_path, GraphError
+    try:
+        _validated = validate_project_path(project_path.strip() if project_path else "")
+    except GraphError as _ve:
+        return {"error": str(_ve)}
+    _pid = _st.derive_project_id(_validated)
+    _gpath = _st.graph_path(_pid)
+    if not _gpath.exists():
+        return {"error": "Graph not built for this project."}
+    return GraphQuerier(_gpath), _validated
+
 
 def _resolve_graph_path(raw_path: str):
     """Validate path, derive project_id, check staleness.
@@ -1463,18 +2246,54 @@ def _get_graphs_info(paths: list[str]) -> list[dict]:
     return [graph_info_for_path(p, check_stale=False) for p in paths]
 
 
+def _extract_jira_key_from_ref(issue_ref: str) -> str:
+    """Extract bare issue key from a URL or bare key string.
+
+    https://foo.atlassian.net/browse/PROJ-123 -> PROJ-123
+    PROJ-123 -> PROJ-123
+    """
+    import re as _re
+    # URL path: last segment after /browse/ or similar
+    m = _re.search(r"/([A-Z][A-Z0-9]+-\d+)(?:[/?#]|$)", issue_ref)
+    if m:
+        return m.group(1)
+    # Bare key
+    if _re.match(r"^[A-Z][A-Z0-9]*-\d+$", issue_ref.strip()):
+        return issue_ref.strip()
+    return ""
+
+
+def _resolve_paths_from_ticket(issue_ref: str) -> "list[dict] | None":
+    """Look up ALL registered ICX projects matching the ticket's Jira project key.
+
+    Returns list of {"path": str, "name": str} on match, None otherwise.
+    Never raises.
+    """
+    try:
+        key = _extract_jira_key_from_ref(issue_ref)
+        if not key or "-" not in key:
+            return None
+        project_prefix = key.split("-")[0]
+        from icx_engine.graph.storage import find_projects_by_jira_key
+        infos = find_projects_by_jira_key(project_prefix)
+        if infos:
+            return [{"path": i.path, "name": i.name} for i in infos]
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Memory search (runs inside memory thread)
 # ---------------------------------------------------------------------------
 
-def _search_memory_sync(qi, top_k: int = 10) -> list[dict]:
-    """Search memory with a MemoryQueryInput. Returns list of PastInsight dicts."""
+def _search_memory_sync(qi, top_k: int = 10) -> dict:
+    """Search memory with a MemoryQueryInput. Returns smart query dict."""
     try:
         mem = _ensure_memory_manager()
-        results = mem.query(qi, top_k=top_k)
-        return [r.model_dump() for r in results]
+        return mem.query_smart(qi, top_k=top_k)
     except Exception:
-        return []
+        return {"results": [], "negative_signals": [], "decay_applied": False}
 
 
 def _find_by_file_sync(file_path: str, project_key: str | None) -> list[dict]:
@@ -1504,6 +2323,137 @@ def _get_related_sync(
 def _get_patterns_sync(project_key: str | None) -> list[dict]:
     """Return stored patterns, optionally filtered by project_key."""
     return _ensure_memory_manager().get_patterns(project_key=project_key)
+
+
+def _reinforce_usage_sync(source_key: str, used_by_key: str) -> dict:
+    """Reinforce memory usage. Runs inside the memory thread."""
+    return _ensure_memory_manager().reinforce_usage(source_key, used_by_key)
+
+
+def _get_audit_trail_sync(issue_key: str, limit: int) -> list[dict]:
+    """Return audit trail for issue_key. Runs inside the memory thread."""
+    return _ensure_memory_manager().get_audit_trail(issue_key, limit)
+
+
+def _quick_memory_search_sync(summary: str, top_k: int = 3) -> dict:
+    """Quick internal search for intelligence layer. Runs inside the memory thread."""
+    try:
+        from icx_engine.memory.schema import MemoryQueryInput
+        qi = MemoryQueryInput(
+            issue_key="",
+            project_key="",
+            source_type="",
+            summary=summary,
+            description=summary,
+            issue_type="",
+        )
+        return _ensure_memory_manager().query_smart(qi, top_k=top_k, min_score=0.68)
+    except Exception:
+        return {"results": [], "negative_signals": [], "decay_applied": False}
+
+
+# ---------------------------------------------------------------------------
+# Intelligence layer helpers (Phase 10)
+# ---------------------------------------------------------------------------
+
+def _build_negative_signal_warning(negative_signals: list[dict]) -> str:
+    if not negative_signals:
+        return ""
+    lines = ["NEGATIVE SIGNAL WARNING:"]
+    lines.append("The following past resolutions matched this ticket but were confirmed WRONG:")
+    for sig in negative_signals:
+        lines.append(
+            f"  - {sig.get('issue_key', '?')}: {sig.get('negation_reason', 'no reason recorded')}"
+            f" (pattern: {sig.get('root_cause_pattern', '?')})"
+        )
+    lines.append("DO NOT reuse these approaches. They have been confirmed to fail.")
+    return "\n".join(lines)
+
+
+def _check_semantic_patterns(pattern_results: list[dict], ticket_summary: str) -> str:
+    """Return warning string if any semantic pattern matches, else empty string."""
+    ticket_lower = ticket_summary.lower()
+    for pattern in pattern_results:
+        if pattern.get("pattern_type") != "semantic_signal":
+            continue
+        try:
+            evidence = pattern.get("evidence", {})
+            if isinstance(evidence, str):
+                evidence = json.loads(evidence)
+        except Exception:
+            continue
+        signal_words = evidence.get("signal_words", [])
+        hits = [w for w in signal_words if w in ticket_lower]
+        if len(hits) >= 2:
+            top_file = evidence.get("top_fix_file", "")
+            rate = int(evidence.get("top_fix_file_rate", 0) * 100)
+            root_cause = evidence.get("root_cause_pattern", "")
+            group_size = evidence.get("group_size", 0)
+            return (
+                f"Pattern detected: {group_size} past tickets mentioning "
+                f"'{hits[0]}' and '{hits[1]}' had root cause {root_cause} "
+                f"and {rate}% were fixed in {top_file}. Check there first."
+            )
+    return ""
+
+
+def _build_intelligence(
+    issue_key: str,
+    memory_results: dict,
+    graph_info: dict,
+    pattern_results: list[dict],
+) -> dict:
+    """Build the intelligence field for analyze response. No new API calls."""
+    results = memory_results.get("results", [])
+    negative_signals = memory_results.get("negative_signals", [])
+    problem_summary = graph_info.get("_problem_summary", "")
+
+    prior_resolution = None
+    skip_diagnosis = False
+    confidence = 0.0
+    pattern_warning = ""
+    verdict = "novel"
+
+    if results and results[0].get("similarity_score", 0.0) >= 0.72:
+        verdict = "seen_before"
+        confidence = results[0]["similarity_score"]
+        prior_resolution = results[0]
+        skip_diagnosis = (
+            prior_resolution.get("outcome_verified", False)
+            and confidence >= 0.80
+        )
+    else:
+        semantic_warning = _check_semantic_patterns(pattern_results, problem_summary)
+        if semantic_warning:
+            verdict = "pattern_match"
+            confidence = 0.60
+            pattern_warning = semantic_warning
+        else:
+            hub_patterns = [p for p in pattern_results if p.get("pattern_type") == "citation_hub"]
+            if hub_patterns:
+                verdict = "pattern_match"
+                confidence = 0.55
+                pattern_warning = f"Citation hub detected: {hub_patterns[0].get('label', '')}"
+
+    suggested_files: list[str] = graph_info.get("context_files", [])[:3]
+    open_files_count = len(suggested_files)
+    token_budget_estimate = 500 + (open_files_count * 800) + (300 if prior_resolution else 0)
+
+    _session_set(issue_key, "intelligence_verdict", verdict)
+    _session_set(issue_key, "suggested_files", suggested_files)
+    _session_set(issue_key, "ticket_summary", problem_summary)
+
+    return {
+        "verdict": verdict,
+        "confidence": round(confidence, 4),
+        "prior_resolution": prior_resolution,
+        "pattern_warning": pattern_warning or None,
+        "negative_signals": negative_signals,
+        "suggested_files": suggested_files,
+        "skip_diagnosis": skip_diagnosis,
+        "open_files_count": open_files_count,
+        "token_budget_estimate": token_budget_estimate,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1576,8 +2526,19 @@ async def _handle_analyze_issue(
             except Exception:
                 pass  # directory creation failure - proceed without images on disk
 
+        # When no paths given, resolve ALL projects under the ticket's Jira project key.
+        _auto_resolved = False
+        if not project_paths:
+            _resolved_infos = _resolve_paths_from_ticket(issue_ref)
+            if _resolved_infos:
+                project_paths = [r["path"] for r in _resolved_infos]
+                _auto_resolved = True
+
         # Graph info (sync - filesystem only) also runs while memory search is in flight.
-        graphs: list[dict] = _get_graphs_info(project_paths)
+        graphs: list[dict] = _get_graphs_info(project_paths) if project_paths else []
+        if _auto_resolved:
+            for g in graphs:
+                g["path_auto_resolved"] = True
 
         # Determine memory status - reported to agent so it knows whether to call memory_search.
         memory_status = _mem_state
@@ -1718,7 +2679,30 @@ async def _handle_analyze_issue(
             "---"
         )
 
-        if len(graphs) > 1:
+        if not graphs:
+            # No project paths - no graph available. Use grep/glob for file discovery.
+            icx_instruction = (
+                _VISION_GATE
+                + "No project path provided and no registered ICX project found for this ticket's "
+                "Jira project key. Use grep/glob to locate relevant files.\n"
+                "HINT: If you know the local codebase path, call this tool again with "
+                "project_paths=['/absolute/path/to/repo'] to enable graph navigation.\n\n"
+                "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
+                "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
+                "STEP 2: Read the located files.\n"
+                "STEP 3: STOP. You MUST NOT write any code or make any edits yet. "
+                "Present this confirmation format to the user and wait for their response:\n\n"
+                + _CONFIRMATION_BLOCK + "\n\n"
+                "STEP 4: Wait for explicit user approval. "
+                "Silence or ambiguity does NOT count as approval - ask again if unclear.\n"
+                "STEP 5: On explicit approval only - implement exactly the approach you stated, "
+                "using memory_search results as a pattern reference.\n"
+                "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
+                "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first "
+                "(if memory_search result was used), then save_memory."
+                + _MANDATORY_TAIL
+            )
+        elif len(graphs) > 1:
             # Multi-path case: build a summary of all paths and choose the right workflow.
             ready_graphs = [g for g in graphs if g["status"] == "ready"]
             building_graphs = [g for g in graphs if g["status"] in ("building", "rebuilding")]
@@ -1736,20 +2720,21 @@ async def _handle_analyze_issue(
                     eta = g.get("eta_seconds") or "?"
                     graph_lines.append(f"  - {p}: BUILDING (~{eta}s)")
                 elif s == "not_built":
-                    graph_lines.append(f"  - {p}: NOT BUILT  run: icx graph build --path {p}")
+                    _nb = g.get("name") or p
+                    graph_lines.append(f"  - {p}: NOT BUILT  run: icx graph build {_nb}")
                 elif s == "not_registered":
-                    graph_lines.append(f"  - {p}: NOT REGISTERED  run: icx graph add --name <name> --path {p}")
+                    graph_lines.append(f"  - {p}: NOT REGISTERED  run: icx graph add --name <name> --path {p} --project <key>")
                 else:
                     graph_lines.append(f"  - {p}: UNAVAILABLE")
             graph_summary = "\n".join(graph_lines)
 
             missing_build_cmds = "\n".join(
-                f"  icx graph build --path {g['path']}"
+                f"  icx graph build {g.get('name') or g['path']}"
                 for g in missing_graphs
                 if g["status"] == "not_built"
             )
             missing_register_cmds = "\n".join(
-                f"  icx graph add --name <name> --path {g['path']}  then: icx graph build <name>"
+                f"  icx graph add --name <name> --path {g['path']} --project <key>  then: icx graph build <name>"
                 for g in missing_graphs
                 if g["status"] == "not_registered"
             )
@@ -1787,7 +2772,7 @@ async def _handle_analyze_issue(
                     "STEP 4: On explicit approval - implement exactly the stated approach, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 5: Ask the user to test.\n"
-                    "STEP 6: Only after user confirms it works - call save_memory."
+                    "STEP 6: Only after user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
                     + (f"\n{stale_warning}" if stale_warning else "")
                     + _MANDATORY_TAIL
                 )
@@ -1806,7 +2791,7 @@ async def _handle_analyze_issue(
                     "STEP 4: Wait for explicit user approval.\n"
                     "STEP 5: On approval - implement exactly the stated approach.\n"
                     "STEP 6: Ask the user to test.\n"
-                    "STEP 7: After user confirms - call save_memory."
+                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
                     + _MANDATORY_TAIL
                 )
             else:
@@ -1823,7 +2808,7 @@ async def _handle_analyze_issue(
                     "STEP 4: Wait for explicit user approval.\n"
                     "STEP 5: On approval - implement exactly the stated approach.\n"
                     "STEP 6: Ask the user to test.\n"
-                    "STEP 7: After user confirms - call save_memory."
+                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
                     + _MANDATORY_TAIL
                 )
         else:
@@ -1854,7 +2839,7 @@ async def _handle_analyze_issue(
                     "STEP 4: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 5: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 6: Only after the user confirms it works - call save_memory.\n"
+                    "STEP 6: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory.\n"
                     + _MANDATORY_TAIL
                     + stale_warning
                 )
@@ -1875,7 +2860,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call save_memory.\n"
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory.\n"
                     + _MANDATORY_TAIL + "\n"
                     f"Optionally call analyze_issue_fast again with the same project_paths in ~{eta}s "
                     "to cross-check your file selection against the completed graph."
@@ -1886,7 +2871,7 @@ async def _handle_analyze_issue(
                     + "Graph not built for this project.\n"
                     "MANDATORY: Tell the user exactly this before doing anything else:\n"
                     f"  'The ICX graph for this project has not been built yet. "
-                    f"Run this in your terminal to build it: icx graph build --path {project_paths[0]}'\n\n"
+                    f"Run this in your terminal to build it: icx graph build {graphs[0].get('name') or project_paths[0]}'\n\n"
                     "Then proceed using grep/glob for file discovery.\n\n"
                     "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
                     "STEP 1: Use work_item.analysis to identify key terms and locate relevant files via grep/glob.\n"
@@ -1899,7 +2884,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
                     + _MANDATORY_TAIL
                 )
             elif graph_status == "not_registered":
@@ -1922,7 +2907,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
                     + _MANDATORY_TAIL
                 )
             else:
@@ -1940,7 +2925,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
                     + _MANDATORY_TAIL
                 )
 
@@ -2019,19 +3004,117 @@ async def _handle_analyze_issue(
             },
         }
         response["graphs"] = graphs
+
+        # Phase 10: intelligence layer - quick internal memory search when ready
+        _mem_state_now = _get_memory_state()
+        if _mem_state_now == "ready":
+            import functools
+            try:
+                loop = asyncio.get_running_loop()
+                _quick_mem = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _get_memory_executor(),
+                        functools.partial(_quick_memory_search_sync, summary_val[:400], 3),
+                    ),
+                    timeout=3.0,
+                )
+            except Exception:
+                _quick_mem = {"results": [], "negative_signals": [], "decay_applied": False}
+
+            _pattern_results: list[dict] = []
+            try:
+                _pattern_results = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _get_memory_executor(),
+                        functools.partial(_get_patterns_sync, None),
+                    ),
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+
+            _graph_ctx: dict = {"context_files": [], "_problem_summary": summary_val}
+            if graphs and graphs[0].get("status") == "ready":
+                _graph_ctx["_problem_summary"] = summary_val
+
+            intelligence = _build_intelligence(
+                issue_key=issue_key_val,
+                memory_results=_quick_mem,
+                graph_info=_graph_ctx,
+                pattern_results=_pattern_results,
+            )
+            response["intelligence"] = intelligence
+
+            # Prepend negative signal warning to _icx_next if present
+            _neg_warning = _build_negative_signal_warning(intelligence.get("negative_signals", []))
+            if _neg_warning:
+                existing_instruction = response.get("_icx_next", {}).get("instruction", "")
+                response["_icx_next"]["instruction"] = _neg_warning + "\n\n" + existing_instruction
+
         return json.dumps(response)
 
     except asyncio.TimeoutError:
         _timeout_label = "45 seconds" if skip_vision else "11 minutes"
-        return json.dumps({"error": (
-            f"Analysis timed out after {_timeout_label}. "
-            "The issue tracker or AI provider may be slow or unreachable. "
-            "Check your network and credentials, then try again."
-        )})
+        return json.dumps({
+            "status": "error",
+            "code": "TIMEOUT",
+            "message": (
+                f"Analysis timed out after {_timeout_label}. "
+                "The issue tracker or AI provider may be slow or unreachable. "
+                "Check your network and credentials, then try again."
+            ),
+            "action_required": "tell_user_to_check_network_and_retry",
+        })
+    except IssueNotFound as exc:
+        return json.dumps({
+            "status": "error",
+            "code": "ISSUE_NOT_FOUND",
+            "message": str(exc),
+            "action_required": "ask_user_to_verify_issue_key",
+        })
+    except AuthError as exc:
+        return json.dumps({
+            "status": "error",
+            "code": "AUTH_FAILED",
+            "message": str(exc),
+            "action_required": "tell_user_to_run_icx_connection_add",
+        })
+    except NoConnectionError as exc:
+        return json.dumps({
+            "status": "error",
+            "code": "NO_CONNECTION",
+            "message": str(exc),
+            "action_required": "tell_user_to_run_icx_connection_add",
+        })
+    except RateLimited as exc:
+        return json.dumps({
+            "status": "error",
+            "code": "RATE_LIMITED",
+            "message": str(exc),
+            "action_required": "wait_and_retry",
+        })
+    except InvalidInput as exc:
+        return json.dumps({
+            "status": "error",
+            "code": "INVALID_INPUT",
+            "message": str(exc),
+            "action_required": "ask_user_for_correct_issue_key",
+        })
     except ICXError as exc:
-        return json.dumps({"error": str(exc), "type": type(exc).__name__})
+        return json.dumps({
+            "status": "error",
+            "code": "ICX_ERROR",
+            "message": str(exc),
+            "type": type(exc).__name__,
+            "action_required": "report_error_to_user",
+        })
     except Exception as exc:
-        return json.dumps({"error": f"Unexpected error: {exc}"})
+        return json.dumps({
+            "status": "error",
+            "code": "INTERNAL_ERROR",
+            "message": f"Unexpected error: {exc}",
+            "action_required": "report_error_to_user",
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -2047,10 +3130,12 @@ async def _handle_save_memory(
     tags: list[str],
     work_item_type: str,
     pattern_used: str = "",
+    extra: dict | None = None,
 ) -> str:
     """Save agent-synthesized resolution to local memory. No tracker re-fetch."""
     import uuid
     from datetime import datetime, timezone
+    extra = extra or {}
     try:
         config = ConfigManager.load()
         from icx_engine.engine import extract_domain, resolve_connection, _extract_project_key
@@ -2060,6 +3145,46 @@ async def _handle_save_memory(
         conn = resolve_connection(domain, config, raw_input=issue_key)
         if conn is None:
             return json.dumps({"error": "No matching connection found for this issue key. Check your ICX configuration."})
+
+        import functools
+
+        # Route negate/verify through dedicated manager methods (Phase 4)
+        if extra.get("negate"):
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                _get_memory_executor(),
+                functools.partial(
+                    _negate_resolution_sync,
+                    issue_key.upper(),
+                    extra.get("negation_reason", ""),
+                ),
+            )
+            return json.dumps(result)
+
+        if extra.get("outcome_verified"):
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                _get_memory_executor(),
+                functools.partial(
+                    _verify_resolution_sync,
+                    issue_key.upper(),
+                    extra.get("outcome_feedback_note", ""),
+                ),
+            )
+            if "error" not in result:
+                return json.dumps({**result, "saved": True})
+
+        # Build causal chain from session context + tool input (Phase 8)
+        causal_chain = {
+            "ticket_summary": _session_get(issue_key, "ticket_summary", ""),
+            "intelligence_verdict": _session_get(issue_key, "intelligence_verdict", "novel"),
+            "graph_cluster": extra.get("graph_cluster", ""),
+            "suggested_files": _session_get(issue_key, "suggested_files", []),
+            "files_agent_opened": extra.get("files_agent_opened", []),
+            "prior_resolution_used": extra.get("prior_resolution_used") or None,
+            "root_cause_confirmed": extra.get("root_cause_confirmed", False),
+            "diagnosis_steps": extra.get("diagnosis_steps", 0),
+        }
 
         entry = MemoryEntry(
             id=str(uuid.uuid4()),
@@ -2077,6 +3202,13 @@ async def _handle_save_memory(
             tags=tags,
             work_item_type=work_item_type,
             pattern_used=pattern_used,
+            root_cause_pattern=extra.get("root_cause_pattern", "uncategorized"),
+            pattern_confidence=float(extra.get("pattern_confidence", 0.0)),
+            outcome_verified=bool(extra.get("outcome_verified", False)),
+            outcome_feedback_note=extra.get("outcome_feedback_note", ""),
+            causal_chain=causal_chain,
+            full_ticket_text=extra.get("full_ticket_text", ""),
+            attachment_summary=extra.get("attachment_summary", ""),
         )
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(_get_memory_executor(), _save_memory_sync, entry)
@@ -2093,6 +3225,7 @@ async def _handle_save_memory(
             "saved": True,
             "issue_key": entry.issue_key,
             "summary": summary[:80],
+            "root_cause_pattern": entry.root_cause_pattern,
         })
     except ICXError as exc:
         return json.dumps({"error": str(exc), "type": type(exc).__name__})

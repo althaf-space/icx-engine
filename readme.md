@@ -29,8 +29,8 @@ ICX is an early-stage product. The core pipeline (fetch → process → analyse 
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
 | Attachments | PDF, DOCX, XLSX, CSV, images via OCR + vision, audio (MP3/WAV/M4A/OGG/FLAC/AAC/Opus) + video (MP4/MOV/AVI/MKV/WebM) via local Whisper or LLM-native transcription | Speaker diarisation, language hints |
 | Memory | Local LanceDB + ONNX embeddings (BAAI/bge-base-en-v1.5, 768-dim, no PyTorch) | Team-shared memory, conflict resolution |
-| MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 5 graph tools, 4 historical memory tools, `save_memory` (13 total) | Batch analysis, project-level summary |
-| Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, incremental rebuild |
+| MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `reinforce_memory_usage`, `get_memory_audit` (20 total) | Batch analysis, project-level summary |
+| Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), JSP/Servlet, Go, Rails, gRPC/Protobuf, Terraform/HCL, event broker detection (Kafka, RabbitMQ, Redis, SQS, SNS, NATS), co-change history, optional SCIP compiler-grade edges, incremental rebuild (SHA-256 hashing), multi-source edge fusion, PageRank + betweenness centrality, blast radius, cycle detection, dead code, CODEOWNERS integration, staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, team-shared graph cache |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
 
@@ -242,9 +242,9 @@ icx memory patterns --project PROJ
 ### Codebase graph
 
 ```sh
-icx graph add --name NAME --path PATH   # register a project directory for graph analysis
+icx graph add --name NAME --path PATH --project KEY   # register a project directory (--project required, e.g. PROJ)
 icx graph build NAME               # build (or rebuild) the knowledge graph for a project
-icx graph build --path PATH        # build by path instead of name
+icx graph build --project KEY      # build all graphs tagged with a Jira project key (case-insensitive)
 icx graph build NAME --force       # rebuild even if graph is current
 icx graph list                     # list all registered projects with status and file counts
 icx graph status NAME              # detailed status: build state, last commit, staleness info
@@ -335,11 +335,18 @@ After setup, restart your editor. ICX will appear in its list of available tools
 | `graph_call_chain` | Trace call chains forward or backward from a function. Input: `node_id`, `project_path`. |
 | `graph_impact` | Find everything a file or function affects (callers, dependents). Input: `node_id`, `project_path`. |
 | `graph_cross_links` | Find cross-service or cross-module dependencies. Input: `project_path`. |
+| `graph_important_nodes` | Top files/functions by PageRank + betweenness centrality. Identifies architectural hotspots - useful before a refactor or when assessing blast radius. Input: `project_path`, optional `top_k`. |
+| `graph_blast_radius` | Given a list of changed files, returns all direct and transitive dependents, a risk score (0.0-1.0), and co-change partners not yet in the changed set. Input: `changed_files`, `project_path`. |
+| `graph_cycles` | Detect circular dependency chains using structural edges (imports, calls, implements). Returns chains up to `max_cycles`. Input: `project_path`, optional `max_cycles`. |
+| `graph_dead_code` | Files with zero incoming structural edges, excluding entry points and test files. Useful for cleanup tasks. Input: `project_path`. |
+| `graph_ownership` | CODEOWNERS ownership lookup for a file, plus cross-team dependency edges (files owned by a different team that this file depends on). Input: `file_path`, `project_path`. |
 | `memory_get_hotspots` | When exploring which files need extra attention - returns files ranked by historical work item count. |
 | `memory_find_by_file` | Before editing a file - surface all past work items that touched it. Input: `file_path`. |
 | `memory_get_related` | Find work items that touched the same files. Primary: pass `files` from `graph_find_context` (works for new tickets, computes overlap on-the-fly). Secondary: pass `issue_key` for reopened tickets with prior history (uses pre-stored edges). |
-| `memory_get_patterns` | Return auto-detected statistical patterns (frequent files, dominant tags, dominant work item type) computed every 10 saves. |
-| `save_memory` | After the developer confirms the fix is tested and working. Cleans up temp images for that issue. |
+| `memory_get_patterns` | Return auto-detected statistical patterns: `frequent_file`, `dominant_tag`, `top_work_item_type`, `citation_hub`, `semantic_signal`. Recomputed every 5 saves. |
+| `save_memory` | After the developer confirms the fix is tested and working. Required fields: `root_cause_pattern` (from 21-value enum, use `"uncategorized"` if none fits), `pattern_confidence`. Optional: `outcome_verified`, `outcome_feedback_note`, `negate`, `negation_reason`, `graph_cluster`, `files_agent_opened`, `prior_resolution_used`, `root_cause_confirmed`, `diagnosis_steps`. Routes to `verify_resolution()` or `negate_resolution()` when those flags are set. |
+| `reinforce_memory_usage` | Call immediately after using a past `memory_search` result to solve a new ticket. Records the citation, auto-elevates entries cited 5+ times. Required: `source_key`, `new_ticket_key`. |
+| `get_memory_audit` | Retrieve the full audit trail for a memory entry in reverse chronological order. Shows every reinforcement, verification, negation, and hub detection event. Required: `issue_key`. |
 
 **Multi-repo support:** Pass `project_paths` as a list. Two modes the agent must follow:
 - **User named specific repos** ("fix the auth service and UI") - agent resolves those paths and passes them: `project_paths: ["/projects/auth-svc", "/projects/ui"]`. Do not include the workspace root.

@@ -31,6 +31,10 @@ _PARSER_EXTENSIONS = frozenset({
     ".rb", ".cs", ".kt", ".kts", ".scala", ".php", ".swift", ".lua",
     ".zig", ".ps1", ".ex", ".exs", ".m", ".mm", ".jl", ".vue", ".svelte",
     ".dart", ".sql", ".md", ".mdx",
+    ".jsp", ".jspx",
+    ".erb",
+    ".proto",
+    ".tf", ".tfvars",
 })
 
 def _is_skip_dir(name: str) -> bool:
@@ -157,8 +161,63 @@ def _collect_source_files(project_path: Path) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
+# Incremental merge helper
+# ---------------------------------------------------------------------------
+
+def _merge_incremental(
+    existing_graph: dict,
+    new_extraction: dict,
+    changed_files: list[str],
+    deleted_files: list[str],
+) -> dict:
+    """
+    Removes stale nodes/edges (from changed/deleted files),
+    appends newly extracted nodes/edges.
+    Preserves fix_confidence_delta and resolution_weight on surviving edges.
+    """
+    stale = set(changed_files) | set(deleted_files)
+
+    surviving_nodes = [
+        n for n in existing_graph.get("nodes", [])
+        if n.get("file", n.get("source_file", "")) not in stale
+    ]
+    surviving_edges = [
+        e for e in existing_graph.get("links", existing_graph.get("edges", []))
+        if e.get("source_file", "") not in stale
+        and e.get("target_file", "") not in stale
+    ]
+    merged = dict(existing_graph)
+    merged["nodes"] = surviving_nodes + new_extraction.get("nodes", [])
+    merged["links"] = surviving_edges + new_extraction.get(
+        "links", new_extraction.get("edges", [])
+    )
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Subprocess entry point (must be a top-level function for pickle on Windows)
 # ---------------------------------------------------------------------------
+
+def _detect_languages(files) -> list[str]:
+    """Detect programming languages present based on file extensions."""
+    exts = {Path(str(f)).suffix.lower() for f in files}
+    langs = []
+    if exts & {'.py'}:
+        langs.append('python')
+    if exts & {'.ts', '.tsx'}:
+        langs.append('typescript')
+    if exts & {'.js', '.jsx', '.mjs'}:
+        langs.append('javascript')
+    if exts & {'.java'}:
+        langs.append('java')
+    if exts & {'.kt', '.kts'}:
+        langs.append('kotlin')
+    if exts & {'.go'}:
+        langs.append('go')
+    if exts & {'.rb'}:
+        langs.append('ruby')
+    return langs
+
 
 def _build_project_isolated(
     project_path_str: str,
@@ -232,6 +291,46 @@ def _build_project_isolated(
         except Exception:
             pass
 
+        # -- Incremental hash check ----------------------------------------------------------
+        from icx_engine.graph.parser.file_cache import (
+            load_hashes, save_hashes, compute_changed_files,
+        )
+
+        hash_cache_path = icx_cache / "file_hashes.json"
+        stored_hashes = load_hashes(hash_cache_path)
+        graph_json_path = icx_cache / "graph.json"
+        _incremental = graph_json_path.exists() and bool(stored_hashes)
+
+        # Convert Path objects to relative POSIX strings for hashing
+        _rel_files = [f.relative_to(project_path).as_posix() for f in files]
+
+        if _incremental:
+            _changed_rel, _deleted_rel, _new_hashes = compute_changed_files(
+                str(project_path), _rel_files, stored_hashes
+            )
+            progress.emit(
+                "incremental",
+                current=len(_changed_rel),
+                total=len(files),
+                message=f"{len(_changed_rel)} changed, {len(_deleted_rel)} deleted",
+            )
+            if not _changed_rel and not _deleted_rel:
+                progress.emit("complete", current=1, total=1, message="graph unchanged - skipping rebuild")
+                save_hashes(hash_cache_path, _new_hashes)
+                return {
+                    **result,
+                    "file_count": len(files),
+                    "incremental": True,
+                    "skipped": True,
+                }
+            # Only parse changed files through AST
+            _changed_abs = {project_path / rel for rel in _changed_rel}
+            files_to_parse = [f for f in files if f in _changed_abs]
+        else:
+            _changed_rel, _deleted_rel, _new_hashes = [], [], {}
+            files_to_parse = files
+        # -- End incremental check -----------------------------------------------------------
+
         result["file_count"] = len(files)
         progress.emit("scan", current=len(files), total=len(files),
                       message=f"{len(files)} files")
@@ -242,7 +341,7 @@ def _build_project_isolated(
 
         # parallel=False: this function already runs in a ProcessPoolExecutor
         # subprocess; grandchild spawn under Windows deadlocks during import.
-        _ast_total = len(files)
+        _ast_total = len(files_to_parse)
         progress.emit("ast", current=0, total=_ast_total, message="parsing")
 
         _ast_msg = ["parsing"]
@@ -266,11 +365,29 @@ def _build_project_isolated(
             progress.emit("ast", current=display, total=total, message=_ast_msg[0])
 
         extraction = extract(
-            files, cache_root=icx_cache, parallel=False,
+            files_to_parse, cache_root=icx_cache, parallel=False,
             on_progress=_ast_on_progress, on_start=_ast_on_start,
         )
         progress.emit("ast", current=_ast_total, total=_ast_total,
                       message=f"{len(extraction.get('nodes', []))} nodes")
+
+        # CO_CHANGED edges from git history (runs before LSP pass)
+        try:
+            from icx_engine.graph.parser.resolvers.cochange_resolver import resolve_cochange
+            _cochange_edges = resolve_cochange(files, project_path, extraction)
+            if _cochange_edges:
+                extraction = {
+                    **extraction,
+                    "edges": list(extraction.get("edges", [])) + _cochange_edges,
+                }
+            progress.emit(
+                "cochange",
+                current=len(_cochange_edges) // 2,
+                total=len(_cochange_edges) // 2,
+                message=f"{len(_cochange_edges) // 2} co-changed file pairs",
+            )
+        except Exception as _cochange_exc:
+            _log.debug("cochange_resolver skipped (%s)", type(_cochange_exc).__name__)
 
         lsp_edge_count = 0
 
@@ -429,6 +546,183 @@ def _build_project_isolated(
 
         _lsp_tick(f"{lsp_edge_count} edges")
 
+        # In incremental mode, SCIP needs ALL project nodes (not just changed-file nodes)
+        # so cross-file references can be matched against the full node set.
+        _scip_all_nodes: list[dict] = list(extraction.get("nodes", []))
+        if _incremental and graph_json_path.exists():
+            try:
+                import json as _json_scip
+                _existing_g = _json_scip.loads(graph_json_path.read_text(encoding="utf-8"))
+                _stale_scip = set(_changed_rel) | set(_deleted_rel)
+                _existing_nodes = [
+                    n for n in _existing_g.get("nodes", [])
+                    if n.get("source_file", n.get("file", "")) not in _stale_scip
+                ]
+                _scip_all_nodes = _existing_nodes + _scip_all_nodes
+            except Exception:
+                pass
+
+        # SCIP optional compiler-grade edge integration
+        try:
+            import shutil as _shutil
+            from icx_engine.graph.parser.scip_manager import (
+                ensure_indexer as _ensure_scip_indexer,
+                _CONFIGS as _SCIP_CONFIGS,
+                write_ts_tsconfig as _write_ts_tsconfig,
+            )
+            from icx_engine.graph.parser.scip_reader import (
+                run_scip_indexer, read_scip_edges, _INDEXERS as _SCIP_INDEXERS,
+                BACKGROUND_SPAWNED as _SCIP_BACKGROUND_SPAWNED,
+            )
+            scip_cache = icx_cache / "scip"
+            scip_cache.mkdir(exist_ok=True)
+            _detected_langs = _detect_languages(files)
+
+            # Invalidate stale SCIP caches.
+            # Full rebuild: remove all .scip files so indexers always run fresh.
+            # Incremental: remove .scip only for languages whose source files changed.
+            # (Incremental with no changes exits early before reaching this point.)
+            _EXT_TO_SCIP_LANG: dict[str, str] = {
+                ".ts": "typescript", ".tsx": "typescript",
+                ".js": "javascript", ".jsx": "javascript",
+                ".mjs": "javascript", ".cjs": "javascript",
+                ".vue": "javascript", ".svelte": "javascript",
+                ".py": "python",
+                ".go": "go",
+                ".java": "java", ".kt": "java", ".kts": "java",
+                ".rb": "ruby",
+            }
+            if not _incremental:
+                # Full build: wipe all cached SCIP output including partials.
+                # Do NOT delete .building lock files - running daemons own those;
+                # deleting the .scip.tmp causes their atomic rename to fail cleanly
+                # so they exit without producing stale output.
+                for _pat in ("*.scip", "*.scip.tmp"):
+                    for _sf in scip_cache.glob(_pat):
+                        try:
+                            _sf.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            elif _changed_rel:
+                # Incremental: invalidate only languages with changed files.
+                # Also remove .tmp so any running daemon's rename fails cleanly
+                # (daemon exits, lock removed, next build spawns fresh daemon).
+                _langs_invalidated: set[str] = set()
+                for _rel in _changed_rel:
+                    _ext = Path(_rel).suffix.lower()
+                    _slang = _EXT_TO_SCIP_LANG.get(_ext)
+                    if _slang and _slang not in _langs_invalidated:
+                        for _suffix in (f"{_slang}.scip", f"{_slang}.scip.tmp"):
+                            try:
+                                (scip_cache / _suffix).unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                        _langs_invalidated.add(_slang)
+
+            # Build per-language task list. Managed langs (python/ts/js/go) auto-install
+            # via scip_manager; path-only langs (java/kotlin/ruby) require manual install
+            # but are used if found on PATH. typescript/javascript share one install_dir
+            # so deduplicate by install_dir to avoid running the indexer twice.
+            _scip_tasks: list[tuple[str, bool]] = []  # (lang, is_managed)
+            _seen_managed_dirs: set[str] = set()
+            for _lang in _detected_langs:
+                _ll = _lang.lower()
+                if _ll in _SCIP_CONFIGS:
+                    _dir_key = str(_SCIP_CONFIGS[_ll].install_dir)
+                    if _dir_key not in _seen_managed_dirs:
+                        _seen_managed_dirs.add(_dir_key)
+                        _scip_tasks.append((_ll, True))
+                elif _ll in _SCIP_INDEXERS and _shutil.which(_SCIP_INDEXERS[_ll][0]):
+                    _scip_tasks.append((_ll, False))
+
+            if not _scip_tasks:
+                progress.emit("scip", current=0, total=0, message="no SCIP indexers installed")
+            else:
+                _scip_total = len(_scip_tasks)
+                _scip_step = 0
+                _total_scip_edges = 0
+                for _scip_lang, _scip_managed in _scip_tasks:
+                    progress.emit("scip", current=_scip_step, total=_scip_total,
+                                  message=f"scip-{_scip_lang}")
+                    _scip_detail = "no output"
+                    try:
+                        if _scip_managed:
+                            _scip_result = _ensure_scip_indexer(_SCIP_CONFIGS[_scip_lang])
+                            if _scip_result is not None:
+                                _scip_run_cmd, _scip_run_env = _scip_result
+                                _ts_tsconfig_path = None
+                                _effective_cmd = _scip_run_cmd
+                                if _scip_lang in ("typescript", "javascript"):
+                                    try:
+                                        # Always generate a SCIP-optimised tsconfig.
+                                        # For projects with tsconfig.json: the wrapper extends it
+                                        # (inheriting paths, jsx, module settings) but limits
+                                        # "files" to .ts/.tsx only. This avoids indexing thousands
+                                        # of .jsx/.js files that allowJs would otherwise include,
+                                        # which is the main cause of scip-typescript timeouts.
+                                        # For JS-only projects: standalone fallback tsconfig.
+                                        _project_tsconfig = None
+                                        for _tc_name in ("tsconfig.json", "jsconfig.json"):
+                                            _tc_candidate = project_path / _tc_name
+                                            if _tc_candidate.exists():
+                                                _project_tsconfig = str(_tc_candidate)
+                                                break
+                                        _ts_tsconfig_path = scip_cache / "icx-tsconfig.json"
+                                        _write_ts_tsconfig(
+                                            str(project_path),
+                                            [str(f) for f in files],
+                                            _ts_tsconfig_path,
+                                            project_tsconfig=_project_tsconfig,
+                                        )
+                                        _effective_cmd = [
+                                            x for x in _scip_run_cmd
+                                            if x != "--infer-tsconfig"
+                                        ] + [str(_ts_tsconfig_path)]
+                                    except Exception:
+                                        _effective_cmd = _scip_run_cmd
+                                _scip_file = run_scip_indexer(
+                                    _scip_lang, str(project_path), scip_cache,
+                                    cmd=_effective_cmd,
+                                    extra_env=_scip_run_env or None,
+                                    use_cache=True,
+                                )
+                            else:
+                                _scip_file = None
+                                _scip_detail = "indexer not installed (runtime missing or npm failed)"
+                        else:
+                            _scip_file = run_scip_indexer(
+                                _scip_lang, str(project_path), scip_cache,
+                                use_cache=True,
+                            )
+                        if _scip_file is _SCIP_BACKGROUND_SPAWNED:
+                            _scip_detail = "indexing in background; edges on next build"
+                        elif _scip_file:
+                            _scip_edges = read_scip_edges(
+                                _scip_file, _scip_all_nodes,
+                                project_path=str(project_path),
+                            )
+                            if _scip_edges:
+                                extraction = {
+                                    **extraction,
+                                    "edges": list(extraction.get("edges", [])) + _scip_edges,
+                                }
+                            _total_scip_edges += len(_scip_edges)
+                            _scip_detail = f"{len(_scip_edges)} edges"
+                        else:
+                            if _scip_managed and _scip_result is not None:
+                                _scip_detail = "indexer ran but produced no index.scip"
+                    except Exception as _scip_lang_exc:
+                        _scip_detail = f"error: {type(_scip_lang_exc).__name__}"
+                        _log.debug("scip %s failed (%s)", _scip_lang,
+                                   type(_scip_lang_exc).__name__)
+                    _log.debug("scip %s: %s", _scip_lang, _scip_detail)
+                    _scip_step += 1
+                progress.emit("scip", current=_scip_total, total=_scip_total,
+                              message=f"{_total_scip_edges} compiler-grade edges")
+        except Exception as _scip_exc:
+            progress.emit("scip", current=0, total=0, message="skipped")
+            _log.debug("scip integration skipped (%s)", type(_scip_exc).__name__)
+
         _RESOLVERS = (
             ("java_inheritance", "icx_engine.graph.parser.resolvers.java_inheritance", "extract_java_inheritance_edges"),
             ("fastapi", "icx_engine.graph.parser.resolvers.fastapi", "extract_fastapi_edges"),
@@ -455,6 +749,11 @@ def _build_project_isolated(
             ("graphql_resolvers", "icx_engine.graph.parser.resolvers.graphql_resolvers", "extract_graphql_edges"),
             ("vue_options", "icx_engine.graph.parser.resolvers.vue_options", "extract_vue_options_edges"),
             ("spring_xml", "icx_engine.graph.parser.resolvers.spring_xml", "extract_spring_xml_edges"),
+            ("jsp", "icx_engine.graph.parser.resolvers.jsp_resolver", "resolve_jsp"),
+            ("go", "icx_engine.graph.parser.resolvers.go_resolver", "resolve_go"),
+            ("rails", "icx_engine.graph.parser.resolvers.rails_resolver", "resolve_rails"),
+            ("proto", "icx_engine.graph.parser.resolvers.proto_resolver", "resolve_proto"),
+            ("terraform", "icx_engine.graph.parser.resolvers.terraform_resolver", "resolve_terraform"),
         )
 
         framework_edge_count = 0
@@ -493,6 +792,20 @@ def _build_project_isolated(
             _log.debug("universal_ast resolver: %d edges", len(universal_edges))
         except Exception as universal_exc:
             _log.debug("universal_ast resolver skipped (%s)", type(universal_exc).__name__)
+
+        # Event-driven edge detection (Kafka, RabbitMQ, Redis, SQS, SNS, NATS, OpenAPI, AsyncAPI)
+        try:
+            from icx_engine.graph.parser.resolvers.event_resolver import resolve_events
+            _event_edges = resolve_events(files, project_path, extraction)
+            if _event_edges:
+                _event_edges = _abs_edges(_event_edges)
+                extraction = {
+                    **extraction,
+                    "edges": list(extraction.get("edges", [])) + _event_edges,
+                }
+            _log.debug("event_resolver: %d edges", len(_event_edges))
+        except Exception as _event_exc:
+            _log.debug("event_resolver skipped (%s)", type(_event_exc).__name__)
 
         try:
             from icx_engine.graph.parser.resolvers.cross_service_rest import (
@@ -599,27 +912,9 @@ def _build_project_isolated(
         else:
             progress.emit("llm", current=0, total=0, message="no LLM configured")
 
-        # Cross-resolver edge dedup: multiple resolvers may emit edges for the
-        # same (source, target) pair with different relations. Keep only the
-        # highest-priority relation so the final graph has one canonical edge.
-        # Priority: imports(4) > inherits(3) > calls(2) > uses(1) > other(0).
-        _REL_PRIORITY = {"imports": 4, "inherits": 3, "calls": 2, "injects": 2, "uses": 1}
-        _best: dict[tuple, dict] = {}
-        for _e in extraction.get("edges", []):
-            if not isinstance(_e, dict):
-                continue
-            _k = (_e.get("source"), _e.get("target"))
-            if None in _k:
-                continue
-            _pri = _REL_PRIORITY.get(_e.get("relation", ""), 0)
-            _existing = _best.get(_k)
-            if _existing is None:
-                _best[_k] = _e
-            else:
-                _epri = _REL_PRIORITY.get(_existing.get("relation", ""), 0)
-                if _pri > _epri:
-                    _best[_k] = _e
-        extraction = {**extraction, "edges": list(_best.values())}
+        # Multi-source edge fusion: fuse edges where multiple resolvers agree
+        from icx_engine.graph.parser.dedup import fuse_and_dedup as _fuse_dedup
+        extraction = {**extraction, "edges": _fuse_dedup(extraction.get("edges", []))}
 
         progress.emit("louvain", current=0, total=1, message="community detect")
         # Directed graph preserves edge direction so opposite-direction
@@ -639,9 +934,33 @@ def _build_project_isolated(
         result["community_count"] = len(communities) if isinstance(communities, dict) else 0
 
         progress.emit("export", current=0, total=1, message="write graph.json")
-        to_json(G, communities, output_path=graph_tmp_path_str)
+        to_json(G, communities, output_path=graph_tmp_path_str, skip_safety_check=True)
         progress.emit("export", current=1, total=1,
                       message=f"{result['node_count']} nodes, {result['edge_count']} edges")
+
+        # -- Incremental merge (if applicable) --
+        if _incremental:
+            try:
+                import json as _json
+                existing_graph = _json.loads(graph_json_path.read_text(encoding="utf-8"))
+                # Load what to_json just wrote to the tmp path
+                fresh_graph = _json.loads(_Path(graph_tmp_path_str).read_text(encoding="utf-8"))
+                merged = _merge_incremental(existing_graph, fresh_graph, _changed_rel, _deleted_rel)
+                _Path(graph_tmp_path_str).write_text(
+                    _json.dumps(merged, separators=(",", ":")), encoding="utf-8"
+                )
+            except Exception as _merge_exc:
+                _log.debug("incremental merge failed (%s), keeping full build", type(_merge_exc).__name__)
+
+        # Save hashes after successful build
+        _final_hashes = _new_hashes if _incremental else {}
+        if not _final_hashes:
+            # Full build: compute hashes now
+            _final_hashes_list = compute_changed_files(str(project_path), _rel_files, {})
+            _final_hashes = _final_hashes_list[2]
+        save_hashes(hash_cache_path, _final_hashes)
+        result["incremental"] = _incremental
+        # -- End incremental merge -----------------------------------------------------------
 
     except ImportError as exc:
         result["error"] = (

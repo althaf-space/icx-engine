@@ -351,6 +351,16 @@ def _format_backend_env_keys(backend: str) -> str:
     return " or ".join(keys) if keys else "AWS_PROFILE or AWS_REGION"
 
 
+def get_backend_api_key(backend: str) -> str:
+    """Return the first configured API key for backend, or an empty string."""
+    return _get_backend_api_key(backend)
+
+
+def format_backend_env_keys(backend: str) -> str:
+    """Return user-facing accepted API-key variable names."""
+    return _format_backend_env_keys(backend)
+
+
 def _default_model_for_backend(backend: str) -> str:
     """Return configured model override or backend default model."""
     cfg = BACKENDS[backend]
@@ -1214,7 +1224,8 @@ def _call_llm(prompt: str, *, backend: str, max_tokens: int = 200) -> str:
         return resp.content[0].text if resp.content else ""
 
     if backend == "claude-cli":
-        import shutil, subprocess
+        import shutil
+        import subprocess
         if shutil.which("claude") is None:
             raise RuntimeError("Claude Code CLI not found on $PATH")
         proc = subprocess.run(

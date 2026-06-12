@@ -34,7 +34,7 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.),
-  exposing 13 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 5 graph query tools, 4 historical memory tools, and 1 save tool (`save_memory`)
+  exposing 18 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 10 graph query tools, 4 historical memory tools, and 1 save tool (`save_memory`)
 
 The architecture is deliberately split along two axes:
 
@@ -437,7 +437,7 @@ Never skip `finalize()` - calling providers that omit it will produce incorrect 
 
 ### MCP tool architecture (`mcp_server.py`)
 
-ICX exposes 13 tools over MCP (workflow order):
+ICX exposes 18 tools over MCP (workflow order):
 
 | # | Tool | Purpose |
 |---|------|---------|
@@ -449,11 +449,16 @@ ICX exposes 13 tools over MCP (workflow order):
 | 5 | `graph_call_chain` | Trace call chains from a function |
 | 6 | `graph_impact` | Find what a file/function affects |
 | 7 | `graph_cross_links` | Find cross-service dependencies |
-| 8 | `memory_get_hotspots` | Files ranked by historical work item count |
-| 9 | `memory_find_by_file` | Surface work items that touched a given file |
-| 10 | `memory_get_related` | Work items sharing files with current ticket (file-overlap or stored edges) |
-| 11 | `memory_get_patterns` | Auto-detected statistical patterns (every 10 saves) |
-| 12 | `save_memory` | Save resolution after developer confirms fix is tested |
+| 8 | `graph_important_nodes` | Top files/functions by PageRank + betweenness centrality - identifies architectural hotspots |
+| 9 | `graph_blast_radius` | Given changed files, returns all dependents, risk score, and missing co-change files |
+| 10 | `graph_cycles` | Detect circular dependency chains (structural edges only) |
+| 11 | `graph_dead_code` | Files with zero incoming edges excluding entry points and test files |
+| 12 | `graph_ownership` | CODEOWNERS ownership lookup + cross-team dependency edges |
+| 13 | `memory_get_hotspots` | Files ranked by historical work item count |
+| 14 | `memory_find_by_file` | Surface work items that touched a given file |
+| 15 | `memory_get_related` | Work items sharing files with current ticket (file-overlap or stored edges) |
+| 16 | `memory_get_patterns` | Auto-detected statistical patterns (every 10 saves) |
+| 17 | `save_memory` | Save resolution after developer confirms fix is tested |
 
 `analyze_issue_fast` and `analyze_issue` both call `_handle_analyze_issue()` internally - the only difference is `skip_vision=True` vs `skip_vision=False`. The `_call_tool()` dispatcher sets this based on which tool name was called.
 
@@ -493,11 +498,50 @@ ICX exposes 13 tools over MCP (workflow order):
 
 `work_item.analysis` excludes the raw `images` dict (Base64 blobs). Images are written to `~/.icx/temp/<issue_key>/` and their paths returned in `work_item.image_paths`. `images_access` is only present when `image_paths` is non-empty. `pending_images` (list of unprocessed image filenames, fast mode only) is still included in `analysis`.
 
-`graphs[N].status` values: `"ready"` (report available; may include `stale_note` when files changed since last build), `"building"` (user-initiated build in progress), `"not_built"` (never built; agent must tell user to run `icx graph build`), `"not_registered"` (project unknown), `"error"`. `graphs` is always a list - single project = list of one entry, multi-project = one entry per path.
+`graphs[N].status` values: `"ready"` (report available; may include `stale_note` when files changed since last build), `"building"` (user-initiated build in progress), `"not_built"` (never built; agent must tell user to run `icx graph build`), `"not_registered"` (project unknown), `"error"`. `graphs` is always a list - single project = list of one entry, multi-project = one entry per path. When `project_paths` was empty and the path was resolved from the ticket's Jira project key, `graphs[0].path_auto_resolved = true` is set so the agent can surface the resolved path to the user.
+
+**`project_paths` resolution priority:** `project_paths` is optional in the tool schema. The resolution order is:
+
+1. `project_paths` is non-empty -> use as-is, no registry lookup.
+2. `project_paths` is `[]` (or omitted) -> `_resolve_paths_from_ticket(issue_ref)` extracts the Jira project key prefix from the issue ref (URL or bare key) and calls `find_project_by_jira_key()` against the ICX registry. If a registered project has a matching `jira_project` field, its path is used and `graphs[0].path_auto_resolved = true`.
+3. No match in registry -> `graphs = []`, instruction directs agent to use grep/glob only.
+
+The agent must never auto-detect the editor workspace root or guess a path. When uncertain, pass `[]` and let ICX resolve from the ticket. `find_project_by_jira_key()` in `storage.py` performs a case-insensitive scan of all registry entries for a `jira_project` match.
 
 `memory.status` values in the response: `"ready"` (agent should call `memory_search` tool now), `"warming_up"` (model loading - retry next call), `"failed"` (setup required or load error - `note` field contains the reason). The dedicated single-worker executor thread keeps the ONNX model resident after first load; `memory_search` tool calls run on this thread. Graph info is resolved synchronously from filesystem only - no subprocess wait.
 
-**`engine.run()` timeout:** The call to `engine.run()` inside `_handle_analyze_issue` is wrapped in `asyncio.wait_for`. The timeout is **15 seconds** for `analyze_issue_fast` (`skip_vision=True`) and **660 seconds** (11 minutes) for `analyze_issue` (`skip_vision=False`). The 660s ceiling is calculated from worst-case pipeline time: Jira fetch with 3 retries + max sleep delays (~210s), parallel attachment downloads (60s), parallel vision enrichment or summarization (90s), main LLM call (120s), visual grounding (45s), plus buffer. If the deadline elapses, `_handle_analyze_issue` returns `{"error": "Analysis timed out..."}` - no exception is raised to the MCP host. Without this ceiling, a hung HTTP request or stalled SDK call would block the MCP tool indefinitely with no feedback to the user.
+**`engine.run()` timeout:** The call to `engine.run()` inside `_handle_analyze_issue` is wrapped in `asyncio.wait_for`. The timeout is **45 seconds** for `analyze_issue_fast` (`skip_vision=True`) and **660 seconds** (11 minutes) for `analyze_issue` (`skip_vision=False`). The 660s ceiling is calculated from worst-case pipeline time: Jira fetch with 3 retries + max sleep delays (~210s), parallel attachment downloads (60s), parallel vision enrichment or summarization (90s), main LLM call (120s), visual grounding (45s), plus buffer. If the deadline elapses, `_handle_analyze_issue` returns a structured error - no exception is raised to the MCP host. Without this ceiling, a hung HTTP request or stalled SDK call would block the MCP tool indefinitely with no feedback to the user.
+
+**MCP error response shape:** All error responses from `_handle_analyze_issue` and graph tools follow a consistent structured format so the AI agent always knows what action to take:
+
+```json
+{
+  "status": "error",
+  "code": "ISSUE_NOT_FOUND",
+  "message": "Issue not found. Check the URL or issue key.",
+  "action_required": "ask_user_to_verify_issue_key"
+}
+```
+
+`code` values and their `action_required` values:
+
+| `code` | Cause | `action_required` |
+|--------|-------|-------------------|
+| `MISSING_PROJECT_PATH` | `project_paths` missing or empty | `ask_user_for_project_path` |
+| `INVALID_PROJECT_PATH` | Path entry too long or wrong type | `ask_user_for_project_path` |
+| `ISSUE_NOT_FOUND` | 404 from tracker | `ask_user_to_verify_issue_key` |
+| `AUTH_FAILED` | 401/403 from tracker | `tell_user_to_run_icx_connection_add` |
+| `NO_CONNECTION` | No connection configured for domain | `tell_user_to_run_icx_connection_add` |
+| `RATE_LIMITED` | 429 from tracker | `wait_and_retry` |
+| `INVALID_INPUT` | Malformed issue key | `ask_user_for_correct_issue_key` |
+| `TIMEOUT` | Pipeline exceeded time limit | `tell_user_to_check_network_and_retry` |
+| `ICX_ERROR` | Other `ICXError` subclass | `report_error_to_user` |
+| `INTERNAL_ERROR` | Unhandled exception | `report_error_to_user` |
+| `NO_PATH` | Graph tool called without `project_path` | `ask_user_for_path` |
+| `NO_GRAPH` | Graph not built for path | `stop_and_tell_user_to_build_graph` |
+| `GRAPH_STALE` | Staleness exceeds 3% threshold | `stop_and_tell_user_to_rebuild_graph` |
+
+Graph tool errors (`NO_PATH`, `NO_GRAPH`, `GRAPH_STALE`) use `status`/`code`/`message`/`action_required` and may include `build_command` and `project_path` for convenience.
 
 **Windows UTF-8 startup fix:** `run_mcp_server()` calls `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` and `sys.stderr.reconfigure(encoding="utf-8", errors="replace")` before starting the event loop. On Windows, the default console codepage (cp1252) cannot encode characters like `→` that can appear in Jira issue content or LLM analysis output. Without this fix, any such character written to a text-mode stream raises `UnicodeEncodeError`, which on an uncaught path crashes the MCP server process and causes the MCP host to receive no response. The `errors="replace"` fallback ensures a single unencodable character never terminates the server.
 
@@ -520,9 +564,9 @@ All statuses share a mandatory **STEP 0 vision gate** prepended to the instructi
 | Graph status | Instruction behaviour (after STEP 0 / STEP 0B) |
 |---|---|
 | `ready` (no stale_note) | Read `graph.report_path` (compact index); identify relevant cluster from table; read `GRAPH_CLUSTERS/<name>.md` for full file list; read core files; **present confirmation summary to user** (problem understood, goal, **approach** - exactly what will change and why, files list, conventions followed, new dependencies if any - ask "Shall I proceed?"); if confirmed implement; if user adds context incorporate and proceed; test; call `save_memory` |
-| `ready` (with stale_note) | Same as ready, but **first inform the user** of the staleness: X of Y files changed (Z%), suggest `icx graph build --path <project_path>` to refresh. Then proceed with the graph as normal. |
+| `ready` (with stale_note) | Same as ready, but **first inform the user** of the staleness: X of Y files changed (Z%), suggest `icx graph build <name>` to refresh. Then proceed with the graph as normal. |
 | `building` | User-initiated build in progress; proceed now with grep/glob; optionally re-call `analyze_issue_fast` when ETA elapses to cross-check file selection |
-| `not_built` | **Tell the user** to run `icx graph build --path <project_path>` in their terminal; then proceed with grep/glob |
+| `not_built` | **Tell the user** to run `icx graph build <name>` in their terminal; then proceed with grep/glob |
 | `not_registered` / `error` | Graph unavailable; proceed with grep/glob |
 
 **Confirmation gate:** When the graph is ready, the agent is instructed to present a structured summary before writing any code: problem statement (1-2 sentences), acceptance criteria as bullet points, **approach** (exactly what the agent will change/add/remove and precisely why that fixes the problem - specific enough for the user to reject and propose an alternative), and the list of files it plans to touch with their role tags. For non-bug work items the confirmation format also includes "Conventions I will follow" (derived from existing code) and "New external dependencies required" (or "None"). The user can confirm or redirect. If the user redirects, the agent must present a revised confirmation using the same format before starting.
@@ -968,38 +1012,153 @@ class MemoryQueryInput:
 
 When adding a new connector, no changes to the memory module are needed. `engine.run()` builds `MemoryQueryInput` from `raw.issue_key`, `connector.connector_type()`, `raw.summary`, and `raw.description`. The `source_type` field is populated automatically.
 
-### MemoryEntry confidence fields
+### MemoryEntry fields
 
-Two fields track how often a resolution has been confirmed:
+**Core confidence fields:**
 
 | Field | Type | Description |
 |---|---|---|
-| `confirmation_count` | `int` | Number of times `save()` was called with `resolution_confirmed=True` for this issue key |
+| `confirmation_count` | `int` | Number of confirmed saves + `verify_resolution()` calls for this key |
 | `memory_confidence` | `float` | `min(1.0, confirmation_count * 0.25)` - 0.25 per confirmation, capped at 1.0 |
 
-`confirmation_count` is never reset on unconfirmed saves - it accumulates across all confirmed saves. The confidence value acts as a ranking boost during `query()`: entries with higher confidence rank above equally-scored peers (factor of 0.5 keeps it as a tie-breaker, not a dominant signal).
+**Phase 1 - Root cause classification:**
 
-Existing tables (created before this version) are automatically upgraded via `add_columns()` on first open, defaulting both fields to 0.
+| Field | Type | Description |
+|---|---|---|
+| `root_cause_pattern` | `str` | Canonical pattern from `ROOT_CAUSE_PATTERNS` (21 values). Default: `"uncategorized"` |
+| `pattern_confidence` | `float` | Agent's certainty about the pattern (0.0-1.0) |
+| `outcome_verified` | `bool` | True only after developer explicitly confirms fix worked |
+| `outcome_feedback_note` | `str` | Note recorded on verify/negate. Max 500 chars |
+| `negated` | `bool` | True if resolution was confirmed WRONG. Negated entries never surface in primary results |
+| `negation_reason` | `str` | Why this resolution was negated |
 
-**`save(restore=True)`:** Used exclusively by `icx memory import`. Skips the increment logic entirely and writes `confirmation_count` and `memory_confidence` directly from the entry, preserving exported trust signals exactly. Never use `restore=True` outside the import path.
+**Phase 2 - Reference reinforcement:**
+
+| Field | Type | Description |
+|---|---|---|
+| `used_by_tickets` | `list[str]` | Issue keys that cited this entry to solve new tickets |
+| `usage_count` | `int` | `len(used_by_tickets)` - denormalized for fast queries |
+| `cross_reference_boost` | `float` | Retrieval boost: `min(1.0, usage_count * 0.15) + cluster_bonus - negation_penalty` |
+
+**Phase 3 - Temporal decay:**
+
+| Field | Type | Description |
+|---|---|---|
+| `temporal_decay_factor` | `float` | Recomputed at query time. 1.0 = fresh, 0.2 = floor. Pattern-aware: `config_env_mismatch` decays at 5x the rate of `missing_null_check` |
+
+**Phase 6 - Semantic drift:**
+
+| Field | Type | Description |
+|---|---|---|
+| `save_context_vector` | `list[float]` | 768-dim embedding of (summary + root_cause_pattern + files_changed) at save time |
+| `semantic_drift_score` | `float` | Last computed cosine distance between save vector and current query vector. Written at query time |
+
+**Phase 8 - Causal chain:**
+
+| Field | Type | Description |
+|---|---|---|
+| `causal_chain` | `dict` | Full decision trail: `ticket_summary`, `intelligence_verdict`, `graph_cluster`, `suggested_files`, `files_agent_opened`, `prior_resolution_used`, `root_cause_confirmed`, `diagnosis_steps` |
+| `full_ticket_text` | `str` | LLM-analysed problem_summary + detailed_description. Max 2000 chars. Included in embed text for richer retrieval |
+| `attachment_summary` | `str` | One-paragraph summary of what attachments showed. Max 500 chars. Included in embed text |
+
+**ROOT_CAUSE_PATTERNS (21 canonical values):**
+`stale_cache_reference`, `missing_null_check`, `incorrect_transaction_boundary`, `event_race_condition`, `schema_drift`, `auth_scope_mismatch`, `async_context_leak`, `missing_index`, `type_coercion_error`, `config_env_mismatch`, `missing_idempotency`, `cascade_delete_missing`, `n_plus_one_query`, `memory_leak`, `timeout_misconfiguration`, `pagination_boundary_error`, `deserialization_contract_break`, `feature_flag_state_leak`, `tenant_isolation_breach`, `retry_storm`, `uncategorized`
+
+**MemoryAuditEvent schema:**
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `str` | UUID, auto-generated |
+| `event_type` | `str` | `"reinforced"`, `"verified"`, `"negated"`, `"boost_applied"`, `"hub_detected"` |
+| `source_key` | `str` | Issue key of the memory entry that changed |
+| `actor_key` | `str` | Who triggered the change (issue key or `"developer"`) |
+| `timestamp` | `str` | ISO 8601 UTC |
+| `before_boost` / `after_boost` | `float` | cross_reference_boost before and after |
+| `before_confidence` / `after_confidence` | `float` | memory_confidence before and after |
+| `note` | `str` | Human-readable description of the event |
+
+Existing tables are automatically upgraded via `add_columns()` on first open with safe defaults. `save_context_vector` is stored as a JSON-encoded string column (`save_context_vector_json`) and `causal_chain` as `causal_chain_json` to avoid PyArrow fixed-dim vector conflicts.
+
+**`save(restore=True)`:** Used exclusively by `icx memory import`. Skips the increment logic entirely and writes fields directly from the entry. Never use `restore=True` outside the import path.
 
 ### Search strategy
 
-Hybrid search: dense ANN vector search + BM25 FTS merged with Reciprocal Rank Fusion (RRF), with optional tag pre-filter and confidence boost.
+`query_smart()` returns `{results: list[dict], negative_signals: list[dict], decay_applied: bool}`. `query()` wraps it, returning `list[PastInsight]` for backward compatibility with `engine.run()`.
 
-- Vector search finds semantically similar issues even when wording differs
-- FTS catches exact technical terms (error codes, function names, file paths)
-- Cosine similarity is computed from vector distance (`1.0 - _distance`) and used as the reported score (0.0-1.0)
-- Entries below `min_score` are filtered out before ranking - irrelevant results never appear regardless of DB size
-- Tag pre-filter (if `MemoryQueryInput.tags` is non-empty): narrows to entries sharing at least one tag before RRF; falls back to full candidate set if no entries match any tag
-- RRF (k=60) is used for ranking among qualified candidates; confidence multiplier applied: `rrf_score * (1.0 + 0.5 * memory_confidence)`
+Hybrid search with adjusted scoring:
+- Dense ANN vector + BM25 FTS merged with RRF (k=60)
+- Adjusted score: `rrf * decay * (1 + 0.5 * memory_confidence) * (1 + cross_reference_boost)`
+- Negated entries routed to `negative_signals[]`, never to `results[]`
+- Tag pre-filter narrows candidates when `MemoryQueryInput.tags` is non-empty
 - Default: top_k=3, min_score=0.65
 
-FTS index is created on columns: `summary`, `problem_description`. `resolution_note` is excluded from FTS - it describes the fix (not the problem), so keyword-matching incoming queries against it produces noise. If FTS index creation fails (LanceDB build variation), vector-only search is used as fallback - no exception raised.
+FTS index columns: `summary`, `problem_description`. `resolution_note` excluded (describes fix, not problem - degrades cross-project similarity).
 
-**Vector embedding (`_build_embed_text`):** Only `summary`, `problem_description`, and `tags` are embedded. `resolution_note` is deliberately excluded - it describes the fix, not the problem, and including it skews vectors toward the solution space and degrades cross-project similarity matching for the same bug type with different wordings.
+**Vector embedding (`_build_embed_text`):** `full_ticket_text[:1000]` + `summary` + `problem_description` + `root_cause_pattern` + `attachment_summary` + `tags`. Richer embed text improves retrieval for semantically similar tickets with different wording.
 
-**Exact key lookup:** When `input.issue_key` is provided, `_extract_bare_key()` normalizes the value to `PROJ-123` format (stripping URLs, case-insensitive). If the entry exists, it is prepended to results with `similarity_score=1.0`, bypassing the embedding comparison entirely. This ensures the same ticket always surfaces its own saved resolution even if the embedding was computed from different text at save time.
+**Temporal decay rates (`_DECAY_CLASSES`):**
+- `fast` (0.005/day): `config_env_mismatch`, `timeout_misconfiguration`, `schema_drift`, `feature_flag_state_leak`
+- `medium` (0.002/day): `stale_cache_reference`, `missing_index`, `n_plus_one_query`, `retry_storm`, `pagination_boundary_error`
+- `slow` (0.0005/day): all others including `missing_null_check`, `auth_scope_mismatch`, `tenant_isolation_breach`
+
+High `usage_count` resists decay: each 5 citations reduces effective decay rate by 20%, max 80% reduction. Floor: `_MIN_DECAY = 0.2` (ancient entries retain 20% weight minimum).
+
+**Semantic drift penalty:** At query time, cosine distance between `save_context_vector` and query vector determines a drift penalty. Drift > 0.4 adds up to 0.3 penalty to `temporal_decay_factor`. Old entries with empty `save_context_vector` skip drift detection gracefully.
+
+**Exact key lookup:** When `input.issue_key` is provided, the saved entry is prepended with `similarity_score=1.0`, bypassing embedding comparison entirely.
+
+### Intelligence layer (`_build_intelligence` in mcp_server.py)
+
+Called inside `_handle_analyze_issue()` when memory is ready. Runs a quick 3s internal memory search + pattern lookup. Returns an `intelligence` field in the analysis response with:
+
+| Field | Description |
+|---|---|
+| `verdict` | `"novel"` / `"pattern_match"` / `"seen_before"` |
+| `confidence` | 0.0-1.0 |
+| `prior_resolution` | Full result dict if `seen_before`, else null |
+| `skip_diagnosis` | True when `seen_before` + `outcome_verified=True` + confidence >= 0.80 |
+| `pattern_warning` | String describing matched semantic/hub pattern, if any |
+| `negative_signals` | Negated entries that matched this ticket - agent must never reuse these |
+| `suggested_files` | Up to 3 files from graph context |
+| `token_budget_estimate` | `500 + (N_files * 800) + (300 if prior_resolution)` |
+
+Session context (`_SESSION_CONTEXT_DATA[issue_key]`) stores `intelligence_verdict`, `suggested_files`, and `ticket_summary` for the causal chain record written at `save_memory` time.
+
+### Pattern detection (`memory/patterns.py`)
+
+`detect_patterns(entries)` triggers every 5 saves (lowered from 10). Returns 5 pattern types:
+
+| Pattern type | Description |
+|---|---|
+| `frequent_file` | File appears in >= 30% of saved entries |
+| `dominant_tag` | Tag appears in >= 20% of saved entries |
+| `top_work_item_type` | One type is > 50% of all entries |
+| `citation_hub` | An issue key is cited by >= 30% of entries sharing the same `root_cause_pattern` (min group: 3). Triggers `reinforce_usage()` automatically |
+| `semantic_signal` | 3+ entries sharing `root_cause_pattern` have common signal words (>= 60% frequency) in `full_ticket_text` AND a common fix file (>= 50% rate). Produces actionable "check this file first" warnings |
+
+`PatternManager.refresh(entries, project_key, manager=None)`: when `manager` is provided, `_apply_hub_boosts()` auto-reinforces citation hubs via `reinforce_usage()`.
+
+### Reference reinforcement (`reinforce_usage`)
+
+Call `manager.reinforce_usage(source_key, used_by_key)` when a past resolution is used to solve a new ticket. Effects:
+- Appends `used_by_key` to `used_by_tickets` (deduped)
+- Increments `usage_count`
+- Auto-elevates `memory_confidence`: >= 5 citations -> 0.75, >= 10 -> 1.0
+- Recomputes `cross_reference_boost` for this entry AND all siblings sharing `root_cause_pattern` + any overlapping citation
+- Writes a `"reinforced"` audit event
+
+### Outcome feedback (`verify_resolution` / `negate_resolution`)
+
+`verify_resolution(issue_key, feedback_note)`:
+- Increments `confirmation_count`, sets `outcome_verified=True`
+- `memory_confidence = min(1.0, confirmation_count * 0.25)`
+- Writes `"verified"` audit event
+
+`negate_resolution(issue_key, reason)`:
+- Sets `negated=True`, applies -0.4 boost penalty
+- Clears `outcome_verified`
+- Propagates -0.05 penalty to all entries in `used_by_tickets`
+- Writes `"negated"` audit events for each affected entry
 
 ### Integration in engine.run()
 
@@ -1127,7 +1286,100 @@ The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/p
 | `graph/parser/dedup.py` | Duplicate edge deduplication |
 | `graph/parser/lsp_client.py` | Generic LSP stdio JSON-RPC client |
 | `graph/parser/lsp_manager.py` | LSP lifecycle: detect runtime, install language server, version-track, spawn, kill |
-| `graph/parser/resolvers/` | Semantic edge resolvers: Spring, React, Django, FastAPI, Flask, Next.js, Vue, Svelte, Remix, SQLAlchemy, Celery, pytest fixtures, Redux, GraphQL, JPA, JAX-RS, Lombok, Kotlin, TypeScript LSP, Pyright LSP, Java symbols, Python Jedi, Python type-checking, cross-service REST, and more |
+| `graph/parser/resolvers/` | Semantic edge resolvers: Spring, React, Django, FastAPI, Flask, Next.js, Vue, Svelte, Remix, SQLAlchemy, Celery, pytest fixtures, Redux, GraphQL, JPA, JAX-RS, Lombok, Kotlin, TypeScript LSP, Pyright LSP, Java symbols, Python Jedi, Python type-checking, cross-service REST, JSP/Servlet, Go, Rails, gRPC/Protobuf, Terraform/HCL, event brokers, co-change history, and more |
+| `graph/parser/file_cache.py` | SHA-256 file hash cache for incremental graph rebuilds |
+| `graph/parser/dedup.py` | `fuse_and_dedup()` - multi-source edge fusion; confidence summing for fusable families; highest-confidence deduplication for all others |
+| `graph/parser/centrality.py` | PageRank + betweenness + degree centrality; writes `pagerank`, `betweenness`, `degree_centrality`, `importance` attributes onto graph nodes |
+| `graph/parser/ownership.py` | CODEOWNERS file parser; `GraphQuerier.get_ownership()` resolves file owners and cross-team dependency edges |
+| `graph/parser/scip_reader.py` | Optional SCIP compiler-grade index reader; emits `scip_reference` edges (0.95 confidence); built-in protobuf wire-format parser, no generated code dependency |
+
+### Semantic resolvers
+
+Each resolver in `graph/parser/resolvers/` appends edges to the extraction dict during the LSP + semantic resolver pass (build step 4). Resolver failures are logged at DEBUG and never fatal.
+
+| Resolver | File | Edge types | Activation |
+|---|---|---|---|
+| jsp | `graph/parser/resolvers/jsp_resolver.py` | `jsp_forward` (0.70), `jsp_include` (0.85), `taglib_import` (0.90), `el_binding` (0.55), `servlet_mapping` (0.95) | `.java` or `.jsp` present |
+| go | `graph/parser/resolvers/go_resolver.py` | `go_import` (0.90), `go_implements` (0.75), `go_calls` (0.85) | `.go` present |
+| rails | `graph/parser/resolvers/rails_resolver.py` | `rails_view` (0.85), `rails_route` (0.90), `rails_model_controller` (0.80), `rails_ar_usage` (0.70), `rails_concern` (0.80), `rails_service` (0.75) | `app/controllers/` present |
+| proto | `graph/parser/resolvers/proto_resolver.py` | `proto_import` (0.95), `proto_generated` (0.90), `proto_implements` (0.80), `grpc_client` (0.75) | `.proto` present |
+| terraform | `graph/parser/resolvers/terraform_resolver.py` | `tf_module` (0.95), `tf_var_ref` (0.80), `tf_data_ref` (0.85), `tf_resource_dep` (0.90), `tf_output` (0.85) | `.tf` present |
+| event | `graph/parser/resolvers/event_resolver.py` | `kafka_publish/subscribe`, `rabbitmq_publish/subscribe`, `redis_publish/subscribe`, `sqs_publish/subscribe`, `sns_publish`, `nats_publish/subscribe`, `event_channel`, `openapi_impl`, `asyncapi_impl` | always |
+| cochange | `graph/parser/resolvers/cochange_resolver.py` | `co_changed` | git available |
+| scip | `graph/parser/scip_reader.py` | `scip_reference` (0.95) | auto-installed by scip_manager or SCIP indexer on PATH |
+
+The `event` resolver detects broker patterns for Kafka, RabbitMQ, Redis, SQS, SNS, and NATS, and parses OpenAPI/Swagger and AsyncAPI specs for cross-service call edges.
+
+The `proto` resolver is cross-language: it follows `.proto` files into their generated Python, Java, and Go stubs to produce `proto_generated` edges, creating accurate cross-language dependency chains.
+
+### Incremental rebuild
+
+On second and subsequent builds, the graph avoids full re-extraction for unchanged files.
+
+- `graph/parser/file_cache.py` - reads and writes `file_hashes.json` alongside `graph.json` in `~/.icx/graphs/<id>/`. Each entry maps a file path to its SHA-256 digest.
+- `builder.py:_merge_incremental()` - called when `graph.json` and `file_hashes.json` both exist. Files whose digest matches are carried forward from the previous graph without re-parsing; only changed and new files go through AST extraction.
+- `storage.py:ProjectInfo.incremental_capable` - `True` when the stored graph supports incremental merge (i.e., `file_hashes.json` is present). First builds always run full extraction.
+- `storage.py:ProjectInfo.jira_project` - Optional Jira project key (uppercase, e.g. `"PROJ"`) linking this graph to a tracker project. Set via `icx graph add --project`. Used by `lookup_by_jira_project()` and `icx graph build --project` to resolve all graphs for a project key.
+- `storage.py:lookup_by_jira_project(key)` - Returns all `ProjectInfo` entries whose `jira_project` matches `key` (case-insensitive). Used by `icx graph build --project`.
+
+### Edge fusion
+
+After all resolvers have run, `fuse_and_dedup()` in `graph/parser/dedup.py` consolidates duplicate edges produced by different resolver passes:
+
+- **Fusable families** (`_FUSABLE_FAMILIES`): `import`, `call`, `implements` - when two edges of the same family connect the same source/target pair, their confidence values are summed, capped at `0.98`. This rewards signal convergence: if both the AST resolver and the LSP resolver agree on the same import, the combined confidence is higher than either alone.
+- **All other families** (`_EDGE_FAMILIES`): highest confidence wins; the lower-confidence duplicate is discarded.
+- `_EDGE_FAMILIES` lists every known edge type. Unknown edge types pass through unchanged.
+
+### Centrality
+
+`graph/parser/centrality.py` runs after graph assembly and before export:
+
+- Computes **PageRank** (power iteration, 20 rounds), **betweenness centrality** (approximate BFS from min(50, n) sample nodes), **degree centrality** (normalized in+out degree), and a combined **importance** score. Pure Python - no networkx dependency.
+- PageRank dangling redistribution is O(N) per iteration: all dangling contributions are summed once then distributed, not looped per dangling node. This keeps 5k+ node graphs fast (seconds, not minutes).
+- All four values are stored as node attributes and exported to `graph.json` so they are available to `GraphQuerier` without re-computation.
+- `importance` = `0.50 * pagerank + 0.30 * degree_centrality + 0.20 * betweenness`.
+- `find_context()` in `query.py` multiplies its TF-IDF relevance score by `(1.0 + importance)` so structurally central files rank higher for ambiguous queries.
+
+### CO_CHANGED semantics
+
+The cochange resolver (`graph/parser/resolvers/cochange_resolver.py`) scans the last 200 git commits and records how often pairs of files are modified together.
+
+- Minimum threshold: 3 co-occurrences and 0.30 co-occurrence strength (co-occurrences / min(file_a_commits, file_b_commits)).
+- Confidence formula: `0.50 + strength * 0.50`, capped at `0.90`.
+- Edge type: `co_changed`. These edges are structural hints only - they do not imply a call relationship, only historical co-modification.
+- `GraphQuerier.get_cochange_partners(file_path)` returns co-change partners sorted by strength descending.
+
+### SCIP integration (optional)
+
+`graph/parser/scip_reader.py` reads SCIP index files produced by compiler-grade indexers and emits `scip_reference` edges at 0.95 confidence - the highest confidence of any edge source.
+
+**Auto-install (no user action needed):** `graph/parser/scip_manager.py` auto-installs SCIP indexers under `~/.icx/scip/<lang>/` the first time a project with that language is built. Requires the runtime to be on PATH. Each language shows as a progress step during the SCIP phase (same pattern as LSP), so the first build may take longer while the indexer installs silently.
+
+| Language | Runtime needed | Auto-installed? | Notes |
+|---|---|---|---|
+| Python | Node + npm | Yes - `@sourcegraph/scip-python` | `NODE_OPTIONS=--max-old-space-size=4096` set automatically to prevent OOM on large projects |
+| TypeScript/JavaScript | Node + npm | Yes - `@sourcegraph/scip-typescript` | **Always runs as a background daemon** - never blocks the build. scip-typescript is spawned with `--output` pointing directly to the SCIP cache file and detached from the build process. Large projects (1000+ source files, thousands of .d.ts in node_modules) can take 5-30 min; this time is completely invisible to the user. Build completes immediately; SCIP edges appear on the **next** `icx graph build` (cache hit, instant). ICX generates `icx-tsconfig.json` that extends the project's own tsconfig (inheriting paths/aliases) with `files` limited to `.ts/.tsx` only and `incremental=true` for fast reruns. For JS-only projects without tsconfig: standalone tsconfig with `allowJs: true` and `baseUrl`. Cache invalidated when `.ts/.tsx/.js/.jsx` files change. |
+| Go | Go toolchain | Yes - `scip-go` via `go install` | Requires `go.mod` in project root |
+| Java/Kotlin | JDK 11+ + coursier | Yes - `com.sourcegraph:scip-java_2.13` via coursier bootstrap | Runs full Maven/Gradle build internally (sync timeout: 180s, then falls back to background daemon); requires `pom.xml` or `build.gradle`; **macOS/Linux only** - scip-java v0.12.3 uses Unix shell scripts as javac wrapper, broken on Windows |
+| Ruby | None | No - PATH detection only | GEM_HOME complexity prevents reliable auto-install; install via `gem install scip-ruby` |
+
+**Languages with no SCIP indexer available:**
+- **Protocol Buffers** (`.proto`): no SCIP indexer exists. ICX uses `proto_resolver.py` (tree-sitter) for cross-language import/generated edges.
+- **Terraform/HCL** (`.tf`): no SCIP indexer exists. ICX uses `terraform_resolver.py` (tree-sitter) for module/variable/resource dependency edges.
+
+**Sync timeout and background fallback:** All non-background languages (Go, Python, Ruby, Java, Kotlin) run synchronously with a 3-minute cap (`_SCIP_DEFAULT_TIMEOUT = 180`, `_SCIP_TIMEOUTS` overrides for Java/Kotlin also 180s). If the process does not finish within 3 minutes, it is killed and `_spawn_background_scip` is called immediately - the build continues without SCIP edges, and edges appear on the next `icx graph build` (cache hit). TypeScript/JavaScript always bypass this path and go background on launch.
+
+**Java/Kotlin coursier lookup order:** `_find_coursier()` checks PATH first, then `~/.icx/coursier[.bat]`. Install coursier with `brew install coursier` (macOS) or `cs setup` (Linux). The coursier bootstrap creates `scip-java[.bat]` in `~/.icx/scip/java/` on first run and is reused on all subsequent builds.
+
+**Ruby PATH fallback:** if `scip-ruby` is found on PATH, ICX uses it without auto-install. No `gemspec` or project config is generated.
+
+Version drift: if Node, Go, or JDK is upgraded (e.g. via nvm), scip_manager detects the version change and reinstalls automatically.
+
+### Dependencies
+
+No extras required beyond the standard install:
+
+    pip install icx-engine
 
 ### Storage layout
 
@@ -1137,7 +1389,7 @@ All graph data is stored in `~/.icx/graphs/` (created with `0o700`, never inside
 ~/.icx/graphs/
 ├── registry.json                  # name -> project_id map (atomic writes)
 └── <project_id>/                  # SHA256[:12] of resolved project path
-    ├── meta.json                  # ProjectInfo: name, path, status, file_count, git_commit
+    ├── meta.json                  # ProjectInfo: name, path, status, file_count, git_commit, jira_project
     ├── graph.json                 # built knowledge graph (nodes + edges JSON)
     ├── cluster_descriptions.json  # LLM cluster descriptions (written only when LLM configured)
     ├── GRAPH_REPORT.md            # compact index: god nodes + cluster table + cross-cluster
@@ -1155,7 +1407,7 @@ All graph data is stored in `~/.icx/graphs/` (created with `0o700`, never inside
 
 ### Project ID
 
-`derive_project_id(path)` → `SHA256(str(Path(path).resolve()))[:12]` - stable across renames of the graph directory itself, unique per resolved absolute path.
+`derive_project_id(path)` → `SHA256(Path(path).resolve().as_posix())[:12]` - stable across renames of the graph directory itself, unique per resolved absolute path. Uses `as_posix()` so the hash is consistent regardless of OS separator (forward slash always).
 
 ### Build pipeline
 
@@ -1167,10 +1419,10 @@ Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build
    - **Fallback:** rglob filtered by `_is_noise_dir` from `parser/detect.py`
    - **`.icxignore` exclusions:** patterns from `~/.icx/graphs/<project_id>/.icxignore` are applied after file collection (seeded with defaults on first build).
 3. **AST extraction** (`emit: scan, ast`) - `parser.extract.extract(files, cache_root=icx_cache, parallel=False, on_progress=...)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses. `parallel=False` prevents grandchild process spawning inside the subprocess (deadlocks on Windows with the "spawn" context).
-4. **LSP + semantic resolver pass** (`emit: lsp`) - runs language-appropriate resolvers in order; each resolver appends edges to the extraction dict. Resolvers run per-language (Python, Java, Kotlin, JS/TS). Resolver failures are logged at DEBUG and skipped - never fatal. LSP servers (Pyright, tsserver) are managed by `lsp_manager.py` under `~/.icx/` and version-tracked against the active Node / Python runtime.
+4. **LSP + semantic resolver pass** (`emit: lsp`) - runs language-appropriate resolvers in order; each resolver appends edges to the extraction dict. Resolvers run per-language (Python, Java, Kotlin, JS/TS). Resolver failures are logged at DEBUG and skipped - never fatal. LSP servers (Pyright, tsserver) are managed by `lsp_manager.py` under `~/.icx/` and version-tracked against the active Node / Python runtime. **Batch-open protocol:** ts_lsp and pyright_lsp open all files with `did_open` before making any `definition()` queries, so the server indexes the full workspace once rather than re-analysing on every file. A circuit breaker (5 consecutive timeouts) aborts LSP queries cleanly when the server is overloaded. Per-request timeout is 3s.
 5. **LLM edge enrichment** (optional, `emit: llm`) - `extract_corpus_parallel()` sends file batches to the LLM for cross-file semantic edges. Only edges merged; LLM community IDs discarded (collide across chunk boundaries).
 6. **Community detection** (`emit: louvain`) - `build_from_json(extraction)` + `cluster(G)` → merged graph with Louvain communities.
-7. **Export** (`emit: export`) - `to_json(G, communities, output_path=graph_tmp_path)` writes `graph.json.tmp`, then `_finalise_build` renames atomically to `graph.json`.
+7. **Export** (`emit: export`) - `to_json(G, communities, output_path=graph_tmp_path, skip_safety_check=True)` writes compact JSON (no indent, `separators=(",", ":")`) directly to a file handle via `json.dump` - no in-memory string. Then `_finalise_build` renames atomically to `graph.json`. `skip_safety_check=True` skips the existing-node-count guard during builds (guard still applies for manual/admin callers).
 8. **LLM cluster descriptions** (optional) - `_generate_cluster_descriptions(graph_path)` sends top-5 files per cluster to the LLM, writes `cluster_descriptions.json`. Non-fatal: silently skipped when no LLM configured or on any failure.
 9. **Report generation** - `generate_graph_report(graph_json_path, output_path)` writes `GRAPH_REPORT.md` index and `GRAPH_CLUSTERS/` directory (see Report generation section).
 10. Returns `{file_count, node_count, edge_count, community_count, extraction_mode, error}`
@@ -1200,7 +1452,7 @@ In MCP mode (`_get_graph_info`): when `is_stale=True`, the existing graph is alw
 
 **Git unavailable** → falls back to `_mtime_changed_files()`: samples up to 50 source files, compares mtime against `last_built` ISO timestamp (or "last hour" if not available). No-git projects (e.g. uploaded codebases) use this path.
 
-**No auto-build in MCP:** when `build_status == "not_built"`, `_get_graph_info` returns `"not_built"` status with a message. The agent is instructed to tell the user to run `icx graph build --path <project_path>` and fall back to grep/glob. No background build is triggered. The `icx graph build` CLI command calls `manager.build()` (blocking) directly and is the only way to trigger a build.
+**No auto-build in MCP:** when `build_status == "not_built"`, `_get_graph_info` returns `"not_built"` status with a message. The agent is instructed to tell the user to run `icx graph build <name>` and fall back to grep/glob. No background build is triggered. The `icx graph build` CLI command calls `manager.build()` (blocking) directly and is the only way to trigger a build.
 
 ### Report generation (`querier.py`)
 
@@ -1248,14 +1500,20 @@ Only clusters with 2+ files are shown in the index - single-file clusters are no
 
 ### GraphQuerier API (`graph/query.py`)
 
-`GraphQuerier` loads `graph.json` once and exposes four read-only query methods for programmatic AI agent use:
+`GraphQuerier` loads `graph.json` once and exposes read-only query methods for programmatic AI agent use:
 
 | Method | Returns | Description |
 |---|---|---|
-| `find_context(task)` | `list[ContextResult]` | Score-ranked files relevant to a task description (TF-IDF-style scoring over node labels and file paths) |
+| `find_context(task)` | `list[ContextResult]` | Score-ranked files relevant to a task description (TF-IDF-style scoring boosted by node importance) |
 | `get_call_chain(node_id)` | `CallChain` | Upstream callers + downstream callees for a node, BFS-limited to depth 3 |
 | `get_impact(node_id)` | `ImpactResult` | All dependents (direct + transitive) grouped by edge confidence tier |
 | `get_subsystem(file_path)` | `SubsystemResult` | Community containing the file, with core files and cross-cluster connections |
+| `get_cochange_partners(file_path)` | `list[dict]` | Files that co-change with the given file in git history, sorted by co-occurrence strength descending |
+| `get_blast_radius(changed_files)` | `BlastRadiusResult` | Direct and transitive dependents of all changed files, risk score (0.0-1.0), and missing co-change partners not in the changed set |
+| `get_cycles(max_cycles=20)` | `list[list[str]]` | Circular dependency chains using structural edges only (imports, calls, implements). Capped at `max_cycles`. |
+| `get_dead_code()` | `list[str]` | Files with zero incoming structural edges, excluding known entry points and test files |
+| `get_ownership(file_path, project_path)` | `OwnershipResult` | CODEOWNERS owners for the file, plus cross-owner dependency edges (files owned by a different team that this file depends on) |
+| `get_important_nodes(top_k=10)` | `list[NodeImportance]` | Top nodes by combined PageRank + betweenness importance score |
 
 Agents can instantiate `GraphQuerier(graph_json_path)` directly from the path returned in the `graph.report_path` parent directory. The class is stateless after construction - all methods are safe to call concurrently.
 
@@ -1264,7 +1522,8 @@ Agents can instantiate `GraphQuerier(graph_json_path)` directly from the path re
 - `graph/builder.py:_build_project_isolated` - must remain a top-level function (not lambda/nested/method) for pickle safety on Windows with `ProcessPoolExecutor`. The `_redirected_cache_dir` inner function is acceptable (defined inside the subprocess, never pickled itself).
 - `graph/builder.py:_collect_source_files` - git-first file collection with vendor filtering. Do not replace with direct `rglob` - it does not respect `.gitignore` and includes `node_modules` and build artifacts.
 - `graph/builder.py:_build_project_isolated` - `cache_root=icx_cache` must be passed to `extract()`. When omitted, the parser infers `effective_root` from absolute source file paths (= project root) and writes output into the project directory.
-- `graph/storage.py:derive_project_id` - changing the hash function or length invalidates all existing project IDs.
+- `graph/storage.py:derive_project_id` - changing the hash function or length invalidates all existing project IDs. The input is always `path.as_posix()` (forward-slash separated) to ensure cross-platform hash stability.
+- `mcp_server.py:_load_querier_simple` - all five graph analysis tools (`graph_important_nodes`, `graph_blast_radius`, `graph_cycles`, `graph_dead_code`, `graph_ownership`) route through this helper which calls `validate_project_path()` before any filesystem access. Do not bypass it with raw `Path(project_path)` - matches the pattern used by the other graph query tools via `_resolve_graph_path()`.
 - `graph/querier.py:_role_tag` hook detection - the check `stem.startswith("use") and len(stem) > 3 and stem[3].isupper()` is intentional. React hooks start with lowercase `use` + uppercase letter. Changing to `sl.startswith("use")` causes false matches on `userList`, `userActions` etc.
 - `graph/querier.py` deduplication - the `used_filenames` set must use `.lower()` for membership checks. Windows NTFS is case-insensitive; without this, two communities with labels like "Modal" and "modal" silently overwrite each other's cluster file.
 - `graph/querier.py:_community_label:_SKIP_PARTS` - the extended set of Java package directory names must stay. Removing them causes generic package names to bleed through as cluster labels on Java projects.

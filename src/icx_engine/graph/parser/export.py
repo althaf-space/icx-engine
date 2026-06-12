@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -81,10 +82,9 @@ def backup_if_protected(out_dir: Path) -> "Path | None":
                 except Exception:
                     pass
         if copied:
-            print(f"[icx graph] backed up {reason} graph ({copied} files) → {backup_dir.name}/")
+            print(f"[icx graph] backed up {reason} graph ({copied} files) -> {backup_dir.name}/")
         return backup_dir
     except Exception as exc:
-        import sys
         print(f"[icx graph] warning: backup failed ({exc}) - continuing with overwrite", file=sys.stderr)
         return None
 
@@ -193,7 +193,6 @@ def _viz_node_limit() -> int:
     Falls back to MAX_NODES_FOR_VIZ when the env var is unset, empty, or non-integer.
     Set to 0 to disable HTML viz unconditionally (useful for CI runners).
     """
-    import os
     raw = os.environ.get("GRAPHIFY_VIZ_NODE_LIMIT")
     if raw is None or not raw.strip():
         return MAX_NODES_FOR_VIZ
@@ -534,10 +533,21 @@ def _resolve_resolver_tag(link: dict) -> str:
     return "ast_low"
 
 
-def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *, force: bool = False, built_at_commit: str | None = None) -> bool:
-    # Safety check: refuse to silently shrink an existing graph (#479)
+def to_json(
+    G: nx.Graph,
+    communities: dict[int, list[str]],
+    output_path: str,
+    *,
+    force: bool = False,
+    built_at_commit: str | None = None,
+    skip_safety_check: bool = False,
+) -> bool:
+    # Safety check: refuse to silently shrink an existing graph (#479).
+    # Skipped during builds (skip_safety_check=True) because reading a large
+    # existing graph.json (potentially 100s of MB) just to count nodes adds
+    # significant latency with no benefit - the build always produces a complete graph.
     existing_path = Path(output_path)
-    if not force and existing_path.exists():
+    if not force and not skip_safety_check and existing_path.exists():
         try:
             from icx_engine.graph.parser.security import check_graph_file_size_cap
             check_graph_file_size_cap(existing_path)
@@ -545,13 +555,12 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
             existing_n = len(existing_data.get("nodes", []))
             new_n = G.number_of_nodes()
             if new_n < existing_n:
-                import sys as _sys
                 print(
                     f"[icx graph] WARNING: new graph has {new_n} nodes but existing "
                     f"graph.json has {existing_n}. Refusing to overwrite - you may be "
                     f"missing chunk files from a previous session. "
                     f"Pass force=True to override.",
-                    file=_sys.stderr,
+                    file=sys.stderr,
                 )
                 return False
         except Exception:
@@ -589,8 +598,27 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
     commit = built_at_commit if built_at_commit is not None else _git_head()
     if commit:
         data["built_at_commit"] = commit
-    with open(output_path, "w", encoding="utf-8") as f:  # nosec
-        json.dump(data, f, indent=2)
+
+    # Compute centrality scores and attach to nodes
+    try:
+        from icx_engine.graph.parser.centrality import compute_centrality
+        _scores = compute_centrality(data["nodes"], data.get("links", []))
+        for node in data["nodes"]:
+            node.update(_scores.get(node.get("id", ""), {}))
+    except Exception:
+        pass  # Centrality is enrichment only - never fails a build
+
+    tmp_path = existing_path.with_name("graph.json.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as _fh:
+            json.dump(data, _fh, separators=(",", ":"), ensure_ascii=False)
+        tmp_path.replace(existing_path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return True
 
 
@@ -677,8 +705,7 @@ def to_cypher(G: nx.Graph, output_path: str) -> None:
             f"MATCH (a {{id: '{u_esc}'}}), (b {{id: '{v_esc}'}}) "
             f"MERGE (a)-[:{rel} {{confidence: '{conf}'}}]->(b);"
         )
-    with open(output_path, "w", encoding="utf-8") as f:  # nosec
-        f.write("\n".join(lines))
+    Path(output_path).write_text("\n".join(lines), encoding="utf-8")  # nosec
 
 
 def to_html(
@@ -806,9 +833,14 @@ def to_html(
         n = member_counts.get(cid, len(communities.get(cid, []))) if member_counts else len(communities.get(cid, []))
         legend_data.append({"cid": cid, "color": color, "label": lbl, "count": n})
 
-    # Escape </script> sequences so embedded JSON cannot break out of the script tag
+    # Escape </script> sequences and JS line-terminator chars (U+2028/U+2029)
     def _js_safe(obj) -> str:
-        return json.dumps(obj).replace("</", "<\\/")
+        return (
+            json.dumps(obj)
+            .replace("</", "<\\/")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
 
     nodes_json = _js_safe(vis_nodes)
     edges_json = _js_safe(vis_edges)
