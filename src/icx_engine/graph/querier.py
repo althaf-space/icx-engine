@@ -128,7 +128,7 @@ def generate_graph_report(graph_json_path: Path, output_path: Path) -> None:
                 nid = node.get("id") or node.get("label") or ""
                 src = node.get("source_file")
                 if nid and src:
-                    parent = str(Path(src.replace("\\", "/")).parent)
+                    parent = Path(src.replace("\\", "/")).parent.as_posix()
                     node_community[nid] = parent
 
     # -----------------------------------------------------------------------
@@ -155,7 +155,7 @@ def generate_graph_report(graph_json_path: Path, output_path: Path) -> None:
     if all(len(fs) < 2 for fs in community_files.values()):
         file_community = {}
         for f in all_files:
-            parent = str(Path(f.replace("\\", "/")).parent)
+            parent = Path(f.replace("\\", "/")).parent.as_posix()
             file_community[f] = parent
         community_files = defaultdict(list)
         for f, comm in file_community.items():
@@ -384,6 +384,45 @@ def generate_graph_report(graph_json_path: Path, output_path: Path) -> None:
                 lines.append(f"  - {label_a} <-> {label_b}  ({count} edges)")
         else:
             lines.append("  (none detected)")
+        lines.append("")
+
+    # Top architectural nodes section
+    top_nodes = sorted(
+        [n for n in nodes if n.get("importance", 0) > 0],
+        key=lambda n: n.get("importance", 0),
+        reverse=True,
+    )[:10]
+    if top_nodes:
+        lines.append("## Top architectural nodes\n")
+        lines.append("| File | Importance | PageRank | Betweenness |")
+        lines.append("|------|------------|----------|-------------|")
+        for ndata in top_nodes:
+            f = ndata.get("source_file", "")
+            imp = ndata.get("importance", 0.0)
+            pr = ndata.get("pagerank", 0.0)
+            bt = ndata.get("betweenness", 0.0)
+            lines.append(f"| {f} | {imp:.4f} | {pr:.4f} | {bt:.4f} |")
+        lines.append("")
+
+    # Edge sources table
+    from collections import Counter as _Counter
+    resolver_counts: dict[str, int] = _Counter()
+    resolver_conf_sum: dict[str, float] = defaultdict(float)
+    for edge in edges:
+        resolver = edge.get("resolver_tag", edge.get("confidence_source", "unknown")) or "unknown"
+        resolver_counts[resolver] += 1
+        cs = edge.get("confidence_score", edge.get("confidence", 0.0))
+        try:
+            resolver_conf_sum[resolver] += float(cs)
+        except (TypeError, ValueError):
+            pass
+    if resolver_counts:
+        lines.append("## Edge sources\n")
+        lines.append("| Resolver | Count | Avg confidence |")
+        lines.append("|----------|-------|----------------|")
+        for resolver, count in sorted(resolver_counts.items(), key=lambda x: -x[1]):
+            avg_conf = resolver_conf_sum[resolver] / count if count > 0 else 0.0
+            lines.append(f"| {resolver} | {count:,} | {avg_conf:.2f} |")
         lines.append("")
 
     lines.append("---")

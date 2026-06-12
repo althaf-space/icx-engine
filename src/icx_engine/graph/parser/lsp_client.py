@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlparse
 
 _log = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = 10.0
+_DEFAULT_TIMEOUT = 3.0
 _INIT_TIMEOUT = 30.0
 
 
@@ -54,6 +54,11 @@ class LSPClient:
         self._lock = threading.Lock()
         self._reader: threading.Thread | None = None
         self._running = False
+        self._consecutive_timeouts = 0
+
+    @property
+    def consecutive_timeouts(self) -> int:
+        return self._consecutive_timeouts
 
     def start(self) -> bool:
         try:
@@ -164,9 +169,11 @@ class LSPClient:
 
         try:
             response = q.get(timeout=timeout if timeout is not None else self._timeout)
+            self._consecutive_timeouts = 0
             return response.get("result")
         except queue.Empty:
-            _log.debug("LSP timeout on %s (seq=%s)", method, seq)
+            self._consecutive_timeouts += 1
+            _log.debug("LSP timeout on %s (seq=%s, consecutive=%d)", method, seq, self._consecutive_timeouts)
             return None
         finally:
             with self._lock:

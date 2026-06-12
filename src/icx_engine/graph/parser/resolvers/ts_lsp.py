@@ -31,6 +31,7 @@ _JS_EXTS: frozenset[str] = frozenset({
 })
 
 _MAX_POSITIONS_PER_FILE = 100
+_CIRCUIT_BREAKER_LIMIT = 5
 
 
 def _build_node_index(nodes: list[dict], project_root: Path) -> dict:
@@ -178,6 +179,10 @@ def extract_ts_lsp_edges(
             if client.pid:
                 record_pid(TS_LS.install_dir, client.pid)
 
+            # Phase 1: parse all files and batch-open them before any queries.
+            # Opening all files first lets the server index the full workspace
+            # once, avoiding N repeated re-analysis cycles that cause timeouts.
+            file_tasks: list[tuple[Path, str, str, list[tuple[int, int, str]]]] = []
             for js_file in js_files:
                 try:
                     rel = _norm(str(js_file.relative_to(project_root)))
@@ -203,8 +208,24 @@ def extract_ts_lsp_edges(
                     continue
 
                 client.did_open(js_file, lang_id)
+                file_tasks.append((js_file, rel, src_id, positions))
+
+            # Phase 2: query definitions with circuit breaker.
+            # After _CIRCUIT_BREAKER_LIMIT consecutive timeouts the server is
+            # overloaded; stop querying rather than burning timeout budget on
+            # every remaining file.
+            for js_file, rel, src_id, positions in file_tasks:
+                if client.consecutive_timeouts >= _CIRCUIT_BREAKER_LIMIT:
+                    _log.debug(
+                        "ts_lsp: circuit breaker triggered (%d consecutive timeouts), "
+                        "aborting remaining queries",
+                        _CIRCUIT_BREAKER_LIMIT,
+                    )
+                    break
 
                 for row, col, kind in positions:
+                    if client.consecutive_timeouts >= _CIRCUIT_BREAKER_LIMIT:
+                        break
                     for loc in client.definition(js_file, row, col):
                         loc_norm = _norm(loc.path)
                         if not loc_norm.startswith(proj_str_norm):

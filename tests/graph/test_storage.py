@@ -15,7 +15,10 @@ from icx_engine.graph.storage import (
     register_project,
     lookup_by_name,
     lookup_by_path,
+    lookup_by_jira_project,
     list_projects,
+    find_project_by_jira_key,
+    find_projects_by_jira_key,
     remove_project,
     read_meta,
     write_meta,
@@ -53,7 +56,7 @@ def test_project_id_is_12_chars(tmp_path):
 
 
 def test_project_id_is_sha256_prefix(tmp_path):
-    expected = hashlib.sha256(str(tmp_path).encode()).hexdigest()[:12]
+    expected = hashlib.sha256(tmp_path.as_posix().encode()).hexdigest()[:12]
     assert derive_project_id(tmp_path) == expected
 
 
@@ -164,6 +167,96 @@ def test_list_projects_returns_all(tmp_path):
     names = {p.name for p in projects}
     assert "alpha" in names
     assert "beta" in names
+
+
+# ---------------------------------------------------------------------------
+# jira_project / lookup_by_jira_project
+# ---------------------------------------------------------------------------
+
+def test_register_with_jira_project_stored_in_meta(tmp_path):
+    pid = register_project("proj-svc", tmp_path, jira_project="PROJ")
+    meta = read_meta(pid)
+    assert meta is not None
+    assert meta.jira_project == "PROJ"
+
+
+def test_register_jira_project_normalised_to_uppercase(tmp_path):
+    pid = register_project("proj-svc", tmp_path, jira_project="proj")
+    meta = read_meta(pid)
+    assert meta.jira_project == "PROJ"
+
+
+def test_register_without_jira_project_is_none(tmp_path):
+    pid = register_project("no-project", tmp_path)
+    meta = read_meta(pid)
+    assert meta is not None
+    assert meta.jira_project is None
+
+
+def test_lookup_by_jira_project_returns_matching(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    register_project("proj-svc", a, jira_project="PROJ")
+    register_project("proj-ui", b, jira_project="PROJ")
+    results = lookup_by_jira_project("PROJ")
+    names = {r.name for r in results}
+    assert names == {"proj-svc", "proj-ui"}
+
+
+def test_lookup_by_jira_project_case_insensitive(tmp_path):
+    register_project("proj-svc", tmp_path, jira_project="PROJ")
+    assert len(lookup_by_jira_project("proj")) == 1
+    assert len(lookup_by_jira_project("Proj")) == 1
+    assert len(lookup_by_jira_project("PROJ")) == 1
+
+
+def test_lookup_by_jira_project_no_match_returns_empty(tmp_path):
+    register_project("other-svc", tmp_path)
+    assert lookup_by_jira_project("PROJ") == []
+
+
+def test_lookup_by_jira_project_excludes_other_projects(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    register_project("proj-svc", a, jira_project="PROJ")
+    register_project("other-svc", b, jira_project="OTHER")
+    results = lookup_by_jira_project("PROJ")
+    assert len(results) == 1
+    assert results[0].name == "proj-svc"
+
+
+def test_reregister_updates_jira_project(tmp_path):
+    pid = register_project("proj-svc", tmp_path, jira_project="OLD")
+    register_project("proj-svc", tmp_path, jira_project="PROJ")
+    meta = read_meta(pid)
+    assert meta.jira_project == "PROJ"
+
+
+def test_read_meta_old_format_jira_project_is_none(tmp_path, isolated_graphs):
+    """Old meta.json without jira_project field deserializes gracefully."""
+    pid = derive_project_id(tmp_path)
+    meta_dir = isolated_graphs / pid
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    import json
+    (meta_dir / "meta.json").write_text(
+        json.dumps({
+            "name": "legacy-app",
+            "path": str(tmp_path),
+            "project_id": pid,
+            "last_built": None,
+            "git_commit": None,
+            "file_count": 0,
+            "build_status": "not_built",
+        }),
+        encoding="utf-8",
+    )
+    meta = read_meta(pid)
+    assert meta is not None
+    assert meta.jira_project is None
 
 
 # ---------------------------------------------------------------------------
@@ -301,3 +394,51 @@ def test_sweep_stale_temp_dirs_skips_files(tmp_path):
     sweep_stale_temp_dirs(max_age_seconds=0, _root=tmp_path)  # age=0 removes everything old
     # File should remain (sweep only targets dirs)
     assert (tmp_path / "loose_file.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# find_project_by_jira_key
+# ---------------------------------------------------------------------------
+
+def test_find_projects_by_jira_key_returns_all_matching(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
+    register_project("app-svc", tmp_path / "svc", jira_project="MYAPP")
+    register_project("app-ui", tmp_path / "ui", jira_project="MYAPP")
+    results = find_projects_by_jira_key("MYAPP")
+    assert len(results) == 2
+    names = {r.name for r in results}
+    assert names == {"app-svc", "app-ui"}
+
+
+def test_find_projects_by_jira_key_case_insensitive(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
+    register_project("app-svc", tmp_path / "svc", jira_project="MYAPP")
+    assert len(find_projects_by_jira_key("myapp")) == 1
+    assert len(find_projects_by_jira_key("Myapp")) == 1
+
+
+def test_find_projects_by_jira_key_no_match_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
+    register_project("myapp", tmp_path / "myapp", jira_project="MYAPP")
+    assert find_projects_by_jira_key("OTHER") == []
+
+
+def test_find_projects_by_jira_key_empty_registry_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
+    assert find_projects_by_jira_key("PROJ") == []
+
+
+def test_find_projects_by_jira_key_empty_key_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
+    register_project("myapp", tmp_path / "myapp", jira_project="MYAPP")
+    assert find_projects_by_jira_key("") == []
+    assert find_projects_by_jira_key("   ") == []
+
+
+def test_find_project_by_jira_key_returns_first_match(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
+    register_project("app-svc", tmp_path / "svc", jira_project="MYAPP")
+    register_project("app-ui", tmp_path / "ui", jira_project="MYAPP")
+    result = find_project_by_jira_key("MYAPP")
+    assert result is not None
+    assert result.name in {"app-svc", "app-ui"}

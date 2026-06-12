@@ -6,6 +6,7 @@ Pipeline: exact normalization → entropy gate → MinHash/LSH blocking →
 Jaro-Winkler verification → same-community boost → union-find merge.
 """
 from __future__ import annotations
+import logging
 import math
 import re
 import unicodedata
@@ -13,6 +14,8 @@ from collections import defaultdict
 
 from datasketch import MinHash, MinHashLSH
 from rapidfuzz.distance import JaroWinkler
+
+_log = logging.getLogger(__name__)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -219,6 +222,7 @@ def deduplicate_entities(
             except ValueError:
                 pass  # duplicate key in LSH - already inserted
 
+        candidates_by_id = {n["id"]: n for n in candidates}
         for node in candidates:
             node_id = node["id"]
             norm_label = _norm(node.get("label", node.get("id", "")))
@@ -230,7 +234,7 @@ def deduplicate_entities(
                 if uf.find(node_id) == uf.find(neighbor_id):
                     continue
 
-                neighbor = next((n for n in candidates if n["id"] == neighbor_id), None)
+                neighbor = candidates_by_id.get(neighbor_id)
                 if neighbor is None:
                     continue
 
@@ -285,7 +289,7 @@ def deduplicate_entities(
         if fuzzy_merges:
             msg += f", {fuzzy_merges} fuzzy"
         msg += ")"
-    print(msg + ".", flush=True)
+    _log.info("%s.", msg)
 
     deduped_nodes = [n for n in unique_nodes if n["id"] not in remap]
     deduped_edges = []
@@ -335,13 +339,13 @@ def _llm_tiebreak(
 ) -> None:
     """Batch-resolve ambiguous pairs (score in [low, high)) via LLM."""
     try:
-        from icx_engine.graph.parser.llm import BACKENDS, _format_backend_env_keys, _get_backend_api_key
+        from icx_engine.graph.parser.llm import BACKENDS, format_backend_env_keys, get_backend_api_key
         if backend not in BACKENDS:
-            print(f"[icx graph] --dedup-llm: unknown backend {backend!r}, skipping LLM tiebreaker.", flush=True)
+            _log.warning("[icx graph] --dedup-llm: unknown backend %r, skipping LLM tiebreaker.", backend)
             return
-        if not _get_backend_api_key(backend):
-            env_keys = _format_backend_env_keys(backend)
-            print(f"[icx graph] --dedup-llm: {env_keys} not set, skipping LLM tiebreaker.", flush=True)
+        if not get_backend_api_key(backend):
+            env_keys = format_backend_env_keys(backend)
+            _log.warning("[icx graph] --dedup-llm: %s not set, skipping LLM tiebreaker.", env_keys)
             return
     except ImportError:
         return
@@ -376,10 +380,7 @@ def _llm_tiebreak(
         # F-038: previously this silent fallback hid the fact that `_call_llm`
         # didn't exist in `graphify.llm` at all, so `--dedup-llm` was a no-op.
         # Surface the import failure so future regressions are visible.
-        print(
-            f"[icx graph] --dedup-llm: cannot import _call_llm ({exc}); skipping LLM tiebreaker.",
-            flush=True,
-        )
+        _log.warning("[icx graph] --dedup-llm: cannot import _call_llm (%s); skipping LLM tiebreaker.", exc)
         return
 
     for batch_start in range(0, len(ambiguous), batch_size):
@@ -415,4 +416,125 @@ def _llm_tiebreak(
                         uf.union(winner["id"], a["id"])
                         uf.union(winner["id"], b["id"])
         except Exception as exc:
-            print(f"[icx graph] --dedup-llm batch failed: {exc}", flush=True)
+            _log.warning("[icx graph] --dedup-llm batch failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Edge fusion: multi-source confidence boosting
+# ---------------------------------------------------------------------------
+
+# Edges in the same FAMILY for the same (source_file, target_file) pair get fused.
+# Edges in different families are NEVER fused - they represent different relationships.
+_EDGE_FAMILIES: dict[str, str] = {
+    # Structural import/reference family - fuse when multiple resolvers agree
+    "scip_reference":       "import",
+    "pyright_import":       "import",
+    "jedi_import":          "import",
+    "tsserver_import":      "import",
+    "java_symbol_import":   "import",
+    "java_symbol_call":     "import",
+    "go_import":            "import",
+
+    # Structural call family
+    "go_calls":             "call",
+
+    # Implementation family
+    "go_implements":        "implements",
+    "java_interface_impl":  "implements",
+    "proto_implements":     "implements",
+
+    # Framework edges - each is its OWN family, never fused with others
+    "spring_bean":          "spring_bean",
+    "spring_component":     "spring_component",
+    "react_import":         "react_import",
+    "django_url":           "django_url",
+    "fastapi_route":        "fastapi_route",
+    "flask_route":          "flask_route",
+    "jsp_forward":          "jsp_forward",
+    "jsp_include":          "jsp_include",
+    "servlet_mapping":      "servlet_mapping",
+    "el_binding":           "el_binding",
+    "taglib_import":        "taglib_import",
+    "rails_view":           "rails_view",
+    "rails_route":          "rails_route",
+    "rails_model_controller": "rails_model_controller",
+    "rails_ar_usage":       "rails_ar_usage",
+    "rails_concern":        "rails_concern",
+    "rails_service":        "rails_service",
+    "proto_generated":      "proto_generated",
+    "proto_import":         "proto_import",
+    "grpc_client":          "grpc_client",
+    "tf_module":            "tf_module",
+    "tf_var_ref":           "tf_var_ref",
+    "tf_data_ref":          "tf_data_ref",
+    "tf_resource_dep":      "tf_resource_dep",
+    "tf_output":            "tf_output",
+
+    # Event edges - each broker direction is its own family
+    "kafka_publish":        "kafka_publish",
+    "kafka_subscribe":      "kafka_subscribe",
+    "rabbitmq_publish":     "rabbitmq_publish",
+    "rabbitmq_subscribe":   "rabbitmq_subscribe",
+    "redis_publish":        "redis_publish",
+    "redis_subscribe":      "redis_subscribe",
+    "sqs_publish":          "sqs_publish",
+    "sqs_subscribe":        "sqs_subscribe",
+    "sns_publish":          "sns_publish",
+    "nats_publish":         "nats_publish",
+    "nats_subscribe":       "nats_subscribe",
+    "event_channel":        "event_channel",
+    "openapi_impl":         "openapi_impl",
+    "asyncapi_impl":        "asyncapi_impl",
+
+    # Co-change - its own family, never fused with structural edges
+    "co_changed":           "co_changed",
+}
+
+_FUSABLE_FAMILIES = frozenset({"import", "call", "implements"})
+
+
+def fuse_and_dedup(edges: list[dict]) -> list[dict]:
+    """Deduplicate and fuse cross-resolver edges.
+
+    FUSION RULE (import, call, implements families only):
+      When multiple resolvers produce edges for the same (source_file, target_file)
+      in the same family, sum their confidence scores capped at 0.98.
+      Store all contributing resolver names in resolver_sources[].
+      Keep all other fields from the highest-confidence source edge.
+
+    NO FUSION (all other families):
+      Keep the highest-confidence edge per (source_file, target_file, type).
+
+    0.98 cap: never exactly 1.0 - reserved for verified ground truth only.
+    """
+    # Group by (source_file, target_file, family)
+    grouped: dict[tuple, list[dict]] = defaultdict(list)
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        src = edge.get("source_file", "")
+        tgt = edge.get("target_file", "")
+        edge_type = edge.get("type", edge.get("relation", ""))
+        family = _EDGE_FAMILIES.get(edge_type, edge_type)  # unknown type = own family
+        grouped[(src, tgt, family)].append(edge)
+
+    result = []
+    for (src, tgt, family), group in grouped.items():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+
+        if family in _FUSABLE_FAMILIES:
+            base = max(group, key=lambda e: e.get("confidence", 0.0))
+            total = sum(e.get("confidence", 0.0) for e in group)
+            fused = dict(base)
+            fused["confidence"] = round(min(0.98, total), 4)
+            fused["resolver"] = "fused"
+            fused["resolver_sources"] = sorted(
+                {e.get("resolver", "unknown") for e in group}
+            )
+            result.append(fused)
+        else:
+            result.append(max(group, key=lambda e: e.get("confidence", 0.0)))
+
+    return result

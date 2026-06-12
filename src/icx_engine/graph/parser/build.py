@@ -114,7 +114,7 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
     root: if given, absolute source_file paths from semantic subagents are made
         relative to root so all nodes share a consistent path key (#932).
     """
-    _root = str(Path(root).resolve()) if root else None
+    _root = Path(root).resolve().as_posix() if root else None
     # NetworkX <= 3.1 serialised edges as "links"; remap to "edges" for compatibility.
     if "edges" not in extraction and "links" in extraction:
         extraction = dict(extraction, edges=extraction["links"])
@@ -218,7 +218,7 @@ def build(
     directed=False (default) produces an undirected Graph for backward compatibility.
     dedup=True (default) runs entity deduplication before building the graph.
     dedup_llm_backend: if set (e.g. "gemini", "claude", or "kimi"), uses LLM to resolve
-        ambiguous pairs in the 75–92 Jaro-Winkler score zone.
+        ambiguous pairs in the 75-92 Jaro-Winkler score zone.
     root: if given, absolute source_file paths are made relative to root (#932).
 
     Extractions are merged in order. For nodes with the same ID, the last

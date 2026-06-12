@@ -48,6 +48,8 @@ class ProjectInfo:
     build_status: BuildStatus
     build_started_at: str | None = None
     extraction_mode: str = "ast"  # "ast" or "semantic"
+    incremental_capable: bool = False
+    jira_project: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +187,7 @@ def cache_dir_for_project(project_id: str) -> Path:
 
 def derive_project_id(resolved_path: Path) -> str:
     """SHA256[:12] of the resolved absolute project path. Stable across renames."""
-    digest = hashlib.sha256(str(resolved_path).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(resolved_path.as_posix().encode("utf-8")).hexdigest()
     return digest[:12]
 
 
@@ -297,6 +299,7 @@ def read_meta(project_id: str) -> ProjectInfo | None:
             build_status=data.get("build_status", "not_built"),
             build_started_at=data.get("build_started_at"),
             extraction_mode=data.get("extraction_mode", "ast"),
+            jira_project=data.get("jira_project"),
         )
     except Exception as exc:
         _log.warning("Failed to parse meta.json for project %s (%s)", project_id, type(exc).__name__)
@@ -390,23 +393,29 @@ def set_build_status(project_id: str, status: BuildStatus) -> None:
 # Registry operations
 # ---------------------------------------------------------------------------
 
-def register_project(name: str, path: Path) -> str:
+def register_project(name: str, path: Path, jira_project: str | None = None) -> str:
     """Add or update a project in the registry. Returns project_id."""
     name = normalize_name(name)
     project_id = derive_project_id(path)
+    jp = jira_project.strip().upper() if jira_project and jira_project.strip() else None
 
     with _registry_lock:
         entries = _read_registry()
+        # Preserve existing jira_project when not re-specified (e.g. rebuild without --project)
+        if jp is None:
+            for e in entries:
+                if e.get("project_id") == project_id or e.get("name") == name:
+                    jp = e.get("jira_project") or None
+                    break
         # Remove existing entry for this path or name (update in place)
         entries = [
             e for e in entries
             if e.get("project_id") != project_id and e.get("name") != name
         ]
-        entries.append({
-            "name": name,
-            "path": str(path),
-            "project_id": project_id,
-        })
+        entry: dict = {"name": name, "path": str(path), "project_id": project_id}
+        if jp is not None:
+            entry["jira_project"] = jp
+        entries.append(entry)
         _write_registry(entries)
 
     # Create project dir + initial meta if not present (outside registry lock)
@@ -420,10 +429,16 @@ def register_project(name: str, path: Path) -> str:
             git_commit=None,
             file_count=0,
             build_status="not_built",
+            jira_project=jp,
         ))
         # Seed .icxignore on first project registration
         from icx_engine.graph.parser.icxignore import seed as _seed_icxignore
         _seed_icxignore(icxignore_path(project_id))
+    else:
+        # Update jira_project on re-registration (even if meta already exists)
+        if jp is not None and meta.jira_project != jp:
+            meta.jira_project = jp
+            write_meta(meta)
     return project_id
 
 
@@ -450,6 +465,19 @@ def lookup_by_cwd() -> ProjectInfo | None:
     return None
 
 
+def lookup_by_jira_project(key: str) -> list[ProjectInfo]:
+    """Return all ProjectInfo entries tagged with the given Jira project key (case-insensitive)."""
+    key_lower = key.strip().lower()
+    results = []
+    for entry in _read_registry():
+        jp = (entry.get("jira_project") or "").strip().lower()
+        if jp and jp == key_lower:
+            meta = read_meta(entry["project_id"])
+            if meta is not None:
+                results.append(meta)
+    return results
+
+
 def list_projects() -> list[ProjectInfo]:
     results = []
     for entry in _read_registry():
@@ -457,6 +485,44 @@ def list_projects() -> list[ProjectInfo]:
         if meta is not None:
             results.append(meta)
     return results
+
+
+def find_projects_by_jira_key(jira_key: str) -> "list[ProjectInfo]":
+    """Return ALL registered projects whose jira_project matches jira_key (case-insensitive).
+
+    Reads jira_project from registry.json (authoritative source) - not meta.json,
+    which may be stale if the project was re-registered after the initial build.
+    Returns empty list if no match or registry is empty.
+    """
+    key = jira_key.strip().upper()
+    if not key:
+        return []
+    results = []
+    for entry in _read_registry():
+        entry_jira = entry.get("jira_project") or ""
+        if entry_jira.upper() == key:
+            meta = read_meta(entry["project_id"])
+            if meta:
+                results.append(meta)
+            else:
+                # Registry entry exists but meta missing - synthesize minimal ProjectInfo
+                results.append(ProjectInfo(
+                    name=entry.get("name", ""),
+                    path=entry.get("path", ""),
+                    project_id=entry["project_id"],
+                    last_built=None,
+                    git_commit=None,
+                    file_count=0,
+                    build_status="not_built",
+                    jira_project=entry_jira,
+                ))
+    return results
+
+
+def find_project_by_jira_key(jira_key: str) -> "ProjectInfo | None":
+    """Return the first registered project matching jira_key. Use find_projects_by_jira_key for all matches."""
+    results = find_projects_by_jira_key(jira_key)
+    return results[0] if results else None
 
 
 def remove_project(project_id: str, keep_cache: bool = False) -> None:

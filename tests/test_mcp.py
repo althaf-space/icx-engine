@@ -447,8 +447,9 @@ async def test_handle_analyze_issue_returns_error_json_when_no_connection():
         mock_cm.load.return_value = AppConfig()
         result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
     data = json.loads(result)
-    assert "error" in data
-    assert "type" in data
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_CONNECTION"
+    assert "action_required" in data
 
 
 async def test_handle_analyze_issue_returns_error_json_on_invalid_key():
@@ -456,7 +457,7 @@ async def test_handle_analyze_issue_returns_error_json_on_invalid_key():
         mock_cm.load.return_value = AppConfig()
         result = await _handle_analyze_issue("not-a-valid-key", project_paths=["/projects/my-svc"])
     data = json.loads(result)
-    assert "error" in data
+    assert data.get("status") == "error"
 
 
 def test_run_mcp_server_is_callable():
@@ -500,8 +501,8 @@ async def test_handle_analyze_issue_unknown_profile_returns_error_json(mcp_confi
         mock_cm.load.return_value = mcp_config_with_llm
         result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"], profile="ghost-profile")
     data = json.loads(result)
-    assert "error" in data
-    assert "ghost-profile" in data["error"]
+    assert data.get("status") == "error"
+    assert "ghost-profile" in data["message"]
 
 
 async def test_list_tools_does_not_call_config_load():
@@ -585,7 +586,7 @@ async def test_mcp_fast_tool_uses_45s_timeout():
 
     assert timeout_used.get("value") == 45.0
     data = json.loads(result)
-    assert "error" in data
+    assert data.get("status") == "error"
 
 
 async def test_mcp_full_tool_uses_660s_timeout():
@@ -603,7 +604,7 @@ async def test_mcp_full_tool_uses_660s_timeout():
 
     assert timeout_used.get("value") == 660.0
     data = json.loads(result)
-    assert "error" in data
+    assert data.get("status") == "error"
 
 
 @respx.mock
@@ -799,18 +800,20 @@ async def test_list_tools_returns_twelve_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 13
+    assert len(tools) == 20
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory",
         "graph_find_context", "graph_call_chain", "graph_impact", "graph_subsystem",
-        "graph_cross_links",
+        "graph_cross_links", "graph_important_nodes", "graph_blast_radius",
+        "graph_cycles", "graph_dead_code", "graph_ownership",
         "memory_find_by_file", "memory_get_hotspots", "memory_get_related",
         "memory_get_patterns", "memory_search",
+        "reinforce_memory_usage", "get_memory_audit",
     }
 
 
-async def test_analyze_tool_schema_requires_project_paths():
+async def test_analyze_tool_schema_issue_ref_required_project_paths_optional():
     from icx_engine.mcp_server import _list_tools
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
@@ -818,8 +821,8 @@ async def test_analyze_tool_schema_requires_project_paths():
 
     fast_tool = next(t for t in tools if t.name == "analyze_issue_fast")
     schema = fast_tool.inputSchema
-    assert "project_paths" in schema["required"]
     assert "issue_ref" in schema["required"]
+    assert "project_paths" not in schema.get("required", []), "project_paths must be optional"
     assert "profile" not in schema.get("required", [])
     assert "project_path" not in schema["properties"], "old project_path must be removed"
     assert "additional_paths" not in schema["properties"], "old additional_paths must be removed"
@@ -836,7 +839,7 @@ async def test_analyze_tool_schema_project_paths_is_array():
         tool = next(t for t in tools if t.name == tool_name)
         schema = tool.inputSchema
         assert "project_paths" in schema["properties"], f"{tool_name} missing project_paths"
-        assert "project_paths" in schema.get("required", []), f"{tool_name} project_paths must be required"
+        assert "project_paths" not in schema.get("required", []), f"{tool_name} project_paths must be optional"
         assert schema["properties"]["project_paths"]["type"] == "array"
         assert "project_path" not in schema["properties"], f"{tool_name} old project_path must not exist"
         assert "additional_paths" not in schema["properties"], f"{tool_name} old additional_paths must not exist"
@@ -1549,8 +1552,9 @@ async def test_engine_run_timeout_returns_error_json():
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=asyncio.TimeoutError)):
             result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
     data = json.loads(result)
-    assert "error" in data
-    assert "timed out" in data["error"].lower()
+    assert data.get("status") == "error"
+    assert data.get("code") == "TIMEOUT"
+    assert "timed out" in data["message"].lower()
     assert "type" not in data
 
 
@@ -1561,7 +1565,7 @@ async def test_engine_run_timeout_error_is_not_generic_unexpected():
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=asyncio.TimeoutError)):
             result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
     data = json.loads(result)
-    assert "Unexpected error" not in data["error"]
+    assert "Unexpected error" not in data["message"]
 
 
 # ── Non-bug instruction enhancement ──────────────────────────────────────────
@@ -1836,4 +1840,253 @@ def test_get_related_sync_delegates_to_memory_manager(tmp_path):
 
     mock_mem.get_related.assert_called_once_with(None, None, ["auth/token.py"])
     assert result == expected
+
+
+# ── Structured error responses ────────────────────────────────────────────────
+
+async def test_call_tool_analyze_missing_project_paths_proceeds_to_engine():
+    """analyze_issue with no project_paths omitted proceeds (no MISSING_PROJECT_PATH error)."""
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket", return_value=None):
+            result = await _call_tool("analyze_issue", {"issue_ref": "TEST-123"})
+    data = json.loads(result[0].text)
+    assert data.get("code") != "MISSING_PROJECT_PATH"
+
+
+async def test_call_tool_analyze_empty_project_paths_proceeds_to_engine():
+    """analyze_issue with empty project_paths list proceeds (no MISSING_PROJECT_PATH error)."""
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket", return_value=None):
+            result = await _call_tool("analyze_issue", {"issue_ref": "TEST-123", "project_paths": []})
+    data = json.loads(result[0].text)
+    assert data.get("code") != "MISSING_PROJECT_PATH"
+
+
+async def test_call_tool_analyze_whitespace_only_paths_proceeds_to_engine():
+    """analyze_issue with whitespace-only paths proceeds after stripping (no MISSING_PROJECT_PATH)."""
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket", return_value=None):
+            result = await _call_tool("analyze_issue", {"issue_ref": "TEST-123", "project_paths": ["   "]})
+    data = json.loads(result[0].text)
+    assert data.get("code") != "MISSING_PROJECT_PATH"
+
+
+async def test_handle_analyze_issue_not_found_returns_structured_error():
+    """IssueNotFound from engine returns code=ISSUE_NOT_FOUND with action_required."""
+    from icx_engine.exceptions import IssueNotFound
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=IssueNotFound("Issue not found. Check the URL or issue key."))):
+            result = await _handle_analyze_issue("TEST-404", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert data.get("status") == "error"
+    assert data.get("code") == "ISSUE_NOT_FOUND"
+    assert data.get("action_required") == "ask_user_to_verify_issue_key"
+    assert "not found" in data["message"].lower()
+
+
+async def test_handle_analyze_issue_auth_error_returns_structured_error():
+    """AuthError from engine returns code=AUTH_FAILED with action_required."""
+    from icx_engine.exceptions import AuthError
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=AuthError("Authentication failed. Run `icx connection --add` to reconnect."))):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert data.get("status") == "error"
+    assert data.get("code") == "AUTH_FAILED"
+    assert data.get("action_required") == "tell_user_to_run_icx_connection_add"
+
+
+async def test_handle_analyze_issue_no_connection_returns_structured_error():
+    """NoConnectionError from engine returns code=NO_CONNECTION with action_required."""
+    from icx_engine.exceptions import NoConnectionError
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=NoConnectionError("No connection configured."))):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_CONNECTION"
+    assert data.get("action_required") == "tell_user_to_run_icx_connection_add"
+
+
+async def test_handle_analyze_issue_rate_limited_returns_structured_error():
+    """RateLimited from engine returns code=RATE_LIMITED with action_required."""
+    from icx_engine.exceptions import RateLimited
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=RateLimited("Rate limited. Wait a moment and try again."))):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert data.get("status") == "error"
+    assert data.get("code") == "RATE_LIMITED"
+    assert data.get("action_required") == "wait_and_retry"
+
+
+async def test_handle_analyze_issue_invalid_input_returns_structured_error():
+    """InvalidInput from engine returns code=INVALID_INPUT with action_required."""
+    from icx_engine.exceptions import InvalidInput
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=InvalidInput("Invalid issue key format."))):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert data.get("status") == "error"
+    assert data.get("code") == "INVALID_INPUT"
+    assert data.get("action_required") == "ask_user_for_correct_issue_key"
+
+
+async def test_handle_analyze_issue_unexpected_exception_returns_structured_error():
+    """Unhandled exceptions return code=INTERNAL_ERROR with action_required."""
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=RuntimeError("Disk full"))):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert data.get("status") == "error"
+    assert data.get("code") == "INTERNAL_ERROR"
+    assert data.get("action_required") == "report_error_to_user"
+    assert "Disk full" in data["message"]
+
+
+async def test_handle_analyze_issue_timeout_returns_structured_error():
+    """TimeoutError returns code=TIMEOUT with action_required and no 'type' key."""
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(side_effect=asyncio.TimeoutError)):
+            result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    assert data.get("status") == "error"
+    assert data.get("code") == "TIMEOUT"
+    assert data.get("action_required") == "tell_user_to_check_network_and_retry"
+    assert "type" not in data
+
+
+# ── project_paths auto-resolution ─────────────────────────────────────────────
+
+async def test_handle_analyze_empty_paths_auto_resolves_from_jira_key():
+    """Empty project_paths triggers registry lookup by Jira project key; match populates graphs."""
+    from icx_engine.models.output import IssueContext
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket",
+                   return_value=[{"path": "/clients/myapp", "name": "myapp"}]):
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
+                    "status": "not_built", "path": "/clients/myapp", "name": "myapp",
+                    "report_path": None, "access": "", "report_inline": "", "eta_seconds": None,
+                }]):
+                    result = await _handle_analyze_issue("MYAPP-123", project_paths=[])
+
+    data = json.loads(result)
+    assert "graphs" in data
+    assert len(data["graphs"]) == 1
+    assert data["graphs"][0]["path"] == "/clients/myapp"
+    assert data["graphs"][0].get("path_auto_resolved") is True
+
+
+async def test_handle_analyze_empty_paths_auto_resolves_multiple_projects():
+    """When Jira key maps to multiple projects, all are returned in graphs."""
+    from icx_engine.models.output import IssueContext
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    two_graphs = [
+        {"status": "ready", "path": "/clients/app/svc", "name": "app-svc",
+         "report_path": "/clients/app/svc/GRAPH_REPORT.md", "access": "pre-authorized", "eta_seconds": None},
+        {"status": "not_built", "path": "/clients/app/ui", "name": "app-ui",
+         "report_path": None, "access": "", "report_inline": "", "eta_seconds": None},
+    ]
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket",
+                   return_value=[{"path": "/clients/app/svc", "name": "app-svc"},
+                                  {"path": "/clients/app/ui", "name": "app-ui"}]):
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+                with patch("icx_engine.mcp_server._get_graphs_info", return_value=two_graphs):
+                    result = await _handle_analyze_issue("APP-1", project_paths=[])
+
+    data = json.loads(result)
+    assert len(data["graphs"]) == 2
+    assert all(g.get("path_auto_resolved") is True for g in data["graphs"])
+
+
+async def test_handle_analyze_empty_paths_no_registry_match_returns_empty_graphs():
+    """Empty project_paths with no registry match produces graphs=[] and grep/glob instruction."""
+    from icx_engine.models.output import IssueContext
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket", return_value=None):
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+                result = await _handle_analyze_issue("UNKNOWN-99", project_paths=[])
+
+    data = json.loads(result)
+    assert data.get("graphs") == []
+    assert "grep" in data["_icx_next"]["instruction"].lower()
+
+
+async def test_handle_analyze_explicit_paths_skip_registry_lookup():
+    """Non-empty project_paths bypasses _resolve_paths_from_ticket entirely."""
+    from icx_engine.models.output import IssueContext
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket") as mock_resolve:
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
+                    "status": "not_registered", "path": "/explicit/path",
+                    "report_path": None, "access": "", "report_inline": "", "eta_seconds": None,
+                }]):
+                    await _handle_analyze_issue("TEST-1", project_paths=["/explicit/path"])
+
+    mock_resolve.assert_not_called()
+
+
+# ── _extract_jira_key_from_ref ─────────────────────────────────────────────────
+
+def test_extract_jira_key_from_url():
+    from icx_engine.mcp_server import _extract_jira_key_from_ref
+    assert _extract_jira_key_from_ref("https://foo.atlassian.net/browse/CCBSS-19583") == "CCBSS-19583"
+
+
+def test_extract_jira_key_from_bare_key():
+    from icx_engine.mcp_server import _extract_jira_key_from_ref
+    assert _extract_jira_key_from_ref("PROJ-42") == "PROJ-42"
+
+
+def test_extract_jira_key_from_url_with_trailing_slash():
+    from icx_engine.mcp_server import _extract_jira_key_from_ref
+    assert _extract_jira_key_from_ref("https://foo.atlassian.net/browse/AB-1/") == "AB-1"
+
+
+def test_extract_jira_key_returns_empty_for_invalid():
+    from icx_engine.mcp_server import _extract_jira_key_from_ref
+    assert _extract_jira_key_from_ref("not-a-valid-ref") == ""
 

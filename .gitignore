@@ -38,11 +38,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# ── JCE local config - contains Jira tokens and LLM API keys ─────────────────
-# Note: ~/.jce/ lives outside this repo, but .jce/ here covers any local copy
-~/.jce/
-.jce/
-
 # ── Local env files ───────────────────────────────────────────────────────────
 .env
 .env.local
@@ -53,10 +48,7 @@ Thumbs.db
 # .cursor/ is written by `jce mcp start` relative to project root - must be excluded
 .claude/
 .cursor/
-
-# ── Graphify knowledge graph output ──────────────────────────────────────────
-graphify-out/
-CLAUDE.md
+claude.md
 
 # ── Internal dev docs - session notes, phase logs, planning ──────────────────
 docs/

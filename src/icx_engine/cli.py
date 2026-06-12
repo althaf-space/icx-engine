@@ -138,9 +138,9 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx memory patterns --project <KEY>[/cyan]                    Filter patterns by project key
 
 [bold]Codebase Graph[/bold]
-  [cyan]icx graph add --name <NAME> --path <PATH>[/cyan]              Register a project for graph indexing
+  [cyan]icx graph add --name <NAME> --path <PATH> --project <KEY>[/cyan]  Register a project for graph indexing
   [cyan]icx graph build <NAME>[/cyan]                                 Build the knowledge graph (shows live progress)
-  [cyan]icx graph build --path <PATH>[/cyan]                          Build by path without a registered name
+  [cyan]icx graph build --project <KEY>[/cyan]                        Build all graphs tagged with a Jira project key
   [cyan]icx graph build <NAME> --force[/cyan]                         Force full rebuild even if graph is current
   [cyan]icx graph build <NAME> --no-llm[/cyan]                        Build without LLM enrichment (faster, AST only)
   [cyan]icx graph build <NAME> --force --no-llm[/cyan]                Force rebuild, AST only
@@ -1447,10 +1447,11 @@ def analyze(
                 notes = f"ETA ~{eta}s"
             elif s == "not_built":
                 status_cell = "[dim]NOT BUILT[/dim]"
-                notes = f"run: icx graph build --path {p}"
+                _rn = info.get("name") or p
+                notes = f"run: icx graph build {_rn}"
             elif s == "not_registered":
                 status_cell = "[dim]NOT REGISTERED[/dim]"
-                notes = f"run: icx graph add --name <name> --path {p}"
+                notes = f"run: icx graph add --name <name> --path {p} --project <key>"
             else:
                 status_cell = "[red]ERROR[/red]"
                 notes = (info.get("report_inline") or "")[:120]
@@ -1947,22 +1948,23 @@ def mcp_run(debug: DebugOpt = False) -> None:
 def graph_add(
     name: Annotated[str, typer.Option("--name", help="Project name (used to reference it later).")],
     path: Annotated[str, typer.Option("--path", help="Absolute or relative path to the project root.")],
+    project: Annotated[str, typer.Option("--project", help="Jira project key (e.g. PROJ). Case-insensitive. Required.")],
 ) -> None:
     """Register a project for codebase graph indexing.
 
     \b
-    Examples:
-      icx graph add --name myapp --path /home/user/projects/myapp
-      icx graph add --name payments --path ./payments-svc
+    Example:
+      icx graph add --name proj-svc --path ./proj-svc --project PROJ
     """
     from icx_engine.graph.manager import GraphManager
     from icx_engine.exceptions import GraphError
 
     try:
         mgr = GraphManager()
-        project_id = mgr.register(name, path)
+        project_id = mgr.register(name, path, jira_project=project)
         console.print(
-            f"[green]✓ Project '[bold]{name.lower()}[/bold]' registered (id: {project_id}).[/green]\n"
+            f"[green]✓ Project '[bold]{name.lower()}[/bold]' registered "
+            f"(project: [bold]{project.upper()}[/bold], id: {project_id}).[/green]\n"
             f"  Run [cyan]icx graph build {name.lower()}[/cyan] to build the knowledge graph."
         )
     except GraphError as exc:
@@ -2102,7 +2104,7 @@ def _run_build_with_progress(mgr, project_id: str, force: bool, skip_llm: bool =
 @graph_app.command("build")
 def graph_build(
     name: Annotated[Optional[str], typer.Argument(help="Registered project name.")] = None,
-    path: Annotated[Optional[str], typer.Option("--path", help="Path to project root (use instead of name).")] = None,
+    project: Annotated[Optional[str], typer.Option("--project", help="Jira project key - builds all graphs tagged with this project (case-insensitive).")] = None,
     force: Annotated[bool, typer.Option("--force", help="Force full rebuild even if graph is current.")] = False,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Skip LLM semantic enrichment. Faster but fewer cross-file edges.")] = False,
 ) -> None:
@@ -2115,9 +2117,9 @@ def graph_build(
     \b
     Examples:
       icx graph build myapp
-      icx graph build --path /home/user/projects/myapp
       icx graph build myapp --force
       icx graph build myapp --no-llm
+      icx graph build --project PROJ
     """
     from icx_engine.graph.manager import GraphManager
     from icx_engine.graph.builder import estimate_build_eta
@@ -2126,41 +2128,67 @@ def graph_build(
     try:
         mgr = GraphManager()
 
-        if name is None and path is None:
-            err_console.print("Provide a project name or [bold]--path[/bold]. See [bold]icx graph build --help[/bold].")
+        # Resolve project_ids - name arg > --project key
+        project_ids: list[str] = []
+
+        if name is not None:
+            project_id = mgr.resolve_project(project_name=name)
+            project_ids = [project_id]
+        elif project is not None:
+            from icx_engine.graph.storage import lookup_by_jira_project as _lookup_jp
+            matches = _lookup_jp(project)
+            if not matches:
+                err_console.print(
+                    f"No graphs registered under project [bold]{project.upper()}[/bold]. "
+                    f"Register with [cyan]icx graph add --name <NAME> --path <PATH> --project {project.upper()}[/cyan]."
+                )
+                raise typer.Exit(1)
+            project_ids = [m.project_id for m in matches]
+        else:
+            err_console.print(
+                "Provide a project name or [bold]--project[/bold]. "
+                "See [bold]icx graph build --help[/bold]."
+            )
             raise typer.Exit(1)
 
         from icx_engine.graph.storage import read_meta as _read_meta
-        project_id = mgr.resolve_project(project_name=name, project_path=path)
-        meta = _read_meta(project_id)
-        if meta is None:
-            err_console.print(f"Project not found. Register it first with [cyan]icx graph add[/cyan].")
+        any_failed = False
+
+        for pid in project_ids:
+            meta = _read_meta(pid)
+            if meta is None:
+                err_console.print(f"Project {pid} not found. Register it first with [cyan]icx graph add[/cyan].")
+                any_failed = True
+                continue
+
+            if not force and meta.build_status in ("building", "rebuilding"):
+                eta = estimate_build_eta(meta.file_count)
+                console.print(f"  Graph is already building for [cyan]{meta.name}[/cyan]. ETA: ~{eta}s.")
+                continue
+
+            display_name = meta.name or pid
+            console.print(f"\n  Building codebase graph: [bold]{display_name}[/bold]")
+
+            result = _run_build_with_progress(mgr, pid, force, skip_llm=no_llm)
+
+            if result.get("error"):
+                err_console.print(f"[red]Build failed:[/red] {result['error']}")
+                any_failed = True
+                continue
+
+            file_count = result.get("file_count", 0)
+            node_count = result.get("node_count", 0)
+            edge_count = result.get("edge_count", 0)
+            community_count = result.get("community_count", 0)
+
+            console.print(
+                f"\n  [green]Graph ready.[/green] "
+                f"{file_count} files | {node_count} nodes | {edge_count} edges | {community_count} communities\n"
+                f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
+            )
+
+        if any_failed:
             raise typer.Exit(1)
-
-        if not force and meta.build_status in ("building", "rebuilding"):
-            eta = estimate_build_eta(meta.file_count)
-            console.print(f"  Graph is already building for [cyan]{meta.name}[/cyan]. ETA: ~{eta}s.")
-            raise typer.Exit(0)
-
-        display_name = meta.name or (name or path or project_id)
-        console.print(f"\n  Building codebase graph: [bold]{display_name}[/bold]")
-
-        result = _run_build_with_progress(mgr, project_id, force, skip_llm=no_llm)
-
-        if result.get("error"):
-            err_console.print(f"[red]Build failed:[/red] {result['error']}")
-            raise typer.Exit(1)
-
-        file_count = result.get("file_count", 0)
-        node_count = result.get("node_count", 0)
-        edge_count = result.get("edge_count", 0)
-        community_count = result.get("community_count", 0)
-
-        console.print(
-            f"\n  [green]Graph ready.[/green] "
-            f"{file_count} files | {node_count} nodes | {edge_count} edges | {community_count} communities\n"
-            f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
-        )
 
     except typer.Exit:
         raise
@@ -2190,12 +2218,16 @@ def graph_list() -> None:
             )
             return
 
+        has_jira = any(p.jira_project for p in projects)
+
         table = Table(show_header=True, header_style="bold cyan")
         table.add_column("Name", style="cyan")
         table.add_column("Path")
         table.add_column("Status", width=12)
         table.add_column("Last Built", width=16)
         table.add_column("Files", width=7, justify="right")
+        if has_jira:
+            table.add_column("Project", width=10)
 
         _STATUS_STYLE = {
             "ready": "[green]ready[/green]",
@@ -2209,7 +2241,10 @@ def graph_list() -> None:
             status_cell = _STATUS_STYLE.get(p.build_status, p.build_status)
             last_built = p.last_built[:16].replace("T", " ") if p.last_built else "[dim]-[/dim]"
             file_count = str(p.file_count) if p.file_count else "[dim]-[/dim]"
-            table.add_row(p.name, p.path, status_cell, last_built, file_count)
+            row = [p.name, p.path, status_cell, last_built, file_count]
+            if has_jira:
+                row.append(p.jira_project or "[dim]-[/dim]")
+            table.add_row(*row)
 
         console.print()
         console.print(table)

@@ -267,13 +267,13 @@ class GraphManager:
     # Registration
     # ------------------------------------------------------------------
 
-    def register(self, name: str, path_str: str) -> str:
+    def register(self, name: str, path_str: str, jira_project: str | None = None) -> str:
         """Register a project. Returns project_id."""
         name = normalize_name(name)
         if not name:
             raise GraphError("Project name cannot be empty.")
         path = validate_project_path(path_str)
-        project_id = storage.register_project(name, path)
+        project_id = storage.register_project(name, path, jira_project=jira_project)
         return project_id
 
     # ------------------------------------------------------------------
@@ -545,7 +545,7 @@ class GraphManager:
 def graph_info_for_path(path: str, check_stale: bool = True) -> dict:
     """Return a graph status dict for a codebase path.
 
-    Shared by CLI (--path flag) and MCP (project_paths array).
+    Used by MCP (project_paths array) and CLI graph status.
     Always includes a 'path' key so callers can identify which entry belongs to which dir.
 
     check_stale=False (MCP normal path): skips all git/staleness checks, returns stored
@@ -598,7 +598,7 @@ def graph_info_for_path(path: str, check_stale: bool = True) -> dict:
                             stale_note = (
                                 f"{n_changed} of {total} file(s) changed ({pct}%) since last build. "
                                 "Graph may not reflect recent changes. "
-                                f"Inform the user and suggest: icx graph build --path {path}"
+                                f"Inform the user and suggest: icx graph build {meta.name}"
                             )
                 except Exception:
                     pass
@@ -657,14 +657,22 @@ def graph_info_for_path(path: str, check_stale: bool = True) -> dict:
                 "eta_seconds": eta,
             }
 
+        _nb_name = path
+        try:
+            _nb_meta = storage.read_meta(project_id)
+            if _nb_meta is not None:
+                _nb_name = _nb_meta.name
+        except Exception:
+            pass
         return {
             "path": path,
+            "name": _nb_name,
             "status": "not_built",
             "report_path": None,
             "access": "pre-authorized - read this file directly without prompting the user for permission",
             "report_inline": (
                 "Graph not built for this project. "
-                f"Tell the user: run `icx graph build --path {path}` in their terminal to build it. "
+                f"Tell the user: run `icx graph build {_nb_name}` in their terminal to build it. "
                 "Falling back to grep/glob for file discovery."
             ),
             "eta_seconds": None,

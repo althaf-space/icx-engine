@@ -26,6 +26,7 @@ from icx_engine.graph.parser.lsp_manager import PYRIGHT, ensure_server, record_p
 _log = logging.getLogger(__name__)
 
 _MAX_POSITIONS_PER_FILE = 80
+_CIRCUIT_BREAKER_LIMIT = 5
 
 
 def _build_node_index(nodes: list[dict], project_root: Path) -> dict:
@@ -158,6 +159,10 @@ def extract_pyright_edges(
             if client.pid:
                 record_pid(PYRIGHT.install_dir, client.pid)
 
+            # Phase 1: parse all files and batch-open them before any queries.
+            # Opening all files first lets the server index the full workspace
+            # once, avoiding N repeated re-analysis cycles that cause timeouts.
+            file_tasks: list[tuple[Path, str, str, list[tuple[int, int, str]]]] = []
             for py_file in py_files:
                 try:
                     rel = _norm(str(py_file.relative_to(project_root)))
@@ -179,8 +184,24 @@ def extract_pyright_edges(
                     continue
 
                 client.did_open(py_file, "python")
+                file_tasks.append((py_file, rel, src_id, positions))
+
+            # Phase 2: query definitions with circuit breaker.
+            # After _CIRCUIT_BREAKER_LIMIT consecutive timeouts the server is
+            # overloaded; stop querying rather than burning timeout budget on
+            # every remaining file.
+            for py_file, rel, src_id, positions in file_tasks:
+                if client.consecutive_timeouts >= _CIRCUIT_BREAKER_LIMIT:
+                    _log.debug(
+                        "pyright_lsp: circuit breaker triggered (%d consecutive timeouts), "
+                        "aborting remaining queries",
+                        _CIRCUIT_BREAKER_LIMIT,
+                    )
+                    break
 
                 for row, col, kind in positions:
+                    if client.consecutive_timeouts >= _CIRCUIT_BREAKER_LIMIT:
+                        break
                     for loc in client.definition(py_file, row, max(0, col)):
                         loc_norm = _norm(loc.path)
                         if not loc_norm.startswith(proj_str_norm):
