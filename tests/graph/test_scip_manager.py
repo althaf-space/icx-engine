@@ -1,4 +1,5 @@
 """Tests for SCIP indexer auto-install manager."""
+import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -428,12 +429,13 @@ class TestFindCoursier:
         assert result == "/usr/bin/coursier"
 
     def test_finds_in_icx_home(self, tmp_path):
-        bat = tmp_path / "coursier.bat"
-        bat.write_text("@echo off")
+        name = "coursier.bat" if os.name == "nt" else "coursier"
+        binary = tmp_path / name
+        binary.write_text("@echo off")
         with patch("shutil.which", return_value=None), \
              patch("icx_engine.graph.parser.scip_manager.ICX_HOME", tmp_path):
             result = _find_coursier()
-        assert result == str(bat)
+        assert result == str(binary)
 
 
 class TestJavaKotlinInConfigs:
