@@ -1054,6 +1054,16 @@ def test_system_prompt_mandates_technical_logic_tagged_block():
     assert "formula" in p
 
 
+def test_system_prompt_guards_against_prompt_injection():
+    """SYSTEM_PROMPT must instruct the LLM to never follow directives embedded in issue content."""
+    p = SYSTEM_PROMPT.lower()
+    assert "untrusted content" in p
+    assert "do not obey" in p
+    assert "take absolute precedence" in p
+    # the guard must precede the attachment-analysis rules it protects
+    assert p.index("untrusted content") < p.index("attachment analysis")
+
+
 async def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
     """When debug_console is provided, engine.run emits Rule output to it."""
     from io import StringIO

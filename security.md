@@ -69,7 +69,16 @@ Attachment download (`JiraClient.download_attachment`) validates every hop of ev
 - Every redirect target is checked against `allowed_hosts` before the next request is made
 - Auth headers are stripped on cross-host redirects
 - Hard limit of 3 redirect hops (`_MAX_REDIRECT_HOPS`)
-- Maximum download size of 20 MB (`_MAX_ATTACHMENT_BYTES`)
+- Maximum download size of 50 MB (`_MAX_ATTACHMENT_BYTES`)
+
+### Prompt injection mitigation
+
+Issue summaries, descriptions, comments, and attachment content (including OCR'd images and video frames) are attacker-influenceable inputs to the LLM. Every LLM-facing prompt that processes this content carries an explicit data/instruction separation guard:
+
+- `SYSTEM_PROMPT` (`llm/base.py`) - an `UNTRUSTED CONTENT` block, placed before the attachment-analysis rules, states that all bracketed input sections (`[SUMMARY]`, `[DESCRIPTION]`, `[COMMENTS]`, `[ATTACHMENTS]`, `[ATTACHMENT CONTENT]`) are data to analyze, not instructions, and that the prompt's rules and output schema take absolute precedence and cannot be overridden by issue content.
+- `_VISION_PROMPT`, `_SUMMARIZE_SYSTEM`, and `_VIDEO_FRAMES_PROMPT` (`connectors/attachments.py`) carry the same one-line guard for OCR text, document content, and video-frame content respectively.
+
+This does not make prompt injection impossible (no prompt-level defense fully does), but it instructs the model to treat embedded directives as reported content rather than commands, reducing the risk of an attacker-controlled issue manipulating analysis output or exfiltrating the system prompt.
 
 ### Concurrent write safety
 

@@ -89,6 +89,9 @@ class MemoryEntry(BaseModel):
     full_ticket_text: str = ""
     attachment_summary: str = ""
 
+    # Tech-stack fingerprint: {dir: {"languages": {...}, "frameworks": {...}, "package_manager": "..."}}
+    tech_stack: dict = Field(default_factory=dict)
+
 
 class MemoryAuditEvent(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

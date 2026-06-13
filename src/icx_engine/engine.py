@@ -1,6 +1,5 @@
 from __future__ import annotations
 import asyncio
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
@@ -17,16 +16,7 @@ from icx_engine.connectors.attachments import (
     DOCUMENT_EXTENSIONS as _DOCUMENT_EXTENSIONS,
 )
 
-_ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
-
 _AUDIO_VIDEO_EXTENSIONS = _AUDIO_EXTENSIONS | _VIDEO_EXTENSIONS
-
-
-def _extract_project_key(issue_key: str) -> str:
-    """Extract project prefix from issue key. Best-effort - not critical path."""
-    if "-" in issue_key:
-        return issue_key.split("-")[0]
-    return issue_key
 
 
 def _split_attachments(
@@ -68,7 +58,8 @@ def extract_domain(input_str: str) -> str | None:
     if any(c in raw for c in ("\x00", "\r", "\n", "\t")):
         raise InvalidInput("Invalid input: control characters are not allowed.")
 
-    if _ISSUE_KEY_RE.match(raw.upper()):
+    from icx_engine.connectors.base import get_all_connector_classes
+    if any(cls.can_handle_bare_key(raw) for cls in get_all_connector_classes()):
         return None
 
     has_scheme = raw.lower().startswith(("http://", "https://"))
@@ -355,7 +346,7 @@ async def run(
             _mem = MemoryManager()
             _query = MemoryQueryInput(
                 issue_key=raw.issue_key,
-                project_key=_extract_project_key(raw.issue_key),
+                project_key=connector.extract_project_key(raw.issue_key),
                 source_type=connector.connector_type(),
                 summary=result.problem_summary,
                 description=result.detailed_description,

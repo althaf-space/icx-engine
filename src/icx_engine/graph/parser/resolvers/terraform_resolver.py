@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
+from icx_engine.graph.parser.resolvers._common import make_edge
+
 _TF_RESOURCE  = re.compile(r'^resource\s+"([^"]+)"\s+"([^"]+)"', re.MULTILINE)
 _TF_DATA      = re.compile(r'^data\s+"([^"]+)"\s+"([^"]+)"', re.MULTILINE)
 _TF_VAR       = re.compile(r'^variable\s+"([^"]+)"', re.MULTILINE)
@@ -134,9 +136,4 @@ def _find_tf_in_dir(dir_path: str, tf_files: list) -> str | None:
 
 
 def _edge(src_id, tgt_id, src_file, tgt_file, etype, confidence) -> dict:
-    return {
-        "source": src_id, "target": tgt_id,
-        "source_file": src_file, "target_file": tgt_file,
-        "relation": etype, "type": etype, "confidence": confidence,
-        "resolver": "terraform", "fix_confidence_delta": 0.0, "resolution_weight": 0.0,
-    }
+    return make_edge(src_id, tgt_id, src_file, tgt_file, etype, confidence, resolver="terraform")

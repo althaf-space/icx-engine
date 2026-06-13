@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
+from icx_engine.graph.parser.resolvers._common import make_edge
+
 _ROUTE_RESOURCES    = re.compile(r'resources?\s+:(\w+)', re.MULTILINE)
 _ROUTE_GET_TO       = re.compile(r"get\s+['\"][^'\"]+['\"],\s*to:\s*['\"](\w+)#", re.MULTILINE)
 _ROUTE_POST_TO      = re.compile(r"post\s+['\"][^'\"]+['\"],\s*to:\s*['\"](\w+)#", re.MULTILINE)
@@ -160,9 +162,4 @@ def _pascal(snake: str) -> str:
 
 
 def _edge(src_id, tgt_id, src_file, tgt_file, etype, confidence) -> dict:
-    return {
-        "source": src_id, "target": tgt_id,
-        "source_file": src_file, "target_file": tgt_file,
-        "relation": etype, "type": etype, "confidence": confidence,
-        "resolver": "rails", "fix_confidence_delta": 0.0, "resolution_weight": 0.0,
-    }
+    return make_edge(src_id, tgt_id, src_file, tgt_file, etype, confidence, resolver="rails")

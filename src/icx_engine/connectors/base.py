@@ -38,23 +38,48 @@ class ConnectorBase(ABC):
     @abstractmethod
     async def process_attachments(self, raw: RawIssueData, llm_config, log=None) -> tuple[dict[str, str], dict[str, str]]: ...
 
+    @classmethod
+    def extract_project_key(cls, issue_key: str) -> str:
+        """Return the project/namespace prefix of an issue key.
+
+        Default heuristic matches Jira-style "PROJ-123" -> "PROJ". Connectors
+        with a different key format (e.g. "owner/repo#123") should override.
+        """
+        return issue_key.split("-", 1)[0] if "-" in issue_key else issue_key
+
+    @classmethod
+    def extract_bare_key_from_ref(cls, ref: str) -> str | None:
+        """Return the bare issue key if `ref` (a bare key or issue URL) matches
+        this connector's conventions, else None. Used to resolve a graph project
+        from a ticket reference without an active connection."""
+        return None
+
+
+def _connector_registry() -> dict[str, type[ConnectorBase]]:
+    from icx_engine.connectors.jira.connector import JiraConnector
+
+    return {
+        "jira": JiraConnector,
+    }
+
+
+def get_connector_class(connector_type: str) -> type[ConnectorBase]:
+    """Return the connector class registered for `connector_type`."""
+    registry = _connector_registry()
+    cls = registry.get(connector_type)
+    if cls is None:
+        raise ValueError(
+            f"Unknown connector type '{connector_type}'. "
+            f"Valid types: {', '.join(registry)}"
+        )
+    return cls
+
 
 def get_connector(connection: BaseConnection) -> ConnectorBase:
     """Return an initialized connector instance for the given connection."""
-    from icx_engine.connectors.jira.connector import JiraConnector
-
-    _registry: dict[str, type[ConnectorBase]] = {
-        "jira": JiraConnector,
-    }
-    cls = _registry.get(connection.connector_type)
-    if cls is None:
-        raise ValueError(
-            f"Unknown connector type '{connection.connector_type}'. "
-            f"Valid types: {', '.join(_registry)}"
-        )
+    cls = get_connector_class(connection.connector_type)
     return cls(connection)
 
 
 def get_all_connector_classes() -> list[type[ConnectorBase]]:
-    from icx_engine.connectors.jira.connector import JiraConnector
-    return [JiraConnector]
+    return list(_connector_registry().values())

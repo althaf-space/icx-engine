@@ -182,6 +182,16 @@ def test_jira_client_has_download_attachment():
     assert callable(JiraClient.download_attachment)
 
 
+def test_uae_optional_dependencies_importable():
+    """Universal Attachment Engine converters (.xls, .pptx, scanned-PDF OCR) are importable."""
+    import xlrd
+    import pptx
+    import fitz
+    assert xlrd is not None
+    assert pptx is not None
+    assert fitz is not None
+
+
 def test_model_no_flags_prints_help_hint(cli_runner):
     from unittest.mock import patch
     with patch.object(ConfigManager, "load", return_value=AppConfig()):

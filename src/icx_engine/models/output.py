@@ -31,6 +31,7 @@ class PastInsight(BaseModel):
     saved_at: str
     work_item_type: str = ""
     pattern_used: str = ""
+    tech_stack: dict = Field(default_factory=dict)
 
 
 class IssueContext(BaseModel):

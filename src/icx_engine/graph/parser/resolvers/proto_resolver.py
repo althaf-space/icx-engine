@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
+from icx_engine.graph.parser.resolvers._common import make_edge
+
 _PROTO_SERVICE  = re.compile(r'service\s+(\w+)\s*\{')
 _PROTO_MESSAGE  = re.compile(r'message\s+(\w+)\s*\{')
 _PROTO_IMPORT   = re.compile(r'^import\s+"([^"]+\.proto)"', re.MULTILINE)
@@ -123,9 +125,4 @@ def _to_pascal(snake: str) -> str:
 
 
 def _edge(src_id, tgt_id, src_file, tgt_file, etype, confidence) -> dict:
-    return {
-        "source": src_id, "target": tgt_id,
-        "source_file": src_file, "target_file": tgt_file,
-        "relation": etype, "type": etype, "confidence": confidence,
-        "resolver": "proto", "fix_confidence_delta": 0.0, "resolution_weight": 0.0,
-    }
+    return make_edge(src_id, tgt_id, src_file, tgt_file, etype, confidence, resolver="proto")

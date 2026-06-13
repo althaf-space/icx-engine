@@ -49,7 +49,7 @@ class ProjectInfo:
     build_started_at: str | None = None
     extraction_mode: str = "ast"  # "ast" or "semantic"
     incremental_capable: bool = False
-    jira_project: str | None = None
+    tracker_project_key: str | None = None  # e.g. Jira project key, GitHub "owner/repo", etc.
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +252,15 @@ def _read_registry() -> list[dict]:
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        entries = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         _log.warning("Failed to parse graph registry (%s); treating as empty", type(exc).__name__)
         return []
+    for entry in entries:
+        # Migrate legacy "jira_project" key (pre-rename) -> "tracker_project_key"
+        if "tracker_project_key" not in entry and "jira_project" in entry:
+            entry["tracker_project_key"] = entry.pop("jira_project")
+    return entries
 
 
 def _write_registry(entries: list[dict]) -> None:
@@ -299,7 +304,7 @@ def read_meta(project_id: str) -> ProjectInfo | None:
             build_status=data.get("build_status", "not_built"),
             build_started_at=data.get("build_started_at"),
             extraction_mode=data.get("extraction_mode", "ast"),
-            jira_project=data.get("jira_project"),
+            tracker_project_key=data.get("tracker_project_key", data.get("jira_project")),
         )
     except Exception as exc:
         _log.warning("Failed to parse meta.json for project %s (%s)", project_id, type(exc).__name__)
@@ -393,30 +398,44 @@ def set_build_status(project_id: str, status: BuildStatus) -> None:
 # Registry operations
 # ---------------------------------------------------------------------------
 
-def register_project(name: str, path: Path, jira_project: str | None = None) -> str:
+def register_project(name: str, path: Path, tracker_project_key: str | None = None) -> str:
     """Add or update a project in the registry. Returns project_id."""
     name = normalize_name(name)
     project_id = derive_project_id(path)
-    jp = jira_project.strip().upper() if jira_project and jira_project.strip() else None
+    tpk = tracker_project_key.strip().upper() if tracker_project_key and tracker_project_key.strip() else None
 
     with _registry_lock:
         entries = _read_registry()
-        # Preserve existing jira_project when not re-specified (e.g. rebuild without --project)
-        if jp is None:
+        # Preserve existing tracker_project_key when not re-specified (e.g. rebuild without --project)
+        if tpk is None:
             for e in entries:
                 if e.get("project_id") == project_id or e.get("name") == name:
-                    jp = e.get("jira_project") or None
+                    tpk = e.get("tracker_project_key") or None
                     break
-        # Remove existing entry for this path or name (update in place)
-        entries = [
-            e for e in entries
-            if e.get("project_id") != project_id and e.get("name") != name
-        ]
+        # Remove existing entry for this path or name (update in place).
+        # An entry dropped here for re-registration under the same `name` but a
+        # different `project_id` (e.g. project moved to a new path) leaves its
+        # old cache dir orphaned under ~/.icx/graphs/<old_id>/ - clean it up.
+        kept_entries = []
+        stale_project_ids = []
+        for e in entries:
+            if e.get("project_id") != project_id and e.get("name") != name:
+                kept_entries.append(e)
+            elif e.get("project_id") != project_id:
+                stale_project_ids.append(e.get("project_id"))
+        entries = kept_entries
         entry: dict = {"name": name, "path": str(path), "project_id": project_id}
-        if jp is not None:
-            entry["jira_project"] = jp
+        if tpk is not None:
+            entry["tracker_project_key"] = tpk
         entries.append(entry)
         _write_registry(entries)
+
+    for _stale_id in stale_project_ids:
+        if _stale_id:
+            _stale_dir = _project_dir_path(_stale_id)
+            if _stale_dir.exists():
+                import shutil as _shutil
+                _shutil.rmtree(_stale_dir, ignore_errors=True)
 
     # Create project dir + initial meta if not present (outside registry lock)
     meta = read_meta(project_id)
@@ -429,15 +448,15 @@ def register_project(name: str, path: Path, jira_project: str | None = None) -> 
             git_commit=None,
             file_count=0,
             build_status="not_built",
-            jira_project=jp,
+            tracker_project_key=tpk,
         ))
         # Seed .icxignore on first project registration
         from icx_engine.graph.parser.icxignore import seed as _seed_icxignore
         _seed_icxignore(icxignore_path(project_id))
     else:
-        # Update jira_project on re-registration (even if meta already exists)
-        if jp is not None and meta.jira_project != jp:
-            meta.jira_project = jp
+        # Update tracker_project_key on re-registration (even if meta already exists)
+        if tpk is not None and meta.tracker_project_key != tpk:
+            meta.tracker_project_key = tpk
             write_meta(meta)
     return project_id
 
@@ -465,13 +484,13 @@ def lookup_by_cwd() -> ProjectInfo | None:
     return None
 
 
-def lookup_by_jira_project(key: str) -> list[ProjectInfo]:
-    """Return all ProjectInfo entries tagged with the given Jira project key (case-insensitive)."""
+def lookup_by_tracker_project_key(key: str) -> list[ProjectInfo]:
+    """Return all ProjectInfo entries tagged with the given tracker project key (case-insensitive)."""
     key_lower = key.strip().lower()
     results = []
     for entry in _read_registry():
-        jp = (entry.get("jira_project") or "").strip().lower()
-        if jp and jp == key_lower:
+        tpk = (entry.get("tracker_project_key") or "").strip().lower()
+        if tpk and tpk == key_lower:
             meta = read_meta(entry["project_id"])
             if meta is not None:
                 results.append(meta)
@@ -487,20 +506,20 @@ def list_projects() -> list[ProjectInfo]:
     return results
 
 
-def find_projects_by_jira_key(jira_key: str) -> "list[ProjectInfo]":
-    """Return ALL registered projects whose jira_project matches jira_key (case-insensitive).
+def find_projects_by_tracker_key(tracker_key: str) -> "list[ProjectInfo]":
+    """Return ALL registered projects whose tracker_project_key matches tracker_key (case-insensitive).
 
-    Reads jira_project from registry.json (authoritative source) - not meta.json,
+    Reads tracker_project_key from registry.json (authoritative source) - not meta.json,
     which may be stale if the project was re-registered after the initial build.
     Returns empty list if no match or registry is empty.
     """
-    key = jira_key.strip().upper()
+    key = tracker_key.strip().upper()
     if not key:
         return []
     results = []
     for entry in _read_registry():
-        entry_jira = entry.get("jira_project") or ""
-        if entry_jira.upper() == key:
+        entry_key = entry.get("tracker_project_key") or ""
+        if entry_key.upper() == key:
             meta = read_meta(entry["project_id"])
             if meta:
                 results.append(meta)
@@ -514,14 +533,14 @@ def find_projects_by_jira_key(jira_key: str) -> "list[ProjectInfo]":
                     git_commit=None,
                     file_count=0,
                     build_status="not_built",
-                    jira_project=entry_jira,
+                    tracker_project_key=entry_key,
                 ))
     return results
 
 
-def find_project_by_jira_key(jira_key: str) -> "ProjectInfo | None":
-    """Return the first registered project matching jira_key. Use find_projects_by_jira_key for all matches."""
-    results = find_projects_by_jira_key(jira_key)
+def find_project_by_tracker_key(tracker_key: str) -> "ProjectInfo | None":
+    """Return the first registered project matching tracker_key. Use find_projects_by_tracker_key for all matches."""
+    results = find_projects_by_tracker_key(tracker_key)
     return results[0] if results else None
 
 

@@ -71,7 +71,7 @@ def compute_centrality(nodes: list[dict], edges: list[dict]) -> dict[str, dict]:
                     new_pr[j] += contrib
         pr = new_pr
 
-    max_pr = max(pr) or 1.0
+    max_pr = max(pr)
     pr_norm = [p / max_pr for p in pr]
 
     # Degree centrality

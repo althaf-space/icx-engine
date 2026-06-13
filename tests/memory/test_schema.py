@@ -31,6 +31,7 @@ def test_past_insight_fields():
     assert insight.issue_key == "PROJ-87"
     assert insight.similarity_score == 0.91
     assert insight.files_changed == ["src/auth/token.py"]
+    assert insight.tech_stack == {}
 
 
 def test_issue_context_past_insights_defaults_empty():
@@ -120,6 +121,7 @@ def test_memory_entry_optional_fields_default():
     )
     assert entry.impact == ""
     assert entry.tags == []
+    assert entry.tech_stack == {}
 
 
 def test_memory_query_input():

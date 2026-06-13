@@ -58,6 +58,17 @@ class TestFindOwners:
         assert "@security-team" in owners
 
 
+class TestMatchPatternDirectory:
+    def test_nested_dir_pattern_matches_anywhere(self):
+        assert _match_pattern("src/auth/", "app/src/auth/token.py") is True
+
+    def test_no_false_positive_on_substring(self):
+        assert _match_pattern("lib/", "app/oldlib/utils.py") is False
+
+    def test_dir_pattern_matches_at_root(self):
+        assert _match_pattern("lib/", "app/lib/utils.py") is True
+
+
 class TestLoadCODEOWNERS:
     def test_loads_from_project_root(self, tmp_path):
         codeowners = tmp_path / "CODEOWNERS"

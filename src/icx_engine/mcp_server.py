@@ -1062,6 +1062,12 @@ async def _list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Absolute path to the project root.",
                     },
+                    "file_path": {
+                        "type": "string",
+                        "description": "Optional absolute path to a file in this project. "
+                        "When given, also returns co_changed_files: files historically "
+                        "committed together with this file (from the cochange resolver).",
+                    },
                 },
                 "required": ["project_path"],
             },
@@ -1255,7 +1261,7 @@ async def _list_tools() -> list[Tool]:
                 "ANSWERS: 'Which BUG CATEGORIES keep recurring?' - detects systemic failure patterns across all saved work items.\n"
                 "USE WHEN THE SAME BUG CATEGORY KEEPS RECURRING OR BEFORE MAJOR REFACTORING - "
                 "reveals systemic weaknesses in the codebase.\n"
-                "Patterns are recomputed every 10 saves.\n"
+                "Patterns are recomputed every 5 saves.\n"
                 "RUNTIME: under 1 second.\n"
                 "RETURNS: [{project_key, pattern_type, label, evidence, entry_count, detected_at}]\n"
                 "Pattern types and what they mean:\n"
@@ -2246,36 +2252,42 @@ def _get_graphs_info(paths: list[str]) -> list[dict]:
     return [graph_info_for_path(p, check_stale=False) for p in paths]
 
 
-def _extract_jira_key_from_ref(issue_ref: str) -> str:
-    """Extract bare issue key from a URL or bare key string.
+def _match_tracker_ref(issue_ref: str) -> "tuple[str, type] | None":
+    """Try each registered connector's extract_bare_key_from_ref(). Returns
+    (bare_key, connector_class) for the first match, or None."""
+    from icx_engine.connectors.base import get_all_connector_classes
+    for cls in get_all_connector_classes():
+        key = cls.extract_bare_key_from_ref(issue_ref)
+        if key:
+            return key, cls
+    return None
+
+
+def _extract_tracker_key_from_ref(issue_ref: str) -> str:
+    """Extract bare issue key from a URL or bare key string, trying each
+    registered connector's conventions in turn.
 
     https://foo.atlassian.net/browse/PROJ-123 -> PROJ-123
     PROJ-123 -> PROJ-123
     """
-    import re as _re
-    # URL path: last segment after /browse/ or similar
-    m = _re.search(r"/([A-Z][A-Z0-9]+-\d+)(?:[/?#]|$)", issue_ref)
-    if m:
-        return m.group(1)
-    # Bare key
-    if _re.match(r"^[A-Z][A-Z0-9]*-\d+$", issue_ref.strip()):
-        return issue_ref.strip()
-    return ""
+    match = _match_tracker_ref(issue_ref)
+    return match[0] if match else ""
 
 
 def _resolve_paths_from_ticket(issue_ref: str) -> "list[dict] | None":
-    """Look up ALL registered ICX projects matching the ticket's Jira project key.
+    """Look up ALL registered ICX projects matching the ticket's tracker project key.
 
     Returns list of {"path": str, "name": str} on match, None otherwise.
     Never raises.
     """
     try:
-        key = _extract_jira_key_from_ref(issue_ref)
-        if not key or "-" not in key:
+        match = _match_tracker_ref(issue_ref)
+        if not match:
             return None
-        project_prefix = key.split("-")[0]
-        from icx_engine.graph.storage import find_projects_by_jira_key
-        infos = find_projects_by_jira_key(project_prefix)
+        key, cls = match
+        project_prefix = cls.extract_project_key(key)
+        from icx_engine.graph.storage import find_projects_by_tracker_key
+        infos = find_projects_by_tracker_key(project_prefix)
         if infos:
             return [{"path": i.path, "name": i.name} for i in infos]
     except Exception:
@@ -2629,7 +2641,13 @@ async def _handle_analyze_issue(
 
         _MANDATORY_TAIL = (
             "\n\nIF the user requests a different approach: present the revised plan using the same "
-            "confirmation format above and wait for approval again before writing any code."
+            "confirmation format above and wait for approval again before writing any code.\n\n"
+            "ITERATION RULE - applies for the rest of this task, no exceptions:\n"
+            "After EVERY code change you make - including fixes requested during iteration - STOP "
+            "and ask the user to test before making any further change or calling "
+            "reinforce_memory_usage/save_memory. This repeats on the 2nd, 3rd, and every "
+            "subsequent fix. A prior 'looks good' or 'works' does NOT carry over to a new edit - "
+            "each new change requires its own fresh test confirmation."
         )
 
         _is_non_bug = issue_type_val.lower() not in ("bug", "defect", "incident", "error")
@@ -3138,7 +3156,8 @@ async def _handle_save_memory(
     extra = extra or {}
     try:
         config = ConfigManager.load()
-        from icx_engine.engine import extract_domain, resolve_connection, _extract_project_key
+        from icx_engine.engine import extract_domain, resolve_connection
+        from icx_engine.connectors.base import get_connector_class
         from icx_engine.memory.schema import MemoryEntry
 
         domain = extract_domain(issue_key)
@@ -3186,10 +3205,21 @@ async def _handle_save_memory(
             "diagnosis_steps": extra.get("diagnosis_steps", 0),
         }
 
+        project_key = get_connector_class(conn.connector_type).extract_project_key(issue_key)
+        tech_stack: dict = {}
+        try:
+            from icx_engine.graph.storage import find_projects_by_tracker_key
+            from icx_engine.memory.stack_fingerprint import detect_stack
+            _matches = find_projects_by_tracker_key(project_key)
+            if _matches:
+                tech_stack = detect_stack(Path(_matches[0].path))
+        except Exception:
+            pass
+
         entry = MemoryEntry(
             id=str(uuid.uuid4()),
             issue_key=issue_key.upper(),
-            project_key=_extract_project_key(issue_key),
+            project_key=project_key,
             source_type=conn.connector_type,
             issue_type=work_item_type,
             summary=summary,
@@ -3209,6 +3239,7 @@ async def _handle_save_memory(
             causal_chain=causal_chain,
             full_ticket_text=extra.get("full_ticket_text", ""),
             attachment_summary=extra.get("attachment_summary", ""),
+            tech_stack=tech_stack,
         )
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(_get_memory_executor(), _save_memory_sync, entry)

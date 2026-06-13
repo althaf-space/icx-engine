@@ -44,9 +44,18 @@ def _match_pattern(pattern: str, filepath: str) -> bool:
         # Anchored pattern: match from root only
         return fnmatch.fnmatch(filepath, pattern) or fnmatch.fnmatch(filepath, pattern + "/*")
 
-    # Directory pattern (ends with /)
+    # Directory pattern (ends with /): match if the pattern's directory
+    # segments appear as a contiguous run of path segments anywhere in
+    # filepath, not as a raw substring (which could false-match e.g.
+    # pattern "lib/" against ".../oldlib/...").
     if pattern.endswith("/"):
-        return filepath.startswith(pattern) or f"/{pattern}" in f"/{filepath}/"
+        pat_parts = pattern[:-1].split("/")
+        parts = filepath.split("/")
+        n = len(pat_parts)
+        return any(
+            parts[i:i + n] == pat_parts
+            for i in range(len(parts) - n + 1)
+        )
 
     # Wildcard or name pattern: match anywhere in path
     name = Path(filepath).name

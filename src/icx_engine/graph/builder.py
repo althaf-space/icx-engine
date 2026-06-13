@@ -164,27 +164,47 @@ def _collect_source_files(project_path: Path) -> list[Path]:
 # Incremental merge helper
 # ---------------------------------------------------------------------------
 
+def _rel_path(p: str, root_posix: str) -> str:
+    """Normalize a path for stale-set comparison: backslash -> forward slash,
+    and strip an absolute project-root prefix so paths are repo-relative.
+    """
+    if not p:
+        return p
+    p = p.replace("\\", "/")
+    if root_posix and (p == root_posix or p.startswith(root_posix + "/")):
+        p = p[len(root_posix):].lstrip("/")
+    return p
+
+
 def _merge_incremental(
     existing_graph: dict,
     new_extraction: dict,
     changed_files: list[str],
     deleted_files: list[str],
+    root_posix: str = "",
 ) -> dict:
     """
     Removes stale nodes/edges (from changed/deleted files),
     appends newly extracted nodes/edges.
     Preserves fix_confidence_delta and resolution_weight on surviving edges.
+
+    root_posix: absolute project root (POSIX form). Used to normalize
+    absolute source_file/target_file values (e.g. from _abs_edges) back to
+    repo-relative form so they compare correctly against changed_files/
+    deleted_files, which are always repo-relative POSIX paths.
     """
-    stale = set(changed_files) | set(deleted_files)
+    stale = {_rel_path(p, root_posix) for p in changed_files} | {
+        _rel_path(p, root_posix) for p in deleted_files
+    }
 
     surviving_nodes = [
         n for n in existing_graph.get("nodes", [])
-        if n.get("file", n.get("source_file", "")) not in stale
+        if _rel_path(n.get("file", n.get("source_file", "")), root_posix) not in stale
     ]
     surviving_edges = [
         e for e in existing_graph.get("links", existing_graph.get("edges", []))
-        if e.get("source_file", "") not in stale
-        and e.get("target_file", "") not in stale
+        if _rel_path(e.get("source_file", ""), root_posix) not in stale
+        and _rel_path(e.get("target_file", ""), root_posix) not in stale
     ]
     merged = dict(existing_graph)
     merged["nodes"] = surviving_nodes + new_extraction.get("nodes", [])
@@ -371,24 +391,6 @@ def _build_project_isolated(
         progress.emit("ast", current=_ast_total, total=_ast_total,
                       message=f"{len(extraction.get('nodes', []))} nodes")
 
-        # CO_CHANGED edges from git history (runs before LSP pass)
-        try:
-            from icx_engine.graph.parser.resolvers.cochange_resolver import resolve_cochange
-            _cochange_edges = resolve_cochange(files, project_path, extraction)
-            if _cochange_edges:
-                extraction = {
-                    **extraction,
-                    "edges": list(extraction.get("edges", [])) + _cochange_edges,
-                }
-            progress.emit(
-                "cochange",
-                current=len(_cochange_edges) // 2,
-                total=len(_cochange_edges) // 2,
-                message=f"{len(_cochange_edges) // 2} co-changed file pairs",
-            )
-        except Exception as _cochange_exc:
-            _log.debug("cochange_resolver skipped (%s)", type(_cochange_exc).__name__)
-
         lsp_edge_count = 0
 
         _proj_posix = project_path.as_posix()
@@ -402,6 +404,24 @@ def _build_project_isolated(
                     e = {**e, "source_file": f"{_proj_posix}/{sf}"}
                 result.append(e)
             return result
+
+        # CO_CHANGED edges from git history (runs before LSP pass)
+        try:
+            from icx_engine.graph.parser.resolvers.cochange_resolver import resolve_cochange
+            _cochange_edges = _abs_edges(resolve_cochange(files, project_path, extraction))
+            if _cochange_edges:
+                extraction = {
+                    **extraction,
+                    "edges": list(extraction.get("edges", [])) + _cochange_edges,
+                }
+            progress.emit(
+                "cochange",
+                current=len(_cochange_edges) // 2,
+                total=len(_cochange_edges) // 2,
+                message=f"{len(_cochange_edges) // 2} co-changed file pairs",
+            )
+        except Exception as _cochange_exc:
+            _log.debug("cochange_resolver skipped (%s)", type(_cochange_exc).__name__)
 
         _exts = {f.suffix.lower() for f in files}
         _has_py = bool(_exts & {'.py'})
@@ -645,6 +665,7 @@ def _build_project_isolated(
                     progress.emit("scip", current=_scip_step, total=_scip_total,
                                   message=f"scip-{_scip_lang}")
                     _scip_detail = "no output"
+                    _scip_result = None
                     try:
                         if _scip_managed:
                             _scip_result = _ensure_scip_indexer(_SCIP_CONFIGS[_scip_lang])
@@ -945,7 +966,10 @@ def _build_project_isolated(
                 existing_graph = _json.loads(graph_json_path.read_text(encoding="utf-8"))
                 # Load what to_json just wrote to the tmp path
                 fresh_graph = _json.loads(_Path(graph_tmp_path_str).read_text(encoding="utf-8"))
-                merged = _merge_incremental(existing_graph, fresh_graph, _changed_rel, _deleted_rel)
+                merged = _merge_incremental(
+                    existing_graph, fresh_graph, _changed_rel, _deleted_rel,
+                    root_posix=project_path.as_posix(),
+                )
                 _Path(graph_tmp_path_str).write_text(
                     _json.dumps(merged, separators=(",", ":")), encoding="utf-8"
                 )

@@ -106,6 +106,14 @@ def _row_to_entry(row: dict) -> MemoryEntry:
         except Exception:
             pass
 
+    tech_stack: dict = {}
+    _ts_raw = row.get("tech_stack_json") or ""
+    if _ts_raw and _ts_raw != "{}":
+        try:
+            tech_stack = json.loads(_ts_raw)
+        except Exception:
+            pass
+
     return MemoryEntry(
         id=row["id"],
         issue_key=row["issue_key"],
@@ -141,6 +149,7 @@ def _row_to_entry(row: dict) -> MemoryEntry:
         causal_chain=causal_chain,
         full_ticket_text=row.get("full_ticket_text") or "",
         attachment_summary=row.get("attachment_summary") or "",
+        tech_stack=tech_stack,
     )
 
 
@@ -249,6 +258,9 @@ class MemoryManager:
                 to_add["full_ticket_text"] = "''"
             if "attachment_summary" not in existing_cols:
                 to_add["attachment_summary"] = "''"
+            # Tech-stack fingerprint
+            if "tech_stack_json" not in existing_cols:
+                to_add["tech_stack_json"] = "'{}'"
             if to_add:
                 try:
                     self._table.add_columns(to_add)
@@ -298,6 +310,7 @@ class MemoryManager:
             pa.field("causal_chain_json", pa.utf8()),
             pa.field("full_ticket_text", pa.utf8()),
             pa.field("attachment_summary", pa.utf8()),
+            pa.field("tech_stack_json", pa.utf8()),
         ])
         self._table = self._db.create_table(_TABLE_NAME, schema=schema)
         return self._table
@@ -401,6 +414,7 @@ class MemoryManager:
             "causal_chain_json": json.dumps(entry.causal_chain) if entry.causal_chain else "{}",
             "full_ticket_text": entry.full_ticket_text or "",
             "attachment_summary": entry.attachment_summary or "",
+            "tech_stack_json": json.dumps(entry.tech_stack) if entry.tech_stack else "{}",
         }
         if vector is not None:
             row["vector"] = vector
@@ -437,7 +451,10 @@ class MemoryManager:
     ) -> float:
         """Compute temporal_decay_factor combining time-based decay and semantic drift."""
         try:
-            days = (datetime.now(timezone.utc) - datetime.fromisoformat(entry.saved_at.replace("Z", "+00:00").split("+")[0]).replace(tzinfo=timezone.utc)).days
+            saved_at = datetime.fromisoformat(entry.saved_at.replace("Z", "+00:00"))
+            if saved_at.tzinfo is None:
+                saved_at = saved_at.replace(tzinfo=timezone.utc)
+            days = max(0, (datetime.now(timezone.utc) - saved_at.astimezone(timezone.utc)).days)
         except Exception:
             days = 0
 
@@ -724,6 +741,7 @@ class MemoryManager:
                 saved_at=r.get("saved_at", ""),
                 work_item_type=r.get("work_item_type", "bug"),
                 pattern_used=r.get("pattern_used", ""),
+                tech_stack=r.get("tech_stack", {}),
             ))
         return insights
 
@@ -862,6 +880,7 @@ class MemoryManager:
                 "negated": entry.negated,
                 "negation_reason": entry.negation_reason,
                 "memory_confidence": entry.memory_confidence,
+                "tech_stack": entry.tech_stack,
             }
             if entry.negated:
                 negative_signals.append(d)
@@ -898,6 +917,7 @@ class MemoryManager:
                                 "negated": exact.negated,
                                 "negation_reason": exact.negation_reason,
                                 "memory_confidence": exact.memory_confidence,
+                                "tech_stack": exact.tech_stack,
                             })
                     except Exception:
                         pass
@@ -1004,7 +1024,7 @@ class MemoryManager:
             log(f"  migrating {count} work items to {VECTOR_DIM}-dim vectors...")
         self.clear()
         for i, entry in enumerate(entries, 1):
-            self.save(entry)
+            self.save(entry, restore=True)
             if log:
                 log(f"  [{i}/{count}] {entry.issue_key}")
         return count

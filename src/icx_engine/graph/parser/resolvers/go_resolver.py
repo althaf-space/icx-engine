@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
+from icx_engine.graph.parser.resolvers._common import make_edge
+
 _GO_IMPORT_SINGLE  = re.compile(r'import\s+"([^"]+)"')
 _GO_IMPORT_GROUP   = re.compile(r'import\s*\((.*?)\)', re.DOTALL)
 _GO_IMPORT_LINE    = re.compile(r'(?:(\w+)\s+)?"([^"]+)"')
@@ -162,9 +164,4 @@ def _extract_struct_methods(contents: dict) -> list:
 
 
 def _edge(src_id, tgt_id, src_file, tgt_file, etype, confidence) -> dict:
-    return {
-        "source": src_id, "target": tgt_id,
-        "source_file": src_file, "target_file": tgt_file,
-        "relation": etype, "type": etype, "confidence": confidence,
-        "resolver": "go", "fix_confidence_delta": 0.0, "resolution_weight": 0.0,
-    }
+    return make_edge(src_id, tgt_id, src_file, tgt_file, etype, confidence, resolver="go")

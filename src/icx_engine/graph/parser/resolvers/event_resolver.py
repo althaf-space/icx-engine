@@ -21,6 +21,8 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
+from icx_engine.graph.parser.resolvers._common import make_edge
+
 # -- Kafka --
 _KAFKA_PY_SEND   = re.compile(r'(?:producer|kafka)\.send\s*\(\s*["\']([^"\']+)["\']', re.M)
 _KAFKA_PY_SUB    = re.compile(r'consumer\.subscribe\s*\(\s*\[([^\]]+)\]', re.M)
@@ -196,9 +198,4 @@ def _event_edge(src_id, tgt_id, src_file, tgt_file, etype, confidence, topic, br
     }
 
 def _edge_plain(src_id, tgt_id, src_file, tgt_file, etype, confidence) -> dict:
-    return {
-        "source": src_id, "target": tgt_id,
-        "source_file": src_file, "target_file": tgt_file,
-        "relation": etype, "type": etype, "confidence": confidence,
-        "resolver": "event", "fix_confidence_delta": 0.0, "resolution_weight": 0.0,
-    }
+    return make_edge(src_id, tgt_id, src_file, tgt_file, etype, confidence, resolver="event")

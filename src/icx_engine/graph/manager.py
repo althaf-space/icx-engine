@@ -267,13 +267,13 @@ class GraphManager:
     # Registration
     # ------------------------------------------------------------------
 
-    def register(self, name: str, path_str: str, jira_project: str | None = None) -> str:
+    def register(self, name: str, path_str: str, tracker_project_key: str | None = None) -> str:
         """Register a project. Returns project_id."""
         name = normalize_name(name)
         if not name:
             raise GraphError("Project name cannot be empty.")
         path = validate_project_path(path_str)
-        project_id = storage.register_project(name, path, jira_project=jira_project)
+        project_id = storage.register_project(name, path, tracker_project_key=tracker_project_key)
         return project_id
 
     # ------------------------------------------------------------------
@@ -385,6 +385,8 @@ class GraphManager:
             file_count=file_count,
             build_status="ready",
             extraction_mode=result.get("extraction_mode", "ast"),
+            incremental_capable=meta.incremental_capable,
+            tracker_project_key=meta.tracker_project_key,
         )
         storage.write_meta(updated)
 
@@ -429,7 +431,6 @@ class GraphManager:
 
         # Generate navigation map for agents
         try:
-            dest = storage.graph_path(meta.project_id)
             report_out = _report_path(meta.project_id)
             if dest.exists():
                 generate_graph_report(dest, report_out)

@@ -813,6 +813,16 @@ async def test_list_tools_returns_twelve_tools():
     }
 
 
+async def test_graph_cross_links_schema_has_file_path():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+
+    tool = next(t for t in tools if t.name == "graph_cross_links")
+    assert "file_path" in tool.inputSchema["properties"]
+
+
 async def test_analyze_tool_schema_issue_ref_required_project_paths_optional():
     from icx_engine.mcp_server import _list_tools
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
@@ -869,6 +879,8 @@ async def test_handle_analyze_issue_success_includes_icx_next():
     assert data["graphs"][0]["status"] == "ready"
     assert "memory" in data
     assert "work_item" in data
+    assert "ITERATION RULE" in data["_icx_next"]["instruction"]
+    assert "each new change requires its own fresh test confirmation" in data["_icx_next"]["instruction"]
 
 
 async def test_handle_save_memory_returns_saved_true(mcp_config):
@@ -932,6 +944,58 @@ async def test_handle_save_memory_pattern_used_defaults_to_empty(mcp_config):
     assert data["saved"] is True
     saved_entry = mock_mem.save.call_args[0][0]
     assert saved_entry.pattern_used == ""
+
+
+async def test_handle_save_memory_populates_tech_stack(mcp_config):
+    """tech_stack is detected from the matched project path and saved on the entry."""
+    mock_mem = MagicMock()
+    stack = {".": {"languages": {"java": "17"}, "frameworks": {"spring-boot": "3.2.1"}, "package_manager": "maven"}}
+    mock_project = MagicMock()
+    mock_project.path = "/projects/my-svc"
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+            with patch("icx_engine.graph.storage.find_projects_by_tracker_key", return_value=[mock_project]):
+                with patch("icx_engine.memory.stack_fingerprint.detect_stack", return_value=stack):
+                    result = await _handle_save_memory(
+                        "TEST-123",
+                        "Root cause summary",
+                        "Detailed problem description.",
+                        "Resolution note describing the exact change.",
+                        [],
+                        ["some-tag"],
+                        "bug",
+                    )
+
+    data = json.loads(result)
+    assert data["saved"] is True
+    saved_entry = mock_mem.save.call_args[0][0]
+    assert saved_entry.tech_stack == stack
+
+
+async def test_handle_save_memory_tech_stack_empty_when_no_project_match(mcp_config):
+    """tech_stack defaults to {} when no matching project is found for the issue key."""
+    mock_mem = MagicMock()
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+            with patch("icx_engine.graph.storage.find_projects_by_tracker_key", return_value=[]):
+                result = await _handle_save_memory(
+                    "TEST-123",
+                    "Root cause summary",
+                    "Detailed problem description.",
+                    "Resolution note describing the exact change.",
+                    [],
+                    ["some-tag"],
+                    "bug",
+                )
+
+    data = json.loads(result)
+    assert data["saved"] is True
+    saved_entry = mock_mem.save.call_args[0][0]
+    assert saved_entry.tech_stack == {}
 
 
 # ── Profile override - CLI ────────────────────────────────────────────────────
@@ -2069,24 +2133,24 @@ async def test_handle_analyze_explicit_paths_skip_registry_lookup():
     mock_resolve.assert_not_called()
 
 
-# ── _extract_jira_key_from_ref ─────────────────────────────────────────────────
+# ── _extract_tracker_key_from_ref ──────────────────────────────────────────────
 
-def test_extract_jira_key_from_url():
-    from icx_engine.mcp_server import _extract_jira_key_from_ref
-    assert _extract_jira_key_from_ref("https://foo.atlassian.net/browse/CCBSS-19583") == "CCBSS-19583"
-
-
-def test_extract_jira_key_from_bare_key():
-    from icx_engine.mcp_server import _extract_jira_key_from_ref
-    assert _extract_jira_key_from_ref("PROJ-42") == "PROJ-42"
+def test_extract_tracker_key_from_url():
+    from icx_engine.mcp_server import _extract_tracker_key_from_ref
+    assert _extract_tracker_key_from_ref("https://foo.atlassian.net/browse/CCBSS-19583") == "CCBSS-19583"
 
 
-def test_extract_jira_key_from_url_with_trailing_slash():
-    from icx_engine.mcp_server import _extract_jira_key_from_ref
-    assert _extract_jira_key_from_ref("https://foo.atlassian.net/browse/AB-1/") == "AB-1"
+def test_extract_tracker_key_from_bare_key():
+    from icx_engine.mcp_server import _extract_tracker_key_from_ref
+    assert _extract_tracker_key_from_ref("PROJ-42") == "PROJ-42"
 
 
-def test_extract_jira_key_returns_empty_for_invalid():
-    from icx_engine.mcp_server import _extract_jira_key_from_ref
-    assert _extract_jira_key_from_ref("not-a-valid-ref") == ""
+def test_extract_tracker_key_from_url_with_trailing_slash():
+    from icx_engine.mcp_server import _extract_tracker_key_from_ref
+    assert _extract_tracker_key_from_ref("https://foo.atlassian.net/browse/AB-1/") == "AB-1"
+
+
+def test_extract_tracker_key_returns_empty_for_invalid():
+    from icx_engine.mcp_server import _extract_tracker_key_from_ref
+    assert _extract_tracker_key_from_ref("not-a-valid-ref") == ""
 
