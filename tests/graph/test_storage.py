@@ -15,10 +15,10 @@ from icx_engine.graph.storage import (
     register_project,
     lookup_by_name,
     lookup_by_path,
-    lookup_by_jira_project,
+    lookup_by_tracker_project_key,
     list_projects,
-    find_project_by_jira_key,
-    find_projects_by_jira_key,
+    find_project_by_tracker_key,
+    find_projects_by_tracker_key,
     remove_project,
     read_meta,
     write_meta,
@@ -26,6 +26,7 @@ from icx_engine.graph.storage import (
     ProjectInfo,
     _is_relative_to,
     _normalize_issue_key,
+    _project_dir_path,
     temp_images_dir,
     sweep_stale_temp_dirs,
 )
@@ -156,6 +157,25 @@ def test_lookup_by_path_finds_project(tmp_path):
     assert info is not None
 
 
+def test_reregister_same_name_new_path_removes_old_cache_dir(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    old_pid = register_project("myapp", a)
+    old_dir = _project_dir_path(old_pid)
+    old_dir.mkdir(parents=True, exist_ok=True)
+    (old_dir / "marker.txt").write_text("stale")
+
+    new_pid = register_project("myapp", b)
+
+    assert new_pid != old_pid
+    assert not old_dir.exists()
+    info = lookup_by_name("myapp")
+    assert info is not None
+    assert info.project_id == new_pid
+
+
 def test_list_projects_returns_all(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"
@@ -170,74 +190,74 @@ def test_list_projects_returns_all(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# jira_project / lookup_by_jira_project
+# tracker_project_key / lookup_by_tracker_project_key
 # ---------------------------------------------------------------------------
 
-def test_register_with_jira_project_stored_in_meta(tmp_path):
-    pid = register_project("proj-svc", tmp_path, jira_project="PROJ")
+def test_register_with_tracker_project_key_stored_in_meta(tmp_path):
+    pid = register_project("proj-svc", tmp_path, tracker_project_key="PROJ")
     meta = read_meta(pid)
     assert meta is not None
-    assert meta.jira_project == "PROJ"
+    assert meta.tracker_project_key == "PROJ"
 
 
-def test_register_jira_project_normalised_to_uppercase(tmp_path):
-    pid = register_project("proj-svc", tmp_path, jira_project="proj")
+def test_register_tracker_project_key_normalised_to_uppercase(tmp_path):
+    pid = register_project("proj-svc", tmp_path, tracker_project_key="proj")
     meta = read_meta(pid)
-    assert meta.jira_project == "PROJ"
+    assert meta.tracker_project_key == "PROJ"
 
 
-def test_register_without_jira_project_is_none(tmp_path):
+def test_register_without_tracker_project_key_is_none(tmp_path):
     pid = register_project("no-project", tmp_path)
     meta = read_meta(pid)
     assert meta is not None
-    assert meta.jira_project is None
+    assert meta.tracker_project_key is None
 
 
-def test_lookup_by_jira_project_returns_matching(tmp_path):
+def test_lookup_by_tracker_project_key_returns_matching(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"
     a.mkdir()
     b.mkdir()
-    register_project("proj-svc", a, jira_project="PROJ")
-    register_project("proj-ui", b, jira_project="PROJ")
-    results = lookup_by_jira_project("PROJ")
+    register_project("proj-svc", a, tracker_project_key="PROJ")
+    register_project("proj-ui", b, tracker_project_key="PROJ")
+    results = lookup_by_tracker_project_key("PROJ")
     names = {r.name for r in results}
     assert names == {"proj-svc", "proj-ui"}
 
 
-def test_lookup_by_jira_project_case_insensitive(tmp_path):
-    register_project("proj-svc", tmp_path, jira_project="PROJ")
-    assert len(lookup_by_jira_project("proj")) == 1
-    assert len(lookup_by_jira_project("Proj")) == 1
-    assert len(lookup_by_jira_project("PROJ")) == 1
+def test_lookup_by_tracker_project_key_case_insensitive(tmp_path):
+    register_project("proj-svc", tmp_path, tracker_project_key="PROJ")
+    assert len(lookup_by_tracker_project_key("proj")) == 1
+    assert len(lookup_by_tracker_project_key("Proj")) == 1
+    assert len(lookup_by_tracker_project_key("PROJ")) == 1
 
 
-def test_lookup_by_jira_project_no_match_returns_empty(tmp_path):
+def test_lookup_by_tracker_project_key_no_match_returns_empty(tmp_path):
     register_project("other-svc", tmp_path)
-    assert lookup_by_jira_project("PROJ") == []
+    assert lookup_by_tracker_project_key("PROJ") == []
 
 
-def test_lookup_by_jira_project_excludes_other_projects(tmp_path):
+def test_lookup_by_tracker_project_key_excludes_other_projects(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"
     a.mkdir()
     b.mkdir()
-    register_project("proj-svc", a, jira_project="PROJ")
-    register_project("other-svc", b, jira_project="OTHER")
-    results = lookup_by_jira_project("PROJ")
+    register_project("proj-svc", a, tracker_project_key="PROJ")
+    register_project("other-svc", b, tracker_project_key="OTHER")
+    results = lookup_by_tracker_project_key("PROJ")
     assert len(results) == 1
     assert results[0].name == "proj-svc"
 
 
-def test_reregister_updates_jira_project(tmp_path):
-    pid = register_project("proj-svc", tmp_path, jira_project="OLD")
-    register_project("proj-svc", tmp_path, jira_project="PROJ")
+def test_reregister_updates_tracker_project_key(tmp_path):
+    pid = register_project("proj-svc", tmp_path, tracker_project_key="OLD")
+    register_project("proj-svc", tmp_path, tracker_project_key="PROJ")
     meta = read_meta(pid)
-    assert meta.jira_project == "PROJ"
+    assert meta.tracker_project_key == "PROJ"
 
 
-def test_read_meta_old_format_jira_project_is_none(tmp_path, isolated_graphs):
-    """Old meta.json without jira_project field deserializes gracefully."""
+def test_read_meta_old_format_tracker_project_key_is_none(tmp_path, isolated_graphs):
+    """Old meta.json without tracker_project_key field deserializes gracefully."""
     pid = derive_project_id(tmp_path)
     meta_dir = isolated_graphs / pid
     meta_dir.mkdir(parents=True, exist_ok=True)
@@ -256,7 +276,46 @@ def test_read_meta_old_format_jira_project_is_none(tmp_path, isolated_graphs):
     )
     meta = read_meta(pid)
     assert meta is not None
-    assert meta.jira_project is None
+    assert meta.tracker_project_key is None
+
+
+def test_read_registry_migrates_legacy_jira_project_key(tmp_path, isolated_graphs):
+    """registry.json entries with the legacy "jira_project" key are read as tracker_project_key."""
+    a = tmp_path / "a"
+    a.mkdir()
+    register_project("legacy-app", a, tracker_project_key="PROJ")
+    registry_path = isolated_graphs / "registry.json"
+    entries = json.loads(registry_path.read_text(encoding="utf-8"))
+    for entry in entries:
+        entry["jira_project"] = entry.pop("tracker_project_key")
+    registry_path.write_text(json.dumps(entries), encoding="utf-8")
+
+    results = lookup_by_tracker_project_key("PROJ")
+    assert len(results) == 1
+    assert results[0].name == "legacy-app"
+
+
+def test_read_meta_migrates_legacy_jira_project_field(tmp_path, isolated_graphs):
+    """meta.json with the legacy "jira_project" field is exposed as tracker_project_key."""
+    pid = derive_project_id(tmp_path)
+    meta_dir = isolated_graphs / pid
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "meta.json").write_text(
+        json.dumps({
+            "name": "legacy-app",
+            "path": str(tmp_path),
+            "project_id": pid,
+            "last_built": None,
+            "git_commit": None,
+            "file_count": 0,
+            "build_status": "not_built",
+            "jira_project": "PROJ",
+        }),
+        encoding="utf-8",
+    )
+    meta = read_meta(pid)
+    assert meta is not None
+    assert meta.tracker_project_key == "PROJ"
 
 
 # ---------------------------------------------------------------------------
@@ -397,48 +456,48 @@ def test_sweep_stale_temp_dirs_skips_files(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# find_project_by_jira_key
+# find_project_by_tracker_key
 # ---------------------------------------------------------------------------
 
-def test_find_projects_by_jira_key_returns_all_matching(tmp_path, monkeypatch):
+def test_find_projects_by_tracker_key_returns_all_matching(tmp_path, monkeypatch):
     monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
-    register_project("app-svc", tmp_path / "svc", jira_project="MYAPP")
-    register_project("app-ui", tmp_path / "ui", jira_project="MYAPP")
-    results = find_projects_by_jira_key("MYAPP")
+    register_project("app-svc", tmp_path / "svc", tracker_project_key="MYAPP")
+    register_project("app-ui", tmp_path / "ui", tracker_project_key="MYAPP")
+    results = find_projects_by_tracker_key("MYAPP")
     assert len(results) == 2
     names = {r.name for r in results}
     assert names == {"app-svc", "app-ui"}
 
 
-def test_find_projects_by_jira_key_case_insensitive(tmp_path, monkeypatch):
+def test_find_projects_by_tracker_key_case_insensitive(tmp_path, monkeypatch):
     monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
-    register_project("app-svc", tmp_path / "svc", jira_project="MYAPP")
-    assert len(find_projects_by_jira_key("myapp")) == 1
-    assert len(find_projects_by_jira_key("Myapp")) == 1
+    register_project("app-svc", tmp_path / "svc", tracker_project_key="MYAPP")
+    assert len(find_projects_by_tracker_key("myapp")) == 1
+    assert len(find_projects_by_tracker_key("Myapp")) == 1
 
 
-def test_find_projects_by_jira_key_no_match_returns_empty(tmp_path, monkeypatch):
+def test_find_projects_by_tracker_key_no_match_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
-    register_project("myapp", tmp_path / "myapp", jira_project="MYAPP")
-    assert find_projects_by_jira_key("OTHER") == []
+    register_project("myapp", tmp_path / "myapp", tracker_project_key="MYAPP")
+    assert find_projects_by_tracker_key("OTHER") == []
 
 
-def test_find_projects_by_jira_key_empty_registry_returns_empty(tmp_path, monkeypatch):
+def test_find_projects_by_tracker_key_empty_registry_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
-    assert find_projects_by_jira_key("PROJ") == []
+    assert find_projects_by_tracker_key("PROJ") == []
 
 
-def test_find_projects_by_jira_key_empty_key_returns_empty(tmp_path, monkeypatch):
+def test_find_projects_by_tracker_key_empty_key_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
-    register_project("myapp", tmp_path / "myapp", jira_project="MYAPP")
-    assert find_projects_by_jira_key("") == []
-    assert find_projects_by_jira_key("   ") == []
+    register_project("myapp", tmp_path / "myapp", tracker_project_key="MYAPP")
+    assert find_projects_by_tracker_key("") == []
+    assert find_projects_by_tracker_key("   ") == []
 
 
-def test_find_project_by_jira_key_returns_first_match(tmp_path, monkeypatch):
+def test_find_project_by_tracker_key_returns_first_match(tmp_path, monkeypatch):
     monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: tmp_path)
-    register_project("app-svc", tmp_path / "svc", jira_project="MYAPP")
-    register_project("app-ui", tmp_path / "ui", jira_project="MYAPP")
-    result = find_project_by_jira_key("MYAPP")
+    register_project("app-svc", tmp_path / "svc", tracker_project_key="MYAPP")
+    register_project("app-ui", tmp_path / "ui", tracker_project_key="MYAPP")
+    result = find_project_by_tracker_key("MYAPP")
     assert result is not None
     assert result.name in {"app-svc", "app-ui"}

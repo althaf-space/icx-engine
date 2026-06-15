@@ -191,6 +191,25 @@ def test_build_success_sets_status_ready(registered):
     assert meta.file_count == 10
 
 
+def test_build_preserves_tracker_project_key(project_dir):
+    mgr = GraphManager()
+    pid = mgr.register("myapp", str(project_dir), tracker_project_key="PROJ")
+
+    fake_result = {
+        "file_count": 10, "node_count": 50, "edge_count": 100,
+        "community_count": 3, "error": None,
+    }
+
+    with patch("icx_engine.graph.manager.current_git_commit", return_value="abc123"):
+        with patch.object(GraphManager, "_run_build_subprocess") as mock_build:
+            mock_build.return_value = fake_result
+            storage.graph_tmp_path(pid).write_text("{}", encoding="utf-8")
+            mgr.build(pid)
+
+    meta = storage.read_meta(pid)
+    assert meta.tracker_project_key == "PROJ"
+
+
 def test_build_unknown_project_raises():
     mgr = GraphManager()
     with pytest.raises(GraphError, match="not found"):

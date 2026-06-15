@@ -10,7 +10,7 @@ from icx_engine.graph.parser.file_cache import (
     hash_file,
     compute_changed_files,
 )
-from icx_engine.graph.builder import _merge_incremental
+from icx_engine.graph.builder import _merge_incremental, _rel_path
 
 
 class TestLoadSaveHashes:
@@ -134,3 +134,40 @@ class TestMergeIncremental:
         node_ids = {n["id"] for n in merged["nodes"]}
         assert "n1" not in node_ids
         assert "n2" in node_ids
+
+    def test_absolute_edge_source_file_purged_with_root_posix(self):
+        existing = {
+            "nodes": [{"id": "n1", "source_file": "src/a.py"}],
+            "links": [
+                {
+                    "source": "n1", "target": "n2",
+                    "source_file": "/proj/src/a.py", "target_file": "src/b.py",
+                }
+            ],
+        }
+        merged = _merge_incremental(
+            existing, {"nodes": [], "edges": []}, ["src/a.py"], [],
+            root_posix="/proj",
+        )
+        assert merged["links"] == []
+
+    def test_windows_style_node_source_file_purged(self):
+        existing = {
+            "nodes": [{"id": "n1", "file": "src\\a.py", "source_file": "src\\a.py"}],
+            "links": [],
+        }
+        merged = _merge_incremental(
+            existing, {"nodes": [], "edges": []}, ["src/a.py"], [],
+        )
+        assert merged["nodes"] == []
+
+
+class TestRelPath:
+    def test_no_root_posix_only_normalizes_separators(self):
+        assert _rel_path("src\\a.py", "") == "src/a.py"
+
+    def test_strips_absolute_root_prefix(self):
+        assert _rel_path("/proj/src/a.py", "/proj") == "src/a.py"
+
+    def test_empty_path_returned_as_is(self):
+        assert _rel_path("", "/proj") == ""

@@ -36,6 +36,10 @@ class OllamaProvider(LLMProvider):
                 f"Cannot connect to Ollama at {self.client.base_url}. "
                 "Ensure Ollama is running: `ollama serve`."
             ) from exc
+        except openai.APIStatusError as exc:
+            raise SourceUnavailable(
+                f"Ollama returned an error (status {exc.status_code})."
+            ) from exc
 
         content = response.choices[0].message.content or ""
         try:

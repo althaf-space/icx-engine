@@ -27,10 +27,10 @@ ICX is an early-stage product. The core pipeline (fetch → process → analyse 
 |------|--------------|-------------|
 | Connectors | Jira Cloud (stable) | GitHub Issues, Linear |
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
-| Attachments | PDF, DOCX, XLSX, CSV, images via OCR + vision, audio (MP3/WAV/M4A/OGG/FLAC/AAC/Opus) + video (MP4/MOV/AVI/MKV/WebM) via local Whisper or LLM-native transcription | Speaker diarisation, language hints |
+| Attachments | PDF (incl. scanned/OCR), DOCX, XLSX, XLS, PPTX, CSV, ZIP, code/text/config files, images via OCR + vision, audio (MP3/WAV/M4A/OGG/FLAC/AAC/Opus) + video (MP4/MOV/AVI/MKV/WebM, full-duration frame sampling) via local Whisper or LLM-native transcription | Speaker diarisation, language hints |
 | Memory | Local LanceDB + ONNX embeddings (BAAI/bge-base-en-v1.5, 768-dim, no PyTorch) | Team-shared memory, conflict resolution |
 | MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `reinforce_memory_usage`, `get_memory_audit` (20 total) | Batch analysis, project-level summary |
-| Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), JSP/Servlet, Go, Rails, gRPC/Protobuf, Terraform/HCL, event broker detection (Kafka, RabbitMQ, Redis, SQS, SNS, NATS), co-change history, optional SCIP compiler-grade edges, incremental rebuild (SHA-256 hashing), multi-source edge fusion, PageRank + betweenness centrality, blast radius, cycle detection, dead code, CODEOWNERS integration, staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, team-shared graph cache |
+| Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), JSP/Servlet, Go, C#, PHP, Rust, C++, Swift, Elixir, Scala, Rails, Angular, gRPC/Protobuf, Terraform/HCL, event broker detection (Kafka, RabbitMQ, Redis, SQS, SNS, NATS), co-change history, gopls/jdtls/kotlin-language-server/rust-analyzer/OmniSharp/intelephense/clangd compiler-grade edges, incremental rebuild (SHA-256 hashing), multi-source edge fusion, PageRank + betweenness centrality, blast radius, cycle detection, dead code, CODEOWNERS integration, staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, team-shared graph cache |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
 
@@ -65,7 +65,7 @@ flowchart LR
 
 ### CLI - fast mode
 
-Skip all attachment processing and get text-only output immediately. Skipped filenames are preserved in `pending_images` (images), `pending_audio` (audio + video), `pending_documents` (PDF/DOCX/XLSX), and `pending_unsupported` (other types) so nothing is lost.
+Skip all attachment processing and get text-only output immediately. Skipped filenames are preserved in `pending_images` (images), `pending_audio` (audio + video), `pending_documents` (PDF/DOCX/XLSX/XLS/PPTX/CSV/ZIP/code+text files), and `pending_unsupported` (other types) so nothing is lost.
 
 ```mermaid
 flowchart LR
@@ -122,7 +122,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.3.6 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
+**Version:** 0.3.7 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
 
 ```
 pipx install icx-engine
@@ -242,9 +242,9 @@ icx memory patterns --project PROJ
 ### Codebase graph
 
 ```sh
-icx graph add --name NAME --path PATH --project KEY   # register a project directory (--project required, e.g. PROJ)
+icx graph add --name NAME --path PATH --project KEY   # register a project directory (--project required, e.g. a Jira project key like PROJ)
 icx graph build NAME               # build (or rebuild) the knowledge graph for a project
-icx graph build --project KEY      # build all graphs tagged with a Jira project key (case-insensitive)
+icx graph build --project KEY      # build all graphs tagged with this tracker project key (case-insensitive)
 icx graph build NAME --force       # rebuild even if graph is current
 icx graph list                     # list all registered projects with status and file counts
 icx graph status NAME              # detailed status: build state, last commit, staleness info

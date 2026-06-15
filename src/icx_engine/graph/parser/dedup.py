@@ -209,9 +209,10 @@ def deduplicate_entities(
                 candidates.append(node)
 
     fuzzy_merges = 0
+    lsh: MinHashLSH | None = None
+    minhashes: dict[str, MinHash] = {}
     if len(candidates) >= 2:
         lsh = MinHashLSH(threshold=_LSH_THRESHOLD, num_perm=_NUM_PERM)
-        minhashes: dict[str, MinHash] = {}
 
         for node in candidates:
             norm_label = _norm(node.get("label", node.get("id", "")))
@@ -262,7 +263,7 @@ def deduplicate_entities(
 
     # ── pass 3: LLM tiebreaker for ambiguous pairs (opt-in) ──────────────────
     if dedup_llm_backend is not None:
-        _llm_tiebreak(candidates, uf, communities, backend=dedup_llm_backend)
+        _llm_tiebreak(candidates, uf, communities, minhashes, lsh, backend=dedup_llm_backend)
 
     # ── build remap table from union-find components ──────────────────────────
     components = uf.components()
@@ -331,13 +332,19 @@ def _llm_tiebreak(
     candidates: list[dict],
     uf: _UF,
     communities: dict[str, int],
+    minhashes: dict[str, MinHash],
+    lsh: MinHashLSH | None,
     *,
     backend: str,
     batch_size: int = 30,
     low: float = 75.0,
     high: float = 92.0,
 ) -> None:
-    """Batch-resolve ambiguous pairs (score in [low, high)) via LLM."""
+    """Batch-resolve ambiguous pairs (score in [low, high)) via LLM.
+
+    Only LSH-neighbor pairs are considered (mirrors pass 2's blocking strategy),
+    avoiding an O(n^2) cross-product over all candidates.
+    """
     try:
         from icx_engine.graph.parser.llm import BACKENDS, format_backend_env_keys, get_backend_api_key
         if backend not in BACKENDS:
@@ -350,24 +357,44 @@ def _llm_tiebreak(
     except ImportError:
         return
 
+    if lsh is None or len(candidates) < 2:
+        return
+
+    candidates_by_id = {n["id"]: n for n in candidates}
+    seen_pairs: set[tuple[str, str]] = set()
     ambiguous: list[tuple[dict, dict, float]] = []
-    for i, node in enumerate(candidates):
+
+    for node in candidates:
+        node_id = node["id"]
         norm_i = _norm(node.get("label", node.get("id", "")))
-        for j in range(i + 1, len(candidates)):
-            neighbor = candidates[j]
-            if uf.find(node["id"]) == uf.find(neighbor["id"]):
+        for neighbor_id in lsh.query(minhashes[node_id]):
+            if neighbor_id == node_id:
                 continue
+            pair = (node_id, neighbor_id) if node_id < neighbor_id else (neighbor_id, node_id)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+
+            if uf.find(node_id) == uf.find(neighbor_id):
+                continue
+
+            neighbor = candidates_by_id.get(neighbor_id)
+            if neighbor is None:
+                continue
+
             norm_j = _norm(neighbor.get("label", neighbor.get("id", "")))
             score = JaroWinkler.normalized_similarity(norm_i, norm_j) * 100
             if _is_variant_pair(norm_i, norm_j):
                 continue
             if _short_label_blocked(norm_i, norm_j, score):
                 continue
-            c1 = communities.get(node["id"])
-            c2 = communities.get(neighbor["id"])
+
+            c1 = communities.get(node_id)
+            c2 = communities.get(neighbor_id)
             if (c1 is not None and c2 is not None and c1 == c2
                     and min(len(norm_i), len(norm_j)) >= 12):
                 score += _COMMUNITY_BOOST
+
             if low <= score < high:
                 ambiguous.append((node, neighbor, score))
 

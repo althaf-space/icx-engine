@@ -1,8 +1,11 @@
 """Tests for universal_ast resolver. Creates temp source files per language."""
 from __future__ import annotations
+import sys
 import tempfile
 from pathlib import Path
 import pytest
+
+from icx_engine.graph.parser.resolvers.universal_ast import _walk
 
 
 def _run(source: str, suffix: str) -> list[dict]:
@@ -91,3 +94,45 @@ def test_resolver_tag_is_universal_ast():
     edges = _run(src, ".go")
     for e in edges:
         assert e.get("resolver_tag") == "universal_ast"
+
+
+class _FakeNode:
+    """Minimal stand-in for a tree-sitter Node: has .type and .children."""
+
+    def __init__(self, node_type: str, children: list["_FakeNode"] | None = None) -> None:
+        self.type = node_type
+        self.children = children or []
+
+
+class TestWalkOrder:
+    def test_preorder_visit_order_matches_recursive(self):
+        root = _FakeNode("root", [
+            _FakeNode("a", [_FakeNode("a1"), _FakeNode("a2")]),
+            _FakeNode("b", [_FakeNode("b1")]),
+        ])
+        visited: list[tuple[str, int]] = []
+        _walk(root, lambda node, depth: visited.append((node.type, depth)))
+        assert visited == [
+            ("root", 0),
+            ("a", 1),
+            ("a1", 2),
+            ("a2", 2),
+            ("b", 1),
+            ("b1", 2),
+        ]
+
+
+class TestWalkDeepTree:
+    def test_deep_chain_does_not_raise_recursion_error(self):
+        """A chain deeper than Python's default recursion limit must not raise."""
+        depth = sys.getrecursionlimit() + 500
+        root = _FakeNode("leaf")
+        for _ in range(depth):
+            root = _FakeNode("node", [root])
+
+        visited_types = []
+        _walk(root, lambda node, depth: visited_types.append(node.type))
+
+        assert len(visited_types) == depth + 1
+        assert visited_types[0] == "node"
+        assert visited_types[-1] == "leaf"

@@ -44,6 +44,10 @@ class NIMProvider(LLMProvider):
                 f"Cannot connect to NIM at {self.client.base_url}.{hint} "
                 "Check your network and NIM base URL."
             ) from exc
+        except openai.APIStatusError as exc:
+            raise SourceUnavailable(
+                f"NIM API returned an error (status {exc.status_code}). Try again later."
+            ) from exc
 
         content = response.choices[0].message.content or ""
         try:

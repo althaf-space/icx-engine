@@ -63,7 +63,7 @@ def _connect_jira_token(debug: bool = False) -> None:
             resp = asyncio.run(check_http_credentials(verify_url=verify_url, auth_header=auth_header))
             typer.echo(f"  status : {resp.status_code}", err=True)
         else:
-            with console.status(f"[bold]Verifying credentials with {domain}…[/bold]", spinner="dots"):
+            with console.status(f"[bold]Verifying credentials with {domain}...[/bold]", spinner="dots"):
                 resp = asyncio.run(check_http_credentials(verify_url=verify_url, auth_header=auth_header))
         if resp.status_code == 401:
             from icx_engine.exceptions import AuthError
@@ -197,7 +197,7 @@ def _connect_jira_oauth(debug: bool = False) -> None:
             typer.echo(f"  fetching cloud ID for {domain}...", err=True)
             cloud_id = asyncio.run(_get_cloud_id())
         else:
-            with console.status(f"[bold]Fetching cloud ID for {domain}…[/bold]", spinner="dots"):
+            with console.status(f"[bold]Fetching cloud ID for {domain}...[/bold]", spinner="dots"):
                 cloud_id = asyncio.run(_get_cloud_id())
     except Exception as exc:
         if debug:

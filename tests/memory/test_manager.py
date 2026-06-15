@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import uuid
@@ -89,6 +90,49 @@ def test_query_returns_hits_above_threshold(tmp_path):
     assert len(insights) >= 1
     assert insights[0].issue_key == "PROJ-100"
     assert 0.0 <= insights[0].similarity_score <= 1.0
+
+
+def test_tech_stack_persists_and_surfaces_in_query(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    stack = {".": {"languages": {"java": "17"}, "frameworks": {"spring-boot": "3.2.1"}, "package_manager": "maven"}}
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        entry = _make_entry(
+            issue_key="PROJ-100",
+            summary="JWT auth token expires too quickly",
+            tech_stack=stack,
+        )
+        mgr.save(entry)
+
+        stored = mgr.show("PROJ-100")
+        assert stored.tech_stack == stack
+
+        q = MemoryQueryInput(
+            issue_key="PROJ-200",
+            project_key="PROJ",
+            source_type="jira",
+            summary="OAuth token invalid after 1 hour",
+            description="Users get 401 after one hour session",
+            issue_type="Bug",
+        )
+        insights = mgr.query(q, top_k=3, min_score=0.0)
+
+    assert len(insights) >= 1
+    assert insights[0].tech_stack == stack
+
+
+def test_tech_stack_defaults_empty_dict(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        entry = _make_entry(issue_key="PROJ-101")
+        mgr.save(entry)
+        stored = mgr.show("PROJ-101")
+
+    assert stored.tech_stack == {}
 
 
 def test_query_empty_db_returns_empty_list(tmp_path):
@@ -312,6 +356,54 @@ def test_migrate_reembeds_entries(tmp_path):
     assert any("PROJ-2" in line for line in logged)
     entries = mgr.list_entries()
     assert len(entries) == 2
+
+
+def test_migrate_preserves_confirmation_state(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    mock_emb = _mock_embeddings()
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=mock_emb):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-1", id="id-1"))
+        before = mgr.show("PROJ-1")
+        assert before.confirmation_count == 1
+        assert before.memory_confidence == 0.25
+
+        mgr.migrate()
+
+        after = mgr.show("PROJ-1")
+        assert after.confirmation_count == 1
+        assert after.memory_confidence == 0.25
+
+
+# ── _recompute_decay ─────────────────────────────────────────────────────────
+
+def test_recompute_decay_handles_non_utc_offset(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    mock_emb = _mock_embeddings()
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=mock_emb):
+        mgr = MemoryManager(db_path=tmp_path)
+        saved_at = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
+            "%Y-%m-%dT%H:%M:%S+05:30"
+        )
+        entry = _make_entry(saved_at=saved_at)
+        decay = mgr._recompute_decay(entry)
+        assert 0.0 < decay <= 1.0
+
+
+def test_recompute_decay_future_saved_at_not_above_one(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    mock_emb = _mock_embeddings()
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=mock_emb):
+        mgr = MemoryManager(db_path=tmp_path)
+        future = (datetime.now(timezone.utc) + timedelta(days=5)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        entry = _make_entry(saved_at=future)
+        decay = mgr._recompute_decay(entry)
+        assert decay <= 1.0
 
 
 # ── prewarm ──────────────────────────────────────────────────────────────────

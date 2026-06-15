@@ -8,6 +8,8 @@ Format: one glob pattern per line (same as .gitignore).
   blank lines are ignored
   directory/ patterns (trailing slash) match only directories
   ** matches any number of path segments
+  !pattern negates (re-includes) a path matched by an earlier pattern
+  the last matching pattern wins, same as .gitignore
 """
 from __future__ import annotations
 
@@ -134,6 +136,7 @@ snapshots/
 #   legacy/          - exclude the legacy/ subdirectory
 #   *.generated.ts   - exclude all generated TypeScript files
 #   docs/            - exclude documentation directory
+#   !docs/api/       - re-include docs/api/ even if docs/ is excluded above
 # ---------------------------------------------------------------------------
 """
 
@@ -152,44 +155,68 @@ class IcxIgnore:
 
     def __init__(self, patterns: list[str], root: Path) -> None:
         self._root = root.resolve()
-        # (normalized_pattern, dir_only)
-        self._rules: list[tuple[str, bool]] = []
+        # (normalized_pattern, dir_only, negated)
+        self._rules: list[tuple[str, bool, bool]] = []
         for p in patterns:
+            negated = p.startswith("!")
+            if negated:
+                p = p[1:]
             dir_only = p.endswith("/")
             norm = p.rstrip("/")
             if norm:
-                self._rules.append((norm, dir_only))
+                self._rules.append((norm, dir_only, negated))
 
     def matches(self, path: Path, is_dir: bool = False) -> bool:
-        """Return True if path should be excluded from graph building."""
+        """Return True if path should be excluded from graph building.
+
+        Rules are evaluated in file order; the last matching rule wins
+        (gitignore semantics), so a later `!pattern` re-includes a path
+        an earlier pattern excluded, and vice versa.
+        """
         try:
             rel = path.resolve().relative_to(self._root)
         except ValueError:
             return False
 
         rel_posix = rel.as_posix()
+        excluded = False
 
-        for pattern, dir_only in self._rules:
-            if dir_only and not is_dir:
-                continue
-            if _match(rel_posix, pattern):
-                return True
-            # Bare name patterns (no slash, no **) also match any component
-            if "/" not in pattern and "**" not in pattern:
-                for part in rel.parts:
-                    if fnmatch.fnmatch(part, pattern):
-                        return True
-        return False
+        for pattern, dir_only, negated in self._rules:
+            if dir_only:
+                # Directory pattern excludes the whole subtree: match if any
+                # ancestor directory of path (or path itself, when is_dir) matches.
+                candidates = rel.parts if is_dir else rel.parts[:-1]
+                matched = any(
+                    _match("/".join(rel.parts[: i + 1]), pattern)
+                    or (
+                        "/" not in pattern
+                        and "**" not in pattern
+                        and fnmatch.fnmatch(part, pattern)
+                    )
+                    for i, part in enumerate(candidates)
+                )
+            else:
+                matched = _match(rel_posix, pattern)
+                if not matched and "/" not in pattern and "**" not in pattern:
+                    matched = any(fnmatch.fnmatch(part, pattern) for part in rel.parts)
+            if matched:
+                excluded = not negated
+
+        return excluded
 
     def matches_name(self, name: str, is_dir: bool = False) -> bool:
-        """Quick check: does this bare name match any simple (non-path) pattern?"""
-        for pattern, dir_only in self._rules:
+        """Quick check: does this bare name match any simple (non-path) pattern?
+
+        Last matching rule wins, same as matches().
+        """
+        excluded = False
+        for pattern, dir_only, negated in self._rules:
             if dir_only and not is_dir:
                 continue
             if "/" not in pattern and "**" not in pattern:
                 if fnmatch.fnmatch(name, pattern):
-                    return True
-        return False
+                    excluded = not negated
+        return excluded
 
 
 def _match(rel_posix: str, pattern: str) -> bool:

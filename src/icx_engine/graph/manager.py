@@ -36,19 +36,11 @@ def _read_icx_llm_cfg() -> tuple[str, str | None, str | None] | None:
     Read ICX's configured text model and return (parser_backend, api_key, base_url).
     Returns None if no model configured or on any error.
     """
-    try:
-        from icx_engine.config_manager import ConfigManager
-        cfg = ConfigManager.load()
-        llm = cfg.active_llm
-        if llm is None:
-            return None
-        ch = llm.text_config
-        backend = _ICX_PROVIDER_TO_PARSER.get(ch.provider)
-        if not backend:
-            return None
-        return (backend, ch.api_key, ch.base_url)
-    except Exception:
+    full = _read_icx_full_llm_cfg()
+    if full is None:
         return None
+    backend, api_key, base_url, _model = full
+    return (backend, api_key, base_url)
 
 
 def _read_icx_full_llm_cfg() -> tuple[str, str | None, str | None, str] | None:
@@ -267,13 +259,13 @@ class GraphManager:
     # Registration
     # ------------------------------------------------------------------
 
-    def register(self, name: str, path_str: str, jira_project: str | None = None) -> str:
+    def register(self, name: str, path_str: str, tracker_project_key: str | None = None) -> str:
         """Register a project. Returns project_id."""
         name = normalize_name(name)
         if not name:
             raise GraphError("Project name cannot be empty.")
         path = validate_project_path(path_str)
-        project_id = storage.register_project(name, path, jira_project=jira_project)
+        project_id = storage.register_project(name, path, tracker_project_key=tracker_project_key)
         return project_id
 
     # ------------------------------------------------------------------
@@ -385,6 +377,8 @@ class GraphManager:
             file_count=file_count,
             build_status="ready",
             extraction_mode=result.get("extraction_mode", "ast"),
+            incremental_capable=meta.incremental_capable,
+            tracker_project_key=meta.tracker_project_key,
         )
         storage.write_meta(updated)
 
@@ -429,7 +423,6 @@ class GraphManager:
 
         # Generate navigation map for agents
         try:
-            dest = storage.graph_path(meta.project_id)
             report_out = _report_path(meta.project_id)
             if dest.exists():
                 generate_graph_report(dest, report_out)

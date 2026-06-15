@@ -4,7 +4,6 @@ import logging
 import math
 import re
 import sys
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -18,7 +17,7 @@ _BARE_KEY_RE = re.compile(r'[A-Z][A-Z0-9]*-[0-9]+')
 from icx_engine.memory.embeddings import EmbeddingsManager, VECTOR_DIM, EMBEDDING_MODEL
 from icx_engine.memory.patterns import PatternManager
 from icx_engine.memory.relations import RelationManager
-from icx_engine.memory.schema import MemoryEntry, MemoryQueryInput, MemoryAuditEvent, _sq
+from icx_engine.memory.schema import MemoryEntry, MemoryQueryInput, MemoryAuditEvent, _sq, connect_with_timeout
 from icx_engine.models.output import PastInsight
 
 _TABLE_NAME = "memory_entries"
@@ -106,6 +105,14 @@ def _row_to_entry(row: dict) -> MemoryEntry:
         except Exception:
             pass
 
+    tech_stack: dict = {}
+    _ts_raw = row.get("tech_stack_json") or ""
+    if _ts_raw and _ts_raw != "{}":
+        try:
+            tech_stack = json.loads(_ts_raw)
+        except Exception:
+            pass
+
     return MemoryEntry(
         id=row["id"],
         issue_key=row["issue_key"],
@@ -141,6 +148,7 @@ def _row_to_entry(row: dict) -> MemoryEntry:
         causal_chain=causal_chain,
         full_ticket_text=row.get("full_ticket_text") or "",
         attachment_summary=row.get("attachment_summary") or "",
+        tech_stack=tech_stack,
     )
 
 
@@ -163,30 +171,9 @@ class MemoryManager:
     def _get_table(self):
         if self._table is not None:
             return self._table
-        import lancedb  # lazy import
         import pyarrow as pa
 
-        _result: list = [None]
-        _exc: list = [None]
-
-        def _connect() -> None:
-            try:
-                _result[0] = lancedb.connect(str(self._db_path))
-            except Exception as e:
-                _exc[0] = e
-
-        _t = threading.Thread(target=_connect, daemon=True)
-        _t.start()
-        _t.join(3.0)
-        if _t.is_alive():
-            raise MemoryError(
-                f"LanceDB connection timed out after 3 s at {self._db_path}. "
-                "A stale file lock from a previous server process may be blocking access. "
-                "Restart your system or kill orphan icx processes to release the lock."
-            )
-        if _exc[0] is not None:
-            raise MemoryError(f"LanceDB connection failed: {_exc[0]}") from _exc[0]
-        self._db = _result[0]
+        self._db = connect_with_timeout(self._db_path)
         tables_response = self._db.list_tables()
         existing = (
             tables_response.tables
@@ -249,6 +236,9 @@ class MemoryManager:
                 to_add["full_ticket_text"] = "''"
             if "attachment_summary" not in existing_cols:
                 to_add["attachment_summary"] = "''"
+            # Tech-stack fingerprint
+            if "tech_stack_json" not in existing_cols:
+                to_add["tech_stack_json"] = "'{}'"
             if to_add:
                 try:
                     self._table.add_columns(to_add)
@@ -298,6 +288,7 @@ class MemoryManager:
             pa.field("causal_chain_json", pa.utf8()),
             pa.field("full_ticket_text", pa.utf8()),
             pa.field("attachment_summary", pa.utf8()),
+            pa.field("tech_stack_json", pa.utf8()),
         ])
         self._table = self._db.create_table(_TABLE_NAME, schema=schema)
         return self._table
@@ -401,6 +392,7 @@ class MemoryManager:
             "causal_chain_json": json.dumps(entry.causal_chain) if entry.causal_chain else "{}",
             "full_ticket_text": entry.full_ticket_text or "",
             "attachment_summary": entry.attachment_summary or "",
+            "tech_stack_json": json.dumps(entry.tech_stack) if entry.tech_stack else "{}",
         }
         if vector is not None:
             row["vector"] = vector
@@ -437,7 +429,10 @@ class MemoryManager:
     ) -> float:
         """Compute temporal_decay_factor combining time-based decay and semantic drift."""
         try:
-            days = (datetime.now(timezone.utc) - datetime.fromisoformat(entry.saved_at.replace("Z", "+00:00").split("+")[0]).replace(tzinfo=timezone.utc)).days
+            saved_at = datetime.fromisoformat(entry.saved_at.replace("Z", "+00:00"))
+            if saved_at.tzinfo is None:
+                saved_at = saved_at.replace(tzinfo=timezone.utc)
+            days = max(0, (datetime.now(timezone.utc) - saved_at.astimezone(timezone.utc)).days)
         except Exception:
             days = 0
 
@@ -724,6 +719,7 @@ class MemoryManager:
                 saved_at=r.get("saved_at", ""),
                 work_item_type=r.get("work_item_type", "bug"),
                 pattern_used=r.get("pattern_used", ""),
+                tech_stack=r.get("tech_stack", {}),
             ))
         return insights
 
@@ -862,6 +858,7 @@ class MemoryManager:
                 "negated": entry.negated,
                 "negation_reason": entry.negation_reason,
                 "memory_confidence": entry.memory_confidence,
+                "tech_stack": entry.tech_stack,
             }
             if entry.negated:
                 negative_signals.append(d)
@@ -898,6 +895,7 @@ class MemoryManager:
                                 "negated": exact.negated,
                                 "negation_reason": exact.negation_reason,
                                 "memory_confidence": exact.memory_confidence,
+                                "tech_stack": exact.tech_stack,
                             })
                     except Exception:
                         pass
@@ -929,10 +927,8 @@ class MemoryManager:
     def clear(self) -> None:
         """Delete all memory entries, relations, and patterns. Recreates empty tables."""
         try:
-            import lancedb
-
             if self._db is None:
-                self._db = lancedb.connect(str(self._db_path))
+                self._db = connect_with_timeout(self._db_path)
             tables_response = self._db.list_tables()
             existing = (
                 tables_response.tables
@@ -1004,7 +1000,7 @@ class MemoryManager:
             log(f"  migrating {count} work items to {VECTOR_DIM}-dim vectors...")
         self.clear()
         for i, entry in enumerate(entries, 1):
-            self.save(entry)
+            self.save(entry, restore=True)
             if log:
                 log(f"  [{i}/{count}] {entry.issue_key}")
         return count

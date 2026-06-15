@@ -17,7 +17,7 @@ async def refresh_oauth_if_needed(
     auth = conn.auth
     if not isinstance(auth, JiraOAuthAuth):
         return conn
-    if not auth.client_id or not auth.client_secret:
+    if not auth.client_id:
         return conn  # missing credentials - cannot refresh
     if time.time() < auth.expires_at - _REFRESH_BUFFER_SECS:
         return conn

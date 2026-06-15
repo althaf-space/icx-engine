@@ -1044,7 +1044,7 @@ def _validate_and_save_model(
             typer.echo(f"  validating text model ({txt_label})...", err=True)
             asyncio.run(_run(new_llm.text_config))
         else:
-            with console.status(f"[bold]Validating text model ({txt_label})…[/bold]", spinner="dots"):
+            with console.status(f"[bold]Validating text model ({txt_label})...[/bold]", spinner="dots"):
                 asyncio.run(_run(new_llm.text_config))
     except Exception as exc:
         render_icx_error(exc, err_console, show_traceback=traceback)
@@ -1060,7 +1060,7 @@ def _validate_and_save_model(
                 asyncio.run(_run(new_llm.image_config))
             else:
                 with console.status(
-                    f"[bold]Validating image model ({img_model})…[/bold]", spinner="dots"
+                    f"[bold]Validating image model ({img_model})...[/bold]", spinner="dots"
                 ):
                     asyncio.run(_run(new_llm.image_config))
         except Exception as exc:
@@ -1380,7 +1380,7 @@ def analyze(
         if debug:
             result = _run()
         else:
-            with console.status(f"[bold]Analyzing {url}…[/bold]", spinner="dots"):
+            with console.status(f"[bold]Analyzing {url}...[/bold]", spinner="dots"):
                 result = _run()
 
     except ICXError as exc:
@@ -1743,7 +1743,7 @@ def uninstall(
         console.print(f"[yellow]Failed to delete {icx_dir}:[/yellow] {exc}")
 
     # 4. Uninstall the package - detect pipx vs pip, handle Windows exe-lock
-    console.print("\nUninstalling [bold]icx-engine[/bold] package…")
+    console.print("\nUninstalling [bold]icx-engine[/bold] package...")
     try:
         _uninstall_package(console)
     except Exception as exc:
@@ -1948,7 +1948,7 @@ def mcp_run(debug: DebugOpt = False) -> None:
 def graph_add(
     name: Annotated[str, typer.Option("--name", help="Project name (used to reference it later).")],
     path: Annotated[str, typer.Option("--path", help="Absolute or relative path to the project root.")],
-    project: Annotated[str, typer.Option("--project", help="Jira project key (e.g. PROJ). Case-insensitive. Required.")],
+    project: Annotated[str, typer.Option("--project", help="Tracker project key (e.g. a Jira project key like PROJ, or your tracker's project identifier). Case-insensitive. Required.")],
 ) -> None:
     """Register a project for codebase graph indexing.
 
@@ -1961,7 +1961,7 @@ def graph_add(
 
     try:
         mgr = GraphManager()
-        project_id = mgr.register(name, path, jira_project=project)
+        project_id = mgr.register(name, path, tracker_project_key=project)
         console.print(
             f"[green]✓ Project '[bold]{name.lower()}[/bold]' registered "
             f"(project: [bold]{project.upper()}[/bold], id: {project_id}).[/green]\n"
@@ -2104,7 +2104,7 @@ def _run_build_with_progress(mgr, project_id: str, force: bool, skip_llm: bool =
 @graph_app.command("build")
 def graph_build(
     name: Annotated[Optional[str], typer.Argument(help="Registered project name.")] = None,
-    project: Annotated[Optional[str], typer.Option("--project", help="Jira project key - builds all graphs tagged with this project (case-insensitive).")] = None,
+    project: Annotated[Optional[str], typer.Option("--project", help="Tracker project key - builds all graphs tagged with this project (case-insensitive).")] = None,
     force: Annotated[bool, typer.Option("--force", help="Force full rebuild even if graph is current.")] = False,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Skip LLM semantic enrichment. Faster but fewer cross-file edges.")] = False,
 ) -> None:
@@ -2135,7 +2135,7 @@ def graph_build(
             project_id = mgr.resolve_project(project_name=name)
             project_ids = [project_id]
         elif project is not None:
-            from icx_engine.graph.storage import lookup_by_jira_project as _lookup_jp
+            from icx_engine.graph.storage import lookup_by_tracker_project_key as _lookup_jp
             matches = _lookup_jp(project)
             if not matches:
                 err_console.print(
@@ -2218,7 +2218,7 @@ def graph_list() -> None:
             )
             return
 
-        has_jira = any(p.jira_project for p in projects)
+        has_tracker_key = any(p.tracker_project_key for p in projects)
 
         table = Table(show_header=True, header_style="bold cyan")
         table.add_column("Name", style="cyan")
@@ -2226,7 +2226,7 @@ def graph_list() -> None:
         table.add_column("Status", width=12)
         table.add_column("Last Built", width=16)
         table.add_column("Files", width=7, justify="right")
-        if has_jira:
+        if has_tracker_key:
             table.add_column("Project", width=10)
 
         _STATUS_STYLE = {
@@ -2242,8 +2242,8 @@ def graph_list() -> None:
             last_built = p.last_built[:16].replace("T", " ") if p.last_built else "[dim]-[/dim]"
             file_count = str(p.file_count) if p.file_count else "[dim]-[/dim]"
             row = [p.name, p.path, status_cell, last_built, file_count]
-            if has_jira:
-                row.append(p.jira_project or "[dim]-[/dim]")
+            if has_tracker_key:
+                row.append(p.tracker_project_key or "[dim]-[/dim]")
             table.add_row(*row)
 
         console.print()

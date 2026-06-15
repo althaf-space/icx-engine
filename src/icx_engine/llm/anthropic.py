@@ -30,6 +30,10 @@ class AnthropicProvider(LLMProvider):
             raise SourceUnavailable(
                 "Cannot connect to Anthropic API. Check your network connection."
             ) from exc
+        except anthropic.APIStatusError as exc:
+            raise SourceUnavailable(
+                f"Anthropic API returned an error (status {exc.status_code}). Try again later."
+            ) from exc
 
         content = response.content[0].text if response.content else ""
         try:

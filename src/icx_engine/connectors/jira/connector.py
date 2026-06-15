@@ -29,6 +29,22 @@ class JiraConnector(ConnectorBase):
     def can_handle_bare_key(cls, key: str) -> bool:
         return bool(_ISSUE_KEY_RE.match(key.upper()))
 
+    @classmethod
+    def extract_bare_key_from_ref(cls, ref: str) -> str | None:
+        """Return the bare issue key from a bare key or a /browse/ or /issues/ URL.
+
+        https://foo.atlassian.net/browse/PROJ-123  -> PROJ-123
+        PROJ-123                                    -> PROJ-123
+        anything else                               -> None
+        """
+        raw = ref.strip()
+        if _ISSUE_KEY_RE.match(raw.upper()):
+            return raw.upper()
+        m = re.search(r"/([A-Z][A-Z0-9]*-[0-9]+)(?:[/?#]|$)", raw, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        return None
+
     def parse_input(self, input_str: str) -> ParsedInput:
         """
         Parse Jira-style user input into a structured ParsedInput.

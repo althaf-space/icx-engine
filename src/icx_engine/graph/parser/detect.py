@@ -924,7 +924,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             if not in_memory_tree:
                 # Prune noise dirs in-place so os.walk never descends into them.
                 # Dot dirs are allowed - users often want .github/, .claude/, etc.
-                # Framework caches (.next, .nuxt, …) are caught by _is_noise_dir.
+                # Framework caches (.next, .nuxt, etc) are caught by _is_noise_dir.
                 # When negation patterns (!) exist, skip directory-level ignore
                 # pruning so negated files inside can still be reached.
                 has_negation = any(p.startswith("!") for _, p in ignore_patterns)

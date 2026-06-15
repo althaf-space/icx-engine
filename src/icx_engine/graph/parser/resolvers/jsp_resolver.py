@@ -16,6 +16,8 @@ import re
 from pathlib import Path, PurePosixPath
 from collections import defaultdict
 
+from icx_engine.graph.parser.resolvers._common import make_edge
+
 _SPRING_VIEW_RETURN   = re.compile(r'return\s+"([a-zA-Z0-9_/\-]+)"', re.MULTILINE)
 _SPRING_MAV           = re.compile(r'new\s+ModelAndView\s*\(\s*"([a-zA-Z0-9_/\-]+)"', re.MULTILINE)
 _DISPATCHER_FORWARD   = re.compile(r'getRequestDispatcher\s*\(\s*"([^"]+\.jsp)"', re.MULTILINE)
@@ -163,9 +165,4 @@ def _resolve_relative_jsp(inc_path: str, source_jsp: str, jsp_files: set) -> str
 
 
 def _edge(src_id, tgt_id, src_file, tgt_file, etype, confidence) -> dict:
-    return {
-        "source": src_id, "target": tgt_id,
-        "source_file": src_file, "target_file": tgt_file,
-        "relation": etype, "type": etype, "confidence": confidence,
-        "resolver": "jsp", "fix_confidence_delta": 0.0, "resolution_weight": 0.0,
-    }
+    return make_edge(src_id, tgt_id, src_file, tgt_file, etype, confidence, resolver="jsp")

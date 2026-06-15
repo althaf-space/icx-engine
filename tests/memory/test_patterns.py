@@ -232,3 +232,17 @@ def test_pattern_trigger_on_tenth_save(tmp_path):
     pm = PatternManager(db_path=tmp_path)
     patterns = pm.get_patterns("PROJ")
     assert len(patterns) > 0
+
+
+def test_get_table_raises_on_stale_lock(tmp_path, monkeypatch):
+    import time
+    import lancedb
+    import pytest
+    from icx_engine.exceptions import MemoryError
+    from icx_engine.memory.patterns import PatternManager
+
+    monkeypatch.setattr(lancedb, "connect", lambda *a, **k: time.sleep(10))
+
+    pm = PatternManager(db_path=tmp_path)
+    with pytest.raises(MemoryError, match="timed out"):
+        pm._get_table()

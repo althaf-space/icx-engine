@@ -152,12 +152,8 @@ def _mtime_changed_files(
         else:
             cutoff = time.time() - 3600
 
-        source_extensions = {
-            ".py", ".js", ".ts", ".tsx", ".jsx",
-            ".go", ".rs", ".java", ".kt", ".scala",
-            ".c", ".cpp", ".h", ".cs", ".rb", ".php",
-            ".vue", ".svelte",
-        }
+        from icx_engine.graph.builder import _PARSER_EXTENSIONS as source_extensions
+
         files: list[Path] = []
         for ext in source_extensions:
             files.extend(project_path.rglob(f"*{ext}"))

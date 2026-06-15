@@ -1,13 +1,47 @@
 from __future__ import annotations
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from pydantic import BaseModel, Field
+
+from icx_engine.exceptions import MemoryError
 
 
 def _sq(value: str) -> str:
     """Escape a string for use in a LanceDB SQL filter (single-quote escape)."""
     return value.replace("'", "''")
+
+
+def connect_with_timeout(db_path: Path, timeout: float = 3.0):
+    """Connect to LanceDB on a daemon thread, raising MemoryError if it hangs.
+
+    Guards against a stale file lock left by a previous server process.
+    """
+    import lancedb  # lazy import
+
+    _result: list = [None]
+    _exc: list = [None]
+
+    def _connect() -> None:
+        try:
+            _result[0] = lancedb.connect(str(db_path))
+        except Exception as e:
+            _exc[0] = e
+
+    _t = threading.Thread(target=_connect, daemon=True)
+    _t.start()
+    _t.join(timeout)
+    if _t.is_alive():
+        raise MemoryError(
+            f"LanceDB connection timed out after {timeout:g} s at {db_path}. "
+            "A stale file lock from a previous server process may be blocking access. "
+            "Restart your system or kill orphan icx processes to release the lock."
+        )
+    if _exc[0] is not None:
+        raise MemoryError(f"LanceDB connection failed: {_exc[0]}") from _exc[0]
+    return _result[0]
 
 
 ROOT_CAUSE_PATTERNS: set[str] = {
@@ -88,6 +122,9 @@ class MemoryEntry(BaseModel):
     causal_chain: dict = Field(default_factory=dict)
     full_ticket_text: str = ""
     attachment_summary: str = ""
+
+    # Tech-stack fingerprint: {dir: {"languages": {...}, "frameworks": {...}, "package_manager": "..."}}
+    tech_stack: dict = Field(default_factory=dict)
 
 
 class MemoryAuditEvent(BaseModel):
