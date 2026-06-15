@@ -67,7 +67,13 @@ def ensure_server(config: LSPServerConfig) -> list[str] | None:
 
     runtime_path, version = runtime_info
     versioned_dir = config.install_dir / _sanitize_version(version)
-    versioned_dir.mkdir(parents=True, exist_ok=True)
+    if not versioned_dir.exists():
+        versioned_dir.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            try:
+                versioned_dir.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
 
     binary = config.binary_fn(versioned_dir)
     if binary is not None:

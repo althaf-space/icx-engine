@@ -79,6 +79,11 @@ def _project_dir(project_id: str) -> Path:
     d = _graphs_root() / project_id
     if not d.exists():
         d.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            try:
+                d.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
     return d
 
 
@@ -86,6 +91,11 @@ def _cache_dir(project_id: str) -> Path:
     d = _project_dir(project_id) / "cache"
     if not d.exists():
         d.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            try:
+                d.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
     return d
 
 

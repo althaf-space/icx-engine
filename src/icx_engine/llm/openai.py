@@ -32,6 +32,10 @@ class OpenAIProvider(LLMProvider):
             raise SourceUnavailable(
                 "Cannot connect to OpenAI API. Check your network connection."
             ) from exc
+        except openai.APIStatusError as exc:
+            raise SourceUnavailable(
+                f"OpenAI API returned an error (status {exc.status_code}). Try again later."
+            ) from exc
 
         content = response.choices[0].message.content or ""
         try:

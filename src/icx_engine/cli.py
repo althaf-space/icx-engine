@@ -1044,7 +1044,7 @@ def _validate_and_save_model(
             typer.echo(f"  validating text model ({txt_label})...", err=True)
             asyncio.run(_run(new_llm.text_config))
         else:
-            with console.status(f"[bold]Validating text model ({txt_label})…[/bold]", spinner="dots"):
+            with console.status(f"[bold]Validating text model ({txt_label})...[/bold]", spinner="dots"):
                 asyncio.run(_run(new_llm.text_config))
     except Exception as exc:
         render_icx_error(exc, err_console, show_traceback=traceback)
@@ -1060,7 +1060,7 @@ def _validate_and_save_model(
                 asyncio.run(_run(new_llm.image_config))
             else:
                 with console.status(
-                    f"[bold]Validating image model ({img_model})…[/bold]", spinner="dots"
+                    f"[bold]Validating image model ({img_model})...[/bold]", spinner="dots"
                 ):
                     asyncio.run(_run(new_llm.image_config))
         except Exception as exc:
@@ -1380,7 +1380,7 @@ def analyze(
         if debug:
             result = _run()
         else:
-            with console.status(f"[bold]Analyzing {url}…[/bold]", spinner="dots"):
+            with console.status(f"[bold]Analyzing {url}...[/bold]", spinner="dots"):
                 result = _run()
 
     except ICXError as exc:
@@ -1743,7 +1743,7 @@ def uninstall(
         console.print(f"[yellow]Failed to delete {icx_dir}:[/yellow] {exc}")
 
     # 4. Uninstall the package - detect pipx vs pip, handle Windows exe-lock
-    console.print("\nUninstalling [bold]icx-engine[/bold] package…")
+    console.print("\nUninstalling [bold]icx-engine[/bold] package...")
     try:
         _uninstall_package(console)
     except Exception as exc:

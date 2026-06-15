@@ -36,19 +36,11 @@ def _read_icx_llm_cfg() -> tuple[str, str | None, str | None] | None:
     Read ICX's configured text model and return (parser_backend, api_key, base_url).
     Returns None if no model configured or on any error.
     """
-    try:
-        from icx_engine.config_manager import ConfigManager
-        cfg = ConfigManager.load()
-        llm = cfg.active_llm
-        if llm is None:
-            return None
-        ch = llm.text_config
-        backend = _ICX_PROVIDER_TO_PARSER.get(ch.provider)
-        if not backend:
-            return None
-        return (backend, ch.api_key, ch.base_url)
-    except Exception:
+    full = _read_icx_full_llm_cfg()
+    if full is None:
         return None
+    backend, api_key, base_url, _model = full
+    return (backend, api_key, base_url)
 
 
 def _read_icx_full_llm_cfg() -> tuple[str, str | None, str | None, str] | None:

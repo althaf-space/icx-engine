@@ -2168,7 +2168,17 @@ def _load_querier_simple(project_path: str) -> tuple | dict:
     _pid = _st.derive_project_id(_validated)
     _gpath = _st.graph_path(_pid)
     if not _gpath.exists():
-        return {"error": "Graph not built for this project."}
+        return {
+            "status": "error",
+            "code": "NO_GRAPH",
+            "message": (
+                f"No graph found for '{_validated}'. "
+                "Tell the user to build it first with the command below, then retry."
+            ),
+            "action_required": "stop_and_tell_user_to_build_graph",
+            "build_command": f"icx graph build \"{_validated}\"",
+            "project_path": str(_validated),
+        }
     return GraphQuerier(_gpath), _validated
 
 
@@ -3192,6 +3202,7 @@ async def _handle_save_memory(
             )
             if "error" not in result:
                 return json.dumps({**result, "saved": True})
+            return json.dumps({**result, "saved": False})
 
         # Build causal chain from session context + tool input (Phase 8)
         causal_chain = {

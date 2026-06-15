@@ -116,7 +116,7 @@ async def run_pkce_flow(
         timeout:             Seconds to wait for the browser callback (default 120)
 
     Returns:
-        Raw token response dict (access_token, refresh_token, expires_in, …)
+        Raw token response dict (access_token, refresh_token, expires_in, etc)
 
     Raises:
         TimeoutError:        Browser callback did not arrive within timeout

@@ -206,11 +206,24 @@ def _merge_incremental(
         if _rel_path(e.get("source_file", ""), root_posix) not in stale
         and _rel_path(e.get("target_file", ""), root_posix) not in stale
     ]
-    merged = dict(existing_graph)
-    merged["nodes"] = surviving_nodes + new_extraction.get("nodes", [])
-    merged["links"] = surviving_edges + new_extraction.get(
+    # Edges that reference a node removed above (e.g. file renamed/deleted)
+    # become dangling even if the edge itself isn't tagged with that file.
+    existing_node_ids = {n.get("id") for n in existing_graph.get("nodes", [])}
+    surviving_node_ids = {n.get("id") for n in surviving_nodes}
+    removed_ids = existing_node_ids - surviving_node_ids
+
+    merged_links = surviving_edges + new_extraction.get(
         "links", new_extraction.get("edges", [])
     )
+    if removed_ids:
+        merged_links = [
+            e for e in merged_links
+            if e.get("source") not in removed_ids and e.get("target") not in removed_ids
+        ]
+
+    merged = dict(existing_graph)
+    merged["nodes"] = surviving_nodes + new_extraction.get("nodes", [])
+    merged["links"] = merged_links
     return merged
 
 
@@ -297,7 +310,7 @@ def _build_project_isolated(
 
         hash_cache_path = icx_cache / "file_hashes.json"
         stored_hashes = load_hashes(hash_cache_path)
-        graph_json_path = icx_cache / "graph.json"
+        graph_json_path = icx_cache.parent / "graph.json"
         _incremental = graph_json_path.exists() and bool(stored_hashes)
 
         # Convert Path objects to relative POSIX strings for hashing

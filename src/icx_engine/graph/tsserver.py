@@ -48,7 +48,13 @@ def ensure_tsserver() -> Path | None:
     if not current_version:
         return None
 
-    ICX_HOME.mkdir(parents=True, exist_ok=True)
+    if not ICX_HOME.exists():
+        ICX_HOME.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            try:
+                ICX_HOME.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
 
     try:
         from filelock import FileLock, Timeout

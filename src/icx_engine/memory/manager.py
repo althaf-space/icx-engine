@@ -927,10 +927,8 @@ class MemoryManager:
     def clear(self) -> None:
         """Delete all memory entries, relations, and patterns. Recreates empty tables."""
         try:
-            import lancedb
-
             if self._db is None:
-                self._db = lancedb.connect(str(self._db_path))
+                self._db = connect_with_timeout(self._db_path)
             tables_response = self._db.list_tables()
             existing = (
                 tables_response.tables
