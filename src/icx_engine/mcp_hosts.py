@@ -68,7 +68,7 @@ def list_hosts() -> list[MCPHost]:
     return [
         MCPHost(
             "claude", "Claude Code",
-            home / ".claude" / "settings.json",
+            home / ".claude.json",
             home / ".claude",
             "json",
         ),

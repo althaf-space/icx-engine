@@ -4,7 +4,6 @@ import logging
 import math
 import re
 import sys
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -18,7 +17,7 @@ _BARE_KEY_RE = re.compile(r'[A-Z][A-Z0-9]*-[0-9]+')
 from icx_engine.memory.embeddings import EmbeddingsManager, VECTOR_DIM, EMBEDDING_MODEL
 from icx_engine.memory.patterns import PatternManager
 from icx_engine.memory.relations import RelationManager
-from icx_engine.memory.schema import MemoryEntry, MemoryQueryInput, MemoryAuditEvent, _sq
+from icx_engine.memory.schema import MemoryEntry, MemoryQueryInput, MemoryAuditEvent, _sq, connect_with_timeout
 from icx_engine.models.output import PastInsight
 
 _TABLE_NAME = "memory_entries"
@@ -172,30 +171,9 @@ class MemoryManager:
     def _get_table(self):
         if self._table is not None:
             return self._table
-        import lancedb  # lazy import
         import pyarrow as pa
 
-        _result: list = [None]
-        _exc: list = [None]
-
-        def _connect() -> None:
-            try:
-                _result[0] = lancedb.connect(str(self._db_path))
-            except Exception as e:
-                _exc[0] = e
-
-        _t = threading.Thread(target=_connect, daemon=True)
-        _t.start()
-        _t.join(3.0)
-        if _t.is_alive():
-            raise MemoryError(
-                f"LanceDB connection timed out after 3 s at {self._db_path}. "
-                "A stale file lock from a previous server process may be blocking access. "
-                "Restart your system or kill orphan icx processes to release the lock."
-            )
-        if _exc[0] is not None:
-            raise MemoryError(f"LanceDB connection failed: {_exc[0]}") from _exc[0]
-        self._db = _result[0]
+        self._db = connect_with_timeout(self._db_path)
         tables_response = self._db.list_tables()
         existing = (
             tables_response.tables

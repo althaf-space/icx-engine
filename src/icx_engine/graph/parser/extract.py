@@ -2234,6 +2234,21 @@ def extract_js(path: Path) -> dict:
     return _extract_generic(path, config)
 
 
+def extract_html(path: Path) -> dict:
+    """Minimal extraction for .html files: emit a single file-level node so
+    framework resolvers (e.g. Angular templateUrl/selector edges) can anchor
+    cross-file edges to it."""
+    try:
+        path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"error": f"cannot read {path}"}
+
+    file_nid = _make_id(str(path))
+    nodes = [{"id": file_nid, "label": path.name, "name": path.name, "file_type": "code",
+              "source_file": str(path), "source_location": None}]
+    return {"nodes": nodes, "edges": []}
+
+
 def extract_svelte(path: Path) -> dict:
     """Extract imports from .svelte files: script-block via JS AST + template regex fallback.
 
@@ -7344,6 +7359,7 @@ _DISPATCH: dict[str, Any] = {
     ".svelte": extract_svelte,
     ".astro": extract_astro,
     ".dart": extract_dart,
+    ".html": extract_html,
     ".v": extract_verilog,
     ".sv": extract_verilog,
     ".sql": extract_sql,

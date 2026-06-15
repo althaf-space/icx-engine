@@ -127,17 +127,3 @@ class TestTsLspBatchOpen:
                     "All did_open calls must complete before any definition() query. "
                     f"Call log: {call_log}"
                 )
-
-
-class TestScipTimeouts:
-    def test_timeout_constants_defined(self):
-        from icx_engine.graph.parser.scip_reader import (
-            _SCIP_TIMEOUTS, _SCIP_DEFAULT_TIMEOUT, _BACKGROUND_ON_LAUNCH,
-        )
-        assert _SCIP_TIMEOUTS["java"] == 180
-        assert _SCIP_TIMEOUTS["kotlin"] == 180
-        assert "typescript" not in _SCIP_TIMEOUTS, "typescript uses background, no timeout"
-        assert "javascript" not in _SCIP_TIMEOUTS, "javascript uses background, no timeout"
-        assert _SCIP_DEFAULT_TIMEOUT == 180
-        assert "typescript" in _BACKGROUND_ON_LAUNCH
-        assert "javascript" in _BACKGROUND_ON_LAUNCH

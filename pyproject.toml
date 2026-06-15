@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.3.6"
+version = "0.3.7"
 description = "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development teams. Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP."
 readme = "readme.md"
 license = { file = "license" }
@@ -88,6 +88,7 @@ graph-extended = [
     "tree-sitter-swift",
     "tree-sitter-php",
     "tree-sitter-c",
+    "tree-sitter-cpp",
     "tree-sitter-scala",
     "tree-sitter-dart",
     "tree-sitter-elixir",

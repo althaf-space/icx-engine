@@ -30,7 +30,7 @@ _PARSER_EXTENSIONS = frozenset({
     ".groovy", ".gradle", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
     ".rb", ".cs", ".kt", ".kts", ".scala", ".php", ".swift", ".lua",
     ".zig", ".ps1", ".ex", ".exs", ".m", ".mm", ".jl", ".vue", ".svelte",
-    ".dart", ".sql", ".md", ".mdx",
+    ".dart", ".sql", ".md", ".mdx", ".html",
     ".jsp", ".jspx",
     ".erb",
     ".proto",
@@ -217,27 +217,6 @@ def _merge_incremental(
 # ---------------------------------------------------------------------------
 # Subprocess entry point (must be a top-level function for pickle on Windows)
 # ---------------------------------------------------------------------------
-
-def _detect_languages(files) -> list[str]:
-    """Detect programming languages present based on file extensions."""
-    exts = {Path(str(f)).suffix.lower() for f in files}
-    langs = []
-    if exts & {'.py'}:
-        langs.append('python')
-    if exts & {'.ts', '.tsx'}:
-        langs.append('typescript')
-    if exts & {'.js', '.jsx', '.mjs'}:
-        langs.append('javascript')
-    if exts & {'.java'}:
-        langs.append('java')
-    if exts & {'.kt', '.kts'}:
-        langs.append('kotlin')
-    if exts & {'.go'}:
-        langs.append('go')
-    if exts & {'.rb'}:
-        langs.append('ruby')
-    return langs
-
 
 def _build_project_isolated(
     project_path_str: str,
@@ -428,6 +407,11 @@ def _build_project_isolated(
         _has_java = bool(_exts & {'.java'})
         _has_kotlin = bool(_exts & {'.kt', '.kts'})
         _has_jsts = bool(_exts & {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.vue', '.svelte'})
+        _has_go = bool(_exts & {'.go'})
+        _has_rust = bool(_exts & {'.rs'})
+        _has_csharp = bool(_exts & {'.cs'})
+        _has_php = bool(_exts & {'.php'})
+        _has_cpp = bool(_exts & {'.cpp', '.cc', '.cxx', '.h', '.hpp', '.hxx'})
 
         _LSP_STEPS = max(1, (
             (1 if _has_py else 0)        # python jedi
@@ -435,6 +419,13 @@ def _build_project_isolated(
             + (2 if _has_java else 0)    # lombok synth + java symbols
             + (1 if _has_kotlin else 0)  # kotlin symbols
             + (2 if _has_jsts else 0)    # jsts imports + typescript LSP
+            + (1 if _has_go else 0)      # gopls LSP
+            + (1 if _has_rust else 0)    # rust-analyzer LSP
+            + (1 if _has_csharp else 0)  # OmniSharp LSP
+            + (1 if _has_php else 0)     # intelephense LSP
+            + (1 if _has_cpp else 0)     # clangd LSP
+            + (1 if _has_java else 0)    # jdtls LSP
+            + (1 if _has_kotlin else 0)  # kotlin-language-server LSP
             + 1                           # final edges summary
         ))
         _lsp_step = 0
@@ -518,6 +509,36 @@ def _build_project_isolated(
                 _log.debug("kotlin_symbols resolver failed (%s)", type(kt_exc).__name__)
             _lsp_tick("kotlin symbols")
 
+        if _has_java:
+            _lsp_pre("jdtls LSP")
+            try:
+                from icx_engine.graph.parser.resolvers.java_lsp import extract_java_lsp_edges
+                java_lsp_edges = _abs_edges(extract_java_lsp_edges(files, project_path, extraction))
+                if java_lsp_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + java_lsp_edges,
+                    }
+                lsp_edge_count += len(java_lsp_edges)
+            except Exception as java_lsp_exc:
+                _log.debug("java_lsp resolver failed (%s)", type(java_lsp_exc).__name__)
+            _lsp_tick("jdtls LSP")
+
+        if _has_kotlin:
+            _lsp_pre("kotlin-language-server LSP")
+            try:
+                from icx_engine.graph.parser.resolvers.kotlin_lsp import extract_kotlin_lsp_edges
+                kotlin_lsp_edges = _abs_edges(extract_kotlin_lsp_edges(files, project_path, extraction))
+                if kotlin_lsp_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + kotlin_lsp_edges,
+                    }
+                lsp_edge_count += len(kotlin_lsp_edges)
+            except Exception as kotlin_lsp_exc:
+                _log.debug("kotlin_lsp resolver failed (%s)", type(kotlin_lsp_exc).__name__)
+            _lsp_tick("kotlin-language-server LSP")
+
         if _has_jsts:
             _lsp_pre("js/ts imports")
             try:
@@ -564,185 +585,82 @@ def _build_project_isolated(
                 _log.debug("pyright_lsp resolver failed (%s)", type(pyright_exc).__name__)
             _lsp_tick("pyright LSP")
 
-        _lsp_tick(f"{lsp_edge_count} edges")
-
-        # In incremental mode, SCIP needs ALL project nodes (not just changed-file nodes)
-        # so cross-file references can be matched against the full node set.
-        _scip_all_nodes: list[dict] = list(extraction.get("nodes", []))
-        if _incremental and graph_json_path.exists():
+        if _has_go:
+            _lsp_pre("gopls LSP")
             try:
-                import json as _json_scip
-                _existing_g = _json_scip.loads(graph_json_path.read_text(encoding="utf-8"))
-                _stale_scip = set(_changed_rel) | set(_deleted_rel)
-                _existing_nodes = [
-                    n for n in _existing_g.get("nodes", [])
-                    if n.get("source_file", n.get("file", "")) not in _stale_scip
-                ]
-                _scip_all_nodes = _existing_nodes + _scip_all_nodes
-            except Exception:
-                pass
+                from icx_engine.graph.parser.resolvers.go_lsp import extract_go_lsp_edges
+                go_lsp_edges = _abs_edges(extract_go_lsp_edges(files, project_path, extraction))
+                if go_lsp_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + go_lsp_edges,
+                    }
+                lsp_edge_count += len(go_lsp_edges)
+            except Exception as go_lsp_exc:
+                _log.debug("go_lsp resolver failed (%s)", type(go_lsp_exc).__name__)
+            _lsp_tick("gopls LSP")
 
-        # SCIP optional compiler-grade edge integration
-        try:
-            import shutil as _shutil
-            from icx_engine.graph.parser.scip_manager import (
-                ensure_indexer as _ensure_scip_indexer,
-                _CONFIGS as _SCIP_CONFIGS,
-                write_ts_tsconfig as _write_ts_tsconfig,
-            )
-            from icx_engine.graph.parser.scip_reader import (
-                run_scip_indexer, read_scip_edges, _INDEXERS as _SCIP_INDEXERS,
-                BACKGROUND_SPAWNED as _SCIP_BACKGROUND_SPAWNED,
-            )
-            scip_cache = icx_cache / "scip"
-            scip_cache.mkdir(exist_ok=True)
-            _detected_langs = _detect_languages(files)
+        if _has_rust:
+            _lsp_pre("rust-analyzer LSP")
+            try:
+                from icx_engine.graph.parser.resolvers.rust_lsp import extract_rust_lsp_edges
+                rust_lsp_edges = _abs_edges(extract_rust_lsp_edges(files, project_path, extraction))
+                if rust_lsp_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + rust_lsp_edges,
+                    }
+                lsp_edge_count += len(rust_lsp_edges)
+            except Exception as rust_lsp_exc:
+                _log.debug("rust_lsp resolver failed (%s)", type(rust_lsp_exc).__name__)
+            _lsp_tick("rust-analyzer LSP")
 
-            # Invalidate stale SCIP caches.
-            # Full rebuild: remove all .scip files so indexers always run fresh.
-            # Incremental: remove .scip only for languages whose source files changed.
-            # (Incremental with no changes exits early before reaching this point.)
-            _EXT_TO_SCIP_LANG: dict[str, str] = {
-                ".ts": "typescript", ".tsx": "typescript",
-                ".js": "javascript", ".jsx": "javascript",
-                ".mjs": "javascript", ".cjs": "javascript",
-                ".vue": "javascript", ".svelte": "javascript",
-                ".py": "python",
-                ".go": "go",
-                ".java": "java", ".kt": "java", ".kts": "java",
-                ".rb": "ruby",
-            }
-            if not _incremental:
-                # Full build: wipe all cached SCIP output including partials.
-                # Do NOT delete .building lock files - running daemons own those;
-                # deleting the .scip.tmp causes their atomic rename to fail cleanly
-                # so they exit without producing stale output.
-                for _pat in ("*.scip", "*.scip.tmp"):
-                    for _sf in scip_cache.glob(_pat):
-                        try:
-                            _sf.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-            elif _changed_rel:
-                # Incremental: invalidate only languages with changed files.
-                # Also remove .tmp so any running daemon's rename fails cleanly
-                # (daemon exits, lock removed, next build spawns fresh daemon).
-                _langs_invalidated: set[str] = set()
-                for _rel in _changed_rel:
-                    _ext = Path(_rel).suffix.lower()
-                    _slang = _EXT_TO_SCIP_LANG.get(_ext)
-                    if _slang and _slang not in _langs_invalidated:
-                        for _suffix in (f"{_slang}.scip", f"{_slang}.scip.tmp"):
-                            try:
-                                (scip_cache / _suffix).unlink(missing_ok=True)
-                            except OSError:
-                                pass
-                        _langs_invalidated.add(_slang)
+        if _has_csharp:
+            _lsp_pre("OmniSharp LSP")
+            try:
+                from icx_engine.graph.parser.resolvers.csharp_lsp import extract_csharp_lsp_edges
+                csharp_lsp_edges = _abs_edges(extract_csharp_lsp_edges(files, project_path, extraction))
+                if csharp_lsp_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + csharp_lsp_edges,
+                    }
+                lsp_edge_count += len(csharp_lsp_edges)
+            except Exception as csharp_lsp_exc:
+                _log.debug("csharp_lsp resolver failed (%s)", type(csharp_lsp_exc).__name__)
+            _lsp_tick("OmniSharp LSP")
 
-            # Build per-language task list. Managed langs (python/ts/js/go) auto-install
-            # via scip_manager; path-only langs (java/kotlin/ruby) require manual install
-            # but are used if found on PATH. typescript/javascript share one install_dir
-            # so deduplicate by install_dir to avoid running the indexer twice.
-            _scip_tasks: list[tuple[str, bool]] = []  # (lang, is_managed)
-            _seen_managed_dirs: set[str] = set()
-            for _lang in _detected_langs:
-                _ll = _lang.lower()
-                if _ll in _SCIP_CONFIGS:
-                    _dir_key = str(_SCIP_CONFIGS[_ll].install_dir)
-                    if _dir_key not in _seen_managed_dirs:
-                        _seen_managed_dirs.add(_dir_key)
-                        _scip_tasks.append((_ll, True))
-                elif _ll in _SCIP_INDEXERS and _shutil.which(_SCIP_INDEXERS[_ll][0]):
-                    _scip_tasks.append((_ll, False))
+        if _has_php:
+            _lsp_pre("intelephense LSP")
+            try:
+                from icx_engine.graph.parser.resolvers.php_lsp import extract_php_lsp_edges
+                php_lsp_edges = _abs_edges(extract_php_lsp_edges(files, project_path, extraction))
+                if php_lsp_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + php_lsp_edges,
+                    }
+                lsp_edge_count += len(php_lsp_edges)
+            except Exception as php_lsp_exc:
+                _log.debug("php_lsp resolver failed (%s)", type(php_lsp_exc).__name__)
+            _lsp_tick("intelephense LSP")
 
-            if not _scip_tasks:
-                progress.emit("scip", current=0, total=0, message="no SCIP indexers installed")
-            else:
-                _scip_total = len(_scip_tasks)
-                _scip_step = 0
-                _total_scip_edges = 0
-                for _scip_lang, _scip_managed in _scip_tasks:
-                    progress.emit("scip", current=_scip_step, total=_scip_total,
-                                  message=f"scip-{_scip_lang}")
-                    _scip_detail = "no output"
-                    _scip_result = None
-                    try:
-                        if _scip_managed:
-                            _scip_result = _ensure_scip_indexer(_SCIP_CONFIGS[_scip_lang])
-                            if _scip_result is not None:
-                                _scip_run_cmd, _scip_run_env = _scip_result
-                                _ts_tsconfig_path = None
-                                _effective_cmd = _scip_run_cmd
-                                if _scip_lang in ("typescript", "javascript"):
-                                    try:
-                                        # Always generate a SCIP-optimised tsconfig.
-                                        # For projects with tsconfig.json: the wrapper extends it
-                                        # (inheriting paths, jsx, module settings) but limits
-                                        # "files" to .ts/.tsx only. This avoids indexing thousands
-                                        # of .jsx/.js files that allowJs would otherwise include,
-                                        # which is the main cause of scip-typescript timeouts.
-                                        # For JS-only projects: standalone fallback tsconfig.
-                                        _project_tsconfig = None
-                                        for _tc_name in ("tsconfig.json", "jsconfig.json"):
-                                            _tc_candidate = project_path / _tc_name
-                                            if _tc_candidate.exists():
-                                                _project_tsconfig = str(_tc_candidate)
-                                                break
-                                        _ts_tsconfig_path = scip_cache / "icx-tsconfig.json"
-                                        _write_ts_tsconfig(
-                                            str(project_path),
-                                            [str(f) for f in files],
-                                            _ts_tsconfig_path,
-                                            project_tsconfig=_project_tsconfig,
-                                        )
-                                        _effective_cmd = [
-                                            x for x in _scip_run_cmd
-                                            if x != "--infer-tsconfig"
-                                        ] + [str(_ts_tsconfig_path)]
-                                    except Exception:
-                                        _effective_cmd = _scip_run_cmd
-                                _scip_file = run_scip_indexer(
-                                    _scip_lang, str(project_path), scip_cache,
-                                    cmd=_effective_cmd,
-                                    extra_env=_scip_run_env or None,
-                                    use_cache=True,
-                                )
-                            else:
-                                _scip_file = None
-                                _scip_detail = "indexer not installed (runtime missing or npm failed)"
-                        else:
-                            _scip_file = run_scip_indexer(
-                                _scip_lang, str(project_path), scip_cache,
-                                use_cache=True,
-                            )
-                        if _scip_file is _SCIP_BACKGROUND_SPAWNED:
-                            _scip_detail = "indexing in background; edges on next build"
-                        elif _scip_file:
-                            _scip_edges = read_scip_edges(
-                                _scip_file, _scip_all_nodes,
-                                project_path=str(project_path),
-                            )
-                            if _scip_edges:
-                                extraction = {
-                                    **extraction,
-                                    "edges": list(extraction.get("edges", [])) + _scip_edges,
-                                }
-                            _total_scip_edges += len(_scip_edges)
-                            _scip_detail = f"{len(_scip_edges)} edges"
-                        else:
-                            if _scip_managed and _scip_result is not None:
-                                _scip_detail = "indexer ran but produced no index.scip"
-                    except Exception as _scip_lang_exc:
-                        _scip_detail = f"error: {type(_scip_lang_exc).__name__}"
-                        _log.debug("scip %s failed (%s)", _scip_lang,
-                                   type(_scip_lang_exc).__name__)
-                    _log.debug("scip %s: %s", _scip_lang, _scip_detail)
-                    _scip_step += 1
-                progress.emit("scip", current=_scip_total, total=_scip_total,
-                              message=f"{_total_scip_edges} compiler-grade edges")
-        except Exception as _scip_exc:
-            progress.emit("scip", current=0, total=0, message="skipped")
-            _log.debug("scip integration skipped (%s)", type(_scip_exc).__name__)
+        if _has_cpp:
+            _lsp_pre("clangd LSP")
+            try:
+                from icx_engine.graph.parser.resolvers.cpp_lsp import extract_cpp_lsp_edges
+                cpp_lsp_edges = _abs_edges(extract_cpp_lsp_edges(files, project_path, extraction))
+                if cpp_lsp_edges:
+                    extraction = {
+                        **extraction,
+                        "edges": list(extraction.get("edges", [])) + cpp_lsp_edges,
+                    }
+                lsp_edge_count += len(cpp_lsp_edges)
+            except Exception as cpp_lsp_exc:
+                _log.debug("cpp_lsp resolver failed (%s)", type(cpp_lsp_exc).__name__)
+            _lsp_tick("clangd LSP")
+
+        _lsp_tick(f"{lsp_edge_count} edges")
 
         _RESOLVERS = (
             ("java_inheritance", "icx_engine.graph.parser.resolvers.java_inheritance", "extract_java_inheritance_edges"),
@@ -772,6 +690,14 @@ def _build_project_isolated(
             ("spring_xml", "icx_engine.graph.parser.resolvers.spring_xml", "extract_spring_xml_edges"),
             ("jsp", "icx_engine.graph.parser.resolvers.jsp_resolver", "resolve_jsp"),
             ("go", "icx_engine.graph.parser.resolvers.go_resolver", "resolve_go"),
+            ("csharp", "icx_engine.graph.parser.resolvers.csharp_resolver", "resolve_csharp"),
+            ("php", "icx_engine.graph.parser.resolvers.php_resolver", "resolve_php"),
+            ("rust", "icx_engine.graph.parser.resolvers.rust_resolver", "resolve_rust"),
+            ("cpp", "icx_engine.graph.parser.resolvers.cpp_resolver", "resolve_cpp"),
+            ("swift", "icx_engine.graph.parser.resolvers.swift_resolver", "resolve_swift"),
+            ("elixir", "icx_engine.graph.parser.resolvers.elixir_resolver", "resolve_elixir"),
+            ("scala", "icx_engine.graph.parser.resolvers.scala_resolver", "resolve_scala"),
+            ("angular", "icx_engine.graph.parser.resolvers.angular_resolver", "resolve_angular"),
             ("rails", "icx_engine.graph.parser.resolvers.rails_resolver", "resolve_rails"),
             ("proto", "icx_engine.graph.parser.resolvers.proto_resolver", "resolve_proto"),
             ("terraform", "icx_engine.graph.parser.resolvers.terraform_resolver", "resolve_terraform"),

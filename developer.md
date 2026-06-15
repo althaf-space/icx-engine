@@ -109,7 +109,7 @@ ICX/
 │   │       ├── validate.py     # graph integrity validation
 │   │       ├── dedup.py        # duplicate edge deduplication
 │   │       ├── lsp_client.py   # generic LSP stdio JSON-RPC client
-│   │       ├── lsp_manager.py  # LSP lifecycle: install, version-track, spawn, kill
+│   │       ├── lsp_manager.py  # LSP lifecycle: install (per-version cache), spawn, kill
 │   │       └── resolvers/      # semantic edge resolvers (Spring, React, Django, FastAPI, etc.)
 │   ├── services/
 │   │   └── connection_service.py  # platform auth flows (_connect_jira_token, _connect_jira_oauth)
@@ -1021,7 +1021,7 @@ The memory module lives at `src/icx_engine/memory/` and follows the same layerin
 | File | Responsibility |
 |---|---|
 | `memory/__init__.py` | Public exports: MemoryManager, MemoryQueryInput |
-| `memory/schema.py` | MemoryEntry (Pydantic), MemoryQueryInput (dataclass) |
+| `memory/schema.py` | MemoryEntry (Pydantic), MemoryQueryInput (dataclass), `connect_with_timeout()` shared LanceDB connect helper |
 | `memory/embeddings.py` | EmbeddingsManager: onnxruntime + tokenizers ONNX inference, first-run sentinel, per-file download progress |
 | `memory/manager.py` | MemoryManager: save, query, delete, list, show, clear, status |
 | `memory/bridge.py` | Cross-reference MemoryEntry.files_changed with codebase graph; bug density analysis |
@@ -1033,6 +1033,8 @@ The memory module lives at `src/icx_engine/memory/` and follows the same layerin
 ### Storage
 
 Memory is stored in `~/.icx/memory/` with mode `0o700`. LanceDB writes columnar `.lance` files to this directory. The model sentinel is at `~/.icx/memory/.mem_initialized` and contains the embedding model name string. Model files are cached at `~/.icx/memory/model/` (`tokenizer.json` + `onnx/model_quantized.onnx`).
+
+**Stale lock detection:** `MemoryManager`, `RelationManager`, and `PatternManager` all connect via `schema.connect_with_timeout()`, which connects on a daemon thread with a 3s timeout. If `lancedb.connect()` hangs (stale file lock from a previous process), it raises `MemoryError` with guidance to restart or kill orphan icx processes, instead of hanging indefinitely.
 
 **Download trigger:** The embedding model downloads only when `icx setup` is run explicitly. `icx analyze`, `icx graph`, and other commands start immediately and use memory only if it is already initialized (lazy load on first query). Memory commands (`icx memory list`, etc.) call `check_ready()` which raises `MemoryError` if the model is not present - the user is directed to run `icx setup`.
 
@@ -1343,15 +1345,13 @@ The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/p
 | `graph/parser/validate.py` | Graph integrity validation |
 | `graph/parser/dedup.py` | Duplicate edge deduplication |
 | `graph/parser/lsp_client.py` | Generic LSP stdio JSON-RPC client |
-| `graph/parser/lsp_manager.py` | LSP lifecycle: detect runtime, install language server, version-track, spawn, kill |
-| `graph/parser/resolvers/` | Semantic edge resolvers: Spring, React, Django, FastAPI, Flask, Next.js, Vue, Svelte, Remix, SQLAlchemy, Celery, pytest fixtures, Redux, GraphQL, JPA, JAX-RS, Lombok, Kotlin, TypeScript LSP, Pyright LSP, Java symbols, Python Jedi, Python type-checking, cross-service REST, JSP/Servlet, Go, Rails, gRPC/Protobuf, Terraform/HCL, event brokers, co-change history, and more |
+| `graph/parser/lsp_manager.py` | LSP lifecycle: detect runtime, install language server into a per-runtime-version cache dir (`~/.icx/<server>/<version>/`), spawn, kill |
+| `graph/parser/resolvers/` | Semantic edge resolvers: Spring, React, Django, FastAPI, Flask, Next.js, Vue, Svelte, Remix, SQLAlchemy, Celery, pytest fixtures, Redux, GraphQL, JPA, JAX-RS, Lombok, Kotlin, TypeScript LSP, Pyright LSP, gopls LSP, jdtls LSP, kotlin-language-server LSP, rust-analyzer LSP, OmniSharp LSP, intelephense LSP, clangd LSP, Java symbols, Python Jedi, Python type-checking, cross-service REST, JSP/Servlet, Go, C++, Swift, Elixir, Scala, Rails, gRPC/Protobuf, Terraform/HCL, event brokers, co-change history, and more |
 | `graph/parser/file_cache.py` | SHA-256 file hash cache for incremental graph rebuilds |
 | `graph/parser/dedup.py` | `fuse_and_dedup()` - multi-source edge fusion; confidence summing for fusable families; highest-confidence deduplication for all others |
 | `graph/parser/centrality.py` | PageRank + betweenness + degree centrality; writes `pagerank`, `betweenness`, `degree_centrality`, `importance` attributes onto graph nodes |
 | `graph/parser/ownership.py` | CODEOWNERS file parser; `GraphQuerier.get_ownership()` resolves file owners and cross-team dependency edges |
 | `graph/parser/resolvers/_common.py` | `make_edge()` - shared edge-dict constructor used by go/terraform/jsp/proto/rails/event resolvers |
-| `graph/parser/scip_reader.py` | Optional SCIP compiler-grade index reader; emits `scip_reference` edges (0.95 confidence); built-in protobuf wire-format parser, no generated code dependency |
-| `graph/parser/scip_manager.py` | Auto-installs and version-tracks SCIP indexers (scip-python, scip-typescript, scip-go, scip-java) under `~/.icx/scip/<lang>/`; reinstalls on runtime version drift |
 
 ### Semantic resolvers
 
@@ -1361,12 +1361,26 @@ Each resolver in `graph/parser/resolvers/` appends edges to the extraction dict 
 |---|---|---|---|
 | jsp | `graph/parser/resolvers/jsp_resolver.py` | `jsp_forward` (0.70), `jsp_include` (0.85), `taglib_import` (0.90), `el_binding` (0.55), `servlet_mapping` (0.95) | `.java` or `.jsp` present |
 | go | `graph/parser/resolvers/go_resolver.py` | `go_import` (0.90), `go_implements` (0.75), `go_calls` (0.85) | `.go` present |
+| csharp | `graph/parser/resolvers/csharp_resolver.py` | `csharp_using` (0.90), `csharp_extends` (0.80), `csharp_calls` (0.75) | `.cs` present |
+| php | `graph/parser/resolvers/php_resolver.py` | `php_use` (0.90), `php_extends` (0.80), `php_calls` (0.75) | `.php` present |
+| rust | `graph/parser/resolvers/rust_resolver.py` | `rust_use` (0.90), `rust_impl` (0.80), `rust_calls` (0.75) | `.rs` present |
+| cpp | `graph/parser/resolvers/cpp_resolver.py` | `cpp_include` (0.85), `cpp_inherits` (0.80), `cpp_calls` (0.75) | `.cpp`/`.cc`/`.cxx`/`.h`/`.hpp`/`.hxx` present |
+| swift | `graph/parser/resolvers/swift_resolver.py` | `swift_import` (0.85), `swift_conforms` (0.80), `swift_calls` (0.75) | `.swift` present |
+| elixir | `graph/parser/resolvers/elixir_resolver.py` | `elixir_alias` (0.90), `elixir_use` (0.80), `elixir_calls` (0.75) | `.ex`/`.exs` present |
+| scala | `graph/parser/resolvers/scala_resolver.py` | `scala_import` (0.90), `scala_extends` (0.80), `scala_calls` (0.75) | `.scala` present |
+| angular | `graph/parser/resolvers/angular_resolver.py` | `angular_declares` (0.85), `angular_imports` (0.85), `angular_di` (0.75), `angular_template` (0.90), `angular_selector` (0.75) | `.ts` present (`.html` templates resolved via minimal `extract_html`) |
+| go_lsp | `graph/parser/resolvers/go_lsp.py` | `imports` (0.95), `calls` (0.95) | `.go` present and Go toolchain on PATH (gopls auto-installed) |
+| java_lsp | `graph/parser/resolvers/java_lsp.py` | `imports` (0.95), `calls` (0.95) | `.java` present and JDK on PATH (jdtls auto-downloaded) |
+| kotlin_lsp | `graph/parser/resolvers/kotlin_lsp.py` | `imports` (0.95), `calls` (0.95) | `.kt`/`.kts` present and JDK on PATH (kotlin-language-server auto-downloaded) |
+| rust_lsp | `graph/parser/resolvers/rust_lsp.py` | `imports` (0.95), `calls` (0.95) | `.rs` present and Rust toolchain on PATH (rust-analyzer auto-downloaded) |
+| csharp_lsp | `graph/parser/resolvers/csharp_lsp.py` | `imports` (0.95), `calls` (0.95) | `.cs` present and .NET SDK on PATH (OmniSharp auto-downloaded) |
+| php_lsp | `graph/parser/resolvers/php_lsp.py` | `imports` (0.95), `calls` (0.95) | `.php` present and Node.js on PATH (intelephense auto-installed via npm) |
+| cpp_lsp | `graph/parser/resolvers/cpp_lsp.py` | `imports` (0.95), `calls` (0.95) | `.cpp`/`.cc`/`.cxx`/`.h`/`.hpp`/`.hxx` present and a C++ compiler (clang++/g++/clang/gcc) on PATH (clangd auto-downloaded) |
 | rails | `graph/parser/resolvers/rails_resolver.py` | `rails_view` (0.85), `rails_route` (0.90), `rails_model_controller` (0.80), `rails_ar_usage` (0.70), `rails_concern` (0.80), `rails_service` (0.75) | `app/controllers/` present |
 | proto | `graph/parser/resolvers/proto_resolver.py` | `proto_import` (0.95), `proto_generated` (0.90), `proto_implements` (0.80), `grpc_client` (0.75) | `.proto` present |
 | terraform | `graph/parser/resolvers/terraform_resolver.py` | `tf_module` (0.95), `tf_var_ref` (0.80), `tf_data_ref` (0.85), `tf_resource_dep` (0.90), `tf_output` (0.85) | `.tf` present |
 | event | `graph/parser/resolvers/event_resolver.py` | `kafka_publish/subscribe`, `rabbitmq_publish/subscribe`, `redis_publish/subscribe`, `sqs_publish/subscribe`, `sns_publish`, `nats_publish/subscribe`, `event_channel`, `openapi_impl`, `asyncapi_impl` | always |
 | cochange | `graph/parser/resolvers/cochange_resolver.py` | `co_changed` | git available |
-| scip | `graph/parser/scip_reader.py` | `scip_reference` (0.95) | auto-installed by scip_manager or SCIP indexer on PATH |
 
 The `event` resolver detects broker patterns for Kafka, RabbitMQ, Redis, SQS, SNS, and NATS, and parses OpenAPI/Swagger and AsyncAPI specs for cross-service call edges.
 
@@ -1409,32 +1423,6 @@ The cochange resolver (`graph/parser/resolvers/cochange_resolver.py`) scans the 
 - Confidence formula: `0.50 + strength * 0.50`, capped at `0.90`.
 - Edge type: `co_changed`. These edges are structural hints only - they do not imply a call relationship, only historical co-modification.
 - `GraphQuerier.get_cochange_partners(file_path)` returns co-change partners sorted by strength descending.
-
-### SCIP integration (optional)
-
-`graph/parser/scip_reader.py` reads SCIP index files produced by compiler-grade indexers and emits `scip_reference` edges at 0.95 confidence - the highest confidence of any edge source.
-
-**Auto-install (no user action needed):** `graph/parser/scip_manager.py` auto-installs SCIP indexers under `~/.icx/scip/<lang>/` the first time a project with that language is built. Requires the runtime to be on PATH. Each language shows as a progress step during the SCIP phase (same pattern as LSP), so the first build may take longer while the indexer installs silently.
-
-| Language | Runtime needed | Auto-installed? | Notes |
-|---|---|---|---|
-| Python | Node + npm | Yes - `@sourcegraph/scip-python` | `NODE_OPTIONS=--max-old-space-size=4096` set automatically to prevent OOM on large projects |
-| TypeScript/JavaScript | Node + npm | Yes - `@sourcegraph/scip-typescript` | **Always runs as a background daemon** - never blocks the build. scip-typescript is spawned with `--output` pointing directly to the SCIP cache file and detached from the build process. Large projects (1000+ source files, thousands of .d.ts in node_modules) can take 5-30 min; this time is completely invisible to the user. Build completes immediately; SCIP edges appear on the **next** `icx graph build` (cache hit, instant). ICX generates `icx-tsconfig.json` that extends the project's own tsconfig (inheriting paths/aliases) with `files` limited to `.ts/.tsx` only and `incremental=true` for fast reruns. For JS-only projects without tsconfig: standalone tsconfig with `allowJs: true` and `baseUrl`. Cache invalidated when `.ts/.tsx/.js/.jsx` files change. |
-| Go | Go toolchain | Yes - `scip-go` via `go install` | Requires `go.mod` in project root |
-| Java/Kotlin | JDK 11+ + coursier | Yes - `com.sourcegraph:scip-java_2.13` via coursier bootstrap | Runs full Maven/Gradle build internally (sync timeout: 180s, then falls back to background daemon); requires `pom.xml` or `build.gradle`; **macOS/Linux only** - scip-java v0.12.3 uses Unix shell scripts as javac wrapper, broken on Windows |
-| Ruby | None | No - PATH detection only | GEM_HOME complexity prevents reliable auto-install; install via `gem install scip-ruby` |
-
-**Languages with no SCIP indexer available:**
-- **Protocol Buffers** (`.proto`): no SCIP indexer exists. ICX uses `proto_resolver.py` (tree-sitter) for cross-language import/generated edges.
-- **Terraform/HCL** (`.tf`): no SCIP indexer exists. ICX uses `terraform_resolver.py` (tree-sitter) for module/variable/resource dependency edges.
-
-**Sync timeout and background fallback:** All non-background languages (Go, Python, Ruby, Java, Kotlin) run synchronously with a 3-minute cap (`_SCIP_DEFAULT_TIMEOUT = 180`, `_SCIP_TIMEOUTS` overrides for Java/Kotlin also 180s). If the process does not finish within 3 minutes, it is killed and `_spawn_background_scip` is called immediately - the build continues without SCIP edges, and edges appear on the next `icx graph build` (cache hit). TypeScript/JavaScript always bypass this path and go background on launch.
-
-**Java/Kotlin coursier lookup order:** `_find_coursier()` checks PATH first, then `~/.icx/coursier[.bat]`. Install coursier with `brew install coursier` (macOS) or `cs setup` (Linux). The coursier bootstrap creates `scip-java[.bat]` in `~/.icx/scip/java/` on first run and is reused on all subsequent builds.
-
-**Ruby PATH fallback:** if `scip-ruby` is found on PATH, ICX uses it without auto-install. No `gemspec` or project config is generated.
-
-Version drift: if Node, Go, or JDK is upgraded (e.g. via nvm), scip_manager detects the version change and reinstalls automatically.
 
 ### Dependencies
 
@@ -1480,7 +1468,7 @@ Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build
    - **Fallback:** rglob filtered by `_is_noise_dir` from `parser/detect.py`
    - **`.icxignore` exclusions:** patterns from `~/.icx/graphs/<project_id>/.icxignore` are applied after file collection (seeded with defaults on first build).
 3. **AST extraction** (`emit: scan, ast`) - `parser.extract.extract(files, cache_root=icx_cache, parallel=False, on_progress=...)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses. `parallel=False` prevents grandchild process spawning inside the subprocess (deadlocks on Windows with the "spawn" context).
-4. **LSP + semantic resolver pass** (`emit: lsp`) - runs language-appropriate resolvers in order; each resolver appends edges to the extraction dict. Resolvers run per-language (Python, Java, Kotlin, JS/TS). Resolver failures are logged at DEBUG and skipped - never fatal. LSP servers (Pyright, tsserver) are managed by `lsp_manager.py` under `~/.icx/` and version-tracked against the active Node / Python runtime. **Batch-open protocol:** ts_lsp and pyright_lsp open all files with `did_open` before making any `definition()` queries, so the server indexes the full workspace once rather than re-analysing on every file. A circuit breaker (5 consecutive timeouts) aborts LSP queries cleanly when the server is overloaded. Per-request timeout is 3s.
+4. **LSP + semantic resolver pass** (`emit: lsp`) - runs language-appropriate resolvers in order; each resolver appends edges to the extraction dict. Resolvers run per-language (Python, Java, Kotlin, JS/TS). Resolver failures are logged at DEBUG and skipped - never fatal. LSP servers (Pyright, tsserver) are managed by `lsp_manager.py` under `~/.icx/<server>/<runtime-version>/`, a per-runtime-version cache so switching Node/Python (or Java/Rust/.NET/etc) versions across projects reuses the cached install instead of reinstalling. **Batch-open protocol:** ts_lsp and pyright_lsp open all files with `did_open` before making any `definition()` queries, so the server indexes the full workspace once rather than re-analysing on every file. A circuit breaker (5 consecutive timeouts) aborts LSP queries cleanly when the server is overloaded. Per-request timeout is 3s.
 5. **LLM edge enrichment** (optional, `emit: llm`) - `extract_corpus_parallel()` sends file batches to the LLM for cross-file semantic edges. Only edges merged; LLM community IDs discarded (collide across chunk boundaries).
 6. **Community detection** (`emit: louvain`) - `build_from_json(extraction)` + `cluster(G)` → merged graph with Louvain communities.
 7. **Export** (`emit: export`) - `to_json(G, communities, output_path=graph_tmp_path, skip_safety_check=True)` writes compact JSON (no indent, `separators=(",", ":")`) directly to a file handle via `json.dump` - no in-memory string. Then `_finalise_build` renames atomically to `graph.json`. `skip_safety_check=True` skips the existing-node-count guard during builds (guard still applies for manual/admin callers).

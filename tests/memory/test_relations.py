@@ -291,3 +291,16 @@ def test_get_related_by_files_multi_file_strength(tmp_path):
     result = rel.get_related_by_files(["a.py", "b.py", "c.py", "d.py", "e.py"], entries)
     assert len(result) == 1
     assert result[0]["strength"] == pytest.approx(0.6, abs=0.01)
+
+
+def test_get_table_raises_on_stale_lock(tmp_path, monkeypatch):
+    from icx_engine.exceptions import MemoryError
+    from icx_engine.memory.relations import RelationManager
+    import time
+    import lancedb
+
+    monkeypatch.setattr(lancedb, "connect", lambda *a, **k: time.sleep(10))
+
+    rel = RelationManager(db_path=tmp_path)
+    with pytest.raises(MemoryError, match="timed out"):
+        rel._get_table()

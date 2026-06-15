@@ -64,21 +64,21 @@ def test_list_hosts_no_cwd_param():
     assert "cwd" not in sig.parameters
 
 
-def test_list_hosts_claude_config_is_global_settings(monkeypatch, tmp_path):
+def test_list_hosts_claude_config_is_user_json(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
     claude = next(h for h in list_hosts() if h.name == "claude")
-    assert claude.config_path == tmp_path / ".claude" / "settings.json"
+    assert claude.config_path == tmp_path / ".claude.json"
     assert claude.detect_path == tmp_path / ".claude"
 
 
-def test_write_icx_entry_claude_merges_into_existing_settings(monkeypatch, tmp_path):
+def test_write_icx_entry_claude_merges_into_existing_user_json(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
     host = get_host("claude")
     host.detect_path.mkdir(parents=True, exist_ok=True)
-    host.config_path.write_text(json.dumps({"hooks": {"PreToolUse": []}, "theme": "dark"}), encoding="utf-8")
+    host.config_path.write_text(json.dumps({"projects": {}, "theme": "dark"}), encoding="utf-8")
     write_icx_entry(host)
     raw = json.loads(host.config_path.read_text(encoding="utf-8"))
-    assert raw["hooks"] == {"PreToolUse": []}
+    assert raw["projects"] == {}
     assert raw["theme"] == "dark"
     assert raw["mcpServers"]["icx"] == ICX_MCP_ENTRY
 

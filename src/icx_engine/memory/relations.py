@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from icx_engine.memory.schema import MemoryEntry
 
-from icx_engine.memory.schema import _sq
+from icx_engine.memory.schema import _sq, connect_with_timeout
 
 _log = logging.getLogger(__name__)
 _EDGES_TABLE = "memory_edges"
@@ -35,11 +35,10 @@ class RelationManager:
     def _get_table(self):
         if self._table is not None:
             return self._table
-        import lancedb
         import pyarrow as pa
 
         if self._db is None:
-            self._db = lancedb.connect(str(self._db_path))
+            self._db = connect_with_timeout(self._db_path)
 
         tables_response = self._db.list_tables()
         existing = (

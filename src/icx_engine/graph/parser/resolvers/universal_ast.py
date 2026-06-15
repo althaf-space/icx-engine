@@ -99,9 +99,16 @@ def _node_text(node, source: bytes) -> str:
 
 
 def _walk(node, visitor, depth: int = 0) -> None:
-    visitor(node, depth)
-    for child in node.children:
-        _walk(child, visitor, depth + 1)
+    """Iterative pre-order traversal (parent before children, children left-to-right).
+
+    Avoids RecursionError on deeply nested ASTs (long method chains, generated code).
+    """
+    stack: list[tuple] = [(node, depth)]
+    while stack:
+        current, current_depth = stack.pop()
+        visitor(current, current_depth)
+        for child in reversed(current.children):
+            stack.append((child, current_depth + 1))
 
 
 def _extract_import_text(node, source: bytes, ext: str) -> str | None:

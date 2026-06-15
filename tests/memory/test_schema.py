@@ -135,3 +135,29 @@ def test_memory_query_input():
     )
     assert q.issue_key == "PROJ-200"
     assert q.source_type == "jira"
+
+
+from icx_engine.memory.schema import connect_with_timeout
+
+
+def test_connect_with_timeout_returns_working_connection(tmp_path):
+    db = connect_with_timeout(tmp_path / "memdb")
+    tables_response = db.list_tables()
+    existing = tables_response.tables if hasattr(tables_response, "tables") else list(tables_response)
+    assert existing == []
+
+
+def test_connect_with_timeout_raises_on_hang(tmp_path, monkeypatch):
+    import time
+    import lancedb
+
+    def _slow_connect(*args, **kwargs):
+        time.sleep(10)
+
+    monkeypatch.setattr(lancedb, "connect", _slow_connect)
+
+    try:
+        connect_with_timeout(tmp_path / "memdb", timeout=0.2)
+        assert False, "expected MemoryError"
+    except MemoryError as exc:
+        assert "timed out" in str(exc)
