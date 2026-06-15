@@ -33,6 +33,30 @@ _VERSION_TIMEOUT_SECONDS = 5
 _INSTALL_TIMEOUT_SECONDS = 300
 
 
+def _safe_extract_tar(tf, install_dir: Path) -> None:
+    """Extract a tar archive, rejecting members that would land outside install_dir."""
+    dest_root = install_dir.resolve()
+    safe_members = []
+    for member in tf.getmembers():
+        member_path = (install_dir / member.name).resolve()
+        if member_path != dest_root and dest_root not in member_path.parents:
+            raise ValueError(f"Illegal tar archive entry: {member.name!r}")
+        safe_members.append(member)
+    tf.extractall(install_dir, members=safe_members)
+
+
+def _safe_extract_zip(zf, install_dir: Path) -> None:
+    """Extract a zip archive, rejecting members that would land outside install_dir."""
+    dest_root = install_dir.resolve()
+    safe_members = []
+    for member in zf.namelist():
+        member_path = (install_dir / member).resolve()
+        if member_path != dest_root and dest_root not in member_path.parents:
+            raise ValueError(f"Illegal zip archive entry: {member!r}")
+        safe_members.append(member)
+    zf.extractall(install_dir, members=safe_members)
+
+
 @dataclass
 class LSPServerConfig:
     """All language-specific knowledge for one LSP server."""
@@ -493,7 +517,7 @@ def _jdtls_install(runtime_path: str, install_dir: Path) -> bool:
     try:
         urllib.request.urlretrieve(_JDTLS_URL, str(archive))
         with tarfile.open(archive) as tf:
-            tf.extractall(install_dir)
+            _safe_extract_tar(tf, install_dir)
     except Exception as exc:
         _log.debug("jdtls: download/extract failed: %s", exc)
         return False
@@ -547,7 +571,7 @@ def _kotlin_ls_install(runtime_path: str, install_dir: Path) -> bool:
     try:
         urllib.request.urlretrieve(_KOTLIN_LS_URL, str(archive))
         with zipfile.ZipFile(archive) as zf:
-            zf.extractall(install_dir)
+            _safe_extract_zip(zf, install_dir)
     except Exception as exc:
         _log.debug("kotlin-language-server: download/extract failed: %s", exc)
         return False
@@ -668,10 +692,10 @@ def _omnisharp_install(runtime_path: str, install_dir: Path) -> bool:
         urllib.request.urlretrieve(f"{_OMNISHARP_BASE}/{asset}", str(archive))
         if is_zip:
             with zipfile.ZipFile(archive) as zf:
-                zf.extractall(install_dir)
+                _safe_extract_zip(zf, install_dir)
         else:
             with tarfile.open(archive) as tf:
-                tf.extractall(install_dir)
+                _safe_extract_tar(tf, install_dir)
     except Exception as exc:
         _log.debug("omnisharp: download/extract failed: %s", exc)
         return False
@@ -780,7 +804,7 @@ def _clangd_install(runtime_path: str, install_dir: Path) -> bool:
         url = f"https://github.com/clangd/clangd/releases/download/{tag}/{asset}"
         urllib.request.urlretrieve(url, str(archive))
         with zipfile.ZipFile(archive) as zf:
-            zf.extractall(install_dir)
+            _safe_extract_zip(zf, install_dir)
     except Exception as exc:
         _log.debug("clangd: download/extract failed: %s", exc)
         return False
