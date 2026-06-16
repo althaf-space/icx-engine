@@ -53,7 +53,7 @@ _FILE_TYPE_SYNONYMS = {
 }
 
 
-def _normalize_id(s: str) -> str:
+def _normalize_id(s: str | None) -> str:
     r"""Normalize an ID string the same way extract._make_id does.
 
     Used to reconcile edge endpoints when the LLM generates IDs with slightly
@@ -61,6 +61,8 @@ def _normalize_id(s: str) -> str:
     with extract._make_id - NFKC normalization, \w with re.UNICODE, underscore
     collapse, and casefold must all match (#811).
     """
+    if not s:
+        return ""
     s = unicodedata.normalize("NFKC", s)
     cleaned = re.sub(r"[^\w]+", "_", s, flags=re.UNICODE)
     cleaned = re.sub(r"_+", "_", cleaned)
@@ -242,8 +244,10 @@ def build(
     return build_from_json(combined, directed=directed, root=root)
 
 
-def _norm_label(label: str) -> str:
+def _norm_label(label: str | None) -> str:
     """Canonical dedup key - Unicode-aware, preserves CJK/word characters."""
+    if not label:
+        return ""
     label = unicodedata.normalize("NFKC", label)
     return re.sub(r"[\W_ ]+", " ", label.casefold(), flags=re.UNICODE).strip()
 

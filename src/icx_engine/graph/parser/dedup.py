@@ -20,8 +20,10 @@ _log = logging.getLogger(__name__)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _norm(label: str) -> str:
+def _norm(label: str | None) -> str:
     """Lowercase + collapse non-alphanumeric runs to space (Unicode-aware)."""
+    if not label:
+        return ""
     label = unicodedata.normalize("NFKC", label)
     return re.sub(r"[\W_]+", " ", label.casefold(), flags=re.UNICODE).strip()
 
