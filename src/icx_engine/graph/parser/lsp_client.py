@@ -10,6 +10,7 @@ import json
 import logging
 import queue
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -18,6 +19,45 @@ _log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 3.0
 _INIT_TIMEOUT = 30.0
+
+
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    """Kill a process and all its children.
+
+    On Windows, Popen.kill() only terminates the root JVM process; child
+    processes spawned by jdtls (gradle daemons, classpath resolvers) survive
+    and hold file locks that block the next graph build. /T kills the tree.
+    """
+    try:
+        import psutil
+        try:
+            root = psutil.Process(proc.pid)
+            children = root.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return
+        for child in children:
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        try:
+            root.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    except ImportError:
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                )
+            except OSError:
+                pass
+        else:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
 
 class Location:
@@ -52,6 +92,9 @@ class LSPClient:
         self._seq = 0
         self._pending: dict[int, queue.Queue] = {}
         self._lock = threading.Lock()
+        # Separate lock for stdin writes: reader thread may respond to server
+        # requests from _read_loop, so _send can be called from two threads.
+        self._send_lock = threading.Lock()
         self._reader: threading.Thread | None = None
         self._running = False
         self._consecutive_timeouts = 0
@@ -141,7 +184,12 @@ class LSPClient:
                 continue
 
             msg_id = msg.get("id")
-            if msg_id is not None:
+            msg_method = msg.get("method")
+
+            if msg_id is not None and msg_method is not None:
+                # Server-initiated request: respond null (method-not-found for unknown).
+                self._send({"jsonrpc": "2.0", "id": msg_id, "result": None})
+            elif msg_id is not None:
                 with self._lock:
                     q = self._pending.get(msg_id)
                 if q is not None:
@@ -152,11 +200,12 @@ class LSPClient:
             return
         body = json.dumps(msg).encode("utf-8")
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-        try:
-            self._proc.stdin.write(header + body)
-            self._proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
+        with self._send_lock:
+            try:
+                self._proc.stdin.write(header + body)
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
 
     def _request(self, method: str, params: dict, timeout: float | None = None) -> object:
         with self._lock:
@@ -246,12 +295,9 @@ class LSPClient:
                 self._notify("exit", {})
                 if self._proc.stdin:
                     self._proc.stdin.close()
-                self._proc.wait(timeout=5)
+                self._proc.wait(timeout=15)
             except Exception:
-                try:
-                    self._proc.kill()
-                except Exception:
-                    pass
+                _kill_tree(self._proc)
 
     def __enter__(self) -> "LSPClient":
         return self

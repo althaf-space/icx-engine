@@ -18,12 +18,13 @@ from __future__ import annotations
 import bisect
 import hashlib
 import logging
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
 
 from icx_engine.graph.parser.confidence import LSP_RESOLVED, annotate_edge
-from icx_engine.graph.parser.lsp_manager import JDTLS, ensure_server, record_pid
+from icx_engine.graph.parser.lsp_manager import JDTLS, ensure_server, java_runtime, kill_tracked, record_pid
 
 _log = logging.getLogger(__name__)
 
@@ -123,6 +124,7 @@ def _collect_positions(tree) -> list[tuple[int, int, str]]:
 
 
 def _workspace_dir(project_root: Path) -> Path:
+    """Persistent jdtls workspace under ~/.icx/jdtls/workspaces/<sha1[:16]>/."""
     digest = hashlib.sha1(str(project_root).encode("utf-8")).hexdigest()[:16]
     return JDTLS.install_dir / "workspaces" / digest
 
@@ -145,13 +147,36 @@ def extract_java_lsp_edges(
 
     pos_index = _build_pos_index(nodes_list, project_root)
 
+    # Kill any jdtls zombie from a previous build before starting a new one.
+    # Orphan JVM child processes hold file locks on Windows and slow JVM startup.
+    kill_tracked(JDTLS.install_dir)
+
     base_cmd = ensure_server(JDTLS)
     if base_cmd is None:
         return []
 
+    rt = java_runtime()
+    java_ver = rt[1] if rt else "unknown"
     workspace = _workspace_dir(project_root)
+    marker = workspace / "icx-ready"
+
+    # Wipe only when Java version changed: a workspace indexed by a different JDK
+    # produces wrong type resolution. Missing marker = may be a pre-marker build or
+    # interrupted build; we attempt to reuse it so existing warm indexes are not lost.
+    if marker.exists():
+        try:
+            if marker.read_text(encoding="utf-8").strip() != java_ver:
+                shutil.rmtree(workspace, ignore_errors=True)
+        except OSError:
+            pass
     workspace.mkdir(parents=True, exist_ok=True)
-    cmd = base_cmd + ["-data", str(workspace)]
+    # Remove marker at build start so a mid-build kill does not leave a stale marker.
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
 
     import javalang
 
@@ -160,7 +185,9 @@ def extract_java_lsp_edges(
     proj_str_norm = _norm(str(project_root))
     seen: set[tuple[str, str, str]] = set()
     edges: list[dict] = []
+    _build_ok = False
 
+    cmd = base_cmd + ["-data", str(workspace)]
     try:
         with LSPClient(cmd, project_root) as client:
             if not client.start():
@@ -247,7 +274,15 @@ def extract_java_lsp_edges(
 
                 client.did_close(java_file)
 
+        _build_ok = True
     except Exception as exc:
         _log.debug("java_lsp error: %s", type(exc).__name__)
+
+    # Write marker only on clean completion so a mid-build kill leaves no stale marker.
+    if _build_ok:
+        try:
+            marker.write_text(java_ver, encoding="utf-8")
+        except OSError:
+            pass
 
     return edges
