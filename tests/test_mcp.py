@@ -998,6 +998,88 @@ async def test_handle_save_memory_tech_stack_empty_when_no_project_match(mcp_con
     assert saved_entry.tech_stack == {}
 
 
+async def test_handle_save_memory_outcome_verified_new_entry_falls_through(mcp_config):
+    """outcome_verified=True on a brand-new entry creates it instead of failing."""
+    mock_mem = MagicMock()
+    mock_mem.save.return_value = None
+    mock_mem.verify_resolution.return_value = {"error": "entry not found", "issue_key": "TEST-1"}
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+            result = await _handle_save_memory(
+                "TEST-1",
+                "Root cause summary",
+                "Detailed problem description.",
+                "Resolution note.",
+                ["src/foo.py"],
+                ["some-tag"],
+                "Task",
+                extra={"outcome_verified": True, "outcome_feedback_note": "Tested and confirmed."},
+            )
+
+    data = json.loads(result)
+    assert data["saved"] is True, f"expected saved=True, got: {data}"
+    mock_mem.save.assert_called_once()
+    saved_entry = mock_mem.save.call_args[0][0]
+    assert saved_entry.outcome_verified is True
+    assert saved_entry.outcome_feedback_note == "Tested and confirmed."
+
+
+async def test_handle_save_memory_outcome_verified_existing_entry(mcp_config):
+    """outcome_verified=True on existing entry calls verify_resolution and returns success."""
+    mock_mem = MagicMock()
+    mock_mem.verify_resolution.return_value = {
+        "issue_key": "TEST-2",
+        "confirmation_count": 2,
+        "memory_confidence": 0.5,
+    }
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+            result = await _handle_save_memory(
+                "TEST-2",
+                "Root cause summary",
+                "Detailed problem description.",
+                "Resolution note.",
+                [],
+                ["some-tag"],
+                "bug",
+                extra={"outcome_verified": True, "outcome_feedback_note": "Works in prod."},
+            )
+
+    data = json.loads(result)
+    assert data["saved"] is True
+    assert data["confirmation_count"] == 2
+    mock_mem.save.assert_not_called()
+
+
+async def test_handle_save_memory_outcome_verified_other_error_fails(mcp_config):
+    """outcome_verified=True with a non-'entry not found' error still returns saved=False."""
+    mock_mem = MagicMock()
+    mock_mem.verify_resolution.return_value = {"error": "database locked", "issue_key": "TEST-3"}
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+            result = await _handle_save_memory(
+                "TEST-3",
+                "Root cause summary",
+                "Detailed problem description.",
+                "Resolution note.",
+                [],
+                ["some-tag"],
+                "bug",
+                extra={"outcome_verified": True, "outcome_feedback_note": "Tested."},
+            )
+
+    data = json.loads(result)
+    assert data["saved"] is False
+    assert "database locked" in data.get("error", "")
+    mock_mem.save.assert_not_called()
+
+
 # ── Profile override - CLI ────────────────────────────────────────────────────
 
 from icx_engine.cli import app as _cli_app

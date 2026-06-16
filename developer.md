@@ -1213,6 +1213,9 @@ Call `manager.reinforce_usage(source_key, used_by_key)` when a past resolution i
 - Increments `confirmation_count`, sets `outcome_verified=True`
 - `memory_confidence = min(1.0, confirmation_count * 0.25)`
 - Writes `"verified"` audit event
+- Returns `{"error": "entry not found"}` if the key has no prior entry
+
+**Note:** When `save_memory` is called with `outcome_verified=True` and the entry does not yet exist, the MCP handler falls through to normal save (creating the entry with `outcome_verified=True` set). It does not fail. `verify_resolution` is only called directly when the entry already exists.
 
 `negate_resolution(issue_key, reason)`:
 - Sets `negated=True`, applies -0.4 boost penalty
@@ -1344,7 +1347,7 @@ The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/p
 | `graph/parser/roles.py` | File role tag detection (mirrors `querier.py:_role_tag`) |
 | `graph/parser/validate.py` | Graph integrity validation |
 | `graph/parser/dedup.py` | Duplicate edge deduplication |
-| `graph/parser/lsp_client.py` | Generic LSP stdio JSON-RPC client |
+| `graph/parser/lsp_client.py` | Generic LSP stdio JSON-RPC client; `wait_ready(timeout, grace)` blocks until all `$/progress` tokens complete (workDoneProgress protocol), enabling heavy servers (jdtls, kotlin-ls) to finish indexing before definition queries begin |
 | `graph/parser/lsp_manager.py` | LSP lifecycle: detect runtime, install language server into a per-runtime-version cache dir (`~/.icx/<server>/<version>/`), spawn, kill |
 | `graph/parser/resolvers/` | Semantic edge resolvers: Spring, React, Django, FastAPI, Flask, Next.js, Vue, Svelte, Remix, SQLAlchemy, Celery, pytest fixtures, Redux, GraphQL, JPA, JAX-RS, Lombok, Kotlin, TypeScript LSP, Pyright LSP, gopls LSP, jdtls LSP, kotlin-language-server LSP, rust-analyzer LSP, OmniSharp LSP, intelephense LSP, clangd LSP, Java symbols, Python Jedi, Python type-checking, cross-service REST, JSP/Servlet, Go, C++, Swift, Elixir, Scala, Rails, gRPC/Protobuf, Terraform/HCL, event brokers, co-change history, and more |
 | `graph/parser/file_cache.py` | SHA-256 file hash cache for incremental graph rebuilds |

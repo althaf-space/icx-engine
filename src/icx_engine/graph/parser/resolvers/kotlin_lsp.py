@@ -188,6 +188,12 @@ def extract_kotlin_lsp_edges(
                 client.did_open(kt_file, "kotlin")
                 file_tasks.append((kt_file, rel, src_id, positions))
 
+            # Wait for kotlin-language-server to finish background indexing.
+            # kotlin-language-server (JVM-based) indexes files asynchronously;
+            # same workDoneProgress protocol as jdtls.
+            if file_tasks and not client.wait_ready():
+                _log.debug("kotlin_lsp: server indexing did not complete within timeout; proceeding")
+
             # Phase 2: query definitions with circuit breaker.
             for kt_file, rel, src_id, positions in file_tasks:
                 if client.consecutive_timeouts >= _CIRCUIT_BREAKER_LIMIT:

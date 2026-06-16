@@ -3202,7 +3202,10 @@ async def _handle_save_memory(
             )
             if "error" not in result:
                 return json.dumps({**result, "saved": True})
-            return json.dumps({**result, "saved": False})
+            if result.get("error") != "entry not found":
+                return json.dumps({**result, "saved": False})
+            # Entry doesn't exist yet: fall through to normal save below.
+            # The MemoryEntry is created with outcome_verified=True already set.
 
         # Build causal chain from session context + tool input (Phase 8)
         causal_chain = {
