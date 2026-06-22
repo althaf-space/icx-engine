@@ -526,10 +526,7 @@ class ConfigManager:
                     except Exception as _exc:
                         _fallback = _env_get(f"{ctype}_token:{domain}")
                         if _fallback:
-                            print(
-                                f"[config] D-Lock decrypt failed for {ctype} token ({domain}); using env var.",
-                                file=sys.stderr,
-                            )
+                            _log.debug("[config] D-Lock decrypt failed for %s token (%s); using env var.", ctype, domain)
                             auth["api_token"] = _fallback
                         else:
                             from icx_engine.exceptions import ConfigError
@@ -555,10 +552,7 @@ class ConfigManager:
                         except Exception as _exc:
                             _fallback = _env_get(f"{acct_prefix}:{domain}")
                             if _fallback:
-                                print(
-                                    f"[config] D-Lock decrypt failed for OAuth {field_name} ({domain}); using env var.",
-                                    file=sys.stderr,
-                                )
+                                _log.debug("[config] D-Lock decrypt failed for OAuth %s (%s); using env var.", field_name, domain)
                                 auth[field_name] = _fallback
                             else:
                                 from icx_engine.exceptions import ConfigError
@@ -587,10 +581,7 @@ class ConfigManager:
                         except Exception as _exc:
                             _fallback = _env_get(acct_fn(profile_name))
                             if _fallback:
-                                print(
-                                    f"[config] D-Lock decrypt failed for LLM profile '{profile_name}' ({channel}); using env var.",
-                                    file=sys.stderr,
-                                )
+                                _log.debug("[config] D-Lock decrypt failed for LLM profile '%s' (%s); using env var.", profile_name, channel)
                                 ch["api_key"] = _fallback
                             else:
                                 from icx_engine.exceptions import ConfigError

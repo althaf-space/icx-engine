@@ -231,6 +231,43 @@ def test_clear_removes_all(tmp_path):
     assert entries == []
 
 
+def test_list_entries_project_key_full_issue_key(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-100", id="id-1", project_key="PROJ"))
+        mgr.save(_make_entry(issue_key="OTHER-1", id="id-2", project_key="OTHER"))
+        entries = mgr.list_entries(project_key="PROJ-100")
+
+    assert len(entries) == 1
+    assert entries[0].issue_key == "PROJ-100"
+
+
+def test_list_entries_project_key_case_insensitive(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-100", id="id-1", project_key="PROJ"))
+        entries = mgr.list_entries(project_key="proj")
+
+    assert len(entries) == 1
+    assert entries[0].issue_key == "PROJ-100"
+
+
+def test_list_entries_project_key_non_jira_not_mangled(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-100", id="id-1", project_key="owner-org"))
+        entries = mgr.list_entries(project_key="owner-org")
+
+    assert len(entries) == 1
+    assert entries[0].issue_key == "PROJ-100"
+
+
 def test_clear_resets_sub_managers(tmp_path):
     from icx_engine.memory.manager import MemoryManager
 

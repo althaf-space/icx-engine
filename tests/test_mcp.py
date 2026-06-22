@@ -2236,3 +2236,310 @@ def test_extract_tracker_key_returns_empty_for_invalid():
     from icx_engine.mcp_server import _extract_tracker_key_from_ref
     assert _extract_tracker_key_from_ref("not-a-valid-ref") == ""
 
+
+# ── graph_important_nodes ─────────────────────────────────────────────────────
+
+async def test_graph_important_nodes_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_important_nodes", {})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error" or "error" in data
+
+
+async def test_graph_important_nodes_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_important_nodes", {"project_path": "/nonexistent/icx_test_xyz_12345"})
+    data = json.loads(result[0].text)
+    assert "error" in data or data.get("status") == "error"
+
+
+# ── graph_find_context ────────────────────────────────────────────────────────
+
+async def test_graph_find_context_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_find_context", {"task": "auth token expiry"})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_find_context_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_find_context", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+        "task": "auth token expiry",
+    })
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+
+
+# ── graph_subsystem ───────────────────────────────────────────────────────────
+
+async def test_graph_subsystem_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_subsystem", {"file_path": "src/auth/service.py"})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_subsystem_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_subsystem", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+        "file_path": "src/auth/service.py",
+    })
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+
+
+# ── graph_ownership ───────────────────────────────────────────────────────────
+
+async def test_graph_ownership_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_ownership", {"file_path": "src/billing/invoice.py"})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_ownership_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_ownership", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+        "file_path": "src/billing/invoice.py",
+    })
+    data = json.loads(result[0].text)
+    assert "error" in data or data.get("status") == "error"
+
+
+async def test_graph_ownership_rejects_path_traversal():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_ownership", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+        "file_path": "../../../etc/passwd",
+    })
+    data = json.loads(result[0].text)
+    assert "error" in data or data.get("status") == "error"
+    assert "owners" not in data
+
+
+# ── graph_call_chain ──────────────────────────────────────────────────────────
+
+async def test_graph_call_chain_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_call_chain", {"node_id": "auth_service"})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_call_chain_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_call_chain", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+        "node_id": "auth_service",
+    })
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+
+
+# ── graph_impact ──────────────────────────────────────────────────────────────
+
+async def test_graph_impact_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_impact", {"node_id": "user_repository"})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_impact_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_impact", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+        "node_id": "user_repository",
+    })
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+
+
+# ── graph_cross_links ─────────────────────────────────────────────────────────
+
+async def test_graph_cross_links_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_cross_links", {})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_cross_links_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_cross_links", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+    })
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+
+
+# ── graph_blast_radius ────────────────────────────────────────────────────────
+
+async def test_graph_blast_radius_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_blast_radius", {"changed_files": ["src/auth/token.py"]})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_blast_radius_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_blast_radius", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+        "changed_files": ["src/auth/token.py"],
+    })
+    data = json.loads(result[0].text)
+    assert "error" in data or data.get("status") == "error"
+
+
+# ── graph_cycles ──────────────────────────────────────────────────────────────
+
+async def test_graph_cycles_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_cycles", {})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_cycles_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_cycles", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+    })
+    data = json.loads(result[0].text)
+    assert "error" in data or data.get("status") == "error"
+
+
+# ── graph_dead_code ───────────────────────────────────────────────────────────
+
+async def test_graph_dead_code_missing_project_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_dead_code", {})
+    data = json.loads(result[0].text)
+    assert data.get("status") == "error"
+    assert data.get("code") == "NO_PATH"
+
+
+async def test_graph_dead_code_nonexistent_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("graph_dead_code", {
+        "project_path": "/nonexistent/icx_test_xyz_12345",
+    })
+    data = json.loads(result[0].text)
+    assert "error" in data or data.get("status") == "error"
+
+
+# ── memory_get_hotspots ───────────────────────────────────────────────────────
+
+async def test_memory_get_hotspots_returns_empty_structure():
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server._get_hotspots_sync", return_value=[]):
+        result = await _call_tool("memory_get_hotspots", {})
+    data = json.loads(result[0].text)
+    assert "results" in data
+    assert "count" in data
+    assert data["count"] == 0
+
+
+async def test_memory_get_hotspots_returns_items_from_manager():
+    from icx_engine.mcp_server import _call_tool
+    fake = [{"file": "src/auth/token.py", "count": 5, "work_items": ["PROJ-1"]}]
+    with patch("icx_engine.mcp_server._get_hotspots_sync", return_value=fake):
+        result = await _call_tool("memory_get_hotspots", {"top_n": 5})
+    data = json.loads(result[0].text)
+    assert data["count"] == 1
+    assert data["results"][0]["file"] == "src/auth/token.py"
+
+
+# ── memory_find_by_file ───────────────────────────────────────────────────────
+
+async def test_memory_find_by_file_missing_file_path_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("memory_find_by_file", {})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+async def test_memory_find_by_file_returns_empty_structure():
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server._find_by_file_sync", return_value=[]):
+        result = await _call_tool("memory_find_by_file", {"file_path": "src/auth/token.py"})
+    data = json.loads(result[0].text)
+    assert "results" in data
+    assert "count" in data
+    assert data["count"] == 0
+
+
+# ── memory_get_patterns ───────────────────────────────────────────────────────
+
+async def test_memory_get_patterns_returns_empty_structure():
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server._get_patterns_sync", return_value=[]):
+        result = await _call_tool("memory_get_patterns", {})
+    data = json.loads(result[0].text)
+    assert "results" in data
+    assert "count" in data
+    assert data["count"] == 0
+
+
+async def test_memory_get_patterns_returns_items_from_manager():
+    from icx_engine.mcp_server import _call_tool
+    fake = [{"project_key": "PROJ", "pattern_type": "dominant_tag", "label": "auth", "entry_count": 8}]
+    with patch("icx_engine.mcp_server._get_patterns_sync", return_value=fake):
+        result = await _call_tool("memory_get_patterns", {"project_key": "PROJ"})
+    data = json.loads(result[0].text)
+    assert data["count"] == 1
+    assert data["results"][0]["pattern_type"] == "dominant_tag"
+
+
+# ── reinforce_memory_usage ────────────────────────────────────────────────────
+
+async def test_reinforce_memory_usage_memory_not_ready_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server._get_memory_state", return_value="cold"):
+        result = await _call_tool("reinforce_memory_usage", {
+            "source_key": "PROJ-88",
+            "new_ticket_key": "PROJ-142",
+        })
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+async def test_reinforce_memory_usage_invalid_key_format_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("reinforce_memory_usage", {
+        "source_key": "not-a-valid-key",
+        "new_ticket_key": "PROJ-142",
+    })
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+# ── get_memory_audit ──────────────────────────────────────────────────────────
+
+async def test_get_memory_audit_memory_not_ready_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    with patch("icx_engine.mcp_server._get_memory_state", return_value="cold"):
+        result = await _call_tool("get_memory_audit", {"issue_key": "PROJ-88"})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+async def test_get_memory_audit_invalid_key_format_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("get_memory_audit", {"issue_key": "not-a-key"})
+    data = json.loads(result[0].text)
+    assert "error" in data
+

@@ -19,10 +19,11 @@ def export_to_json(entries: list[MemoryEntry], output_path: Path) -> None:
 
 def import_from_json(input_path: Path) -> list[MemoryEntry]:
     """Deserialize MemoryEntry records from a JSON export file."""
+    input_path = input_path.resolve()
     if not input_path.exists():
         raise MemoryError(
             f"Import file not found: {input_path}. "
-            "Run `icx memory export` to create an export file first."
+            "Provide the full path to the export file, e.g. icx memory import /path/to/icx-memory-export.json"
         )
     try:
         data = json.loads(input_path.read_text(encoding="utf-8"))

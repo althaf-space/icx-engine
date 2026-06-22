@@ -57,8 +57,9 @@ def _cosine_distance(a: list[float], b: list[float]) -> float:
         if norm_a == 0 or norm_b == 0:
             return 1.0
         return round(1.0 - dot / (norm_a * norm_b), 6)
-    except Exception:
-        return 0.0
+    except Exception as exc:
+        _log.debug("[memory] cosine distance computation failed: %s", exc)
+        return 1.0
 
 
 def _extract_bare_key(s: str) -> str | None:
@@ -94,24 +95,24 @@ def _row_to_entry(row: dict) -> MemoryEntry:
     if _cc_raw:
         try:
             causal_chain = json.loads(_cc_raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("[memory] _row_to_entry: causal_chain_json parse failed: %s", exc)
 
     save_context_vector: list[float] = []
     _sv_raw = row.get("save_context_vector_json") or ""
     if _sv_raw and _sv_raw != "[]":
         try:
             save_context_vector = json.loads(_sv_raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("[memory] _row_to_entry: save_context_vector_json parse failed: %s", exc)
 
     tech_stack: dict = {}
     _ts_raw = row.get("tech_stack_json") or ""
     if _ts_raw and _ts_raw != "{}":
         try:
             tech_stack = json.loads(_ts_raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("[memory] _row_to_entry: tech_stack_json parse failed: %s", exc)
 
     return MemoryEntry(
         id=row["id"],
@@ -167,6 +168,7 @@ class MemoryManager:
         self._table = None
         self._audit_tbl = None
         self._fts_ready = False  # deferred until first save - avoids hang on empty table
+        self._in_migrate: bool = False
 
     def _get_table(self):
         if self._table is not None:
@@ -338,7 +340,8 @@ class MemoryManager:
                 f"issue_key = '{_sq(issue_key.upper())}'", prefilter=True
             ).limit(1).to_list()
             return _row_to_entry(rows[0]) if rows else None
-        except Exception:
+        except Exception as exc:
+            _log.debug("[memory] _find_by_key failed for %s: %s", issue_key, exc)
             return None
 
     def _upsert_entry(self, entry: MemoryEntry) -> None:
@@ -349,7 +352,6 @@ class MemoryManager:
             (
                 table.merge_insert("issue_key")
                 .when_matched_update_all()
-                .when_not_matched_insert_all()
                 .execute([row])
             )
         except Exception as e:
@@ -576,14 +578,17 @@ class MemoryManager:
             old_boost = citing.cross_reference_boost
             citing.cross_reference_boost = max(0.0, citing.cross_reference_boost - 0.05)
             self._upsert_entry(citing)
-            self._log_audit(MemoryAuditEvent(
-                event_type="negated",
-                source_key=citing_key,
-                actor_key=issue_key,
-                before_boost=old_boost,
-                after_boost=citing.cross_reference_boost,
-                note=f"propagated from negation of {issue_key}",
-            ))
+            try:
+                self._log_audit(MemoryAuditEvent(
+                    event_type="negated",
+                    source_key=citing_key,
+                    actor_key=issue_key,
+                    before_boost=old_boost,
+                    after_boost=citing.cross_reference_boost,
+                    note=f"propagated from negation of {issue_key}",
+                ))
+            except Exception:
+                pass
             propagated_to.append(citing_key)
 
         return {
@@ -664,10 +669,11 @@ class MemoryManager:
         except Exception as exc:
             raise MemoryError(f"Failed to save memory entry for {entry.issue_key}: {exc}") from exc
 
-        try:
-            self._relations.auto_link(entry, self.list_entries())
-        except Exception as exc:
-            _log.warning("auto_link failed for %s: %s", entry.issue_key, exc)
+        if not self._in_migrate:
+            try:
+                self._relations.auto_link(entry, self.list_entries())
+            except Exception as exc:
+                _log.warning("auto_link failed for %s: %s", entry.issue_key, exc)
 
         # Refresh patterns every 5th unique entry (Phase 5 lowered from 10)
         try:
@@ -687,11 +693,15 @@ class MemoryManager:
         try:
             table = self._get_table()
             rows = table.to_arrow().to_pylist()
-        except Exception:
+        except Exception as exc:
+            _log.debug("[memory] list_entries failed: %s", exc)
             return []
         entries = [_row_to_entry(r) for r in rows]
         if project_key:
-            entries = [e for e in entries if e.project_key == project_key]
+            _pk = project_key.upper()
+            if _SAFE_KEY_RE.match(_pk):
+                _pk = _pk.split("-", 1)[0]
+            entries = [e for e in entries if e.project_key.upper() == _pk]
         if source_type:
             entries = [e for e in entries if e.source_type == source_type]
         entries.sort(key=lambda e: e.saved_at, reverse=True)
@@ -999,10 +1009,20 @@ class MemoryManager:
         if log:
             log(f"  migrating {count} work items to {VECTOR_DIM}-dim vectors...")
         self.clear()
-        for i, entry in enumerate(entries, 1):
-            self.save(entry, restore=True)
-            if log:
-                log(f"  [{i}/{count}] {entry.issue_key}")
+        self._in_migrate = True
+        try:
+            for i, entry in enumerate(entries, 1):
+                self.save(entry, restore=True)
+                if log:
+                    log(f"  [{i}/{count}] {entry.issue_key}")
+        finally:
+            self._in_migrate = False
+        try:
+            all_entries = self.list_entries()
+            for entry in all_entries:
+                self._relations.auto_link(entry, all_entries)
+        except Exception as exc:
+            _log.warning("auto_link after migrate failed: %s", exc)
         return count
 
     def get_related(

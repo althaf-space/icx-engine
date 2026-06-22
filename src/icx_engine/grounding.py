@@ -1,7 +1,11 @@
 from __future__ import annotations
+import asyncio
 import base64
 import json
+import logging
 from typing import Callable, Any
+
+_log = logging.getLogger(__name__)
 
 from icx_engine.models.config import ChannelConfig
 from icx_engine.models.output import RawIssueData, IssueContext
@@ -149,7 +153,8 @@ async def _verify_anthropic(
     try:
         corrected = IssueContext.model_validate(json.loads(_strip_json_fencing(text)))
         return finalize(corrected, raw)
-    except Exception:
+    except Exception as exc:
+        _log.debug("[grounding] parse failed in _verify_anthropic: %s", exc)
         return initial
 
 
@@ -191,7 +196,8 @@ async def _verify_openai_compat(
     try:
         corrected = IssueContext.model_validate(json.loads(_strip_json_fencing(text)))
         return finalize(corrected, raw)
-    except Exception:
+    except Exception as exc:
+        _log.debug("[grounding] parse failed in _verify_openai_compat: %s", exc)
         return initial
 
 
@@ -216,14 +222,22 @@ async def _verify_google(
         system_instruction=SYSTEM_PROMPT,
         temperature=0.0,
     )
-    response = await client.aio.models.generate_content(
-        model=image_config.model,
-        contents=parts,
-        config=cfg,
-    )
+    try:
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=image_config.model,
+                contents=parts,
+                config=cfg,
+            ),
+            timeout=45.0,
+        )
+    except asyncio.TimeoutError:
+        _log.debug("[grounding] _verify_google timed out after 45s")
+        return initial
     text = (response.text or "").strip()
     try:
         corrected = IssueContext.model_validate(json.loads(_strip_json_fencing(text)))
         return finalize(corrected, raw)
-    except Exception:
+    except Exception as exc:
+        _log.debug("[grounding] parse failed in _verify_google: %s", exc)
         return initial

@@ -839,33 +839,40 @@ self._conn = (
 
 `model_dump()` omits `exclude=True` fields, so the round-trip silently loses all secrets. The `isinstance` short-circuit avoids this.
 
-### Step 4 - Register the connection model (`connectors/registry.py`)
+### Step 4 - Register the connector and connection model
+
+Use `register_connector()` from `connectors/base.py`. This registers both the connector class and the connection model in one call:
 
 ```python
+from icx_engine.connectors.base import register_connector
+from icx_engine.connectors.myplatform.connector import MyConnector
 from icx_engine.connectors.myplatform.config import MyConnection
 
-CONNECTION_REGISTRY: dict[str, type] = {
-    "jira": JiraConnection,
-    "myplatform": MyConnection,   # ← add this
-}
+register_connector("myplatform", MyConnector, MyConnection)
 ```
 
-This is how `AppConfig._cast_connections()` deserializes saved config into your typed model.
+Call this at import time (e.g. in your package's `__init__.py`) or in a plugin entry point. The built-in Jira connector is auto-registered lazily on first use via `_connector_registry()` - no manual call needed for it.
 
-### Step 5 - Register the connector (`connectors/base.py`)
+`register_connector()` populates two module-level dicts in `connectors/base.py`:
+- `_CONNECTOR_CLASSES["myplatform"] = MyConnector` - used by `get_connector_class()` and `get_connector()`
+- `_CONNECTION_CLASSES["myplatform"] = MyConnection` - mirrored into `connectors/registry.py:CONNECTION_REGISTRY` so `AppConfig._cast_connections()` can deserialize saved config into your typed model.
+
+`connectors/registry.py` now reads `_CONNECTION_CLASSES` dynamically - no manual edits needed.
+
+### Step 5 - Optional: override `refresh_credentials()`
+
+If your connector uses OAuth and tokens expire during a long session, override:
 
 ```python
-def _connector_registry() -> dict[str, type[ConnectorBase]]:
-    from icx_engine.connectors.jira.connector import JiraConnector
-    from icx_engine.connectors.myplatform.connector import MyConnector
-
-    return {
-        "jira": JiraConnector,
-        "myplatform": MyConnector,   # ← add this
-    }
+async def refresh_credentials(self) -> None:
+    """Refresh OAuth tokens if needed."""
+    # check expiry, call refresh_oauth_token(), update self._conn
+    ...
 ```
 
-`_connector_registry()` is the single source of truth - `get_connector()`, `get_connector_class()`, and `get_all_connector_classes()` all derive from it. No other registration point exists.
+The default implementation is a no-op. `engine.py` or callers may invoke this before `fetch()`.
+
+`_connector_registry()` is the single source of truth - `get_connector()`, `get_connector_class()`, and `get_all_connector_classes()` all derive from it.
 
 ### Step 6 - Add a connect flow (`services/connection_service.py` + `cli.py`)
 
@@ -1686,6 +1693,10 @@ pytest tests/ -x -q
 
 **All tests must pass before committing.** There are no exceptions.
 
+**Auth module tests** live in `tests/auth/`. Cover `build_basic_auth_header`, `build_bearer_header`, HTTPS enforcement in `check_http_credentials`, PKCE S256 math, HTTPS enforcement in `run_pkce_flow` and `refresh_oauth_token`.
+
+**Connector base tests** live in `tests/connectors/test_base.py`. Cover `get_connector_class` (known type, unknown type), `register_connector`, `refresh_credentials` no-op, `extract_project_key`.
+
 **Use real data fixtures** - see `tests/test_data.py` for the shared Jira payload. Add your platform's equivalent there, not inline in test files.
 
 **Never mock `ConfigManager` directly** - use the `isolated_config` fixture from `conftest.py` which redirects `CONFIG_PATH` to a temp file:
@@ -1810,7 +1821,7 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 | `graph/parser/icxignore.py:_SEED_CONTENT` | Default exclusion pattern list seeded into new `.icxignore` files on first build. Removing patterns here means future first-build users include those files; changing format requires updating the file header comments. |
 | `graph/progress.py:STAGES` | Stage string constants consumed by the parent-side renderer to display named progress steps. Adding stages is additive (renderer shows unknown stages as-is); removing or renaming stages silently drops the corresponding progress bar step. |
 | `graph/tsserver.py` | tsserver install path and version-tracking logic must stay aligned with `lsp_manager.py` and `resolvers/ts_lsp.py`. If you change the install dir (`~/.icx/tsserver/`), update all three files and the `readme.md` reference. |
-| `graph/parser/lsp_manager.py` | Generic LSP lifecycle. Language-specific servers (ts_lsp, pyright_lsp) inherit from this. Do not add language-specific logic here - add a new resolver file instead. |
+| `graph/parser/lsp_manager.py` | Generic LSP lifecycle. Language-specific servers (ts_lsp, pyright_lsp) inherit from this. Do not add language-specific logic here - add a new resolver file instead. All binary downloads go through `_download_lsp()` which enforces a 300s timeout and supports optional SHA-256 checksum pinning via `_LSP_CHECKSUMS`. To pin a server binary, add `_LSP_CHECKSUMS["server-name"] = "<sha256-hex>"` at the top of the file. |
 | `connectors/audio.py:WhisperManager._load` | Lock + double-checked locking is required - concurrent A/V attachments run through `asyncio.gather` and hit `_load()` from multiple executor threads. Removing the lock races the first-time download. |
 | `connectors/attachments.py:_extract_audio_from_video` | The `try/except asyncio.TimeoutError -> proc.kill(); await proc.wait()` block prevents orphan ffmpeg processes on timeout. The `proc.returncode != 0 -> raise RuntimeError` check prevents passing empty/partial WAV bytes to Whisper. Do not collapse either guard. |
 | `config_manager.py:_SENTINEL` | Do not change the sentinel string - it would invalidate all existing saved configs. |

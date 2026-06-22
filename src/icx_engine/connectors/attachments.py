@@ -803,7 +803,7 @@ async def _extract_frames_from_video(
             "-vf", f"fps={fps}",
             "-frames:v", str(max_frames),
             "-q:v", "5",
-            os.path.join(frame_dir, "frame%04d.jpg"),
+            str(Path(frame_dir) / "frame%04d.jpg"),
             "-y",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

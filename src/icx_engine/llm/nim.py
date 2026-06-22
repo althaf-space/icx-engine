@@ -49,7 +49,7 @@ class NIMProvider(LLMProvider):
                 f"NIM API returned an error (status {exc.status_code}). Try again later."
             ) from exc
 
-        content = response.choices[0].message.content or ""
+        content = response.choices[0].message.content if response.choices else ""
         try:
             return finalize(IssueContext.model_validate(json.loads(_strip_json_fencing(content))), raw)
         except Exception as exc:

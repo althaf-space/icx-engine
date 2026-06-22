@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from icx_engine.models.config import BaseConnection
 from icx_engine.models.output import RawIssueData
 
+_CONNECTOR_CLASSES: dict[str, type] = {}
+_CONNECTION_CLASSES: dict[str, type] = {}
+
 
 @dataclass
 class ParsedInput:
@@ -54,13 +57,26 @@ class ConnectorBase(ABC):
         from a ticket reference without an active connection."""
         return None
 
+    async def refresh_credentials(self) -> None:
+        """Refresh OAuth credentials if needed. Override in connectors that use OAuth."""
+
+
+def register_connector(
+    name: str,
+    connector_cls: type,
+    connection_cls: type,
+) -> None:
+    """Register a connector for lookup by name."""
+    _CONNECTOR_CLASSES[name] = connector_cls
+    _CONNECTION_CLASSES[name] = connection_cls
+
 
 def _connector_registry() -> dict[str, type[ConnectorBase]]:
-    from icx_engine.connectors.jira.connector import JiraConnector
-
-    return {
-        "jira": JiraConnector,
-    }
+    if "jira" not in _CONNECTOR_CLASSES:
+        from icx_engine.connectors.jira.connector import JiraConnector
+        from icx_engine.connectors.jira.config import JiraConnection
+        register_connector("jira", JiraConnector, JiraConnection)
+    return dict(_CONNECTOR_CLASSES)
 
 
 def get_connector_class(connector_type: str) -> type[ConnectorBase]:
@@ -83,3 +99,15 @@ def get_connector(connection: BaseConnection) -> ConnectorBase:
 
 def get_all_connector_classes() -> list[type[ConnectorBase]]:
     return list(_connector_registry().values())
+
+
+__all__ = [
+    "ParsedInput",
+    "ConnectorBase",
+    "register_connector",
+    "get_connector_class",
+    "get_connector",
+    "get_all_connector_classes",
+    "_CONNECTOR_CLASSES",
+    "_CONNECTION_CLASSES",
+]

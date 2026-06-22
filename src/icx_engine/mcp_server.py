@@ -205,7 +205,7 @@ Without it the user sees no feedback during the wait. This is not optional.
 project_paths - list of absolute codebase paths. Priority order:\n\
   1. User named specific repos -> resolve those paths only:\n\
      ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
-  2. User named no specific repo -> pass []. ICX resolves from the ticket's Jira project key.\n\
+  2. User named no specific repo -> pass []. ICX resolves from the ticket's tracker project key.\n\
   3. Cannot determine any path -> pass [].\n\
 ASK the user for the path if not already given. Only pass a path if the user explicitly \n\
 provided it or explicitly said yes to one you proposed. Otherwise pass [].\n\
@@ -342,7 +342,7 @@ Without it the user sees no feedback during the wait. This is not optional.
 project_paths - list of absolute codebase paths. Priority order:\n\
   1. User named specific repos -> resolve those paths only:\n\
      ["/home/alice/projects/auth-svc", "/home/alice/projects/ui"]\n\
-  2. User named no specific repo -> pass []. ICX resolves from the ticket's Jira project key.\n\
+  2. User named no specific repo -> pass []. ICX resolves from the ticket's tracker project key.\n\
   3. Cannot determine any path -> pass [].\n\
 ASK the user for the path if not already given. Only pass a path if the user explicitly \n\
 provided it or explicitly said yes to one you proposed. Otherwise pass [].\n\
@@ -852,7 +852,7 @@ _PROJECT_PATHS_SCHEMA = {
         "  1. User named specific repos -> resolve those paths: "
         "[\"/home/alice/projects/auth-svc\", \"/home/alice/projects/ui\"]\n"
         "  2. User named no specific repo -> pass [] and ICX resolves from the ticket's "
-        "Jira project key against registered projects.\n"
+        "tracker project key against registered projects.\n"
         "  3. Cannot determine any path -> pass [].\n"
         "ASK the user for the path if not already given. Only pass a path if the user "
         "explicitly provided it or explicitly said yes to one you proposed. Otherwise pass [].\n"
@@ -1869,6 +1869,16 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                 {"error": "file_path must be a non-empty string."}
             ))]
         file_path = file_path.strip()
+        _fp_norm = file_path.replace("\\", "/")
+        if (
+            "\x00" in file_path
+            or any(p == ".." for p in _fp_norm.split("/"))
+            or _fp_norm.startswith("/")
+            or (len(file_path) > 1 and file_path[1] == ":")
+        ):
+            return [TextContent(type="text", text=json.dumps({
+                "error": "file_path must be a relative path with no directory traversal."
+            }))]
 
         def _run_ownership() -> dict:
             _r = _load_querier_simple(project_path)
@@ -2712,7 +2722,7 @@ async def _handle_analyze_issue(
             icx_instruction = (
                 _VISION_GATE
                 + "No project path provided and no registered ICX project found for this ticket's "
-                "Jira project key. Use grep/glob to locate relevant files.\n"
+                "tracker project key. Use grep/glob to locate relevant files.\n"
                 "HINT: If you know the local codebase path, call this tool again with "
                 "project_paths=['/absolute/path/to/repo'] to enable graph navigation.\n\n"
                 "MANDATORY INSTRUCTIONS - follow in order, no skipping, no deviation:\n\n"
