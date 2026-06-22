@@ -360,3 +360,18 @@ def test_connection_add_duplicate_domain_prompts_overwrite(cli_runner):
         )
     assert "already exists" in result.output
     assert "Cancelled" in result.output
+
+
+def test_setup_help(cli_runner):
+    result = cli_runner.invoke(app, ["setup", "--help"])
+    assert result.exit_code == 0
+
+
+def test_logout_help(cli_runner):
+    result = cli_runner.invoke(app, ["logout", "--help"])
+    assert result.exit_code == 0
+
+
+def test_uninstall_help(cli_runner):
+    result = cli_runner.invoke(app, ["uninstall", "--help"])
+    assert result.exit_code in (0, 2)

@@ -26,6 +26,34 @@ from typing import Callable
 
 _log = logging.getLogger(__name__)
 
+_LSP_CHECKSUMS: dict[str, str] = {}
+_LSP_DOWNLOAD_TIMEOUT = 300
+
+
+def _download_lsp(url: str, dest: Path, server_name: str = "") -> None:
+    """Download an LSP binary archive with a timeout. Raises on failure."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "icx-engine"})
+    with urllib.request.urlopen(req, timeout=_LSP_DOWNLOAD_TIMEOUT) as resp:
+        with open(dest, "wb") as f:
+            while True:
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                f.write(chunk)
+    if server_name and server_name in _LSP_CHECKSUMS:
+        import hashlib
+        digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+        if digest != _LSP_CHECKSUMS[server_name]:
+            dest.unlink(missing_ok=True)
+            raise ValueError(
+                f"Checksum mismatch for {server_name}: expected "
+                f"{_LSP_CHECKSUMS[server_name]!r}, got {digest!r}"
+            )
+    elif server_name:
+        _log.debug("No checksum pinned for %s - binary authenticity unverified", server_name)
+
+
 ICX_HOME = Path.home() / ".icx"
 
 _TERMINATE_GRACE_SECONDS = 3
@@ -511,11 +539,10 @@ def _jdtls_binary(install_dir: Path) -> Path | None:
 
 def _jdtls_install(runtime_path: str, install_dir: Path) -> bool:
     import tarfile
-    import urllib.request
 
     archive = install_dir / "jdtls.tar.gz"
     try:
-        urllib.request.urlretrieve(_JDTLS_URL, str(archive))
+        _download_lsp(_JDTLS_URL, archive, "jdtls")
         with tarfile.open(archive) as tf:
             _safe_extract_tar(tf, install_dir)
     except Exception as exc:
@@ -565,11 +592,10 @@ def _kotlin_ls_binary(install_dir: Path) -> Path | None:
 
 def _kotlin_ls_install(runtime_path: str, install_dir: Path) -> bool:
     import zipfile
-    import urllib.request
 
     archive = install_dir / "server.zip"
     try:
-        urllib.request.urlretrieve(_KOTLIN_LS_URL, str(archive))
+        _download_lsp(_KOTLIN_LS_URL, archive, "kotlin-language-server")
         with zipfile.ZipFile(archive) as zf:
             _safe_extract_zip(zf, install_dir)
     except Exception as exc:
@@ -625,7 +651,6 @@ def _rust_analyzer_binary(install_dir: Path) -> Path | None:
 
 def _rust_analyzer_install(runtime_path: str, install_dir: Path) -> bool:
     import gzip
-    import urllib.request
 
     bin_dir = install_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -633,7 +658,7 @@ def _rust_analyzer_install(runtime_path: str, install_dir: Path) -> bool:
     target = bin_dir / name
     archive = bin_dir / "rust-analyzer.gz"
     try:
-        urllib.request.urlretrieve(f"{_RUST_ANALYZER_BASE}/{_rust_analyzer_asset()}", str(archive))
+        _download_lsp(f"{_RUST_ANALYZER_BASE}/{_rust_analyzer_asset()}", archive, "rust-analyzer")
         with gzip.open(archive, "rb") as src, open(target, "wb") as dst:
             dst.write(src.read())
     except Exception as exc:
@@ -684,12 +709,11 @@ def _omnisharp_binary(install_dir: Path) -> Path | None:
 def _omnisharp_install(runtime_path: str, install_dir: Path) -> bool:
     import tarfile
     import zipfile
-    import urllib.request
 
     asset, is_zip = _omnisharp_asset()
     archive = install_dir / asset
     try:
-        urllib.request.urlretrieve(f"{_OMNISHARP_BASE}/{asset}", str(archive))
+        _download_lsp(f"{_OMNISHARP_BASE}/{asset}", archive, "omnisharp")
         if is_zip:
             with zipfile.ZipFile(archive) as zf:
                 _safe_extract_zip(zf, install_dir)
@@ -792,7 +816,6 @@ def _clangd_binary(install_dir: Path) -> Path | None:
 
 def _clangd_install(runtime_path: str, install_dir: Path) -> bool:
     import zipfile
-    import urllib.request
 
     tag = _clangd_release_tag()
     if not tag:
@@ -802,7 +825,7 @@ def _clangd_install(runtime_path: str, install_dir: Path) -> bool:
     archive = install_dir / asset
     try:
         url = f"https://github.com/clangd/clangd/releases/download/{tag}/{asset}"
-        urllib.request.urlretrieve(url, str(archive))
+        _download_lsp(url, archive, "clangd")
         with zipfile.ZipFile(archive) as zf:
             _safe_extract_zip(zf, install_dir)
     except Exception as exc:

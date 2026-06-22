@@ -268,7 +268,7 @@ def memory_save(
     import asyncio as _asyncio
     from icx_engine.config_manager import ConfigManager
     from icx_engine.engine import extract_domain, resolve_connection
-    from icx_engine.connectors.base import get_connector
+    from icx_engine.connectors.base import get_connector, get_connector_class
     from icx_engine.memory.manager import MemoryManager
     from icx_engine.memory.schema import MemoryEntry
     import uuid
@@ -312,7 +312,7 @@ def memory_save(
         entry = MemoryEntry(
             id=str(uuid.uuid4()),
             issue_key=parsed.issue_key,
-            project_key=parsed.issue_key.split("-")[0] if "-" in parsed.issue_key else parsed.issue_key,
+            project_key=get_connector_class(conn.connector_type).extract_project_key(parsed.issue_key),
             source_type=conn.connector_type,
             issue_type=raw.issue_type,
             summary=raw.summary,
@@ -675,7 +675,14 @@ def memory_import_cmd(
     from pathlib import Path
 
     try:
-        in_path = Path(file)
+        in_path = Path(file).resolve()
+        if not in_path.exists():
+            err_console.print(
+                f"\n[red]File not found:[/red] {in_path}\n"
+                "  Pass the full path to the export file.\n"
+                "  Example: [cyan]icx memory import /full/path/to/icx-memory-export.json[/cyan]"
+            )
+            raise typer.Exit(1)
         entries = import_from_json(in_path)
         console.print(f"  Found {len(entries)} entries in {in_path}.")
         confirmed = typer.confirm(f"Import all {len(entries)} entries?", default=True)
@@ -2082,7 +2089,13 @@ def _run_build_with_progress(mgr, project_id: str, force: bool, skip_llm: bool =
         worker_thread = threading.Thread(target=worker, daemon=True)
         worker_thread.start()
 
-        tail_events(progress_path, on_event, done.is_set)
+        try:
+            tail_events(progress_path, on_event, done.is_set)
+        except KeyboardInterrupt:
+            done.set()
+            sys.stderr = _real_stderr
+            safe_unlink(progress_path)
+            raise
         worker_thread.join()
 
     # Progress live display cleared (transient=True). Restore stderr first so
@@ -2387,3 +2400,11 @@ def _start_repl(debug: bool = False) -> None:
             if debug:
                 raise
             err_console.print(f"Error: {exc}")
+
+
+def main() -> None:
+    try:
+        app()
+    except KeyboardInterrupt:
+        err_console.print("\nCancelled.")
+        raise SystemExit(130)

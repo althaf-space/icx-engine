@@ -30,8 +30,15 @@ class GeminiProvider(LLMProvider):
                 config=cfg,
             )
         except ClientError as exc:
-            if getattr(exc, "code", None) == 429:
+            _code = getattr(exc, "code", None)
+            if _code == 429:
                 raise RateLimited("Gemini quota exceeded. Wait briefly and retry.") from exc
+            if _code in (400, 404):
+                raise ContextBuildError(
+                    f"Gemini rejected the request (HTTP {_code}). "
+                    "Check that the model name is correct and supported.",
+                    raw_output="",
+                ) from exc
             raise AuthError(
                 "Gemini API key is invalid or request rejected. Re-run `icx model --add` to update it."
             ) from exc

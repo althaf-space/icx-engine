@@ -1,11 +1,14 @@
 from __future__ import annotations
 import asyncio
+import logging
 import os
 import sys
 import tempfile
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from icx_engine.models.config import ChannelConfig
@@ -272,7 +275,8 @@ async def cleanup_transcript_llm(config: "ChannelConfig", transcript: str) -> st
             messages=[{"role": "user", "content": prompt}],
         )
         return (resp.choices[0].message.content or transcript).strip()
-    except Exception:
+    except Exception as exc:
+        _log.warning("cleanup_transcript_llm failed: %s", exc)
         return transcript
 
 
@@ -310,13 +314,15 @@ async def transcribe(
     if config.provider == "openai":
         try:
             return await transcribe_openai(config, audio_bytes, fname)
-        except Exception:
+        except Exception as exc:
+            _log.warning("OpenAI transcription failed (%s); falling back to local Whisper.", exc)
             return await _local_transcribe(audio_bytes, fname, whisper)
 
     if config.provider == "google":
         try:
             return await transcribe_google(config, audio_bytes, fname)
-        except Exception:
+        except Exception as exc:
+            _log.warning("Google transcription failed (%s); falling back to local Whisper.", exc)
             return await _local_transcribe(audio_bytes, fname, whisper)
 
     local = await _local_transcribe(audio_bytes, fname, whisper)

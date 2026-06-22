@@ -159,7 +159,7 @@ async def run_pkce_flow(
                 server_done.set()
             elif "error" in params and state_ok:
                 # Provider sent an explicit error (e.g. access_denied) - unblock immediately
-                auth_code["error"] = params["error"][0]
+                auth_code["error"] = params["error"][0][:200].encode("ascii", "replace").decode()
                 self.send_response(400)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()

@@ -95,7 +95,7 @@ graph-extended = [
 ]
 
 [project.scripts]
-icx = "icx_engine.cli:app"
+icx = "icx_engine.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/icx_engine"]

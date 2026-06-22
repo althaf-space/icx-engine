@@ -276,7 +276,7 @@ def _force_rmtree(path: Path) -> None:
 
     def _on_error(func, target, _exc_info):
         try:
-            os.chmod(target, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+            os.chmod(target, stat.S_IRWXU)
             func(target)
         except OSError:
             pass

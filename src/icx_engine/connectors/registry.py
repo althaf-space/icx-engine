@@ -1,8 +1,6 @@
 from __future__ import annotations
-from icx_engine.connectors.jira.config import JiraConnection
+from icx_engine.connectors.base import _CONNECTION_CLASSES, _connector_registry
 
-# Maps connector_type string → BaseConnection subclass.
-# Add new connectors here as they are implemented.
-CONNECTION_REGISTRY: dict = {
-    "jira": JiraConnection,
-}
+_connector_registry()
+
+CONNECTION_REGISTRY: dict = _CONNECTION_CLASSES
