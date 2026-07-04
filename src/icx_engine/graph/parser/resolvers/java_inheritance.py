@@ -42,6 +42,7 @@ def extract_java_inheritance_edges(
 
     from . import _java_fqn_map as _jfm
     fqn_to_file = _jfm.build_fqn_map(java_files, project_root)
+    pkg_index = _build_pkg_member_index(fqn_to_file)
 
     seen: set[tuple[str, str, str]] = set()
     edges: list[dict] = []
@@ -63,7 +64,7 @@ def extract_java_inheritance_edges(
         }
         pkg_m = _PKG_RE.search(source)
         package = pkg_m.group(1) if pkg_m else ""
-        import_map = _build_import_map(source, package, fqn_to_file)
+        import_map = _build_import_map(source, package, fqn_to_file, pkg_index)
 
         for decl_m in _TYPE_DECL_RE.finditer(source):
             type_name = decl_m.group(1)
@@ -187,8 +188,25 @@ def _emit_inherits(
     edges.append(edge)
 
 
+def _build_pkg_member_index(fqn_to_file: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Group FQNs by parent package: {package: {simple_name: fqn}}. Built once so
+    _build_import_map does an O(1) lookup instead of scanning every FQN per file.
+    Semantics mirror the original `startswith(package + '.')` / `'.' not in simple`
+    direct-member condition, with first-FQN-wins over insertion order."""
+    index: dict[str, dict[str, str]] = {}
+    for fqn in fqn_to_file:
+        dot = fqn.rfind(".")
+        if dot <= 0:
+            continue
+        index.setdefault(fqn[:dot], {}).setdefault(fqn[dot + 1 :], fqn)
+    return index
+
+
 def _build_import_map(
-    source: str, package: str, fqn_to_file: dict[str, str]
+    source: str,
+    package: str,
+    fqn_to_file: dict[str, str],
+    pkg_index: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, str]:
     out: dict[str, str] = {}
     for m in _IMPORT_RE.finditer(source):
@@ -199,11 +217,15 @@ def _build_import_map(
         if simple:
             out[simple] = path
     if package:
-        for fqn in fqn_to_file:
-            if fqn.startswith(package + "."):
-                simple = fqn[len(package) + 1:]
-                if "." not in simple:
-                    out.setdefault(simple, fqn)
+        if pkg_index is not None:
+            for simple, fqn in pkg_index.get(package, {}).items():
+                out.setdefault(simple, fqn)
+        else:
+            for fqn in fqn_to_file:
+                if fqn.startswith(package + "."):
+                    simple = fqn[len(package) + 1:]
+                    if "." not in simple:
+                        out.setdefault(simple, fqn)
     return out
 
 

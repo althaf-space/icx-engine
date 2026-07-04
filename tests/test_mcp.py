@@ -18,7 +18,7 @@ from icx_engine.connectors.jira.config import JiraConnection, TokenAuth
 from test_data import JIRA_BASE_URL, JIRA_ISSUE_PAYLOAD
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# -- helpers -------------------------------------------------------------------
 
 def _codex_host(tmp_path: Path) -> MCPHost:
     return MCPHost(
@@ -29,7 +29,7 @@ def _codex_host(tmp_path: Path) -> MCPHost:
     )
 
 
-# ── path helpers ──────────────────────────────────────────────────────────────
+# -- path helpers --------------------------------------------------------------
 
 def test_home_indirection_is_monkeypatchable(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
@@ -37,7 +37,7 @@ def test_home_indirection_is_monkeypatchable(monkeypatch, tmp_path):
     assert _home() == tmp_path
 
 
-# ── WriteResult ───────────────────────────────────────────────────────────────
+# -- WriteResult ---------------------------------------------------------------
 
 def test_write_result_normal_path(tmp_path):
     wr = WriteResult(path=tmp_path / "mcp.json", fallback=False)
@@ -50,7 +50,7 @@ def test_write_result_fallback_path(tmp_path):
     assert wr.fallback is True
 
 
-# ── list_hosts ────────────────────────────────────────────────────────────────
+# -- list_hosts ----------------------------------------------------------------
 
 def test_list_hosts_returns_five_agents(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
@@ -114,7 +114,7 @@ def test_no_host_has_manual_format(monkeypatch, tmp_path):
         assert h.config_format != "manual", f"{h.name} still uses manual format"
 
 
-# ── detect_installed_hosts ────────────────────────────────────────────────────
+# -- detect_installed_hosts ----------------------------------------------------
 
 def test_detect_installed_hosts_no_cwd_param():
     import inspect
@@ -144,7 +144,7 @@ def test_detect_installed_hosts_includes_windsurf_when_dir_exists(monkeypatch, t
     assert "windsurf" in names
 
 
-# ── get_host ──────────────────────────────────────────────────────────────────
+# -- get_host ------------------------------------------------------------------
 
 def test_get_host_no_cwd_param():
     import inspect
@@ -164,7 +164,7 @@ def test_get_host_returns_none_for_unknown(monkeypatch, tmp_path):
     assert get_host("vscode") is None
 
 
-# ── write_icx_entry (JSON) ────────────────────────────────────────────────────
+# -- write_icx_entry (JSON) ----------------------------------------------------
 
 def test_write_icx_entry_returns_write_result(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
@@ -293,7 +293,7 @@ def test_write_icx_entry_antigravity_merges_existing_entries(monkeypatch, tmp_pa
     assert "icx" in raw["mcpServers"]
 
 
-# ── write_icx_entry (TOML / Codex) ───────────────────────────────────────────
+# -- write_icx_entry (TOML / Codex) -------------------------------------------
 
 def test_write_icx_entry_toml_creates_correct_content(tmp_path):
     host = _codex_host(tmp_path)
@@ -313,7 +313,7 @@ def test_write_icx_entry_toml_merges_with_existing(tmp_path):
     assert raw["mcp_servers"]["icx"] == ICX_MCP_ENTRY
 
 
-# ── remove_icx_entry (JSON) ───────────────────────────────────────────────────
+# -- remove_icx_entry (JSON) ---------------------------------------------------
 
 def test_remove_icx_entry_removes_and_returns_true(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
@@ -358,7 +358,7 @@ def test_remove_icx_entry_preserves_other_tools(monkeypatch, tmp_path):
     assert "other" in raw["mcpServers"]
 
 
-# ── remove_icx_entry (TOML) ───────────────────────────────────────────────────
+# -- remove_icx_entry (TOML) ---------------------------------------------------
 
 def test_remove_icx_entry_toml_removes_and_returns_true(tmp_path):
     host = _codex_host(tmp_path)
@@ -376,7 +376,7 @@ def test_remove_icx_entry_toml_returns_false_when_not_present(tmp_path):
     assert remove_icx_entry(host) is False
 
 
-# ── MCP server handler ────────────────────────────────────────────────────────
+# -- MCP server handler --------------------------------------------------------
 
 from icx_engine.mcp_server import (
     _handle_analyze_issue,
@@ -470,7 +470,7 @@ def test_server_registered_as_ice():
     assert server.name == "icx"
 
 
-# ── Profile override - MCP ────────────────────────────────────────────────────
+# -- Profile override - MCP ----------------------------------------------------
 
 @respx.mock
 async def test_handle_analyze_issue_with_profile_override(mcp_config_with_llm):
@@ -681,7 +681,7 @@ async def test_save_memory_tool_has_required_inputs():
     assert "pattern_used" not in required
 
 
-# ── save_memory per-item input validation ─────────────────────────────────────
+# -- save_memory per-item input validation -------------------------------------
 
 _SAVE_REQUIRED_BASE = {
     "issue_key": "TEST-1",
@@ -792,15 +792,15 @@ async def test_call_tool_save_memory_rejects_empty_work_item_type():
     assert "work_item_type" in data["error"]
 
 
-# ── Tool count and schema ─────────────────────────────────────────────────────
+# -- Tool count and schema -----------------------------------------------------
 
-async def test_list_tools_returns_twelve_tools():
+async def test_list_tools_returns_all_tools():
     from icx_engine.mcp_server import _list_tools
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 20
+    assert len(tools) == 37
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory",
@@ -810,6 +810,12 @@ async def test_list_tools_returns_twelve_tools():
         "memory_find_by_file", "memory_get_hotspots", "memory_get_related",
         "memory_get_patterns", "memory_search",
         "reinforce_memory_usage", "get_memory_audit",
+        "magik_health_check", "start_testing_session", "resume_testing_session",
+        "magik_test_status", "magik_test_results",
+        "magik_login_start", "magik_login_capture", "magik_login_cancel",
+        "magik_login_inline", "magik_logout",
+        "sonar_status", "sonar_projects", "sonar_branches",
+        "sonar_measures", "sonar_quality_gate", "sonar_findings", "sonar_report",
     }
 
 
@@ -855,7 +861,7 @@ async def test_analyze_tool_schema_project_paths_is_array():
         assert "additional_paths" not in schema["properties"], f"{tool_name} old additional_paths must not exist"
 
 
-# ── _icx_next guidance hints ──────────────────────────────────────────────────
+# -- _icx_next guidance hints --------------------------------------------------
 
 async def test_handle_analyze_issue_success_includes_icx_next():
     """_handle_analyze_issue includes _icx_next with instruction in combined response."""
@@ -1080,7 +1086,7 @@ async def test_handle_save_memory_outcome_verified_other_error_fails(mcp_config)
     mock_mem.save.assert_not_called()
 
 
-# ── Profile override - CLI ────────────────────────────────────────────────────
+# -- Profile override - CLI ----------------------------------------------------
 
 from icx_engine.cli import app as _cli_app
 from typer.testing import CliRunner as _CLIRunner
@@ -1152,7 +1158,7 @@ def test_analyze_profile_flag_passed_to_engine():
     assert config.current_llm_profile == "personal"
 
 
-# ── CLI: mcp commands ─────────────────────────────────────────────────────────
+# -- CLI: mcp commands ---------------------------------------------------------
 
 from icx_engine.cli import app
 from typer.testing import CliRunner
@@ -1202,13 +1208,13 @@ def test_mcp_setup_windsurf_writes_config(monkeypatch, tmp_path):
     result = _runner.invoke(app, ["mcp", "setup", "--host", "windsurf"])
     assert result.exit_code == 0
     assert "manual" not in result.output.lower()
-    assert "✓" in result.output or "written" in result.output.lower()
+    assert "OK" in result.output or "written" in result.output.lower()
 
 
 def test_mcp_setup_fallback_prints_notice(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
     monkeypatch.chdir(tmp_path)
-    # cursor detect_path (tmp_path/.cursor) does NOT exist → fallback
+    # cursor detect_path (tmp_path/.cursor) does NOT exist -> fallback
     result = _runner.invoke(app, ["mcp", "setup", "--host", "cursor"])
     assert result.exit_code == 0
     assert "fallback" in result.output.lower() or ".mcp.json" in result.output
@@ -1348,7 +1354,7 @@ async def test_handle_analyze_single_path_no_graphs_key():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
         with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "not_registered", "path": "/projects/my-svc", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}]):
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "not_built", "name": "my-svc", "path": "/projects/my-svc", "report_path": None, "access": "", "report_inline": "", "eta_seconds": None}]):
                 result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     data = json.loads(result)
@@ -1385,8 +1391,9 @@ async def test_handle_analyze_multi_path_icx_next_mentions_all_paths():
     assert "MULTI-PROJECT" in instruction
 
 
-async def test_handle_analyze_multi_path_not_registered_suggests_graph_add():
-    """missing_note for not_registered paths must suggest icx graph add, not icx graph build."""
+async def test_handle_analyze_multi_path_unregistered_is_dropped_not_echoed():
+    """A not_registered path mixed in with a registered one is silently dropped - never
+    echoed back as an `icx graph add/build <path>` prompt (strict no-guessed-path policy)."""
     from icx_engine.models.output import IssueContext
     _issue = IssueContext(
         problem_summary="p", detailed_description="d",
@@ -1407,13 +1414,15 @@ async def test_handle_analyze_multi_path_not_registered_suggests_graph_add():
                 )
 
     data = json.loads(result)
-    instruction = data["_icx_next"]["instruction"]
-    assert "icx graph add" in instruction
-    assert "icx graph build --path /projects/ui" not in instruction
+    paths = [g["path"] for g in data["graphs"]]
+    assert paths == ["/projects/svc"]
+    assert "/projects/ui" not in json.dumps(data)
 
 
-async def test_handle_analyze_single_path_not_registered_suggests_graph_add():
-    """Single-path not_registered instruction must tell user to run icx graph add."""
+async def test_handle_analyze_single_unregistered_path_shows_generic_add_no_guess():
+    """A lone unregistered path is dropped; with no ticket match the graph is 'not present'
+    and the instruction shows the user how to add+build one - generic placeholders only,
+    never the guessed path, never an auto-build."""
     from icx_engine.models.output import IssueContext
     _issue = IssueContext(
         problem_summary="p", detailed_description="d",
@@ -1423,17 +1432,87 @@ async def test_handle_analyze_single_path_not_registered_suggests_graph_add():
     )
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
-            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
-                "status": "not_registered", "path": "/projects/my-svc", "report_path": None,
-                "access": "", "report_inline": "", "eta_seconds": None,
-            }]):
-                result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket", return_value=None):
+            with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
+                    "status": "not_registered", "path": "/projects/my-svc", "report_path": None,
+                    "access": "", "report_inline": "", "eta_seconds": None,
+                }]):
+                    result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
 
     data = json.loads(result)
+    assert data["graphs"] == []
     instruction = data["_icx_next"]["instruction"]
     assert "icx graph add" in instruction
-    assert "not registered" in instruction.lower()
+    assert "icx graph build" in instruction
+    assert "<project-root>" in instruction
+    assert "/projects/my-svc" not in instruction          # guessed path never echoed
+    assert "auto" in instruction.lower()                  # states no auto-build
+
+
+async def test_handle_analyze_all_unregistered_paths_fall_back_to_ticket_key():
+    """A guessed path that is not registered must be discarded: ICX self-corrects to the
+    ticket's registered graphs instead of telling the user to build the bogus path."""
+    from icx_engine.models.output import IssueContext
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    bogus = {"status": "not_registered", "path": "/projects/workspace-root", "report_path": None,
+             "access": "", "report_inline": "", "eta_seconds": None}
+    svc = {"status": "ready", "report_path": "/projects/svc/GRAPH_REPORT.md",
+           "access": "pre-authorized", "path": "/projects/svc", "eta_seconds": None}
+    ui = {"status": "ready", "report_path": "/projects/ui/GRAPH_REPORT.md",
+          "access": "pre-authorized", "path": "/projects/ui", "eta_seconds": None}
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+            with patch("icx_engine.mcp_server._resolve_paths_from_ticket",
+                       return_value=[{"path": "/projects/svc", "name": "proj-svc"},
+                                     {"path": "/projects/ui", "name": "proj-ui"}]):
+                with patch("icx_engine.mcp_server._get_graphs_info",
+                           side_effect=[[bogus], [svc, ui]]):
+                    result = await _handle_analyze_issue(
+                        "PROJ-123", project_paths=["/projects/workspace-root"],
+                    )
+
+    data = json.loads(result)
+    resolved = {g["path"] for g in data["graphs"]}
+    assert resolved == {"/projects/svc", "/projects/ui"}
+    assert all(g.get("path_auto_resolved") for g in data["graphs"])
+    assert "/projects/workspace-root" not in resolved
+    instruction = data["_icx_next"]["instruction"]
+    assert "icx graph build" not in instruction
+    assert "icx graph add" not in instruction
+
+
+async def test_handle_analyze_registered_paths_skip_ticket_fallback():
+    """When supplied paths ARE registered, ICX must not override them via ticket key."""
+    from icx_engine.models.output import IssueContext
+    _issue = IssueContext(
+        problem_summary="p", detailed_description="d",
+        reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+        acceptance_criteria=[], impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.9, missing_information=[],
+    )
+    ready = {"status": "ready", "report_path": "/projects/svc/GRAPH_REPORT.md",
+             "access": "pre-authorized", "path": "/projects/svc", "eta_seconds": None}
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
+            with patch("icx_engine.mcp_server._resolve_paths_from_ticket") as mock_resolve:
+                with patch("icx_engine.mcp_server._get_graphs_info", return_value=[ready]):
+                    result = await _handle_analyze_issue(
+                        "PROJ-123", project_paths=["/projects/svc"],
+                    )
+
+    mock_resolve.assert_not_called()
+    data = json.loads(result)
+    assert [g["path"] for g in data["graphs"]] == ["/projects/svc"]
 
 
 async def test_handle_analyze_multi_path_vision_gate_includes_additional_paths():
@@ -1486,7 +1565,7 @@ async def test_handle_analyze_issue_passes_log_callback_to_engine():
 
 
 def test_analyze_shows_missing_requirements_warning():
-    """analyze prints ⚠ MISSING REQUIREMENTS when missing_information is non-empty."""
+    """analyze prints ! MISSING REQUIREMENTS when missing_information is non-empty."""
     from icx_engine.models.output import IssueContext
     from unittest.mock import AsyncMock, patch
     config = AppConfig(
@@ -1616,7 +1695,7 @@ def test_analyze_no_warning_for_raw_issue_response():
     assert "MISSING REQUIREMENTS" not in result.output
 
 
-# ── CLI: --fast flag ──────────────────────────────────────────────────────────
+# -- CLI: --fast flag ----------------------------------------------------------
 
 def test_analyze_fast_flag_passes_skip_vision_to_engine():
     """--fast flag passes skip_vision=True to engine.run()."""
@@ -1689,7 +1768,7 @@ def test_analyze_without_fast_flag_uses_full_vision():
     assert captured[0]["skip_vision"] is False
 
 
-# ── Timeout handling ──────────────────────────────────────────────────────────
+# -- Timeout handling ----------------------------------------------------------
 
 async def test_engine_run_timeout_returns_error_json():
     """When engine.run() exceeds 660s, _handle_analyze_issue returns a JSON error (no exception)."""
@@ -1714,7 +1793,7 @@ async def test_engine_run_timeout_error_is_not_generic_unexpected():
     assert "Unexpected error" not in data["message"]
 
 
-# ── Non-bug instruction enhancement ──────────────────────────────────────────
+# -- Non-bug instruction enhancement ------------------------------------------
 
 async def test_non_bug_instruction_includes_convention_discovery():
     """For Story/Task issue types, _icx_next instruction includes the convention-discovery step."""
@@ -1809,7 +1888,7 @@ async def test_task_instruction_includes_convention_discovery():
     assert "New external dependencies required" in instruction
 
 
-# ── Session context accumulation ──────────────────────────────────────────────
+# -- Session context accumulation ----------------------------------------------
 
 def _make_issue_ctx(summary: str = "p", issue_type: str = "Bug"):
     from icx_engine.models.output import IssueContext
@@ -1897,7 +1976,7 @@ async def test_session_context_deduplicates_same_key(monkeypatch):
     assert keys[-1] == "PROJ-1"
 
 
-# ── memory_search tool ────────────────────────────────────────────────────────
+# -- memory_search tool --------------------------------------------------------
 
 async def test_memory_search_tool_present_in_list_tools():
     from icx_engine.mcp_server import _list_tools
@@ -1938,7 +2017,7 @@ async def test_call_tool_memory_search_returns_empty_when_memory_not_ready():
     assert data["status"] == "cold"
 
 
-# ── memory_get_related tool ───────────────────────────────────────────────────
+# -- memory_get_related tool ---------------------------------------------------
 
 async def test_call_tool_memory_get_related_no_params_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -1988,7 +2067,7 @@ def test_get_related_sync_delegates_to_memory_manager(tmp_path):
     assert result == expected
 
 
-# ── Structured error responses ────────────────────────────────────────────────
+# -- Structured error responses ------------------------------------------------
 
 async def test_call_tool_analyze_missing_project_paths_proceeds_to_engine():
     """analyze_issue with no project_paths omitted proceeds (no MISSING_PROJECT_PATH error)."""
@@ -2115,7 +2194,7 @@ async def test_handle_analyze_issue_timeout_returns_structured_error():
     assert "type" not in data
 
 
-# ── project_paths auto-resolution ─────────────────────────────────────────────
+# -- project_paths auto-resolution ---------------------------------------------
 
 async def test_handle_analyze_empty_paths_auto_resolves_from_jira_key():
     """Empty project_paths triggers registry lookup by Jira project key; match populates graphs."""
@@ -2193,8 +2272,10 @@ async def test_handle_analyze_empty_paths_no_registry_match_returns_empty_graphs
     assert "grep" in data["_icx_next"]["instruction"].lower()
 
 
-async def test_handle_analyze_explicit_paths_skip_registry_lookup():
-    """Non-empty project_paths bypasses _resolve_paths_from_ticket entirely."""
+async def test_handle_analyze_unregistered_path_no_ticket_match_dropped():
+    """Explicit unregistered path with a non-resolving ticket key: the path is dropped (never
+    auto-registered, never echoed). Ticket fallback is attempted; with no match graphs is
+    empty and the agent is told to grep/glob plus shown how to add a graph."""
     from icx_engine.models.output import IssueContext
     _issue = IssueContext(
         problem_summary="p", detailed_description="d",
@@ -2204,18 +2285,86 @@ async def test_handle_analyze_explicit_paths_skip_registry_lookup():
     )
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.mcp_server._resolve_paths_from_ticket") as mock_resolve:
+        with patch("icx_engine.mcp_server._resolve_paths_from_ticket", return_value=None) as mock_resolve:
             with patch("icx_engine.mcp_server.engine.run", new=AsyncMock(return_value=_issue)):
                 with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{
                     "status": "not_registered", "path": "/explicit/path",
                     "report_path": None, "access": "", "report_inline": "", "eta_seconds": None,
                 }]):
-                    await _handle_analyze_issue("TEST-1", project_paths=["/explicit/path"])
+                    result = await _handle_analyze_issue("TEST-1", project_paths=["/explicit/path"])
 
-    mock_resolve.assert_not_called()
+    mock_resolve.assert_called_once_with("TEST-1")
+    data = json.loads(result)
+    assert data["graphs"] == []
+    assert "/explicit/path" not in json.dumps(data)
 
 
-# ── _extract_tracker_key_from_ref ──────────────────────────────────────────────
+def test_tool_descriptions_forbid_external_tracker_mcp():
+    """Both analyze tool descriptions must declare ICX the sole tracker interface and forbid
+    routing tracker work through any other MCP - stated generically (no single provider name)."""
+    from icx_engine.mcp_server import _FAST_DESCRIPTION, _FULL_DESCRIPTION
+    for desc in (_FAST_DESCRIPTION, _FULL_DESCRIPTION):
+        assert "SOLE TRACKER INTERFACE" in desc
+        assert "MUST NOT connect to" in desc
+        assert "ANY other MCP server" in desc
+        # Generic - must not single out one provider in the rule text.
+        assert "Jira MCP" not in desc
+        assert "GitHub MCP" not in desc
+
+
+def test_resume_desc_has_gate_posture_classification():
+    """resume description must carry the gate-posture classification with agent-generate
+    gates enumerated (2b, compat_scan, profile_gen) and user-decision gates listed."""
+    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    assert "GATE POSTURE CLASSIFICATION" in d
+    assert "USER-DECISION" in d
+    assert "AGENT-GENERATE" in d
+    # 2b, compat_scan, and profile_gen are all agent-generate gates.
+    assert "2b" in d and "compat_scan" in d and "profile_gen" in d
+    # user-decision gate list includes the key human gates.
+    for g in ("ui_check", "memory_save", "manual", "error", "limit"):
+        assert g in d
+
+
+def test_resume_desc_no_unscoped_auto_respond_phrase():
+    """The contradiction is removed: no rule may say to never auto-respond to ANY gate (which
+    fought the agent-generate 2b gate). It must be scoped to USER-DECISION gates."""
+    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    assert "AUTO-RESPOND TO ANY GATE" not in d
+    assert "AUTO-RESPOND TO A USER-DECISION GATE" in d
+
+
+def test_default_posture_line_in_both_testing_descs():
+    """Both start and resume descriptions state the default posture: gate data is the user's to
+    decide; the agent only self-advances to generate the spec at Gate 2b."""
+    from icx_engine.mcp_server import _MAGIK_START_DESCRIPTION, _MAGIK_RESUME_DESCRIPTION
+    for d in (_MAGIK_START_DESCRIPTION, _MAGIK_RESUME_DESCRIPTION):
+        assert "DEFAULT POSTURE" in d
+        assert "for the USER to read and decide" in d
+        assert "Gate 2b" in d
+
+
+def test_start_desc_seed_selection_endpoint_and_backend_bridge():
+    """start description must describe Phase A seed selection: the endpoint/route grep option
+    and the backend-only API-path -> UI-repo grep bridge."""
+    from icx_engine.mcp_server import _MAGIK_START_DESCRIPTION as d
+    assert "PHASE A" in d
+    assert "endpoint/route" in d
+    assert "BACKEND-ONLY" in d
+    # backend bridge: grep the backend api path, then grep the UI repo for it.
+    assert "grep the UI repo" in d
+
+
+def test_gate1_desc_has_grep_import_fallback_when_no_graph():
+    """Gate 1 must instruct the agent to grep-expand imports as the fallback when the UI repo
+    graph is not built, and still end in a user confirm."""
+    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    assert "graph_available IS FALSE" in d
+    assert "grep its own imports" in d
+    assert "no-graph fallback" in d
+
+
+# -- _extract_tracker_key_from_ref ----------------------------------------------
 
 def test_extract_tracker_key_from_url():
     from icx_engine.mcp_server import _extract_tracker_key_from_ref
@@ -2237,7 +2386,7 @@ def test_extract_tracker_key_returns_empty_for_invalid():
     assert _extract_tracker_key_from_ref("not-a-valid-ref") == ""
 
 
-# ── graph_important_nodes ─────────────────────────────────────────────────────
+# -- graph_important_nodes -----------------------------------------------------
 
 async def test_graph_important_nodes_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2253,7 +2402,7 @@ async def test_graph_important_nodes_nonexistent_path_returns_error():
     assert "error" in data or data.get("status") == "error"
 
 
-# ── graph_find_context ────────────────────────────────────────────────────────
+# -- graph_find_context --------------------------------------------------------
 
 async def test_graph_find_context_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2273,7 +2422,7 @@ async def test_graph_find_context_nonexistent_path_returns_error():
     assert data.get("status") == "error"
 
 
-# ── graph_subsystem ───────────────────────────────────────────────────────────
+# -- graph_subsystem -----------------------------------------------------------
 
 async def test_graph_subsystem_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2293,7 +2442,7 @@ async def test_graph_subsystem_nonexistent_path_returns_error():
     assert data.get("status") == "error"
 
 
-# ── graph_ownership ───────────────────────────────────────────────────────────
+# -- graph_ownership -----------------------------------------------------------
 
 async def test_graph_ownership_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2324,7 +2473,7 @@ async def test_graph_ownership_rejects_path_traversal():
     assert "owners" not in data
 
 
-# ── graph_call_chain ──────────────────────────────────────────────────────────
+# -- graph_call_chain ----------------------------------------------------------
 
 async def test_graph_call_chain_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2344,7 +2493,7 @@ async def test_graph_call_chain_nonexistent_path_returns_error():
     assert data.get("status") == "error"
 
 
-# ── graph_impact ──────────────────────────────────────────────────────────────
+# -- graph_impact --------------------------------------------------------------
 
 async def test_graph_impact_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2364,7 +2513,7 @@ async def test_graph_impact_nonexistent_path_returns_error():
     assert data.get("status") == "error"
 
 
-# ── graph_cross_links ─────────────────────────────────────────────────────────
+# -- graph_cross_links ---------------------------------------------------------
 
 async def test_graph_cross_links_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2383,7 +2532,7 @@ async def test_graph_cross_links_nonexistent_path_returns_error():
     assert data.get("status") == "error"
 
 
-# ── graph_blast_radius ────────────────────────────────────────────────────────
+# -- graph_blast_radius --------------------------------------------------------
 
 async def test_graph_blast_radius_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2403,7 +2552,7 @@ async def test_graph_blast_radius_nonexistent_path_returns_error():
     assert "error" in data or data.get("status") == "error"
 
 
-# ── graph_cycles ──────────────────────────────────────────────────────────────
+# -- graph_cycles --------------------------------------------------------------
 
 async def test_graph_cycles_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2422,7 +2571,7 @@ async def test_graph_cycles_nonexistent_path_returns_error():
     assert "error" in data or data.get("status") == "error"
 
 
-# ── graph_dead_code ───────────────────────────────────────────────────────────
+# -- graph_dead_code -----------------------------------------------------------
 
 async def test_graph_dead_code_missing_project_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2441,7 +2590,45 @@ async def test_graph_dead_code_nonexistent_path_returns_error():
     assert "error" in data or data.get("status") == "error"
 
 
-# ── memory_get_hotspots ───────────────────────────────────────────────────────
+# -- start_testing_session injects configured agent_max_steps ----------
+
+async def test_start_session_injects_configured_agent_steps(monkeypatch):
+    from icx_engine import mcp_server
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+
+    captured = {}
+
+    class _Snap:
+        tasks = []
+        next = ()
+
+    class _FakeGraph:
+        async def ainvoke(self, state, config=None):
+            if isinstance(state, dict):
+                captured["agent_max_steps"] = state.get("agent_max_steps")
+
+        async def aget_state(self, config):
+            return _Snap()
+
+    async def _fake_get_graph():
+        return _FakeGraph()
+
+    import icx_engine.testing.graph as _g
+    monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
+
+    cfg = AppConfig()
+    cfg.magik_agent_max_steps = 33
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = cfg
+        await mcp_server._call_tool(
+            "start_testing_session",
+            {"file_paths": ["a.tsx"], "test_mode": "automated"},
+        )
+    assert captured["agent_max_steps"] == 33
+
+
+# -- memory_get_hotspots -------------------------------------------------------
 
 async def test_memory_get_hotspots_returns_empty_structure():
     from icx_engine.mcp_server import _call_tool
@@ -2463,7 +2650,7 @@ async def test_memory_get_hotspots_returns_items_from_manager():
     assert data["results"][0]["file"] == "src/auth/token.py"
 
 
-# ── memory_find_by_file ───────────────────────────────────────────────────────
+# -- memory_find_by_file -------------------------------------------------------
 
 async def test_memory_find_by_file_missing_file_path_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2482,7 +2669,7 @@ async def test_memory_find_by_file_returns_empty_structure():
     assert data["count"] == 0
 
 
-# ── memory_get_patterns ───────────────────────────────────────────────────────
+# -- memory_get_patterns -------------------------------------------------------
 
 async def test_memory_get_patterns_returns_empty_structure():
     from icx_engine.mcp_server import _call_tool
@@ -2504,7 +2691,7 @@ async def test_memory_get_patterns_returns_items_from_manager():
     assert data["results"][0]["pattern_type"] == "dominant_tag"
 
 
-# ── reinforce_memory_usage ────────────────────────────────────────────────────
+# -- reinforce_memory_usage ----------------------------------------------------
 
 async def test_reinforce_memory_usage_memory_not_ready_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2527,7 +2714,7 @@ async def test_reinforce_memory_usage_invalid_key_format_returns_error():
     assert "error" in data
 
 
-# ── get_memory_audit ──────────────────────────────────────────────────────────
+# -- get_memory_audit ----------------------------------------------------------
 
 async def test_get_memory_audit_memory_not_ready_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2542,4 +2729,332 @@ async def test_get_memory_audit_invalid_key_format_returns_error():
     result = await _call_tool("get_memory_audit", {"issue_key": "not-a-key"})
     data = json.loads(result[0].text)
     assert "error" in data
+
+
+# -- Magik-AI testing tools ----------------------------------------------------
+
+async def test_magik_tools_registered():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    names = {t.name for t in tools}
+    expected = {
+        "magik_health_check",
+        "start_testing_session",
+        "resume_testing_session",
+        "magik_test_status",
+        "magik_test_results",
+    }
+    assert expected.issubset(names)
+
+
+async def test_magik_health_tool_schema_has_no_required_fields():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    tool = next(t for t in tools if t.name == "magik_health_check")
+    assert tool.inputSchema.get("required", []) == []
+
+
+async def test_magik_start_tool_requires_file_paths():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    tool = next(t for t in tools if t.name == "start_testing_session")
+    assert "file_paths" in tool.inputSchema["required"]
+    assert "file_paths" in tool.inputSchema["properties"]
+    assert tool.inputSchema["properties"]["file_paths"]["type"] == "array"
+
+
+async def test_magik_resume_tool_requires_session_id_and_response():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    tool = next(t for t in tools if t.name == "resume_testing_session")
+    assert "session_id" in tool.inputSchema["required"]
+    assert "response" in tool.inputSchema["required"]
+
+
+async def test_magik_status_tool_requires_run_id():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    tool = next(t for t in tools if t.name == "magik_test_status")
+    assert "run_id" in tool.inputSchema["required"]
+
+
+async def test_magik_results_tool_requires_run_id():
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    tool = next(t for t in tools if t.name == "magik_test_results")
+    assert "run_id" in tool.inputSchema["required"]
+
+
+async def test_magik_health_check_returns_ok_on_success():
+    from icx_engine.mcp_server import _call_tool
+    from unittest.mock import AsyncMock
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.testing.client.MagikClient.health_check", new=AsyncMock(return_value={"status": "ok"})):
+            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
+                result = await _call_tool("magik_health_check", {})
+    data = json.loads(result[0].text)
+    assert data["ok"] is True
+    assert "data" in data
+
+
+async def test_magik_health_check_returns_not_ok_when_unreachable():
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.testing.client import MagikUnreachable
+    from unittest.mock import AsyncMock
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.testing.client.MagikClient.health_check", new=AsyncMock(side_effect=MagikUnreachable("unreachable"))):
+            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
+                result = await _call_tool("magik_health_check", {})
+    data = json.loads(result[0].text)
+    assert data["ok"] is False
+    assert "error" in data
+
+
+async def test_magik_status_returns_ok_on_success():
+    from icx_engine.mcp_server import _call_tool
+    from unittest.mock import AsyncMock
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.testing.client.MagikClient.get_run_status", new=AsyncMock(return_value={"state": "running"})):
+            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
+                result = await _call_tool("magik_test_status", {"run_id": "ui-123"})
+    data = json.loads(result[0].text)
+    assert data["ok"] is True
+    assert data["data"]["state"] == "running"
+
+
+async def test_magik_status_returns_not_ok_when_run_lost():
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.testing.client import MagikRunLost
+    from unittest.mock import AsyncMock
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.testing.client.MagikClient.get_run_status", new=AsyncMock(side_effect=MagikRunLost("not found"))):
+            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
+                result = await _call_tool("magik_test_status", {"run_id": "ui-999"})
+    data = json.loads(result[0].text)
+    assert data["ok"] is False
+    assert "not found" in data["error"]
+
+
+async def test_magik_results_returns_not_ok_when_report_not_ready():
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.testing.client import MagikReportNotReady
+    from unittest.mock import AsyncMock
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.testing.client.MagikClient.get_run_report", new=AsyncMock(side_effect=MagikReportNotReady("not ready"))):
+            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
+                result = await _call_tool("magik_test_results", {"run_id": "ui-123"})
+    data = json.loads(result[0].text)
+    assert data["ok"] is False
+    assert "not complete yet" in data["error"]
+
+
+async def test_auth_tools_registered():
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    names = {t.name for t in tools}
+    for n in ("magik_login_start", "magik_login_capture", "magik_login_cancel",
+              "magik_login_inline", "magik_logout"):
+        assert n in names
+
+
+async def test_login_inline_validates():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("magik_login_inline", {"loginUrl": "http://x"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "username" in payload["error"] or "password" in payload["error"]
+
+
+async def test_start_session_validates_bad_input():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("start_testing_session", {"file_paths": [], "test_mode": "automated"})
+    payload = json.loads(result[0].text)
+    assert payload.get("ok") is False
+    assert "file_paths" in payload.get("error", "")
+
+
+async def test_resume_description_lists_gate_shapes():
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = {t.name: t for t in await _list_tools()}
+    desc = tools["resume_testing_session"].description
+    for token in ("pick_type", "compat_check", "auth_gate", "profile_push", "approve_iteration", "RULE"):
+        assert token in desc
+
+
+async def test_resume_description_lists_agent_gates():
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = {t.name: t for t in await _list_tools()}
+    desc = tools["resume_testing_session"].description
+    for token in ("compat_scan", "profile_gen", "profile_markdown", "all_compatible"):
+        assert token in desc
+
+
+async def test_compat_scan_description_is_open_ended_mandate():
+    """compat_scan must be an open-ended agent mandate - no hardcoded blocker classes,
+    it bans deferring to the runner, and it makes the agent report every finding to the
+    user rather than deciding. ICX must not claim to verify the answer."""
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = {t.name: t for t in await _list_tools()}
+    desc = tools["resume_testing_session"].description
+    # forbidden-deferral rule (the exact rationalization that caused the miss)
+    assert "work around it" in desc and "less robust but fine" in desc
+    assert "tolerance is never your excuse" in desc
+    # completeness is the agent's job; no fixed checklist
+    assert "first principles" in desc and "There is NO" in desc
+    # report-don't-decide; the user decides
+    assert "REPORT, DO NOT DECIDE" in desc
+    # no leftover hardcoded blocker taxonomy
+    for stale in ("B1 REACHABILITY", "B2 INPUT", "B3 LOCATABILITY", "suspected_blockers", "addressed_suspected"):
+        assert stale not in desc
+    # compat_check lets the user accept-as-is, not only drop/manual
+    assert '"drop"|"manual"|"accept"' in desc
+
+
+async def test_resume_description_has_rulebook_rule():
+    """The agent must be told gate.rules is the binding rulebook loaded from
+    ~/.icx/testing_rules, and gate 2b must document ICX section-presence enforcement."""
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = {t.name: t for t in await _list_tools()}
+    desc = tools["resume_testing_session"].description
+    assert "RULEBOOK RULE" in desc
+    assert "testing_rules" in desc
+    assert "gate.rules" in desc
+    # gate 2b advertises the presence-enforcement + accept_incomplete escape hatch
+    assert "2b-8" in desc and "accept_incomplete" in desc
+
+
+async def test_resume_description_has_expand_scan():
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = {t.name: t for t in await _list_tools()}
+    desc = tools["resume_testing_session"].description
+    assert "expand_scan" in desc and "related_files" in desc
+
+
+async def test_resume_description_has_reread_rule():
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = {t.name: t for t in await _list_tools()}
+    desc = tools["resume_testing_session"].description.lower()
+    assert "re-read" in desc or "read again" in desc
+    assert "read_receipts" in desc
+    assert "stale" in desc
+
+
+async def test_resume_strips_session_id_from_payload(monkeypatch, tmp_path):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.testing import auth as _auth
+
+    store = tmp_path / "auth.json"
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+
+    captured = {}
+
+    class _Snap:
+        values = {"project": "proj-z", "url": "http://host-z/app", "file_paths": ["a.tsx"]}
+        tasks = []
+        next = ()
+
+    class _FakeGraph:
+        async def aget_state(self, config): return _Snap()
+        async def ainvoke(self, command, config=None):
+            captured["resume"] = getattr(command, "resume", None)
+
+    async def _fake_get_graph():
+        return _FakeGraph()
+
+    # handler does `from icx_engine.testing.graph import get_testing_graph` inside the function body
+    import icx_engine.testing.graph as _g
+    monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
+
+    await mcp_server._call_tool("resume_testing_session", {
+        "session_id": "sess-uuid",
+        "response": {"auth_mode": "capture", "session_id": "SECRET-123"},
+    })
+    # session_id stripped from the payload that reaches the graph (and thus the checkpoint writes)
+    assert "session_id" not in (captured["resume"] or {})
+    assert captured["resume"].get("auth_mode") == "capture"
+    # and it was saved to the out-of-band auth store
+    assert _auth.load_session("proj-z", "host-z", store=store).session_id == "SECRET-123"
+
+
+# -- Sonar MCP tools -----------------------------------------------------------
+
+async def test_sonar_tools_registered():
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        names = {t.name for t in await _list_tools()}
+    for n in ("sonar_status", "sonar_projects", "sonar_branches",
+              "sonar_measures", "sonar_quality_gate", "sonar_findings", "sonar_report"):
+        assert n in names
+
+
+async def test_sonar_findings_requires_project(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_findings", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "project" in payload["error"].lower()
+
+
+async def test_sonar_report_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_report", {"project": "my-project"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
 

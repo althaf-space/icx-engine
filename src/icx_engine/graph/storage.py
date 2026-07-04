@@ -494,6 +494,16 @@ def lookup_by_cwd() -> ProjectInfo | None:
     return None
 
 
+def lookup_for_file(file_path: Path) -> ProjectInfo | None:
+    """Return the registered project that contains file_path, at any directory depth."""
+    resolved = file_path.resolve()
+    for entry in _read_registry():
+        registered = Path(entry.get("path", "")).resolve()
+        if resolved == registered or _is_relative_to(resolved, registered):
+            return read_meta(entry["project_id"])
+    return None
+
+
 def lookup_by_tracker_project_key(key: str) -> list[ProjectInfo]:
     """Return all ProjectInfo entries tagged with the given tracker project key (case-insensitive)."""
     key_lower = key.strip().lower()

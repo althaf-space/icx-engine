@@ -28,8 +28,8 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
     Tries Leiden (graspologic) first - best quality.
     Falls back to Louvain (built into networkx) if graspologic is not installed.
 
-    resolution > 1.0 → more, smaller communities.
-    resolution < 1.0 → fewer, larger communities.
+    resolution > 1.0 -> more, smaller communities.
+    resolution < 1.0 -> fewer, larger communities.
 
     Output from graspologic is suppressed to prevent ANSI escape codes
     from corrupting terminal scroll buffers on Windows PowerShell 5.1.

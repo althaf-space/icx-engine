@@ -85,7 +85,9 @@ class JiraConnector(ConnectorBase):
 
         # /browse/<KEY>  or  /issues/<KEY>
         if len(path_parts) >= 2 and path_parts[-2].lower() in ("browse", "issues"):
-            return ParsedInput(issue_key=path_parts[-1].upper())
+            candidate = path_parts[-1].upper()
+            if _ISSUE_KEY_RE.match(candidate):
+                return ParsedInput(issue_key=candidate)
 
         raise InvalidInput(
             "Invalid URL format. Expected a full issue URL or a bare key like PROJ-123."
@@ -134,4 +136,10 @@ class JiraConnector(ConnectorBase):
 
     async def process_attachments(self, raw: RawIssueData, llm_config, log=None) -> tuple[dict[str, str], dict[str, str]]:
         from icx_engine.connectors.attachments import process_attachments as _pa
-        return await _pa(raw, self, llm_config, log=log)
+        if self._client is None:
+            # Preserve original lazy behavior: no client yet means download_attachment
+            # would raise if actually called; zero-attachment cases still succeed.
+            return await _pa(raw, self, llm_config, log=log)
+        # Pool all attachment downloads in this batch over one shared connection.
+        async with self._client.attachment_session():
+            return await _pa(raw, self, llm_config, log=log)

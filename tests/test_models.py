@@ -11,7 +11,7 @@ from icx_engine.connectors.jira.config import JiraConnection, TokenAuth, JiraOAu
 from icx_engine.models.output import RawIssueData, IssueContext
 
 
-# ── ChannelConfig ─────────────────────────────────────────────────────────────
+# -- ChannelConfig -------------------------------------------------------------
 
 def test_channel_config_round_trip():
     ch = ChannelConfig(provider="openai", model="gpt-4o", api_key="sk-xyz", base_url=None)
@@ -37,7 +37,7 @@ def test_channel_config_api_key_excluded_from_serialization():
     assert "api_key" not in ch.model_dump_json()
 
 
-# ── Generic OAuthAuth (models/config.py) ─────────────────────────────────────
+# -- Generic OAuthAuth (models/config.py) -------------------------------------
 
 def test_oauth_auth_generic_round_trip():
     """Generic OAuthAuth has no platform-specific fields."""
@@ -52,7 +52,7 @@ def test_oauth_auth_generic_round_trip():
     assert auth.client_secret is None
 
 
-# ── Jira-specific auth models (connectors/jira/config.py) ────────────────────
+# -- Jira-specific auth models (connectors/jira/config.py) --------------------
 
 def test_token_auth_round_trip():
     auth = TokenAuth(auth_type="token", email="a@b.com", api_token="tok")
@@ -72,7 +72,7 @@ def test_jira_oauth_auth_round_trip():
     assert auth.cloud_id == "cloud-abc"
 
 
-# ── JiraConnection discriminated union ────────────────────────────────────────
+# -- JiraConnection discriminated union ----------------------------------------
 
 def test_jira_connection_discriminated_union_token():
     conn = JiraConnection(
@@ -91,7 +91,7 @@ def test_jira_connection_discriminated_union_oauth():
     assert isinstance(conn.auth, JiraOAuthAuth)
 
 
-# ── BaseConnection extra fields ───────────────────────────────────────────────
+# -- BaseConnection extra fields -----------------------------------------------
 
 def test_base_connection_ignores_extra_fields():
     """Unknown extra fields are discarded (extra='ignore') for security."""
@@ -102,7 +102,7 @@ def test_base_connection_ignores_extra_fields():
     assert dumped["domain"] == "x.atlassian.net"
 
 
-# ── AppConfig ─────────────────────────────────────────────────────────────────
+# -- AppConfig -----------------------------------------------------------------
 
 def test_app_config_defaults_to_empty():
     config = AppConfig()
@@ -131,7 +131,7 @@ def test_app_config_json_round_trip():
     assert restored.active_llm.text_config.provider == "ollama"
 
 
-# ── RawIssueData ──────────────────────────────────────────────────────────────
+# -- RawIssueData --------------------------------------------------------------
 
 def test_raw_issue_data_fields():
     raw = RawIssueData(
@@ -142,7 +142,7 @@ def test_raw_issue_data_fields():
     assert raw.issue_key == "AB-1"
 
 
-# ── IssueContext ──────────────────────────────────────────────────────────────
+# -- IssueContext --------------------------------------------------------------
 
 def test_issue_context_nullable_fields():
     ctx = IssueContext(
@@ -165,7 +165,7 @@ def test_issue_context_score_range():
     assert 0.0 <= ctx.completeness_score <= 1.0
 
 
-# ── AppConfig multi-profile LLM support ──────────────────────────────────────
+# -- AppConfig multi-profile LLM support --------------------------------------
 
 def test_app_config_has_llm_profiles():
     config = AppConfig(
@@ -206,7 +206,7 @@ def test_app_config_json_round_trip_multi_profile():
     assert "personal" in restored.llm_profiles
 
 
-# ── ConfigManager ─────────────────────────────────────────────────────────────
+# -- ConfigManager -------------------------------------------------------------
 
 def test_config_manager_returns_empty_config_when_file_missing(isolated_config):
     from icx_engine.config_manager import ConfigManager
@@ -233,7 +233,7 @@ def test_config_manager_atomic_write_creates_parent(isolated_config):
     assert isolated_config.exists()
 
 
-# ── Jira auth header builder ──────────────────────────────────────────────────
+# -- Jira auth header builder --------------------------------------------------
 
 def test_build_auth_header_token():
     from icx_engine.connectors.jira.auth import build_auth_header
@@ -257,7 +257,7 @@ def test_build_auth_header_oauth():
     assert build_auth_header(conn) == "Bearer bearer-xyz"
 
 
-# ── Phase 2: JiraOAuthAuth stores client_id ──────────────────────────────────
+# -- Phase 2: JiraOAuthAuth stores client_id ----------------------------------
 
 def test_jira_oauth_auth_stores_client_id():
     auth = JiraOAuthAuth(
@@ -275,7 +275,7 @@ def test_jira_oauth_auth_client_id_defaults_empty():
     assert auth.client_id == ""
 
 
-# ── Phase 2: keychain integration ────────────────────────────────────────────
+# -- Phase 2: keychain integration --------------------------------------------
 
 def _make_keychain_mock():
     store: dict = {}
@@ -512,7 +512,7 @@ def test_delete_llm_profile_secrets_removes_both_slots(monkeypatch):
     assert "llm_image:work" not in store
 
 
-# ── Phase 5: OAuth/keychain double-lock ──────────────────────────────────────
+# -- Phase 5: OAuth/keychain double-lock --------------------------------------
 
 def test_secret_fields_excluded_from_serialization():
     """All credential fields are stripped from model_dump() - the double-lock guarantee."""
@@ -629,7 +629,7 @@ def test_config_manager_oauth_plaintext_fallback_when_keychain_unavailable(isola
     assert auth.refresh_token == "ref-plain"
 
 
-# ── Concurrent write safety ───────────────────────────────────────────────────
+# -- Concurrent write safety ---------------------------------------------------
 
 def test_pid_based_temp_file_name(isolated_config, monkeypatch):
     import icx_engine.config_manager as cm
@@ -746,7 +746,7 @@ def test_delete_llm_image_secrets_removes_only_image_slot(monkeypatch):
     assert "llm_text:work" in store        # untouched
 
 
-# ── D-Lock encryption ─────────────────────────────────────────────────────────
+# -- D-Lock encryption ---------------------------------------------------------
 
 def test_dlock_encrypt_decrypt_roundtrip(monkeypatch):
     import icx_engine.config_manager as cm
@@ -877,7 +877,7 @@ def test_dlock_long_llm_api_key_stored_in_config_not_keychain(isolated_config, m
     assert "llm_text:work" not in store
 
 
-# ── Keyring read-only probe and caching ──────────────────────────────────────
+# -- Keyring read-only probe and caching --------------------------------------
 
 def test_keyring_available_does_not_write_to_keychain():
     """_keyring_available() is a read-only probe - set_password must never be called."""

@@ -10,7 +10,7 @@ from icx_engine.connectors.jira.config import JiraConnection, TokenAuth, JiraOAu
 from icx_engine.exceptions import SourceUnavailable
 
 
-# ── JiraClient whitelist enforcement ─────────────────────────────────────────
+# -- JiraClient whitelist enforcement -----------------------------------------
 
 async def test_whitelist_rejects_host_not_in_set():
     client = JiraClient(
@@ -57,6 +57,63 @@ async def test_whitelist_allows_permitted_host():
     assert result == b"data"
 
 
+# -- attachment_session connection pooling ------------------------------------
+
+def _pool_client() -> JiraClient:
+    return JiraClient(
+        "https://api.atlassian.com/ex/jira/abc123/rest/api/3",
+        "Bearer tok",
+        {"api.atlassian.com"},
+    )
+
+
+async def test_attachment_session_sets_and_clears_shared_client():
+    client = _pool_client()
+    assert client._dl_client is None
+    async with client.attachment_session():
+        assert client._dl_client is not None      # one shared client during the batch
+        shared = client._dl_client
+        async with client.attachment_session():    # nested reuses, does not replace
+            assert client._dl_client is shared
+        assert client._dl_client is shared         # inner exit must not close the outer
+    assert client._dl_client is None               # closed + reset after the batch
+
+
+@respx.mock
+async def test_attachment_session_downloads_reuse_one_client():
+    base = "https://api.atlassian.com/ex/jira/abc123/rest/api/3/attachment/content"
+    for i in (1, 2, 3):
+        respx.get(f"{base}/{i}").mock(return_value=httpx.Response(200, content=f"f{i}".encode()))
+    client = _pool_client()
+    async with client.attachment_session():
+        shared = client._dl_client
+        results = [await client.download_attachment(f"{base}/{i}") for i in (1, 2, 3)]
+        assert client._dl_client is shared         # same client across all 3 downloads
+    assert results == [b"f1", b"f2", b"f3"]         # results identical to per-call path
+
+
+@respx.mock
+async def test_download_outside_session_still_works_per_call():
+    url = "https://api.atlassian.com/ex/jira/abc123/rest/api/3/attachment/content/9"
+    respx.get(url).mock(return_value=httpx.Response(200, content=b"solo"))
+    client = _pool_client()
+    result = await client.download_attachment(url)   # no session -> per-call client
+    assert result == b"solo"
+    assert client._dl_client is None
+
+
+async def test_attachment_session_closes_client_on_exception():
+    """An error raised mid-batch must still close + clear the shared client (no leak)."""
+    client = _pool_client()
+    with pytest.raises(RuntimeError):
+        async with client.attachment_session():
+            shared = client._dl_client
+            assert shared is not None
+            raise RuntimeError("boom mid-batch")
+    assert client._dl_client is None         # reset even though the body raised
+    assert shared.is_closed                  # underlying httpx client was aclosed
+
+
 @respx.mock
 async def test_redirect_to_allowed_host_is_followed():
     """Redirect from api.atlassian.com to api.media.atlassian.com (both in allowed_hosts) succeeds."""
@@ -74,6 +131,25 @@ async def test_redirect_to_allowed_host_is_followed():
     )
     result = await client.download_attachment(original_url)
     assert result == b"filedata"
+
+
+@respx.mock
+async def test_relative_redirect_resolves_against_current_host():
+    """A relative Location header resolves to the same host and is followed (finding S4)."""
+    original_url = "https://api.atlassian.com/ex/jira/abc123/rest/api/3/attachment/content/1"
+    resolved_url = "https://api.atlassian.com/rest/api/3/attachment/content/2"
+    respx.get(original_url).mock(
+        return_value=httpx.Response(302, headers={"Location": "/rest/api/3/attachment/content/2"})
+    )
+    respx.get(resolved_url).mock(return_value=httpx.Response(200, content=b"reldata"))
+
+    client = JiraClient(
+        "https://api.atlassian.com/ex/jira/abc123/rest/api/3",
+        "Bearer tok",
+        {"api.atlassian.com"},
+    )
+    result = await client.download_attachment(original_url)
+    assert result == b"reldata"
 
 
 @respx.mock
@@ -96,7 +172,7 @@ async def test_redirect_to_disallowed_host_raises():
 @respx.mock
 async def test_too_many_redirects_raises():
     """More than _MAX_REDIRECT_HOPS redirects raises ValueError."""
-    # Chain: url0 → url1 → url2 → url3 → url4 (4 redirects, exceeds limit of 3)
+    # Chain: url0 -> url1 -> url2 -> url3 -> url4 (4 redirects, exceeds limit of 3)
     base = "https://api.atlassian.com/ex/jira/abc123/rest/api/3/attachment/content"
     for i in range(4):
         respx.get(f"{base}/{i}").mock(
@@ -145,7 +221,7 @@ def test_init_rejects_http_base_url():
         JiraClient("http://test.atlassian.net/rest/api/3", "Basic tok", {"test.atlassian.net"})
 
 
-# ── JiraConnector URL rewriting ───────────────────────────────────────────────
+# -- JiraConnector URL rewriting -----------------------------------------------
 
 def _make_oauth_connector() -> JiraConnector:
     conn = JiraConnection(

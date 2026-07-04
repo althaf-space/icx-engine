@@ -106,7 +106,7 @@ def extract_react_edges(
         }
 
         symbol_to_file = _build_symbol_to_file(
-            source, rel, project_root, project_files,
+            source, rel, project_root, project_files, ts_paths_map,
         )
 
         for match in _JSX_TAG.finditer(source):
@@ -257,13 +257,15 @@ def _trace_barrel(
 
 def _build_symbol_to_file(
     source: str, current_rel: str, project_root: Path, project_files: set[str],
+    ts_paths_map: dict | None = None,
 ) -> dict[str, str]:
     """Walk the file's imports and produce {imported_name: relative_path} when
     the path resolves to a project file."""
     from icx_engine.graph.parser.resolvers.jsts_imports import (
         _resolve_spec, _load_tsconfig_paths,
     )
-    ts_paths_map = _load_tsconfig_paths(project_root)
+    if ts_paths_map is None:
+        ts_paths_map = _load_tsconfig_paths(project_root)
 
     out: dict[str, str] = {}
     for match in _NAMED_IMPORT.finditer(source):

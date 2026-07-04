@@ -137,6 +137,31 @@ def test_memory_query_input():
     assert q.source_type == "jira"
 
 
+from icx_engine.memory.schema import _sq, _SQ_MAX_LEN
+
+
+def test_sq_doubles_single_quotes():
+    assert _sq("A'B") == "A''B"
+    assert _sq("O'Brien") == "O''Brien"
+
+
+def test_sq_leaves_backslash_literal():
+    # Datafusion string literals treat backslash literally - _sq must not alter it.
+    assert _sq("path\\to") == "path\\to"
+
+
+def test_sq_strips_control_chars():
+    assert _sq("a\x00b\x1fc\x7fd") == "abcd"
+
+
+def test_sq_caps_length():
+    assert len(_sq("x" * (_SQ_MAX_LEN + 50))) == _SQ_MAX_LEN
+
+
+def test_sq_valid_key_unchanged():
+    assert _sq("PROJ-123") == "PROJ-123"
+
+
 from icx_engine.memory.schema import connect_with_timeout
 
 

@@ -310,7 +310,7 @@ def _resolve_js_module_path(raw: str | Path, start_dir: Path | None = None) -> P
     return _resolve_workspace_import(raw, start_dir)
 
 
-# ── LanguageConfig dataclass ─────────────────────────────────────────────────
+# -- LanguageConfig dataclass -------------------------------------------------
 
 @dataclass
 class LanguageConfig:
@@ -355,7 +355,7 @@ class LanguageConfig:
     extra_walk_fn: Callable | None = None
 
 
-# ── Generic helpers ───────────────────────────────────────────────────────────
+# -- Generic helpers -----------------------------------------------------------
 
 def _read_text(node, source: bytes) -> str:
     return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
@@ -386,7 +386,7 @@ def _find_body(node, config: LanguageConfig):
     return None
 
 
-# ── Import handlers ───────────────────────────────────────────────────────────
+# -- Import handlers -----------------------------------------------------------
 
 def _import_python(node, source: bytes, file_nid: str, stem: str, edges: list, str_path: str) -> None:
     t = node.type
@@ -484,8 +484,8 @@ def _import_js(node, source: bytes, file_nid: str, stem: str, edges: list, str_p
             break
 
     # Emit symbol-level edges for named imports/re-exports from local/aliased files.
-    # e.g. `import { Foo, type Bar } from './bar'` → file → Foo, file → Bar (EXTRACTED)
-    # e.g. `export { Foo } from './bar'` → file → Foo (re_exports edge)
+    # e.g. `import { Foo, type Bar } from './bar'` -> file -> Foo, file -> Bar (EXTRACTED)
+    # e.g. `export { Foo } from './bar'` -> file -> Foo (re_exports edge)
     # Uses the same _make_id(target_stem, name) key that _extract_generic emits when
     # defining the symbol, so these edges wire importers directly to existing symbol nodes.
     if resolved_path is not None:
@@ -786,7 +786,7 @@ def _import_php(node, source: bytes, file_nid: str, stem: str, edges: list, str_
             break
 
 
-# ── C/C++ function name helpers ───────────────────────────────────────────────
+# -- C/C++ function name helpers -----------------------------------------------
 
 def _get_c_func_name(node, source: bytes) -> str | None:
     """Recursively unwrap declarator to find the innermost identifier (C)."""
@@ -820,7 +820,7 @@ def _get_cpp_func_name(node, source: bytes) -> str | None:
     return None
 
 
-# ── JS/TS extra walk for arrow functions ──────────────────────────────────────
+# -- JS/TS extra walk for arrow functions --------------------------------------
 
 def _find_require_call(value_node):
     """Return the call_expression node if `value_node` is a `require(...)` call
@@ -841,9 +841,9 @@ def _require_imports_js(node, source: bytes, file_nid: str, stem: str, edges: li
     """Detect CommonJS require imports inside lexical_declaration / variable_declaration.
 
     Handles three patterns:
-      const { foo, bar } = require('./mod')   → file → mod (imports_from), file → foo, file → bar
-      const mod         = require('./mod')   → file → mod (imports_from)
-      const x           = require('./mod').y → file → mod (imports_from), file → y
+      const { foo, bar } = require('./mod')   -> file -> mod (imports_from), file -> foo, file -> bar
+      const mod         = require('./mod')   -> file -> mod (imports_from)
+      const x           = require('./mod').y -> file -> mod (imports_from), file -> y
 
     Returns True if any require import was found.
     """
@@ -968,7 +968,7 @@ def _js_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
     return False
 
 
-# ── C# extra walk for namespace declarations ──────────────────────────────────
+# -- C# extra walk for namespace declarations ----------------------------------
 
 def _csharp_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                        nodes: list, edges: list, seen_ids: set, function_bodies: list,
@@ -991,7 +991,7 @@ def _csharp_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: 
     return False
 
 
-# ── Swift extra walk for enum cases ──────────────────────────────────────────
+# -- Swift extra walk for enum cases ------------------------------------------
 
 def _swift_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                       nodes: list, edges: list, seen_ids: set, function_bodies: list,
@@ -1009,7 +1009,7 @@ def _swift_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: s
     return False
 
 
-# ── Language configs ──────────────────────────────────────────────────────────
+# -- Language configs ----------------------------------------------------------
 
 _PYTHON_CONFIG = LanguageConfig(
     ts_module="tree_sitter_python",
@@ -1304,7 +1304,7 @@ _SWIFT_CONFIG = LanguageConfig(
     import_handler=_import_swift,
 )
 
-# ── Generic extractor ─────────────────────────────────────────────────────────
+# -- Generic extractor ---------------------------------------------------------
 
 def _extract_generic(path: Path, config: LanguageConfig) -> dict:
     """Generic AST extractor driven by LanguageConfig."""
@@ -1668,7 +1668,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
             # only visit declarator children, not the type node (which would give
             # us the type name, not the field name). Handles int x, y; via
             # multiple declarator fields and static const int MAX = 100; via the
-            # init_declarator → field_identifier recursion in _get_cpp_func_name.
+            # init_declarator -> field_identifier recursion in _get_cpp_func_name.
             for decl in node.children_by_field_name("declarator"):
                 name = _get_cpp_func_name(decl, source)
                 if name:
@@ -1743,7 +1743,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
 
     walk(root)
 
-    # ── Call-graph pass ───────────────────────────────────────────────────────
+    # -- Call-graph pass -------------------------------------------------------
     label_to_nid: dict[str, str] = {}
     for n in nodes:
         raw = n["label"]
@@ -1853,7 +1853,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
                     if func_node:
                         callee_name = _read_text(func_node, source)
                 elif node.type == "scoped_call_expression":
-                    # Static method call: Helper::format() → callee = "Helper"
+                    # Static method call: Helper::format() -> callee = "Helper"
                     scope_node = node.child_by_field_name("scope")
                     if scope_node:
                         callee_name = _read_text(scope_node, source)
@@ -1917,7 +1917,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
                         "source_location": f"L{node.start_point[0] + 1}",
                     })
 
-            # Helper function calls: config('foo.bar') → uses_config edge to "foo"
+            # Helper function calls: config('foo.bar') -> uses_config edge to "foo"
             if (callee_name and callee_name in config.helper_fn_names):
                 args_node = node.child_by_field_name("arguments")
                 first_key: str | None = None
@@ -1993,7 +1993,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
                                 "weight": 1.0,
                             })
 
-        # Static property access: Foo::$bar → uses_static_prop edge
+        # Static property access: Foo::$bar -> uses_static_prop edge
         if node.type in config.static_prop_types:
             scope_node = node.child_by_field_name("scope")
             if scope_node is None:
@@ -2020,7 +2020,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
                             "weight": 1.0,
                         })
 
-        # PHP class constant access: Foo::BAR → references_constant edge
+        # PHP class constant access: Foo::BAR -> references_constant edge
         if config.ts_module == "tree_sitter_php" and node.type == "class_constant_access_expression":
             class_name = _php_class_const_scope(node)
             if class_name:
@@ -2047,7 +2047,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
     for caller_nid, body_node in function_bodies:
         walk_calls(body_node, caller_nid)
 
-    # ── Event listener pass ───────────────────────────────────────────────────
+    # -- Event listener pass ---------------------------------------------------
     seen_listen_pairs: set[tuple[str, str]] = set()
     for event_name, listener_name, line in pending_listen_edges:
         event_nid = label_to_nid.get(event_name.lower())
@@ -2069,7 +2069,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
             "weight": 1.0,
         })
 
-    # ── Clean edges ───────────────────────────────────────────────────────────
+    # -- Clean edges -----------------------------------------------------------
     valid_ids = seen_ids
     clean_edges = []
     for edge in edges:
@@ -2083,7 +2083,7 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
     return result
 
 
-# ── Python rationale extraction ───────────────────────────────────────────────
+# -- Python rationale extraction -----------------------------------------------
 
 _RATIONALE_PREFIXES = ("# NOTE:", "# IMPORTANT:", "# HACK:", "# WHY:", "# RATIONALE:", "# TODO:", "# FIXME:")
 
@@ -2213,7 +2213,7 @@ def _extract_python_rationale(path: Path, result: dict) -> None:
             _add_rationale(stripped, lineno, file_nid)
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# -- Public API ----------------------------------------------------------------
 
 def extract_python(path: Path) -> dict:
     """Extract classes, functions, and imports from a .py file via tree-sitter AST."""
@@ -2904,7 +2904,7 @@ def extract_sql(path: Path) -> dict:
                            "source_file": str_path, "source_location": None}]
     edges: list[dict] = []
     seen_ids: set[str] = {file_nid}
-    table_nids: dict[str, str] = {}  # name → nid for reference resolution
+    table_nids: dict[str, str] = {}  # name -> nid for reference resolution
 
     def _read(n) -> str:
         return source[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
@@ -3154,7 +3154,7 @@ def extract_swift(path: Path) -> dict:
     return _extract_generic(path, _SWIFT_CONFIG)
 
 
-# ── Julia extractor (custom walk) ────────────────────────────────────────────
+# -- Julia extractor (custom walk) --------------------------------------------
 
 def extract_julia(path: Path) -> dict:
     """Extract modules, structs, functions, imports, and calls from a .jl file."""
@@ -3574,7 +3574,7 @@ def extract_fortran(path: Path) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
-# ── Go extractor (custom walk) ────────────────────────────────────────────────
+# -- Go extractor (custom walk) ------------------------------------------------
 
 def extract_go(path: Path) -> dict:
     """Extract functions, methods, type declarations, and imports from a .go file."""
@@ -3749,8 +3749,8 @@ def extract_go(path: Path) -> dict:
                     field = func_node.child_by_field_name("field")
                     operand = func_node.child_by_field_name("operand")
                     receiver_name = _read_text(operand, source) if operand else ""
-                    # Package-qualified call (e.g. fmt.Println) → allow cross-file resolution.
-                    # Receiver method call (e.g. s.logger.Log) → skip, no import evidence.
+                    # Package-qualified call (e.g. fmt.Println) -> allow cross-file resolution.
+                    # Receiver method call (e.g. s.logger.Log) -> skip, no import evidence.
                     is_member_call = receiver_name not in go_imported_pkgs
                     if field:
                         callee_name = _read_text(field, source)
@@ -3795,7 +3795,7 @@ def extract_go(path: Path) -> dict:
     return {"nodes": nodes, "edges": clean_edges, "raw_calls": raw_calls}
 
 
-# ── Rust extractor (custom walk) ──────────────────────────────────────────────
+# -- Rust extractor (custom walk) ----------------------------------------------
 
 # Common Rust trait/stdlib method names that appear in virtually every codebase.
 # Resolving these cross-file produces spurious INFERRED edges across crate
@@ -3996,7 +3996,7 @@ def extract_rust(path: Path) -> dict:
     return {"nodes": nodes, "edges": clean_edges, "raw_calls": raw_calls}
 
 
-# ── Zig ───────────────────────────────────────────────────────────────────────
+# -- Zig -----------------------------------------------------------------------
 
 def extract_zig(path: Path) -> dict:
     """Extract functions, structs, enums, unions, and imports from a .zig file."""
@@ -4166,7 +4166,7 @@ def extract_zig(path: Path) -> dict:
     return {"nodes": nodes, "edges": clean_edges, "raw_calls": raw_calls}
 
 
-# ── PowerShell ────────────────────────────────────────────────────────────────
+# -- PowerShell ----------------------------------------------------------------
 
 def extract_powershell(path: Path) -> dict:
     """Extract functions, classes, methods, and using statements from a .ps1 file."""
@@ -4335,7 +4335,7 @@ def extract_powershell(path: Path) -> dict:
     return {"nodes": nodes, "edges": clean_edges, "raw_calls": raw_calls}
 
 
-# ── Cross-file import resolution ──────────────────────────────────────────────
+# -- Cross-file import resolution ----------------------------------------------
 
 def _source_key(source_file: str, root: Path) -> str:
     if not source_file:
@@ -5234,7 +5234,7 @@ def _resolve_cross_file_imports(
     """
     Two-pass import resolution: turn file-level imports into class-level edges.
 
-    Pass 1 - build a global map: class/function name → node_id, per stem.
+    Pass 1 - build a global map: class/function name -> node_id, per stem.
     Pass 2 - for each `from .module import Name`, look up Name in the global
               map and add a direct INFERRED edge from each class in the
               importing file to the imported entity.
@@ -5254,7 +5254,7 @@ def _resolve_cross_file_imports(
     language = Language(tspython.language())
     parser = Parser(language)
 
-    # Pass 1: _file_stem(path) → {ClassName: node_id}
+    # Pass 1: _file_stem(path) -> {ClassName: node_id}
     # Keyed by directory-qualified stem (e.g. "auth_models") to avoid collisions
     # when multiple files share the same filename in different directories.
     # A secondary bare-stem index handles absolute imports where only the module
@@ -5287,7 +5287,6 @@ def _resolve_cross_file_imports(
 
     # Pass 2: for each file, find `from .X import A, B, C` and resolve
     new_edges: list[dict] = []
-    stem_to_path: dict[str, Path] = {_file_stem(p): p for p in paths}
 
     for file_result, path in zip(per_file, paths):
         stem = _file_stem(path)
@@ -5316,8 +5315,8 @@ def _resolve_cross_file_imports(
         def walk_imports(node) -> None:
             if node.type == "import_from_statement":
                 # Find the module name - handles both absolute and relative imports.
-                # Relative: `from .models import X` → relative_import → dotted_name
-                # Absolute: `from models import X`  → module_name field
+                # Relative: `from .models import X` -> relative_import -> dotted_name
+                # Absolute: `from models import X`  -> module_name field
                 # target_fq is the directory-qualified stem used as the key in
                 # stem_to_entities. Relative imports are resolved exactly via the
                 # importing file's directory; absolute imports fall back to the
@@ -5475,7 +5474,7 @@ def _resolve_cross_file_java_imports(
     language = Language(tsjava.language())
     parser = Parser(language)
 
-    # Pass 1: class-name → node_id index (only internal, uppercase-starting names)
+    # Pass 1: class-name -> node_id index (only internal, uppercase-starting names)
     name_to_ids: dict[str, list[str]] = {}
     for file_result in per_file:
         for node in file_result.get("nodes", []):
@@ -6046,10 +6045,10 @@ def extract_markdown(path: Path) -> dict:
     return {"nodes": nodes, "edges": edges, "input_tokens": 0, "output_tokens": 0}
 
 
-# ── Pascal / Delphi extractor ─────────────────────────────────────────────────
+# -- Pascal / Delphi extractor -------------------------------------------------
 
 _pascal_unit_cache: dict[str, dict[str, str]] = {}
-_pascal_class_stem_cache: dict[str, dict[str, str]] = {}  # root_key → {stem_lower: _file_stem}
+_pascal_class_stem_cache: dict[str, dict[str, str]] = {}  # root_key -> {stem_lower: _file_stem}
 
 
 def _pascal_project_root(from_path: Path) -> Path:
@@ -6542,7 +6541,7 @@ def extract_pascal(path: Path) -> dict:
                         base_name = _read(child)
                         base_nid = _make_id(stem, base_name)
                         if base_nid not in seen_ids:
-                            # Try cross-file resolution (TFooBar → FooBar.pas)
+                            # Try cross-file resolution (TFooBar -> FooBar.pas)
                             resolved = _pascal_resolve_class(path, base_name)
                             base_nid = resolved if resolved else _make_id(base_name)
                             if base_nid not in seen_ids:
@@ -6629,7 +6628,7 @@ def extract_pascal(path: Path) -> dict:
                         )
         elif node.type == "statement":
             # Pascal bare procedure calls with no args: `Reset;`
-            # tree-sitter represents these as statement → identifier (no exprCall wrapper)
+            # tree-sitter represents these as statement -> identifier (no exprCall wrapper)
             named = [c for c in node.children if c.is_named]
             if len(named) == 1 and named[0].type == "identifier":
                 callee_text = _read(named[0])
@@ -6754,7 +6753,7 @@ def extract_delphi_form(path: Path) -> dict:
 
     Binary .dfm files are skipped gracefully: an empty result is returned
     so the rest of the pipeline is unaffected.  Convert binary forms to
-    text in the Delphi IDE via File → Save As (Text DFM) if you want them
+    text in the Delphi IDE via File -> Save As (Text DFM) if you want them
     indexed.
 
     Text .dfm files are parsed identically to .lfm: component containment
@@ -6898,7 +6897,7 @@ def extract_lazarus_package(path: Path) -> dict:
     add_node(pkg_nid, pkg_name)
     add_edge(file_nid, pkg_nid, "contains")
 
-    # Required packages → imports edges
+    # Required packages -> imports edges
     for item in xml_root.findall(".//RequiredPkgs/"):
         dep_elem = item.find("PackageName")
         if dep_elem is not None:
@@ -6908,7 +6907,7 @@ def extract_lazarus_package(path: Path) -> dict:
                 add_node(dep_nid, dep_name)
                 add_edge(pkg_nid, dep_nid, "imports", context="import")
 
-    # Listed units → contains edges, resolved to path-based IDs where possible
+    # Listed units -> contains edges, resolved to path-based IDs where possible
     for item in xml_root.findall(".//Files/"):
         unit_elem = item.find("UnitName")
         if unit_elem is not None:
@@ -6921,7 +6920,7 @@ def extract_lazarus_package(path: Path) -> dict:
     return {"nodes": nodes, "edges": edges, "input_tokens": 0, "output_tokens": 0}
 
 
-# ── Main extract and collect_files ────────────────────────────────────────────
+# -- Main extract and collect_files --------------------------------------------
 
 
 def _check_tree_sitter_version() -> None:
@@ -7300,7 +7299,7 @@ def extract_json(path: Path) -> dict:
                     if dep_nid:
                         add_edge(key_nid, dep_nid, "imports", line, context="import")
 
-    # Entry: find root document → object
+    # Entry: find root document -> object
     doc = root
     if doc.type == "document" and doc.child_count > 0:
         doc = doc.children[0]
@@ -7691,7 +7690,7 @@ def extract(
     # Cross-file call resolution for all languages
     # Each extractor saved unresolved calls in raw_calls. Now that we have all
     # nodes from all files, resolve any callee that exists in another file.
-    # Build name → ALL matching node IDs so we can skip ambiguous common names
+    # Build name -> ALL matching node IDs so we can skip ambiguous common names
     # (e.g. "log", "execute", "find") that appear in multiple files - resolving
     # those inflates god_nodes ranking with spurious cross-file edges.
     # Build label -> node_id index for cross-file call resolution.
@@ -7741,7 +7740,7 @@ def extract(
         callee = rc.get("callee", "")
         if not callee:
             continue
-        # Skip member-call callees: obj.log() → "log" has no import evidence
+        # Skip member-call callees: obj.log() -> "log" has no import evidence
         # and collides with any top-level function named "log" in the corpus.
         if rc.get("is_member_call"):
             continue

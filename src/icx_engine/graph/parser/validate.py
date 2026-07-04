@@ -70,5 +70,5 @@ def assert_valid(data: dict) -> None:
     """Raise ValueError with all errors if extraction is invalid."""
     errors = validate_extraction(data)
     if errors:
-        msg = f"Extraction JSON has {len(errors)} error(s):\n" + "\n".join(f"  • {e}" for e in errors)
+        msg = f"Extraction JSON has {len(errors)} error(s):\n" + "\n".join(f"  - {e}" for e in errors)
         raise ValueError(msg)

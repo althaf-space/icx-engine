@@ -14,14 +14,14 @@ from icx_engine.graph.change import check_staleness, current_git_commit, ChangeR
 # ---------------------------------------------------------------------------
 
 def test_never_built_is_stale(tmp_path):
-    """No commit AND file_count == 0 → never built → stale, no existing to serve."""
+    """No commit AND file_count == 0 -> never built -> stale, no existing to serve."""
     result = check_staleness(None, 0, tmp_path)
     assert result.is_stale is True
     assert result.serve_existing is False
 
 
 def test_no_commit_but_has_files_falls_back_to_mtime(tmp_path):
-    """No git commit but was built before (file_count > 0) → mtime fallback path."""
+    """No git commit but was built before (file_count > 0) -> mtime fallback path."""
     with patch("icx_engine.graph.change._mtime_changed_files", return_value=[]) as mock_mtime:
         result = check_staleness(None, 100, tmp_path)
     mock_mtime.assert_called_once()
@@ -52,24 +52,24 @@ def test_small_delta_serves_existing(tmp_path):
     with patch("icx_engine.graph.change.subprocess.run", return_value=_mock_git_diff(changed)):
         result = check_staleness("abc123", 100, tmp_path)
     assert result.is_stale is True
-    assert result.serve_existing is True  # ≤5 files
+    assert result.serve_existing is True  # <=5 files
     assert result.changed_files == changed
 
 
 def test_large_delta_by_file_count_blocks(tmp_path):
     changed = [f"src/f{i}.py" for i in range(10)]  # 10 files > 5
     with patch("icx_engine.graph.change.subprocess.run", return_value=_mock_git_diff(changed)):
-        result = check_staleness("abc123", 20, tmp_path)  # 10/20 = 50% ≥ 3%
+        result = check_staleness("abc123", 20, tmp_path)  # 10/20 = 50% >= 3%
     assert result.is_stale is True
     assert result.serve_existing is False
 
 
 def test_large_ratio_but_few_files_serves_existing(tmp_path):
-    # 3 files out of 10 = 30% ratio, but ≤5 files → serve existing
+    # 3 files out of 10 = 30% ratio, but <=5 files -> serve existing
     changed = ["a.py", "b.py", "c.py"]
     with patch("icx_engine.graph.change.subprocess.run", return_value=_mock_git_diff(changed)):
         result = check_staleness("abc123", 10, tmp_path)
-    assert result.serve_existing is True  # ≤5 files overrides ratio
+    assert result.serve_existing is True  # <=5 files overrides ratio
 
 
 def test_exactly_5_files_serves_existing(tmp_path):
@@ -80,7 +80,7 @@ def test_exactly_5_files_serves_existing(tmp_path):
 
 
 def test_6_files_large_ratio_blocks(tmp_path):
-    changed = [f"src/f{i}.py" for i in range(6)]  # 6 files > 5, 6/10 = 60% ≥ 3%
+    changed = [f"src/f{i}.py" for i in range(6)]  # 6 files > 5, 6/10 = 60% >= 3%
     with patch("icx_engine.graph.change.subprocess.run", return_value=_mock_git_diff(changed)):
         result = check_staleness("abc123", 10, tmp_path)
     assert result.serve_existing is False

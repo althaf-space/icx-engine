@@ -1,18 +1,38 @@
 from __future__ import annotations
+import hashlib
 import os
 import sys
+import threading
 from pathlib import Path
 from rich.console import Console
 from rich.progress import (
     Progress, SpinnerColumn, TextColumn, BarColumn,
     DownloadColumn, TransferSpeedColumn, TimeRemainingColumn,
 )
-from icx_engine.exceptions import MemoryError
+from icx_engine.exceptions import ICXMemoryError
 
 EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
 _ONNX_REPO = "Xenova/bge-base-en-v1.5"
 _ONNX_FILE = "onnx/model_quantized.onnx"
 VECTOR_DIM = 768
+
+# Pin downloads to immutable commit revisions so the fetched bytes can never
+# drift from the checksums below. Verified in _verify_model_files() on fresh
+# download only (sentinel-gated) - already-initialized installs are unaffected.
+_TOKENIZER_REVISION = "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"  # BAAI/bge-base-en-v1.5
+_ONNX_REVISION = "4d6cd88e18e51a5e020c2c305726d76ada9c03cf"       # Xenova/bge-base-en-v1.5
+_MODEL_CHECKSUMS: dict[str, str] = {
+    "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+    "onnx/model_quantized.onnx": "c9729cc84cbd0e9fecc759505d2be65916c9fe05222d7ea26c65fcb3382af38d",
+}
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 MEMORY_DIR = Path.home() / ".icx" / "memory"
 MODEL_DIR = MEMORY_DIR / "model"
 SENTINEL_PATH = MEMORY_DIR / ".mem_initialized"
@@ -42,6 +62,7 @@ class EmbeddingsManager:
     def __init__(self) -> None:
         self._session = None
         self._tokenizer = None
+        self._load_lock = threading.Lock()
 
     def ensure_ready(self, console: Console | None = None) -> None:
         """Download model files if not present. Only called from `icx setup`."""
@@ -50,9 +71,9 @@ class EmbeddingsManager:
         self._download_and_init(console or Console(stderr=True))
 
     def check_ready(self) -> None:
-        """Assert model files are present. Raises MemoryError if not - run `icx setup` to download."""
+        """Assert model files are present. Raises ICXMemoryError if not - run `icx setup` to download."""
         if not _is_initialized():
-            raise MemoryError(
+            raise ICXMemoryError(
                 "Embedding model not found. Run `icx setup` to download it."
             )
 
@@ -79,7 +100,7 @@ class EmbeddingsManager:
                 self._download_model_files(progress)
             self._verify_model_files()
         except Exception as exc:
-            raise MemoryError(
+            raise ICXMemoryError(
                 f"Failed to download embedding model '{EMBEDDING_MODEL}'. "
                 "Check your network connection and retry. "
                 "ICX analysis continues to work without memory."
@@ -92,7 +113,7 @@ class EmbeddingsManager:
                     os.environ[k] = v
 
         _mark_initialized()
-        console.print("[bold green]✓[/bold green] Memory ready.\n")
+        console.print("[bold green]OK[/bold green] Memory ready.\n")
 
     def _download_model_files(self, progress: Progress) -> None:
         import socket
@@ -104,10 +125,10 @@ class EmbeddingsManager:
         try:
             files = [
                 ("tokenizer.json",
-                 f"https://huggingface.co/{EMBEDDING_MODEL}/resolve/main/tokenizer.json",
+                 f"https://huggingface.co/{EMBEDDING_MODEL}/resolve/{_TOKENIZER_REVISION}/tokenizer.json",
                  MODEL_DIR / "tokenizer.json"),
                 (_ONNX_FILE,
-                 f"https://huggingface.co/{_ONNX_REPO}/resolve/main/{_ONNX_FILE}",
+                 f"https://huggingface.co/{_ONNX_REPO}/resolve/{_ONNX_REVISION}/{_ONNX_FILE}",
                  MODEL_DIR / _ONNX_FILE),
             ]
 
@@ -131,9 +152,18 @@ class EmbeddingsManager:
         """
         tokenizer_path = MODEL_DIR / "tokenizer.json"
         onnx_path = MODEL_DIR / _ONNX_FILE
-        for path in (tokenizer_path, onnx_path):
+        for rel, path in (("tokenizer.json", tokenizer_path), (_ONNX_FILE, onnx_path)):
             if not path.exists() or path.stat().st_size == 0:
                 raise OSError(f"Model file missing or empty after download: {path}")
+            expected = _MODEL_CHECKSUMS.get(rel)
+            if expected:
+                digest = _sha256_file(path)
+                if digest != expected:
+                    raise OSError(
+                        f"Model file checksum mismatch for {rel}: expected {expected}, "
+                        f"got {digest}. The download may be corrupted or tampered with - "
+                        "retry `icx setup`."
+                    )
 
     def _load_model(self) -> None:
         import onnxruntime as ort  # noqa: PLC0415
@@ -154,7 +184,9 @@ class EmbeddingsManager:
             return [0.0] * VECTOR_DIM
 
         if self._session is None:
-            self._load_model()
+            with self._load_lock:
+                if self._session is None:
+                    self._load_model()
 
         import numpy as np  # noqa: PLC0415
 
@@ -172,7 +204,7 @@ class EmbeddingsManager:
         outputs = self._session.run(None, feed)
 
         # Mean pooling over token dimension, weighted by attention mask
-        token_embeddings = outputs[0]  # (1, seq_len, 384)
+        token_embeddings = outputs[0]  # (1, seq_len, 768)
         mask = attention_mask[..., np.newaxis].astype(np.float32)
         pooled = (token_embeddings * mask).sum(axis=1) / mask.sum(axis=1).clip(min=1e-9)
 

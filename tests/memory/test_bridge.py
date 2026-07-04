@@ -33,7 +33,7 @@ def _mgr_with(entries: list[MemoryEntry]):
     return mgr
 
 
-# ── find_work_items_by_file ───────────────────────────────────────────────────
+# -- find_work_items_by_file ---------------------------------------------------
 
 def test_find_by_file_returns_matching_entry():
     from icx_engine.memory.bridge import find_work_items_by_file
@@ -91,7 +91,7 @@ def test_find_by_file_multiple_files_changed():
     assert len(find_work_items_by_file("token.py", mgr)) == 1
 
 
-# ── get_work_item_density ───────────────────────────────────────────────────────────
+# -- get_work_item_density -----------------------------------------------------------
 
 def test_bug_density_counts_correctly():
     from icx_engine.memory.bridge import get_work_item_density
@@ -136,7 +136,7 @@ def test_bug_density_deduplicates_same_issue_key():
     assert token_row["work_items"].count("PROJ-1") == 1
 
 
-# ── find_work_items_by_function ───────────────────────────────────────────────
+# -- find_work_items_by_function -----------------------------------------------
 
 def test_find_by_function_no_graph_returns_empty():
     from icx_engine.memory.bridge import find_work_items_by_function

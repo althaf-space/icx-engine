@@ -1,4 +1,4 @@
-﻿# ICX - Developer Guide
+# ICX - Developer Guide
 
 This is the complete reference for contributing to ICX. Read it before writing any code.
 
@@ -34,7 +34,7 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.),
-  exposing 18 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 10 graph query tools, 4 historical memory tools, and 1 save tool (`save_memory`)
+  exposing 37 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 10 graph query tools, 4 historical memory tools, 3 memory-save-family tools (`save_memory`, `reinforce_memory_usage`, `get_memory_audit`), 10 testing tools (`magik_health_check`, `start_testing_session`, `resume_testing_session`, `magik_test_status`, `magik_test_results`, `magik_login_start`, `magik_login_capture`, `magik_login_cancel`, `magik_login_inline`, `magik_logout`), and 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`)
 
 The architecture is deliberately split along two axes:
 
@@ -53,117 +53,134 @@ Currently supports: Jira Cloud.
 
 ```
 ICX/
-├── src/icx_engine/         # main package (installed as `icx_engine`)
-│   ├── cli.py                  # Typer CLI - all user-facing commands
-│   ├── engine.py               # core pipeline - called by CLI and MCP
-│   ├── grounding.py            # visual grounding pass - re-verifies analysis against images
-│   ├── mcp_server.py           # MCP stdio server
-│   ├── mcp_hosts.py            # MCP host config file management
-│   ├── config_manager.py       # load/save config + keyring/env-var secret management
-│   ├── exceptions.py           # all ICX exception classes (incl. GraphError)
-│   ├── error_display.py        # Rich Panel error rendering - render_icx_error()
-│   ├── models/
-│   │   ├── config.py           # AppConfig, BaseConnection, LLMConfig, OAuthAuth
-│   │   └── output.py           # RawIssueData, IssueContext, RawIssueResponse
-│   ├── auth/
-│   │   ├── token.py            # generic HTTP Basic/Bearer header utilities
-│   │   └── pkce.py             # generic OAuth 2.0 PKCE flow
-│   ├── connectors/
-│   │   ├── base.py             # ConnectorBase ABC + get_connector() factory
-│   │   ├── registry.py         # connector_type string → BaseConnection subclass map
-│   │   ├── http.py             # shared HTTP status → ICX exception mapping
-│   │   ├── attachments.py      # Universal Attachment Engine - connector-agnostic OCR,
-│   │   │                       # vision enrichment, formula annotation, Base64 capture,
-│   │   │                       # document conversion, audio/video transcription, LLM summarization
-│   │   ├── audio.py            # WhisperManager (faster-whisper, sentinel-cached ~145 MB base model),
-│   │   │                       # transcribe_openai / transcribe_google / cleanup_transcript_llm,
-│   │   │                       # transcribe() dispatch with local-fallback semantics
-│   │   └── jira/               # Jira connector (see section 5 for how it's structured)
-│   │       ├── config.py       # JiraConnection, TokenAuth, JiraOAuthAuth models
-│   │       ├── connector.py    # JiraConnector - implements ConnectorBase
-│   │       ├── client.py       # JiraClient - raw HTTP calls to Jira REST API
-│   │       ├── parser.py       # Jira API JSON → RawIssueData
-│   │       ├── auth.py         # build_auth_header() for token and OAuth
-│   │       └── oauth.py        # refresh_oauth_if_needed()
-│   ├── graph/                  # codebase knowledge graph
-│   │   ├── __init__.py         # public exports: GraphManager, generate_graph_report
-│   │   ├── storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
-│   │   ├── builder.py          # _build_project_isolated (subprocess), estimate_build_eta, progress event writer
-│   │   ├── change.py           # check_staleness, current_git_commit, ChangeResult
-│   │   ├── querier.py          # generate_graph_report - writes GRAPH_REPORT.md index + GRAPH_CLUSTERS/
-│   │   ├── manager.py          # GraphManager - register, build, status, list, remove, resolve; LLM descriptions
-│   │   ├── paths.py            # path resolution, sub-project detection, git root helpers
-│   │   ├── progress.py         # cross-process build progress channel (subprocess writes, parent tails)
-│   │   ├── query.py            # GraphQuerier - find_context, get_call_chain, get_impact, get_subsystem
-│   │   ├── tsserver.py         # tsserver lifecycle: private install under ~/.icx/tsserver/, Node version tracking
-│   │   └── parser/             # vendored AST parser (tree-sitter, LSP, semantic resolvers)
-│   │       ├── extract.py      # entry point: extract(files, ...) -> extraction dict
-│   │       ├── analyze.py      # per-file AST analysis via tree-sitter
-│   │       ├── build.py        # graph assembly from extraction result
-│   │       ├── cluster.py      # Louvain community detection
-│   │       ├── export.py       # graph.json serialisation, to_context_json
-│   │       ├── detect.py       # language and extension detection, _is_noise_dir
-│   │       ├── icxignore.py    # .icxignore per-project exclusion patterns
-│   │       ├── confidence.py   # edge confidence scoring
-│   │       ├── roles.py        # file role tag detection
-│   │       ├── validate.py     # graph integrity validation
-│   │       ├── dedup.py        # duplicate edge deduplication
-│   │       ├── lsp_client.py   # generic LSP stdio JSON-RPC client
-│   │       ├── lsp_manager.py  # LSP lifecycle: install (per-version cache), spawn, kill
-│   │       └── resolvers/      # semantic edge resolvers (Spring, React, Django, FastAPI, etc.)
-│   ├── services/
-│   │   └── connection_service.py  # platform auth flows (_connect_jira_token, _connect_jira_oauth)
-│   ├── memory/                 # local LanceDB + ONNX memory (see section 7)
-│   └── llm/
-│       ├── base.py             # LLMProvider ABC, SYSTEM_PROMPT, build_user_message,
-│       │                       # finalize(), _compute_completeness(), _compute_missing(),
-│       │                       # _strip_json_fencing() - strips Markdown fences before JSON parse
-│       ├── ollama.py           # OllamaProvider
-│       ├── nim.py              # NIMProvider
-│       ├── openai.py           # OpenAIProvider
-│       ├── anthropic.py        # AnthropicProvider
-│       ├── google.py           # GeminiProvider
-│       └── xai.py              # XAIProvider (OpenAI-compatible, api.x.ai/v1)
-├── tests/                      # mirrors src structure
-│   ├── conftest.py             # shared fixtures (cli_runner, isolated_config, etc.)
-│   ├── test_data.py            # shared test fixtures and payloads
-│   ├── test_smoke.py           # CLI smoke tests (incl. graph module)
-│   ├── test_engine.py          # engine.py unit tests
-│   ├── test_attachments.py     # connectors/attachments.py unit tests
-│   ├── test_models.py          # model + config_manager tests (incl. keychain, concurrency)
-│   ├── test_mcp.py             # MCP server + CLI profile + graph MCP tool tests
-│   ├── test_management.py      # ICX status / ICX logout / ICX apikey management tests
-│   ├── graph/
-│   │   ├── test_storage.py             # storage.py: register, lookup, meta, remove
-│   │   ├── test_change.py              # change.py: staleness thresholds, git/mtime fallback
-│   │   ├── test_builder.py             # builder.py: ETA, isolated build error handling
-│   │   ├── test_querier.py             # querier.py: community clusters, god nodes, report generation
-│   │   ├── test_manager.py             # manager.py: register/build/query/resolve integration
-│   │   ├── test_query.py               # GraphQuerier: find_context, get_call_chain, get_impact, get_subsystem
-│   │   ├── test_cluster_weights.py     # cluster weight and community detection edge cases
-│   │   ├── test_confidence.py          # edge confidence scoring
-│   │   ├── test_cross_service_rest.py  # REST cross-service edge resolver
-│   │   ├── test_export_resolver_tag.py # export resolver tag annotation
-│   │   ├── test_graph_info.py          # graph info MCP response structure
-│   │   ├── test_java_inferred_upgrade.py # Java inferred dependency upgrade resolver
-│   │   ├── test_java_interface_impl.py # Java interface/implementation edge resolver
-│   │   ├── test_python_type_checking.py # Python TYPE_CHECKING import resolver
-│   │   ├── test_react_lazy.py          # React.lazy + dynamic import resolver
-│   │   ├── test_roles.py               # file role tag detection
-│   │   ├── test_universal_ast.py       # universal AST edge extraction
-│   │   ├── test_validate.py            # graph integrity validation
-│   │   └── eval/                       # precision/recall evaluation harness (see eval/readme.md)
-│   ├── test_mcp_memory_budget.py   # MCP memory warm/cold/failed/timeout budget tests
-│   └── connectors/
-│       ├── test_audio.py       # audio.py: WhisperManager, transcription dispatch, provider routing
-│       └── jira/
-│           ├── test_parsing.py # JiraConnector.parse_input() tests
-│           ├── test_parser.py  # parse_issue_response() tests
-│           └── test_client.py  # JiraClient HTTP + redirect tests
-├── pyproject.toml              # package metadata, dependencies, build config
-├── readme.md                   # end-user documentation
-├── developer.md                # this file
-└── license                     # license terms
++-- src/icx_engine/         # main package (installed as `icx_engine`)
+|   +-- cli.py                  # Typer CLI - all user-facing commands
+|   +-- engine.py               # core pipeline - called by CLI and MCP
+|   +-- grounding.py            # visual grounding pass - re-verifies analysis against images
+|   +-- mcp_server.py           # MCP stdio server
+|   +-- mcp_hosts.py            # MCP host config file management
+|   +-- config_manager.py       # load/save config + keyring/env-var secret management
+|   +-- exceptions.py           # all ICX exception classes (incl. GraphError)
+|   +-- error_display.py        # Rich Panel error rendering - render_icx_error()
+|   +-- models/
+|   |   +-- config.py           # AppConfig, BaseConnection, LLMConfig, OAuthAuth
+|   |   \-- output.py           # RawIssueData, IssueContext, RawIssueResponse
+|   +-- auth/
+|   |   +-- token.py            # generic HTTP Basic/Bearer header utilities
+|   |   \-- pkce.py             # generic OAuth 2.0 PKCE flow
+|   +-- connectors/
+|   |   +-- base.py             # ConnectorBase ABC + get_connector() factory
+|   |   +-- registry.py         # connector_type string -> BaseConnection subclass map
+|   |   +-- http.py             # shared HTTP status -> ICX exception mapping
+|   |   +-- attachments.py      # Universal Attachment Engine - connector-agnostic OCR,
+|   |   |                       # vision enrichment, formula annotation, Base64 capture,
+|   |   |                       # document conversion, audio/video transcription, LLM summarization
+|   |   +-- audio.py            # WhisperManager (faster-whisper, sentinel-cached ~145 MB base model),
+|   |   |                       # transcribe_openai / transcribe_google / cleanup_transcript_llm,
+|   |   |                       # transcribe() dispatch with local-fallback semantics
+|   |   \-- jira/               # Jira connector (see section 5 for how it's structured)
+|   |       +-- config.py       # JiraConnection, TokenAuth, JiraOAuthAuth models
+|   |       +-- connector.py    # JiraConnector - implements ConnectorBase
+|   |       +-- client.py       # JiraClient - raw HTTP calls to Jira REST API
+|   |       +-- parser.py       # Jira API JSON -> RawIssueData
+|   |       +-- auth.py         # build_auth_header() for token and OAuth
+|   |       \-- oauth.py        # refresh_oauth_if_needed()
+|   +-- graph/                  # codebase knowledge graph
+|   |   +-- __init__.py         # public exports: GraphManager, generate_graph_report
+|   |   +-- storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
+|   |   +-- builder.py          # _build_project_isolated (subprocess), estimate_build_eta, progress event writer
+|   |   +-- change.py           # check_staleness, current_git_commit, ChangeResult
+|   |   +-- querier.py          # generate_graph_report - writes GRAPH_REPORT.md index + GRAPH_CLUSTERS/
+|   |   +-- manager.py          # GraphManager - register, build, status, list, remove, resolve; LLM descriptions
+|   |   +-- paths.py            # path resolution, sub-project detection, git root helpers
+|   |   +-- progress.py         # cross-process build progress channel (subprocess writes, parent tails)
+|   |   +-- query.py            # GraphQuerier - find_context, get_call_chain, get_impact, get_subsystem
+|   |   +-- tsserver.py         # tsserver lifecycle: private install under ~/.icx/tsserver/, Node version tracking
+|   |   \-- parser/             # vendored AST parser (tree-sitter, LSP, semantic resolvers)
+|   |       +-- extract.py      # entry point: extract(files, ...) -> extraction dict
+|   |       +-- analyze.py      # per-file AST analysis via tree-sitter
+|   |       +-- build.py        # graph assembly from extraction result
+|   |       +-- cluster.py      # Louvain community detection
+|   |       +-- export.py       # graph.json serialisation, to_context_json
+|   |       +-- detect.py       # language and extension detection, _is_noise_dir
+|   |       +-- icxignore.py    # .icxignore per-project exclusion patterns
+|   |       +-- confidence.py   # edge confidence scoring
+|   |       +-- roles.py        # file role tag detection
+|   |       +-- validate.py     # graph integrity validation
+|   |       +-- dedup.py        # duplicate edge deduplication
+|   |       +-- lsp_client.py   # generic LSP stdio JSON-RPC client
+|   |       +-- lsp_manager.py  # LSP lifecycle: install (per-version cache), spawn, kill
+|   |       \-- resolvers/      # semantic edge resolvers (Spring, React, Django, FastAPI, etc.)
+|   +-- services/
+|   |   \-- connection_service.py  # platform auth flows (_connect_jira_token, _connect_jira_oauth)
+|   +-- testing/                # Testing orchestration module
+|   |   +-- __init__.py
+|   |   +-- client.py           # Async httpx client for all Magik-AI HTTP calls
+|   |   +-- state.py            # LangGraph TypedDict state + make_initial_state factory
+|   |   +-- nodes.py            # LangGraph node functions + conditional routing
+|   |   +-- graph.py            # StateGraph wiring, SqliteSaver factory, session cleanup
+|   |   +-- session_store.py    # Background poll task registry + session list/cancel
+|   |   +-- classify.py         # per-file layer/testability classifier (path patterns + content signals)
+|   |   +-- compat.py           # per-mode compatibility verdicts + required changes
+|   |   +-- handlers.py         # pluggable TestModeHandler registry (ui/api/agent)
+|   |   +-- expand.py           # grep expander + graph/grep union ranking
+|   |   +-- auth.py             # per-(project,host) Magik session store + TTL/relogin
+|   |   +-- apispec.py          # endpoint extraction + request-spec builder (api mode)
+|   |   +-- profile_gen.py      # Magik Project Profile markdown generator
+|   |   +-- rules.py            # durable per-gate rulebook (~/.icx/testing_rules) loader + section enforcement
+|   |   +-- rules_defaults/     # bundled default rule .md seeded into ~/.icx/testing_rules on first use
+|   |   \-- validate.py         # MCP input validators
+|   +-- memory/                 # local LanceDB + ONNX memory (see section 7)
+|   \-- llm/
+|       +-- base.py             # LLMProvider ABC, SYSTEM_PROMPT, build_user_message,
+|       |                       # finalize(), _compute_completeness(), _compute_missing(),
+|       |                       # _strip_json_fencing() - strips Markdown fences before JSON parse
+|       +-- ollama.py           # OllamaProvider
+|       +-- nim.py              # NIMProvider
+|       +-- openai.py           # OpenAIProvider
+|       +-- anthropic.py        # AnthropicProvider
+|       +-- google.py           # GeminiProvider
+|       \-- xai.py              # XAIProvider (OpenAI-compatible, api.x.ai/v1)
++-- tests/                      # mirrors src structure
+|   +-- conftest.py             # shared fixtures (cli_runner, isolated_config, etc.)
+|   +-- test_data.py            # shared test fixtures and payloads
+|   +-- test_smoke.py           # CLI smoke tests (incl. graph module)
+|   +-- test_engine.py          # engine.py unit tests
+|   +-- test_attachments.py     # connectors/attachments.py unit tests
+|   +-- test_models.py          # model + config_manager tests (incl. keychain, concurrency)
+|   +-- test_mcp.py             # MCP server + CLI profile + graph MCP tool tests
+|   +-- test_management.py      # ICX status / ICX logout / ICX apikey management tests
+|   +-- graph/
+|   |   +-- test_storage.py             # storage.py: register, lookup, meta, remove
+|   |   +-- test_change.py              # change.py: staleness thresholds, git/mtime fallback
+|   |   +-- test_builder.py             # builder.py: ETA, isolated build error handling
+|   |   +-- test_querier.py             # querier.py: community clusters, god nodes, report generation
+|   |   +-- test_manager.py             # manager.py: register/build/query/resolve integration
+|   |   +-- test_query.py               # GraphQuerier: find_context, get_call_chain, get_impact, get_subsystem
+|   |   +-- test_cluster_weights.py     # cluster weight and community detection edge cases
+|   |   +-- test_confidence.py          # edge confidence scoring
+|   |   +-- test_cross_service_rest.py  # REST cross-service edge resolver
+|   |   +-- test_export_resolver_tag.py # export resolver tag annotation
+|   |   +-- test_graph_info.py          # graph info MCP response structure
+|   |   +-- test_java_inferred_upgrade.py # Java inferred dependency upgrade resolver
+|   |   +-- test_java_interface_impl.py # Java interface/implementation edge resolver
+|   |   +-- test_python_type_checking.py # Python TYPE_CHECKING import resolver
+|   |   +-- test_react_lazy.py          # React.lazy + dynamic import resolver
+|   |   +-- test_roles.py               # file role tag detection
+|   |   +-- test_universal_ast.py       # universal AST edge extraction
+|   |   +-- test_validate.py            # graph integrity validation
+|   |   \-- eval/                       # precision/recall evaluation harness (see eval/readme.md)
+|   +-- test_mcp_memory_budget.py   # MCP memory warm/cold/failed/timeout budget tests
+|   \-- connectors/
+|       +-- test_audio.py       # audio.py: WhisperManager, transcription dispatch, provider routing
+|       \-- jira/
+|           +-- test_parsing.py # JiraConnector.parse_input() tests
+|           +-- test_parser.py  # parse_issue_response() tests
+|           \-- test_client.py  # JiraClient HTTP + redirect tests
++-- pyproject.toml              # package metadata, dependencies, build config
++-- readme.md                   # end-user documentation
++-- developer.md                # this file
+\-- license                     # license terms
 ```
 
 ---
@@ -176,62 +193,62 @@ Every `icx analyze` call and every `analyze_issue_fast` / `analyze_issue` MCP ca
 
 ```
 engine.run(input_str, config, connection=None, log=None, mcp_mode=False, profile_override=None, debug_console=None, skip_vision=False)
-  │
-  ├─ extract_domain(input_str)            # URL host or None for bare key
-  ├─ resolve_connection(domain, config)   # pick the right BaseConnection
-  │
-  ├─ connector = get_connector(conn)      # ConnectorBase instance
-  ├─ parsed = connector.parse_input(input_str)   # → ParsedInput(issue_key)
-  ├─ raw = await connector.fetch(issue_key, ...)  # → RawIssueData
-  │
-  ├─ [profile resolution]
-  │   └─ if profile_override set: look up in config.llm_profiles, raise NoLLMError if absent
-  │      else: use config.active_llm
-  │      → active_llm (local variable - config is never mutated)
-  │
-  ├─ [if attachments]
-  │   ├─ [if skip_vision=True]
-  │   │   └─ _split_attachments() separates all attachment types - none are downloaded
-  │   │       image filenames → images_pending (collected, not processed)
-  │   │       audio/video filenames → av_pending (collected, not processed)
-  │   │       document filenames → docs_pending (collected, not processed)
-  │   │       unrecognised types → unsupported_pending (collected, not processed)
-  │   └─ [if skip_vision=False (default)]
-  │       └─ attachment_texts, images = await connector.process_attachments(raw, active_llm)
-  │           # Universal Attachment Engine (connectors/attachments.py):
-  │           #   images       → OCR (Tesseract) + optional vision LLM + Base64 capture
-  │           #   documents    → CSV/Excel/PDF/DOCX/TXT conversion (see UAE section below)
-  │           #   audio        → local Whisper or LLM-native transcription → attachment_texts
-  │           #   video        → imageio-ffmpeg extracts WAV → audio pipeline → attachment_texts
-  │           #   all processed in parallel via asyncio.gather
-  │
-  ├─ [no LLM configured - MCP headless mode]
-  │   └─ return RawIssueResponse (mode="fast_partial" if skip_vision else "raw",
-  │          raw data + attachment_texts + images + pending lists)
-  │
-  ├─ provider = get_provider(active_llm)  # LLMProvider instance
-  ├─ result = await provider.analyze(raw)  # → IssueContext (calls finalize() internally)
-  │
-  ├─ [visual grounding pass - grounding.py - full mode only, skipped when skip_vision=True]
-  │   └─ if confidence_score < 0.8 and image_model configured:
-  │       re-verify analysis against raw images, correct contradictions
-  │
-  ├─ [heuristic confidence check - full mode only]
-  │   └─ attach Base64 images to output (always, when images exist)
-  │       heuristic check still runs for log warning only:
-  │       • confidence_score < 0.8
-  │       • images exist but total OCR text < 500 chars
-  │       • issue_type is Bug with no reproduction steps
-  │
-  ├─ [set pending lists if skip_vision=True]
-  │   └─ result.model_copy with pending_images, pending_audio, pending_documents, pending_unsupported
-  │
-  ├─ [memory enrichment - CLI mode only, skipped when mcp_mode=True]
-  │   └─ MemoryManager().query(MemoryQueryInput using result.problem_summary + result.detailed_description)
-  │       contextual RAG: queries use LLM-analyzed fields, not raw tracker text
-  │       MCP mode: memory runs inside _handle_analyze_issue() via dedicated executor instead
-  │
-  └─ return IssueContext
+  |
+  +- extract_domain(input_str)            # URL host or None for bare key
+  +- resolve_connection(domain, config)   # pick the right BaseConnection
+  |
+  +- connector = get_connector(conn)      # ConnectorBase instance
+  +- parsed = connector.parse_input(input_str)   # -> ParsedInput(issue_key)
+  +- raw = await connector.fetch(issue_key, ...)  # -> RawIssueData
+  |
+  +- [profile resolution]
+  |   \- if profile_override set: look up in config.llm_profiles, raise NoLLMError if absent
+  |      else: use config.active_llm
+  |      -> active_llm (local variable - config is never mutated)
+  |
+  +- [if attachments]
+  |   +- [if skip_vision=True]
+  |   |   \- _split_attachments() separates all attachment types - none are downloaded
+  |   |       image filenames -> images_pending (collected, not processed)
+  |   |       audio/video filenames -> av_pending (collected, not processed)
+  |   |       document filenames -> docs_pending (collected, not processed)
+  |   |       unrecognised types -> unsupported_pending (collected, not processed)
+  |   \- [if skip_vision=False (default)]
+  |       \- attachment_texts, images = await connector.process_attachments(raw, active_llm)
+  |           # Universal Attachment Engine (connectors/attachments.py):
+  |           #   images       -> OCR (Tesseract) + optional vision LLM + Base64 capture
+  |           #   documents    -> CSV/Excel/PDF/DOCX/TXT conversion (see UAE section below)
+  |           #   audio        -> local Whisper or LLM-native transcription -> attachment_texts
+  |           #   video        -> imageio-ffmpeg extracts WAV -> audio pipeline -> attachment_texts
+  |           #   all processed in parallel via asyncio.gather
+  |
+  +- [no LLM configured - MCP headless mode]
+  |   \- return RawIssueResponse (mode="fast_partial" if skip_vision else "raw",
+  |          raw data + attachment_texts + images + pending lists)
+  |
+  +- provider = get_provider(active_llm)  # LLMProvider instance
+  +- result = await provider.analyze(raw)  # -> IssueContext (calls finalize() internally)
+  |
+  +- [visual grounding pass - grounding.py - full mode only, skipped when skip_vision=True]
+  |   \- if confidence_score < 0.8 and image_model configured:
+  |       re-verify analysis against raw images, correct contradictions
+  |
+  +- [heuristic confidence check - full mode only]
+  |   \- attach Base64 images to output (always, when images exist)
+  |       heuristic check still runs for log warning only:
+  |       - confidence_score < 0.8
+  |       - images exist but total OCR text < 500 chars
+  |       - issue_type is Bug with no reproduction steps
+  |
+  +- [set pending lists if skip_vision=True]
+  |   \- result.model_copy with pending_images, pending_audio, pending_documents, pending_unsupported
+  |
+  +- [memory enrichment - CLI mode only, skipped when mcp_mode=True]
+  |   \- MemoryManager().query(MemoryQueryInput using result.problem_summary + result.detailed_description)
+  |       contextual RAG: queries use LLM-analyzed fields, not raw tracker text
+  |       MCP mode: memory runs inside _handle_analyze_issue() via dedicated executor instead
+  |
+  \- return IssueContext
 ```
 
 Pass `log` to receive step-by-step debug output (printed to stderr by the CLI).
@@ -242,11 +259,11 @@ Pass `debug_console` (a `rich.console.Console`) to render the LLM prompt with Ru
 `extract_domain()` extracts the hostname from a URL, or returns `None` for a bare key like `PROJ-123`.
 
 `resolve_connection()` picks which saved connection to use:
-1. Single connection → use it directly
-2. URL input → match by domain
-3. Multiple connections + default set → use the default
-4. Multiple connections + bare key → call `narrow_connections()` which filters by `can_handle_bare_key()` and auto-picks only if exactly one matches
-5. Still ambiguous → return `None` (CLI prompts the user to pick)
+1. Single connection -> use it directly
+2. URL input -> match by domain
+3. Multiple connections + default set -> use the default
+4. Multiple connections + bare key -> call `narrow_connections()` which filters by `can_handle_bare_key()` and auto-picks only if exactly one matches
+5. Still ambiguous -> return `None` (CLI prompts the user to pick)
 
 ### Profile override (`engine.py`)
 
@@ -272,9 +289,9 @@ Secrets (API tokens, OAuth tokens, LLM keys) are **never stored in plaintext** i
 **Keyring availability check:** `_keyring_available()` performs a read-only probe (`keyring.get_password`) rather than a write+delete test. This is intentional: MCP subprocess contexts (e.g. editors that spawn `icx mcp run` as a child process) often have read access to the OS keyring but not write access. A write-based probe would incorrectly report the keyring as unavailable, causing all stored credentials to return as empty strings. `_check_keychain()` wraps `_keyring_available()` with a double-checked lock so the probe runs at most once per process lifetime.
 
 **Plaintext warnings (one-shot per account):** When a secret falls back to plaintext storage, ICX prints the exact environment variable name to set - but only once per account, never again. A sidecar file at `~/.icx/.warned_plaintext` tracks which account keys have already been warned. All three credential types route through `_warn_plaintext(account, label)`:
-- Jira token: `_warn_plaintext(f"{ctype}_token:{domain}", ...)` → e.g. `ICX_JIRA_TOKEN_EXAMPLE_ATLASSIAN_NET`
-- OAuth fields: `_warn_oauth_plaintext(field, domain)` → e.g. `ICX_OAUTH_ACCESS_EXAMPLE_ATLASSIAN_NET`
-- LLM API keys: `_warn_plaintext(acct, ...)` → e.g. `ICX_LLM_TEXT_PERSONAL`
+- Jira token: `_warn_plaintext(f"{ctype}_token:{domain}", ...)` -> e.g. `ICX_JIRA_TOKEN_EXAMPLE_ATLASSIAN_NET`
+- OAuth fields: `_warn_oauth_plaintext(field, domain)` -> e.g. `ICX_OAUTH_ACCESS_EXAMPLE_ATLASSIAN_NET`
+- LLM API keys: `_warn_plaintext(acct, ...)` -> e.g. `ICX_LLM_TEXT_PERSONAL`
 
 `_warn_plaintext(account, label)` checks `_warned_accounts()` before printing; if the account key is already in the sidecar, the function returns immediately without output. After printing, `_mark_warned(account)` appends the key to the sidecar. The generic `ConfigManager.warn_if_plaintext()` (called once after `save()`) similarly shows the full reference table only once per machine, gated on the `"__summary__"` sentinel in the same sidecar file. Write failures to the sidecar are silently swallowed - the command always proceeds.
 
@@ -299,7 +316,7 @@ Ciphertext format in `config.json`:
 "access_token": "dlock:v1:BASE64DATA..."
 ```
 
-`ConfigManager.load()` detects the `"dlock:v1:"` prefix and decrypts transparently before constructing the model. Short secrets (≤ 512 bytes) continue to use the existing `"__keychain__"` sentinel path. When keyring is unavailable, the existing plaintext-with-warning fallback is unchanged.
+`ConfigManager.load()` detects the `"dlock:v1:"` prefix and decrypts transparently before constructing the model. Short secrets (<= 512 bytes) continue to use the existing `"__keychain__"` sentinel path. When keyring is unavailable, the existing plaintext-with-warning fallback is unchanged.
 
 Key functions:
 - `_dlock_encrypt(value: str) -> str` - encrypts and returns tagged base64 string
@@ -334,18 +351,18 @@ Provider routing: `_verify_anthropic` for Anthropic, `_verify_google` for Google
 
   Output text assembles up to three parts joined by `"\n\n"`: an audio-setup message (if Whisper needs installing), `"**Transcript:**\n\n<transcript>"`, and `"**Visual content (N frame(s) sampled across full duration):**\n\n<frame_text>"`. Supported extensions: `VIDEO_EXTENSIONS = {.mp4, .mov, .avi, .mkv, .webm}`. ffmpeg subprocesses are killed on `asyncio.TimeoutError` (60s for frame extraction, 30s for duration probing, 120s for audio extraction).
 
-Returns `tuple[dict[str, str], dict[str, str]]` - `(attachment_texts, images)` where `images` maps filename (or `<filename>::frame_NN.jpg` / `<filename>::page_NN.jpg`) → Base64 string.
+Returns `tuple[dict[str, str], dict[str, str]]` - `(attachment_texts, images)` where `images` maps filename (or `<filename>::frame_NN.jpg` / `<filename>::page_NN.jpg`) -> Base64 string.
 
 **Document converters:**
 
 | Extension | Converter | Notes |
 |---|---|---|
-| `.csv` | `_convert_csv` | `csv.reader` → `_rows_to_markdown()`, capped at `_MAX_CSV_ROWS` = 50 data rows |
+| `.csv` | `_convert_csv` | `csv.reader` -> `_rows_to_markdown()`, capped at `_MAX_CSV_ROWS` = 50 data rows |
 | `.xlsx` | `_convert_xlsx` | Dual-pass openpyxl (see below) |
 | `.xls` | `_convert_xls` | Legacy Excel via `xlrd`; one `_rows_to_markdown()` table per sheet |
 | `.pptx` | `_convert_pptx` | python-pptx; `## Slide N` sections with shape text + `**Notes:**` from speaker notes |
 | `.pdf` | `_convert_pdf` | pdfminer.six; if extracted text is < `_PDF_TEXT_MIN_CHARS` (100), falls back to pymupdf page-render + OCR (scanned-PDF path, see below) |
-| `.docx` | `_convert_docx` | python-docx; headings → Markdown `#` |
+| `.docx` | `_convert_docx` | python-docx; headings -> Markdown `#` |
 | `.zip` | `_convert_zip` | Manifest + recursive conversion of recognized entries (see below) |
 | `.txt` | `_convert_txt` | UTF-8 decode |
 | `.json`, `.yaml`, `.yml`, `.xml`, `.log`, `.md`, + common source extensions (`TEXT_PASSTHROUGH_EXTENSIONS`) | `_convert_text_passthrough` | `.md` returned raw; everything else fenced as ```` ```{lang}\n...\n``` ```` via `_CODE_LANG_MAP` |
@@ -411,7 +428,7 @@ Provider-aware transcription pipeline. `connectors.attachments._process_audio` a
 |---|---|---|
 | `openai` | OpenAI Whisper API (`whisper-1`, large-v2 accuracy), `timeout=120s` | local Whisper on exception |
 | `google` | Gemini native audio via `google-genai`, wrapped in `asyncio.wait_for(timeout=120s)` | local Whisper on exception |
-| `anthropic` / `xai` / `nim` / `ollama` | local Whisper → text LLM cleanup (`cleanup_transcript_llm`) | cleanup returns original transcript on any error |
+| `anthropic` / `xai` / `nim` / `ollama` | local Whisper -> text LLM cleanup (`cleanup_transcript_llm`) | cleanup returns original transcript on any error |
 | no LLM configured | local Whisper only | none - transcript may be empty |
 
 **`WhisperManager`** lazy-loads the `faster-whisper` base model (~145 MB) into `~/.icx/audio/model/` on first transcription. A sentinel file at `~/.icx/audio/.whisper_initialized` records that the download completed, so subsequent runs skip the one-time setup banner. The `_load()` method is guarded by `threading.Lock` with double-checked locking so concurrent A/V attachments queued through `asyncio.gather` never race on first-time download or duplicate model construction.
@@ -467,7 +484,7 @@ Never skip `finalize()` - calling providers that omit it will produce incorrect 
 
 ### MCP tool architecture (`mcp_server.py`)
 
-ICX exposes 18 tools over MCP (workflow order):
+ICX exposes 36 tools over MCP (workflow order):
 
 | # | Tool | Purpose |
 |---|------|---------|
@@ -489,6 +506,13 @@ ICX exposes 18 tools over MCP (workflow order):
 | 15 | `memory_get_related` | Work items sharing files with current ticket (file-overlap or stored edges) |
 | 16 | `memory_get_patterns` | Auto-detected statistical patterns (every 5 saves) |
 | 17 | `save_memory` | Save resolution after developer confirms fix is tested |
+| 18 | `reinforce_memory_usage` | Reinforce a memory entry that influenced the fix (call before `save_memory` when a `memory_search` result was used) |
+| 19 | `get_memory_audit` | Diagnostic - explain why a memory result ranks as it does |
+| 20 | `magik_health_check` | Verify Magik-AI is running before an automated testing session |
+| 21 | `start_testing_session` | Begin a Magik-AI testing session for confirmed UI files |
+| 22 | `resume_testing_session` | Advance the testing session at each gate |
+| 23 | `magik_test_status` | Poll the status of a running test |
+| 24 | `magik_test_results` | Fetch the report for a completed test |
 
 `analyze_issue_fast` and `analyze_issue` both call `_handle_analyze_issue()` internally - the only difference is `skip_vision=True` vs `skip_vision=False`. The `_call_tool()` dispatcher sets this based on which tool name was called.
 
@@ -532,11 +556,20 @@ ICX exposes 18 tools over MCP (workflow order):
 
 **`project_paths` resolution priority:** `project_paths` is optional in the tool schema. The resolution order is:
 
-1. `project_paths` is non-empty -> use as-is, no registry lookup.
-2. `project_paths` is `[]` (or omitted) -> `_resolve_paths_from_ticket(issue_ref)` tries each registered connector's `extract_bare_key_from_ref()` to get a bare issue key from the ref (URL or bare key), then that connector's `extract_project_key()` to get the project prefix, and calls `find_projects_by_tracker_key()` against the ICX registry. If registered projects have a matching `tracker_project_key` field, their paths are used and `graphs[0].path_auto_resolved = true`.
-3. No match in registry -> `graphs = []`, instruction directs agent to use grep/glob only.
+A path is only ever **used** if it is a registered ICX project, or it was resolved from the ticket's tracker key. The strict order is:
 
-The agent must never auto-detect the editor workspace root or guess a path. When uncertain, pass `[]` and let ICX resolve from the ticket. `find_projects_by_tracker_key()` in `storage.py` performs a case-insensitive scan of all registry entries for a `tracker_project_key` match. Project-key extraction is connector-specific (`ConnectorBase.extract_project_key()`/`extract_bare_key_from_ref()`), so any registered tracker - not just Jira - can resolve a project.
+1. `project_paths` is non-empty -> resolved via `_get_graphs_info()`. Each path is looked up in the registry. **Every `"not_registered"` entry is then dropped** - an unregistered path (typically one an agent guessed, e.g. the editor workspace root) must never drive behaviour and is never echoed back in any `icx graph add/build <path>` prompt. `project_paths` is rebuilt from the surviving registered graphs so dropped paths disappear everywhere, including the vision-gate re-call hint.
+2. If, after dropping, no registered graph remains (or `project_paths` was `[]`/omitted to begin with) -> `_resolve_paths_from_ticket(issue_ref)` tries each registered connector's `extract_bare_key_from_ref()` to get a bare issue key from the ref (URL or bare key), then that connector's `extract_project_key()` to get the project prefix, and calls `find_projects_by_tracker_key()` against the ICX registry. If registered projects have a matching `tracker_project_key`, their paths are used and `graphs[*].path_auto_resolved = true`.
+3. Mixed input (at least one supplied path is registered) keeps only the registered ones; the unregistered entries are silently dropped (no ticket fallback, no "graph add" nag for the dropped path).
+4. No match anywhere -> `graphs = []`. The instruction tells the agent to grep/glob and to **show the user how to create a graph** (`icx graph add ... ` then `icx graph build ...`) using generic placeholders - it must ask the user for the real path and never guess one. ICX never triggers a build itself.
+
+**No auto-register on lookup:** `GraphManager.resolve_project(project_path=...)` raises `GraphError` for an unregistered path - it does not silently create a registry entry. This guard is the reason a guessed path can never produce a junk project named after the path basename or a spurious `icx graph build <basename>` prompt. Explicit registration happens only through `GraphManager.register()` (`icx graph add`). The agent must never auto-detect the editor workspace root or guess a path; when uncertain, pass `[]` and let ICX resolve from the ticket. `find_projects_by_tracker_key()` in `storage.py` performs a case-insensitive scan of all registry entries for a `tracker_project_key` match. Project-key extraction is connector-specific (`ConnectorBase.extract_project_key()`/`extract_bare_key_from_ref()`), so any registered tracker can resolve a project.
+
+**ICX is the sole tracker interface:** RULE 0 in both tool descriptions (`_FAST_DESCRIPTION`, `_FULL_DESCRIPTION`) forbids the agent from connecting to, suggesting, or calling any other MCP server/integration for tracker, issue, PR, board, or sprint data - stated generically, with no single provider singled out. On an ICX tracker error the agent must reconfigure ICX and retry, never route around it. Because this lives in the MCP tool description, it reaches every MCP-capable editor identically (Claude Code, Codex, Cursor, Windsurf, Antigravity, etc.) - that is the cross-editor enforcement and it is editor-agnostic by construction, requiring no per-editor config file.
+
+**Enforcement tiers.** Two distinct guarantees, do not conflate them:
+- **Hard (cannot be bypassed by any editor):** the path/build behaviors are enforced in Python - `GraphManager.resolve_project()` raises on an unregistered path, `_handle_analyze_issue()` drops unregistered paths and never triggers a build. No agent prompt can defeat these; they are code.
+- **Advisory (agent may ignore):** "use ICX, never another tracker MCP" is a tool-description instruction. No MCP server can hard-block another MCP from any editor - this ceiling is the same for every editor. The instruction is the strongest available lever and reaches all editors via the tool description.
 
 `memory.status` values in the response: `"ready"` (agent should call `memory_search` tool now), `"warming_up"` (model loading - retry next call), `"failed"` (setup required or load error - `note` field contains the reason). The dedicated single-worker executor thread keeps the ONNX model resident after first load; `memory_search` tool calls run on this thread. Graph info is resolved synchronously from filesystem only - no subprocess wait.
 
@@ -573,7 +606,7 @@ The agent must never auto-detect the editor workspace root or guess a path. When
 
 Graph tool errors (`NO_PATH`, `NO_GRAPH`, `GRAPH_STALE`) use `status`/`code`/`message`/`action_required` and may include `build_command` and `project_path` for convenience.
 
-**Windows UTF-8 startup fix:** `run_mcp_server()` calls `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` and `sys.stderr.reconfigure(encoding="utf-8", errors="replace")` before starting the event loop. On Windows, the default console codepage (cp1252) cannot encode characters like `→` that can appear in Jira issue content or LLM analysis output. Without this fix, any such character written to a text-mode stream raises `UnicodeEncodeError`, which on an uncaught path crashes the MCP server process and causes the MCP host to receive no response. The `errors="replace"` fallback ensures a single unencodable character never terminates the server.
+**Windows UTF-8 startup fix:** `run_mcp_server()` calls `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` and `sys.stderr.reconfigure(encoding="utf-8", errors="replace")` before starting the event loop. On Windows, the default console codepage (cp1252) cannot encode characters like `->` that can appear in Jira issue content or LLM analysis output. Without this fix, any such character written to a text-mode stream raises `UnicodeEncodeError`, which on an uncaught path crashes the MCP server process and causes the MCP host to receive no response. The `errors="replace"` fallback ensures a single unencodable character never terminates the server.
 
 **Progress notifications:** `_handle_analyze_issue` sends MCP progress notifications via `_notify(step, message)` when the client includes a `progressToken` in `_meta`. The `_engine_log` callback is passed to `engine.run()` as `log=`; it maps internal log messages (containing "fetching", "attachment", "analyzing", "visual grounding") to progress steps 0.5-2.0. Steps 0.0 ("starting") and 5.0 ("ready") are sent directly from the handler. If no `progressToken` is present, `_notify` is a silent no-op.
 
@@ -631,6 +664,135 @@ MCP mode skips automatic memory enrichment in `engine.run()`. Memory runs inside
 
 Platform-specific authentication flows live in `services/connection_service.py`, not in `cli.py`. The CLI calls through to these functions; the service module contains all the prompting, validation, HTTP credential checks, and config persistence logic. New connector auth flows must be added here.
 
+### Testing module
+
+The module integrates with Magik-AI Tester via a LangGraph state machine. The editor agent provides changed `file_paths`; ICX classifies and expands them, runs a compatibility remediation loop, then orchestrates submit-poll-report with human confirmation at each gate. ICX makes zero LLM calls of its own - the editor agent reasons at gate interrupts. ICX is a funnel - it decides what is next and orchestrates the loop; the agent reads source, detects compatibility, and generates the spec/profile; classify.py/compat.py/profile_gen.py remain as fallbacks for headless/no-agent runs.
+
+State persists in `~/.icx/testing_sessions.db` (SQLite, WAL, `0o600`). Secrets and the Magik `sessionId` are NEVER written to this checkpoint.
+
+Architecture:
+- Pluggable mode handlers (`handlers.py`): `TestModeHandler` ABC + registry; `UiHandler`/`AgentHandler`/`ApiHandler`. Graph nodes never branch on the mode string - they call `get_handler(test_type)`. A new mode is a new handler.
+- Classification (`classify.py`): `classify_file(path, content)` -> `FileClass{layer, role, artifacts, testability, ...}` from path-pattern rules + content-signal regex.
+- Compatibility (`compat.py`): `check_compat(fc, mode)` -> `CompatVerdict{compatible, reasons, required_changes}`. This is a coarse heuristic used ONLY as the headless / no-agent fallback (ui/agent block backend files + missing stable selectors; api blocks frontend files + missing endpoint/schema; a missing route is advisory). When an agent is present it does the real assessment at the `compat_scan` gate - ICX neither judges nor verifies it (see compat gate mandate below).
+- Rulebook (`rules.py` + `rules_defaults/`): the mandatory per-gate rules the driving agent must follow, kept as editable Markdown in `~/.icx/testing_rules/`. `ensure_seeded()` copies bundled defaults in on first use and never overwrites user edits; `load_gate_rules(gate)` returns `_common.md` + `<gate>.md` (falling back to the bundled copy if the user deleted a file). Every relevant gate node injects `rules` (full text) and `rules_path` into its interrupt payload, so the agent confronts the current rules fresh at every gate, every session, with no dependency on it reaching the filesystem - the MCP `RULEBOOK RULE` tells it gate.rules is binding and overrides its assumptions. For gate 2b, `required_sections(gate)` parses a `<!-- REQUIRED_SECTIONS: ... -->` marker in the md (user-owned) and `missing_sections(gate, spec)` reports absent/empty top-level keys; `_run_gate_2b()` re-asks the agent naming exactly what is missing until the spec is complete (bounded by `_SPEC_MAX_REASK`, never silently submitting - the agent may resume with `accept_incomplete:true` only after the user knowingly accepts). `icx test rules` prints the rulebook dir and enforced sections; `--reset` re-seeds missing files.
+- Expansion (`expand.py`): `expand_via_grep` (dependency-free walk) unioned with the graph expander (`union_rank`), filtered to the chosen mode's relevant layers; off-type files are excluded by default and shown separately.
+
+Gate flow (v2, in order):
+
+| Gate | Who acts | What happens |
+|---|---|---|
+| mode | User | automated or manual |
+| pick_type | User | agent / ui / api (drives file selection; never auto-picked) |
+| expand_scan | AI editor | greps the repo for files related to the seeds (importers/callers/same-feature/route); ICX greps as fallback, graph expansion stays ICX |
+| expand | User | confirm graph + agent-grep expanded files (off-type excluded by default) |
+| compat_scan | AI editor | reads the files itself and reports per-file compatibility {all_compatible, findings}; open-ended mandate, ICX does not verify (see compat mandate below) |
+| compat_check | User | review the agent findings; approve (agent applies required_changes, then re-scan), or per-file drop / manual / accept-as-is |
+| 2a | User | confirm URL + detected fields (auto_detect) |
+| 2b | AI editor | generate JSON spec (AGENT-GENERATE); ICX enforces presence of every section in `~/.icx/testing_rules/2b.md` and re-asks until complete (or user accepts incomplete) |
+| api_manual | User | manual endpoint entry when api auto-spec fails |
+| 3 | User | agent_provider, headless, url, profile_screen (test_type is NOT chosen here - it was picked at pick_type) |
+| auth_gate | User | public / capture / reuse / inline (ui/agent only) |
+| profile_push | User | choose how to push a Project Profile: agent (generate) / file (provide a .md) / no |
+| profile_gen | AI editor | reads source + Magik profile-creation prompt, generates the Project Profile markdown (only when profile_push = agent) |
+| 4 | AI editor | review the full report |
+| 5 | User | approve THIS fix iteration (per-iteration approval) or stop |
+| error | User | retry / skip / end |
+| limit | User | continue or end |
+| ui_check | User | visual confirmation |
+| memory_save | User | save record |
+
+Sonar is a distinct feature, not a testing gate - it runs via the `icx sonar` command group and `sonar/service.py`, detached from this graph (`memory_save -> END`).
+
+Every gate is governed by the durable rulebook in `~/.icx/testing_rules/` (see Rulebook above): ICX injects the gate's rules text into the interrupt payload so the agent always follows the current, user-editable rules - this is what makes a rule stick across every future session instead of living only in the agent's fading context.
+
+Compat gate mandate: ICX is a pure router here - it does NOT judge compatibility and does NOT verify the agent's answer. Completeness is the agent's own responsibility, enforced entirely by the gate instruction (`_COMPAT_MANDATE` in `nodes.py`, mirrored in the `resume_testing_session` tool description). The mandate is open-ended by design - no hardcoded blocker taxonomy: (a) COMPLETENESS - the agent reasons from first principles about everything a test physically must do (reach, locate, see, interact, observe) and examines every element, working from no fixed list; (b) FORBIDDEN DEFERRAL - the agent may NOT pass anything by assuming the test tool / browser-use agent / Playwright will "work around it" or be "less robust but fine" (this rationalization is the exact failure the mandate exists to stop); (c) REPORT, DON'T DECIDE - every concern becomes a finding shown to the user, and the agent never silently accepts, skips, or drops anything. `all_compatible:true` is legitimate only when the agent genuinely found nothing by inspection.
+
+Compat-check remediation loop: every finding goes to the user, who decides each one. The agent applies the edits and resumes with `{"decision":"approve"}` to re-check; or the user rejects with `{"decision":"reject","resolution":{path:"drop"|"manual"|"accept"}}` - `drop` removes the file, `manual` keeps it for hand-testing, `accept` keeps it in the automated run unchanged (the user knowingly accepts the finding). Loops until clean or `max_compat_iterations`.
+
+Auth isolation: Magik sessions are in-memory in Magik (opaque `sessionId`, 1-hour TTL). ICX keys auth by (project, host) in `~/.icx/testing_auth.json` (`0o600`), storing only `{session_id, captured_at, expires_at}` - never a credential. The `project` part of the key is the graph `project_id` (a path hash, collision-proof), not the human name, so two projects with the same name never share a session; when no graph project matches, ICX falls back to a hash of the resolved project root so the key is still unique and stable. `host` is the netloc of the run URL. `node_submit` resolves the sessionId transiently and never returns it into checkpointed state; if an authenticated run (capture/reuse/inline) finds its stored session expired or missing at submit time, it routes to relogin (auth_error -> auth_gate) rather than silently running unauthenticated. Relogin also fires on a mid-run login-redirect or the Magik `auth_required` SSE event, re-entering `auth_gate` and resuming from the checkpoint. The four `magik_login_*`/`magik_logout` MCP tools drive capture/inline login.
+
+Live streaming: `node_poll` consumes the Magik SSE stream when `magik_use_streaming` is set (default true), returning on `done` or routing to relogin on `auth_required`; it falls back to the interval poll otherwise.
+
+Config fields on `AppConfig`: `magik_base_url`, `magik_api_key` (`exclude=True`, keyring), `magik_max_iterations`, `magik_use_streaming` (default true), `magik_agent_max_steps` (default 50, agent-run step budget), `magik_agent_step_cap` (default 60, the clamp ceiling enforced at the config gate), `sonar_project_key`, `sonar_token` (`exclude=True`, keyring). These step fields are set via `icx test configure` or by editing `~/.icx/config.json`; fields absent from an existing config fall back to the model defaults (50/60) at load - no migration needed.
+
+Gate posture (single source of truth in `_MAGIK_RESUME_DESCRIPTION`): AGENT-GENERATE gates are `2b`, `compat_scan`, `profile_gen`, `expand_scan`; all others are USER-DECISION. The agent reads code and generates at those four; ICX orchestrates the rest. Every AGENT-GENERATE gate (2b, compat_scan, profile_gen, expand_scan) carries a mandatory full re-read instruction (earlier reads/memory are stale) and requires a per-file read_receipt ({path, line_count, last_line}) recorded in TestingState.read_receipts for audit; ICX records but does not re-read to validate.
+
+**Port auto-discovery:** Magik writes its active port to `%APPDATA%\Magik-AI Tester\magik.port` on startup (tries 7646-7650 in order, OS-assigned fallback). ICX reads this file to resolve the actual port. `magik_base_url` in config is the override when the file is absent.
+
+**Report parser (`parse_report` in `nodes.py`):** Handles two shapes - UI/API test reports extract `results[]` where `status` in `("fail","error")`; agent run reports extract `verdict.success=False` as a goal-not-met issue plus any `history[]` steps with errors. Returns a flat list of issue dicts.
+
+**Error handling:** `health_check()` converts `httpx.HTTPStatusError` (e.g. 404 on wrong port) to `MagikUnreachable` so CLI commands always show a clean error message rather than a raw traceback. Loop after review routes to `submit` directly, not back to `expand_files` (file list stays fixed for the session).
+
+### Sonar module (code quality)
+
+Sonar is a first-class ICX feature, DISTINCT from the testing LangGraph flow and never wired into the testing state machine. It has its own contracts (`models/sonar.py`), its own client/parse/service (`sonar/`), its own CLI group (`icx sonar`), and its own MCP tools. It mirrors the `analyze` flow's discipline: raw SonarQube Web API JSON is normalized into typed models before being returned. No LLM is involved - the report is a faithful structured projection of SonarQube data that the MCP agent reasons over directly.
+
+**Architecture:** ICX talks to the SonarQube server DIRECTLY over its documented Web API - no Magik, no proxy. `sonar/client.py:SonarClient` is a read-only async client (GET only; it has no POST/PUT/DELETE method and physically cannot mutate the server). Authentication uses a SonarQube user token sent as HTTP Basic (`base64("<token>:")`), accepted by every SonarQube version. `sonar/service.py` assembles reports; `sonar/parse.py` turns a pasted dashboard URL into its base URL.
+
+**Layer parallel with `analyze`:** `RawIssueData` -> `SonarClient` normalizers; `IssueContext` -> `SonarReport`; `connector.parse_input` -> `sonar/parse.py`; `engine.run` -> `service.report`; connection narrowing -> `SonarScope`.
+
+**Config fields** (on `AppConfig`) - multiple named servers with one active, mirroring `llm_profiles`/`current_llm_profile`:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `sonar_connections` | `dict[str, SonarConnection]` | `{}` | Named server connections. `SonarConnection` = `{name, url, token (Field(exclude=True), keyring), verify_tls}` |
+| `active_sonar` | `str \| None` | `None` | Name of the active connection. Sonar is "on" iff this resolves - there is no separate enabled flag |
+| `sonar_enabled` / `sonar_url` / `sonar_token` / `sonar_verify_tls` / `sonar_project_key` | legacy | - | Retained for backward-compatible loading only. A `model_validator` on `AppConfig` migrates a legacy single-server config into a real `"default"` connection on load (visible in `icx status`/`--list` and removable), clearing the legacy fields. The connection is created regardless of the old `sonar_enabled` flag, but only made ACTIVE when it was set - so a previously-disabled config stays off (no silent enable) |
+
+`AppConfig.active_sonar_connection()` resolves the active `SonarConnection` (named, else legacy fallback, else `None`). `sonar_enabled(cfg)` in the service is `active_sonar_connection() is not None`. Per-connection tokens are stored under keyring account `sonar_conn_token:<name>` (D-Lock/sentinel/`_warn_plaintext` fallback), with load-resolve and save-store loops in `config_manager` mirroring the `llm_profiles` api_key handling; `ConfigManager.delete_sonar_connection_secret(name)` clears one on removal.
+
+Project and branch are NOT stored - they are chosen per request. The intended flow: `sonar_projects` lists projects the token can access, the user picks one, `sonar_branches` lists its branches, the user picks one, then `sonar_findings`/`sonar_report` runs against that project + branch.
+
+**Discovery is guarded (mandatory selection protocol).** A real server can hold hundreds of projects, so ICX never dumps them blindly. `sonar_projects`/`sonar_branches` return an envelope `{total, returned, truncated, query, projects|branches, instructions}`. When the count exceeds a cap (`_PROJECT_LIST_CAP`/`_BRANCH_LIST_CAP` = 50) and no `query` is given, the list is **withheld** (`projects: []`, `truncated: true`) - the agent literally has nothing to enumerate and must fall back to the protocol. Both tools accept a `query` substring filter (projects use SonarQube `q`; branches filter client-side). The `instructions` field carries a mandatory, user-editable rulebook (`sonar/rules.py` -> `~/.icx/sonar_rules/selection.md`, seeded from `sonar/rules_defaults/selection.md`, same mechanism as the testing rulebook) that requires the agent to: ask the user whether ICX should fetch or they will paste the key/branch; never invent a key or branch; never dump long lists. Because the rule text is injected into every discovery response, it cannot drift out of the agent's context. Users can edit `selection.md` to change the protocol; edits are never overwritten.
+
+**Data contracts (`models/sonar.py`):** `SonarFinding` (issue or hotspot, normalized), `SonarMeasures` (every dashboard metric: bugs/vulnerabilities/code smells/security hotspots, coverage, duplication, technical debt, A-E ratings, unit-test metrics, plus new-code variants), `SonarQualityGate` + `SonarGateCondition`, `SonarDuplication` + `SonarDupBlock`, `SonarTestGap`, `SonarScope` (the request/filter model), and `SonarReport` (the assembled output).
+
+**Developer scoping (`SonarScope`):** `files` is supplied by the caller only - ICX never derives it. An empty `files` list means project-wide (bounded by `limit`). When `files` is given, findings, per-file measures, and duplication are all restricted to exactly those file components, which also keeps "fetch everything" cheap. Additional filters: `types`, `severities`, `statuses`, `author`, `assignee`, `new_code_only`.
+
+**Full coverage:** for a scope, `service.report` pulls issues (`/api/issues/search`), security hotspots (`/api/hotspots/search`), project measures and per-file measures (`/api/measures/component`), duplication blocks (`/api/duplications/show`), and derives `test_gaps` (files whose measured coverage is 0). Test-coverage gaps are surfaced as data; the MCP agent decides whether to offer to create the missing tests - ICX does not generate them.
+
+**Bounded (no OOM):** issue/hotspot fetches page at `ps=500` with a hard ceiling of 20 pages (10000 findings, matching SonarQube's own `p*ps <= 10000` limit) and honor `scope.limit`; `SonarReport.truncated` and `total_findings` tell the caller when results were clipped.
+
+**Robustness (edge cases handled):** `SECURITY_HOTSPOT` is stripped from the `issues/search` `types` param (it is not an issue type - hotspots have their own API); a hotspots-only request skips the issue query entirely. HTTP errors map through `_raise_for_sonar` to Sonar-appropriate messages (401/403 -> `AuthError` pointing at `icx sonar add`, 404 -> not-found, 429 -> `RateLimited`, 5xx -> unavailable) and surface SonarQube's own `{"errors":[{"msg"}]}` text, so a Community-edition "branch not supported" or a bad project key reads clearly. Per-file measures and duplication lookups swallow per-file errors (a missing/unanalyzed file never aborts the whole report). A file with measured coverage of exactly 0 becomes a `test_gap`; unmeasured coverage (`None`) is not a false gap.
+
+**Service module (`sonar/service.py`):** connection management - `add_connection` (add/update a named server, validates live, first becomes active), `list_connections`, `set_active`, `remove_connection`. Operational functions call `_require_enabled(cfg)` (raises `SonarDisabled` when no active connection resolves) then `_make_client(cfg)` (builds a `SonarClient` from the active connection; raises `SonarNotConfigured` when its token is missing). All operations target the active connection. `status` reports the active connection + live health.
+
+**Security:** read-only by construction (GET only); http and https both allowed because internal Sonar servers commonly run plain http on a private network (the target is operator-configured trusted infra, so private IPs are intentionally not blocked); the token is sent only to the exact configured host and is dropped on any cross-host redirect (preventing SSRF-style token leakage, same guard pattern as the Jira client); TLS verified by default; each connection's token is stored in the OS keyring under `sonar_conn_token:<name>` via `Field(exclude=True)` and never logged.
+
+**`icx sonar` CLI group (minimal - the MCP tools are the rich surface), mirrors `icx model`:**
+
+Connection management uses the same flag form as `icx model` (a group callback with `invoke_without_command=True`); operational verbs are subcommands.
+
+| Command | What it does |
+|---|---|
+| `icx sonar --add` | Prompt for name + URL + token + TLS verify; validates live; first connection becomes active |
+| `icx sonar --list` (or bare `icx sonar`) | List connections and which is active |
+| `icx sonar --active <name\|index>` | Set the active connection (name or number from `icx status`) |
+| `icx sonar --remove <name\|index>` | Remove a connection (name or number; clears its keyring token) |
+| `icx sonar status` | Active connection + live health |
+| `icx sonar projects` | List projects the token can access |
+| `icx sonar report` | Compact summary (gate + counts); `--project`, `--branch`, `--file` (repeatable), `--new-code` |
+
+Connections also appear in `icx status` (a "Sonar Connections" table). MCP tools always operate on the **active** connection - switch with `icx sonar active`, exactly as MCP uses the active LLM profile.
+
+Gated commands catch `SonarDisabled` and print a clear message then exit with code 1 rather than crashing.
+
+**Sonar MCP tools (rich):**
+
+| Tool | Gated | Description |
+|---|---|---|
+| `sonar_status` | No | Report Sonar config and live connection health |
+| `sonar_projects` | Yes | Discover projects (guarded); input: `{query?}`; returns `{total, truncated, projects, instructions}` - list withheld when too many and no query |
+| `sonar_branches` | Yes | Discover branches (guarded); input: `{project, query?}`; same guarded envelope + mandatory `instructions` |
+| `sonar_measures` | Yes | Project measures; input: `{project, branch?}` |
+| `sonar_quality_gate` | Yes | Quality gate status + failing conditions; input: `{project, branch?}` |
+| `sonar_findings` | Yes | Scoped findings (issues + hotspots); input: `{project, branch?, files?, types?, severities?, statuses?, author?, assignee?, new_code_only?, limit?}` |
+| `sonar_report` | Yes | Full report: gate + project/per-file measures + findings + duplications + test gaps; same input schema as `sonar_findings` |
+
+Gated tools return `{ok: false, error: "No active SonarQube connection..."}` when no connection is active. Scoped tools return `{ok: false, error: "project is required..."}` when `project` is missing. `sonar_status` always returns the current state.
+
+**Activation:** Add a connection with `icx sonar add`; the first one becomes active and all operational paths work immediately. Switch servers with `icx sonar active <name>`.
+
 ---
 
 ## 4. Data contracts - the three core models
@@ -651,8 +813,8 @@ class RawIssueData(BaseModel):
     status: str
     metadata: dict                              # reporter, assignee - anything extra
     due_date: str | None = None                 # ISO date string
-    attachment_content_urls: dict[str, str] = {}  # filename → content URL
-    attachment_texts: dict[str, str] = {}       # filename → extracted text (post-UAE)
+    attachment_content_urls: dict[str, str] = {}  # filename -> content URL
+    attachment_texts: dict[str, str] = {}       # filename -> extracted text (post-UAE)
 ```
 
 The `attachments` list is informational (filenames). `attachment_content_urls` is what triggers actual download and processing. If your connector can't supply content URLs, just leave it as `{}` - attachments will be listed but not processed.
@@ -676,7 +838,7 @@ class IssueContext(BaseModel):
     completeness_score: float          # 0.0-1.0, recomputed by finalize(); capped at 0.79
                                        # for Story/Task/Epic with spreadsheets when no schema block
     missing_information: list[str]     # recomputed by finalize(); may include "missing_schema"
-    images: dict[str, str] = {}        # filename → Base64; always populated when images exist
+    images: dict[str, str] = {}        # filename -> Base64; always populated when images exist
     past_insights: list[PastInsight] = Field(default_factory=list)  # CLI only - excluded from MCP serialization; always [] in MCP (mcp_mode=True skips enrichment)
     pending_images: list[str] = Field(default_factory=list)      # image filenames not processed (fast mode only)
     pending_audio: list[str] = Field(default_factory=list)        # audio + video filenames not processed (fast mode only)
@@ -711,8 +873,8 @@ class RawIssueResponse(BaseModel):
     status: str
     metadata: dict
     due_date: str | None = None
-    attachment_texts: dict[str, str] = {}  # filename → extracted text (incl. formula annotations, audio transcripts)
-    images: dict[str, str] = {}            # filename → Base64
+    attachment_texts: dict[str, str] = {}  # filename -> extracted text (incl. formula annotations, audio transcripts)
+    images: dict[str, str] = {}            # filename -> Base64
     pending_images: list[str] = Field(default_factory=list)      # image filenames not processed (fast mode only)
     pending_audio: list[str] = Field(default_factory=list)       # audio + video filenames not processed (fast mode only)
     pending_documents: list[str] = Field(default_factory=list)   # document filenames not processed (fast mode only)
@@ -739,7 +901,7 @@ src/icx_engine/connectors/<name>/
     config.py       # connection model + auth model(s)
     connector.py    # ConnectorBase implementation
     client.py       # HTTP client - raw API calls only
-    parser.py       # API response JSON → RawIssueData
+    parser.py       # API response JSON -> RawIssueData
     auth.py         # build_auth_header()
 ```
 
@@ -825,7 +987,7 @@ def extract_bare_key_from_ref(cls, ref: str) -> str | None:
 
 `extract_project_key()`'s result is matched against `ProjectInfo.tracker_project_key` (set via `icx graph add --project`) to auto-resolve project paths in `_resolve_paths_from_ticket()`. Only override `extract_bare_key_from_ref()` if your platform's bare-key/URL format differs from Jira's `PROJ-123`.
 
-The return type of `process_attachments` is `tuple[dict[str, str], dict[str, str]]` - `(attachment_texts, images)`. The first dict maps filename → extracted text; the second maps filename → Base64.
+The return type of `process_attachments` is `tuple[dict[str, str], dict[str, str]]` - `(attachment_texts, images)`. The first dict maps filename -> extracted text; the second maps filename -> Base64.
 
 **Avoid the lossy round-trip in `__init__`.** If your connector stores the connection model as an attribute, check the type before calling `model_validate(model_dump(...))`:
 
@@ -889,13 +1051,13 @@ Then, in `cli.py`, add your platform to `PLATFORMS` and register it in `_connect
 # cli.py - PLATFORMS list (already exists)
 PLATFORMS: list[tuple[str, str]] = [
     ("jira",       "Jira  (Jira Cloud - API Token or OAuth PKCE)"),
-    ("myplatform", "My Platform  (description)"),   # ← add
+    ("myplatform", "My Platform  (description)"),   # <- add
 ]
 
 # cli.py - _connect() dispatch table (already exists)
 _platform_dispatch = {
     "jira": _connect_jira,
-    "myplatform": _connect_myplatform,   # ← add
+    "myplatform": _connect_myplatform,   # <- add
 }
 ```
 
@@ -910,7 +1072,7 @@ def _connect_myplatform(debug: bool = False) -> None:
 When `PLATFORMS` has more than one entry, `_connect()` automatically shows a numbered selection menu. With one entry it skips the menu and goes directly to that platform's flow. No changes to `_connect()` are needed.
 
 **Never write auth flow logic directly in `cli.py`** - it belongs in `services/connection_service.py`.  
-**Never call platform-specific service functions directly from `connection --add`** - all calls route through `_connect()` → `_platform_dispatch`.
+**Never call platform-specific service functions directly from `connection --add`** - all calls route through `_connect()` -> `_platform_dispatch`.
 
 ### Step 7 - Write tests
 
@@ -920,7 +1082,7 @@ Mirror the Jira test structure:
 tests/connectors/myplatform/
     __init__.py
     test_parsing.py     # parse_input() - all URL formats, bare keys, invalid inputs
-    test_parser.py      # API response JSON → RawIssueData field mapping
+    test_parser.py      # API response JSON -> RawIssueData field mapping
 ```
 
 Add a fixture for your platform's API payload to `tests/test_data.py`.
@@ -1002,20 +1164,63 @@ def get_provider(config: LLMConfig) -> LLMProvider:
         "nim": NIMProvider,
         "openai": OpenAIProvider,
         "anthropic": AnthropicProvider,
-        "myprovider": MyProvider,   # ← add this
+        "myprovider": MyProvider,   # <- add this
     }
 ```
 
-### Step 4 - Add to the CLI (`cli.py`)
+### Step 4 - Add a registry entry (`llm/registry.py`)
 
-Add your provider to `_PROVIDERS` and `_DEFAULT_MODELS` in `cli.py`.
+Add one `ProviderSpec` to `PROVIDERS` in `llm/registry.py` - this is the single
+source of truth. The CLI provider menu + default models, the OpenAI-compatible
+base URLs in `connectors/attachments.py`, and the vision/grounding api-style
+dispatch all derive from it automatically - do **not** re-declare provider lists
+elsewhere.
+
+```python
+"myprovider": ProviderSpec(
+    "myprovider",
+    api_style="openai",          # "openai" | "anthropic" | "google" - selects vision/dispatch shape
+    default_base_url="https://api.myprovider.com/v1",  # or None to use the SDK default
+    default_text_model="...",
+    default_image_model="...",
+    cli_label="My Provider        (cloud, paid)",
+),
+```
+
+`test_llm_registry.py` asserts that every registry provider also has a class
+wired in `get_provider` (Step 3) - keep them in sync.
+
+Out of scope for this registry (separate subsystems): `graph/manager._ICX_PROVIDER_TO_PARSER`
+and `graph/parser/llm.py` carry the graph pipeline's own provider mapping.
 
 ### Step 5 - Write tests
 
 Add a test file `tests/llm/test_myprovider.py` that mocks the HTTP call and verifies:
-- Happy path: valid JSON → `IssueContext`
-- Malformed JSON → `ContextBuildError` raised
+- Happy path: valid JSON -> `IssueContext`
+- Malformed JSON -> `ContextBuildError` raised
 - `finalize()` is applied (check that `issue_type` comes from `raw`, not the LLM output)
+
+---
+
+## 6a. Adding a third-party integration
+
+Integrations (external services beyond connectors/providers) plug in via
+`icx_engine/integrations.py` **without modifying `AppConfig`**:
+
+1. Define a Pydantic config model; mark secret fields `Field(..., exclude=True)`.
+2. `register_integration("myservice", MyServiceConfig)` at import time.
+3. Store settings under `AppConfig.integrations["myservice"]`; read them with
+   `config.integration("myservice")` (returns the validated model, or `None`).
+
+`config_manager` handles the secret fields generically: each `exclude=True`
+field is stored in the OS keyring under `integration_secret:<name>:<field>`
+(with D-Lock/env-var fallbacks), exactly like connector and LLM secrets - no
+per-integration code in `config_manager`.
+
+The existing **Magik-AI (`magik_*`) and Sonar (`sonar_*`) settings remain inline
+on `AppConfig`** for backward compatibility with existing config files and
+stored secrets. New integrations must use the registry, not new `AppConfig`
+fields.
 
 ---
 
@@ -1041,9 +1246,11 @@ The memory module lives at `src/icx_engine/memory/` and follows the same layerin
 
 Memory is stored in `~/.icx/memory/` with mode `0o700`. LanceDB writes columnar `.lance` files to this directory. The model sentinel is at `~/.icx/memory/.mem_initialized` and contains the embedding model name string. Model files are cached at `~/.icx/memory/model/` (`tokenizer.json` + `onnx/model_quantized.onnx`).
 
-**Stale lock detection:** `MemoryManager`, `RelationManager`, and `PatternManager` all connect via `schema.connect_with_timeout()`, which connects on a daemon thread with a 3s timeout. If `lancedb.connect()` hangs (stale file lock from a previous process), it raises `MemoryError` with guidance to restart or kill orphan icx processes, instead of hanging indefinitely.
+**Stale lock detection:** `MemoryManager`, `RelationManager`, and `PatternManager` all connect via `schema.connect_with_timeout()`, which connects on a daemon thread with a 3s timeout. If `lancedb.connect()` hangs (stale file lock from a previous process), it raises `ICXMemoryError` with guidance to restart or kill orphan icx processes, instead of hanging indefinitely.
 
-**Download trigger:** The embedding model downloads only when `icx setup` is run explicitly. `icx analyze`, `icx graph`, and other commands start immediately and use memory only if it is already initialized (lazy load on first query). Memory commands (`icx memory list`, etc.) call `check_ready()` which raises `MemoryError` if the model is not present - the user is directed to run `icx setup`.
+**Download trigger:** The embedding model downloads only when `icx setup` is run explicitly. `icx analyze`, `icx graph`, and other commands start immediately and use memory only if it is already initialized (lazy load on first query). Memory commands (`icx memory list`, etc.) call `check_ready()` which raises `ICXMemoryError` if the model is not present - the user is directed to run `icx setup`.
+
+> Exception rename: the memory exception class is `ICXMemoryError` (in `exceptions.py`); the bare name `MemoryError` shadowed the Python builtin. `MemoryError` remains as a back-compat alias, but new code must import `ICXMemoryError`.
 
 ### Embedding model
 
@@ -1051,7 +1258,9 @@ Memory is stored in `~/.icx/memory/` with mode `0o700`. LanceDB writes columnar 
 Constant: `icx_engine.memory.embeddings.EMBEDDING_MODEL`
 Dimension: `icx_engine.memory.embeddings.VECTOR_DIM` (768)
 
-**Dimension mismatch:** If an existing LanceDB table was created with a different `VECTOR_DIM`, `MemoryManager._get_table()` raises `MemoryError` with a message directing the user to run `icx memory migrate`. The migrate command dumps all entries, drops the table, recreates it with the current schema, and re-embeds each entry with the current model.
+**Integrity:** Model downloads are pinned to immutable HuggingFace commit revisions (`_TOKENIZER_REVISION`, `_ONNX_REVISION`) and verified against SHA-256 checksums in `_MODEL_CHECKSUMS` by `_verify_model_files()` before the init sentinel is written. Verification runs on fresh download only; already-initialized installs are unaffected. A mismatch raises and leaves the sentinel unwritten so `icx setup` can re-download.
+
+**Dimension mismatch:** If an existing LanceDB table was created with a different `VECTOR_DIM`, `MemoryManager._get_table()` raises `ICXMemoryError` with a message directing the user to run `icx memory migrate`. The migrate command dumps all entries, drops the table, recreates it with the current schema, and re-embeds each entry with the current model.
 
 ### MemoryQueryInput
 
@@ -1251,14 +1460,16 @@ except Exception as _mem_exc:
 
 - `~/.icx/memory/` is created with `0o700` - owner read/write/execute only
 - `MemoryEntry` never stores API tokens, OAuth tokens, attachment content, Base64 images, or any field declared `Field(exclude=True)` in any model
-- `resolution_note` and `files_changed` are user-typed strings - never auto-captured from connector responses
+- `resolution_note` and `files_changed` are supplied by the AI agent through a deliberate `save_memory` MCP call - never auto-captured or scraped from connector/tracker responses
 - `icx memory export` prints a warning before writing and requires confirmation
 - `icx memory clear` requires `--confirm` flag and a second confirmation prompt
 - Exports are plaintext JSON - user is responsible for where they send them. ICX never auto-uploads.
+- LanceDB filter values are escaped via `schema._sq()`: single quotes are doubled (the correct Datafusion string-literal escape - backslash is literal there and left untouched), and control characters are stripped with length capped as defense-in-depth. Issue keys are additionally validated against `_SAFE_KEY_RE` before use.
+- Downloaded model files are checksum-verified before use (see Embedding model / Integrity).
 
 ### Issue relationship graph (`memory/relations.py`)
 
-`RelationManager` maintains a `memory_edges` LanceDB table that tracks connections between saved work items. Edges are auto-detected on every `MemoryManager.save()` call via `auto_link()`.
+`RelationManager` maintains a `memory_edges` LanceDB table that tracks connections between saved work items. Edges are auto-detected on `MemoryManager.save()` via `auto_link()` - but only when the saved entry has `files_changed`; a file-less entry cannot form `shares_file` edges, so `save()` skips the candidate scan for it entirely. For file-bearing entries, candidates load via `MemoryManager._lean_link_candidates()` - a **column-projected scan** (`search().select(["issue_key", "files_changed"])`) that returns the same rows as the full load but never hydrates the 768-dim vector or JSON columns (~40x cheaper at a few thousand entries). `auto_link` reads only those two fields, so edges are identical; the method falls back to the full `list_entries()` load on any scan error. The comparison is still O(N) per save (accepted at dev scale); a persistent file-overlap index remains the future optimization for very large memory volumes.
 
 **Table schema:**
 
@@ -1446,41 +1657,41 @@ All graph data is stored in `~/.icx/graphs/` (created with `0o700`, never inside
 
 ```
 ~/.icx/graphs/
-├── registry.json                  # name -> project_id map (atomic writes)
-└── <project_id>/                  # SHA256[:12] of resolved project path
-    ├── meta.json                  # ProjectInfo: name, path, status, file_count, git_commit, tracker_project_key
-    ├── graph.json                 # built knowledge graph (nodes + edges JSON)
-    ├── cluster_descriptions.json  # LLM cluster descriptions (written only when LLM configured)
-    ├── GRAPH_REPORT.md            # compact index: god nodes + cluster table + cross-cluster
-    ├── GRAPH_CLUSTERS/            # per-cluster detail files (one .md per community)
-    │   ├── ServiceName.md
-    │   ├── Feature.md
-    │   └── ...
-    └── cache/                     # graphifyy AST cache (per-project, isolated)
++-- registry.json                  # name -> project_id map (atomic writes)
+\-- <project_id>/                  # SHA256[:12] of resolved project path
+    +-- meta.json                  # ProjectInfo: name, path, status, file_count, git_commit, tracker_project_key
+    +-- graph.json                 # built knowledge graph (nodes + edges JSON)
+    +-- cluster_descriptions.json  # LLM cluster descriptions (written only when LLM configured)
+    +-- GRAPH_REPORT.md            # compact index: god nodes + cluster table + cross-cluster
+    +-- GRAPH_CLUSTERS/            # per-cluster detail files (one .md per community)
+    |   +-- ServiceName.md
+    |   +-- Feature.md
+    |   \-- ...
+    \-- cache/                     # graphifyy AST cache (per-project, isolated)
 
 ~/.icx/temp/
-└── <PROJ-123>/                    # normalized issue key (URLs auto-extracted to bare key)
-    ├── screenshot.png             # issue image attachments written here instead of inline base64
-    └── diagram.jpg                # deleted on save_memory or after 24h TTL sweep
+\-- <PROJ-123>/                    # normalized issue key (URLs auto-extracted to bare key)
+    +-- screenshot.png             # issue image attachments written here instead of inline base64
+    \-- diagram.jpg                # deleted on save_memory or after 24h TTL sweep
 ```
 
 ### Project ID
 
-`derive_project_id(path)` → `SHA256(Path(path).resolve().as_posix())[:12]` - stable across renames of the graph directory itself, unique per resolved absolute path. Uses `as_posix()` so the hash is consistent regardless of OS separator (forward slash always).
+`derive_project_id(path)` -> `SHA256(Path(path).resolve().as_posix())[:12]` - stable across renames of the graph directory itself, unique per resolved absolute path. Uses `as_posix()` so the hash is consistent regardless of OS separator (forward slash always).
 
 ### Build pipeline
 
 Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build calls `_build_project_isolated()` - a **top-level** function (required for pickle on Windows). A `ProgressEmitter` writes newline-delimited JSON events to a temp file throughout the build; the parent process tails this file and forwards events to a Rich Progress bar (CLI) or a no-op renderer (MCP/background).
 
 1. Sets `os.chdir(icx_cache)` and patches `parser.cache.cache_dir` to redirect all cache writes into `~/.icx/graphs/<id>/cache/` (safe in subprocess). Also passes `cache_root=icx_cache` explicitly to `extract()` to prevent any writes to the project directory.
-2. `_collect_source_files(project_path)` → file list (git-first, fallback to filtered rglob)
+2. `_collect_source_files(project_path)` -> file list (git-first, fallback to filtered rglob)
    - **Git path:** `git ls-files --cached --others --exclude-standard` filtered by `_PARSER_EXTENSIONS` - respects `.gitignore`, excludes `node_modules`, `dist`, `target`, etc. Archive directories (`.war/`, `.jar/`, etc.) and committed vendor files (minified file ratio heuristic) are also filtered.
    - **Fallback:** rglob filtered by `_is_noise_dir` from `parser/detect.py`
    - **`.icxignore` exclusions:** patterns from `~/.icx/graphs/<project_id>/.icxignore` are applied after file collection (seeded with defaults on first build).
 3. **AST extraction** (`emit: scan, ast`) - `parser.extract.extract(files, cache_root=icx_cache, parallel=False, on_progress=...)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses. `parallel=False` prevents grandchild process spawning inside the subprocess (deadlocks on Windows with the "spawn" context).
 4. **LSP + semantic resolver pass** (`emit: lsp`) - runs language-appropriate resolvers in order; each resolver appends edges to the extraction dict. Resolvers run per-language (Python, Java, Kotlin, JS/TS). Resolver failures are logged at DEBUG and skipped - never fatal. LSP servers (Pyright, tsserver) are managed by `lsp_manager.py` under `~/.icx/<server>/<runtime-version>/`, a per-runtime-version cache so switching Node/Python (or Java/Rust/.NET/etc) versions across projects reuses the cached install instead of reinstalling. **Batch-open protocol:** ts_lsp and pyright_lsp open all files with `did_open` before making any `definition()` queries, so the server indexes the full workspace once rather than re-analysing on every file. A circuit breaker (5 consecutive timeouts) aborts LSP queries cleanly when the server is overloaded. Per-request timeout is 3s.
 5. **LLM edge enrichment** (optional, `emit: llm`) - `extract_corpus_parallel()` sends file batches to the LLM for cross-file semantic edges. Only edges merged; LLM community IDs discarded (collide across chunk boundaries).
-6. **Community detection** (`emit: louvain`) - `build_from_json(extraction)` + `cluster(G)` → merged graph with Louvain communities.
+6. **Community detection** (`emit: louvain`) - `build_from_json(extraction)` + `cluster(G)` -> merged graph with Louvain communities.
 7. **Export** (`emit: export`) - `to_json(G, communities, output_path=graph_tmp_path, skip_safety_check=True)` writes compact JSON (no indent, `separators=(",", ":")`) directly to a file handle via `json.dump` - no in-memory string. Then `_finalise_build` renames atomically to `graph.json`. `skip_safety_check=True` skips the existing-node-count guard during builds (guard still applies for manual/admin callers).
 8. **LLM cluster descriptions** (optional) - `_generate_cluster_descriptions(graph_path)` sends top-5 files per cluster to the LLM, writes `cluster_descriptions.json`. Non-fatal: silently skipped when no LLM configured or on any failure.
 9. **Report generation** - `generate_graph_report(graph_json_path, output_path)` writes `GRAPH_REPORT.md` index and `GRAPH_CLUSTERS/` directory (see Report generation section).
@@ -1489,7 +1700,7 @@ Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build
 ### Build states
 
 ```
-not_built → building → ready → stale → rebuilding
+not_built -> building -> ready -> stale -> rebuilding
 ```
 
 `get_status()` reads `meta.json`. Background rebuilds set `"rebuilding"` before submitting to the executor; `_on_background_build_done()` sets `"stale"` on failure.
@@ -1503,13 +1714,13 @@ not_built → building → ready → stale → rebuilding
 | commit=None AND file_count=0 | True | False (never built) |
 | commit=None AND file_count>0 | mtime fallback | (see mtime row) |
 | 0 changed files | False | True |
-| ≤ 5 changed files | True | True |
-| > 5 files AND ≥ 3% of total | True | False |
+| <= 5 changed files | True | True |
+| > 5 files AND >= 3% of total | True | False |
 | > 5 files BUT < 3% of total | True | True |
 
 In MCP mode (`_get_graph_info`): when `is_stale=True`, the existing graph is always served regardless of LLM availability. A `stale_note` is attached to the response containing the changed file count, percentage, and a suggestion to run `icx graph build`. The agent is instructed to inform the user of this before proceeding. Auto-rebuild is never triggered from MCP - the user rebuilds explicitly via CLI when ready. The `serve_existing` flag from `ChangeResult` is computed but not used in MCP mode.
 
-**Git unavailable** → falls back to `_mtime_changed_files()`: samples up to 50 source files, compares mtime against `last_built` ISO timestamp (or "last hour" if not available). No-git projects (e.g. uploaded codebases) use this path.
+**Git unavailable** -> falls back to `_mtime_changed_files()`: samples up to 50 source files, compares mtime against `last_built` ISO timestamp (or "last hour" if not available). No-git projects (e.g. uploaded codebases) use this path.
 
 **No auto-build in MCP:** when `build_status == "not_built"`, `_get_graph_info` returns `"not_built"` status with a message. The agent is instructed to tell the user to run `icx graph build <name>` and fall back to grep/glob. No background build is triggered. The `icx graph build` CLI command calls `manager.build()` (blocking) directly and is the only way to trigger a build.
 
@@ -1587,7 +1798,7 @@ Agents can instantiate `GraphQuerier(graph_json_path)` directly from the path re
 - `graph/querier.py` deduplication - the `used_filenames` set must use `.lower()` for membership checks. Windows NTFS is case-insensitive; without this, two communities with labels like "Modal" and "modal" silently overwrite each other's cluster file.
 - `graph/querier.py:_community_label:_SKIP_PARTS` - the extended set of Java package directory names must stay. Removing them causes generic package names to bleed through as cluster labels on Java projects.
 - `graph/querier.py` cluster file write strategy - must use write-in-place + stale-file removal, NOT `shutil.rmtree` + `mkdir`. The rmtree pattern has a TOCTOU window where a symlink can be inserted between delete and recreate, redirecting all subsequent file writes to an attacker-controlled path.
-- `cli.py` memory commands - must call `check_ready()` (raises `MemoryError` if model absent), never `ensure_ready()`. Graph and other commands must not touch the embedding model at all - the graph pipeline uses the LLM API directly, not the embedding model.
+- `cli.py` memory commands - must call `check_ready()` (raises `ICXMemoryError` if model absent), never `ensure_ready()`. Graph and other commands must not touch the embedding model at all - the graph pipeline uses the LLM API directly, not the embedding model.
 - `~/.icx/graphs/` layout - tools and tests both rely on this exact directory structure.
 
 ---
@@ -1625,7 +1836,7 @@ class LLMConfig(BaseModel):
 | `llm_text:<profile>` | Text channel API key | `ICX_LLM_TEXT_<PROFILE_UPPER>` |
 | `llm_image:<profile>` | Image channel API key | `ICX_LLM_IMAGE_<PROFILE_UPPER>` |
 
-The env var is derived by `_env_key(account)` in `config_manager.py`: replace every non-alphanumeric character with `_`, uppercase, prepend `ICX_`. Profile `my-fast` → `ICX_LLM_TEXT_MY_FAST`.
+The env var is derived by `_env_key(account)` in `config_manager.py`: replace every non-alphanumeric character with `_`, uppercase, prepend `ICX_`. Profile `my-fast` -> `ICX_LLM_TEXT_MY_FAST`.
 
 ### Adding a new provider
 
@@ -1639,8 +1850,8 @@ The env var is derived by `_env_key(account)` in `config_manager.py`: replace ev
 
 ```
 engine.run()
-  ├─ get_provider(active_llm.text_config)  → text analysis
-  └─ visual_grounding_pass(..., active_llm.image_config, ...)  → image verification
+  +- get_provider(active_llm.text_config)  -> text analysis
+  \- visual_grounding_pass(..., active_llm.image_config, ...)  -> image verification
 ```
 
 ---
@@ -1660,6 +1871,10 @@ The `_GUIDANCE` dict maps every `ICXError` subclass to `(why_text, how_text)`. U
 **Context-aware `AuthError` guidance:** `render_icx_error` applies a secondary check when the caught exception is `AuthError`. It lowercases the exception message and checks for AI provider keywords (`"gemini"`, `"openai"`, `"anthropic"`, `"xai"`, `"nim"`, `"grok"`). If any keyword matches, the `How:` guidance is overridden to `"Run \`icx model --add\` to update your AI credentials."` instead of the default Jira connection guidance. This ensures the user always sees the precise recovery command for the specific service that failed.
 
 For `ContextBuildError`, `exc.raw_output` is appended below the panel when `show_traceback=True` - showing the raw LLM response that failed to parse. It is hidden otherwise to keep normal error output clean.
+
+### Logging / diagnostics
+
+Modules log via `logging.getLogger(__name__)`. No handler is attached by default, so `_log.debug(...)` output is silent (only WARNING+ surfaces via Python's lastResort). Set `ICX_LOG_LEVEL` (e.g. `DEBUG`, `INFO`) to make it visible: `logging_setup.configure_logging()` - called from `cli.main()` and `run_mcp_server()` - attaches a single stderr handler to the `icx_engine` logger at that level. Unset = no-op (default behavior unchanged). This is independent of the per-command `--debug` flag, which drives a separate step-by-step progress closure.
 
 ---
 
@@ -1745,6 +1960,14 @@ texts, images = await process_attachments(raw, downloader, llm_config)
 
 **When testing heuristic or grounding behavior in `engine.py`**, always mock both `ocr_image` and `vision_enrich` in `icx_engine.connectors.attachments` - if `vision_enrich` is unmocked and an `image_model` is set, it makes real HTTP calls and may cause `asyncio.gather` to silently swallow the error.
 
+#### Testing module tests
+
+- `tests/testing/test_client.py` - MagikClient HTTP calls, use respx for all mocks
+- `tests/testing/test_state.py` - TypedDict field assertions, make_initial_state factory
+- `tests/testing/test_nodes.py` - node functions with mocked client and GraphQuerier
+- `tests/testing/test_session_store.py` - bg task registry and session store operations
+- `tests/testing/test_graph.py` - graph compilation and node membership
+
 ### Fixtures available in `conftest.py`
 
 - `cli_runner` - `CliRunner` instance for CLI tests
@@ -1802,6 +2025,8 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 - **D-Lock threshold:** Never raise `_DLOCK_THRESHOLD` above 512. Windows Credential Manager rejects credential blobs above this size, causing silent plaintext fallback. D-Lock exists precisely to handle values that exceed this limit.
 - **Master Key:** `"icx_master_key"` lives in the OS keyring like any other secret. Never write it to `config.json` or log it.
 
+**Testing credential isolation:** Testing credentials and the Magik `sessionId` are never written to the LangGraph checkpoint DB; `sessionId` lives only in `~/.icx/testing_auth.json` (`0o600`) keyed by (project_id, host) and is injected transiently at submit. `sonar_token` uses `Field(exclude=True)`.
+
 ---
 
 ## 11. What NOT to touch
@@ -1821,7 +2046,7 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 | `graph/parser/icxignore.py:_SEED_CONTENT` | Default exclusion pattern list seeded into new `.icxignore` files on first build. Removing patterns here means future first-build users include those files; changing format requires updating the file header comments. |
 | `graph/progress.py:STAGES` | Stage string constants consumed by the parent-side renderer to display named progress steps. Adding stages is additive (renderer shows unknown stages as-is); removing or renaming stages silently drops the corresponding progress bar step. |
 | `graph/tsserver.py` | tsserver install path and version-tracking logic must stay aligned with `lsp_manager.py` and `resolvers/ts_lsp.py`. If you change the install dir (`~/.icx/tsserver/`), update all three files and the `readme.md` reference. |
-| `graph/parser/lsp_manager.py` | Generic LSP lifecycle. Language-specific servers (ts_lsp, pyright_lsp) inherit from this. Do not add language-specific logic here - add a new resolver file instead. All binary downloads go through `_download_lsp()` which enforces a 300s timeout and supports optional SHA-256 checksum pinning via `_LSP_CHECKSUMS`. To pin a server binary, add `_LSP_CHECKSUMS["server-name"] = "<sha256-hex>"` at the top of the file. |
+| `graph/parser/lsp_manager.py` | Generic LSP lifecycle. Language-specific servers (ts_lsp, pyright_lsp) inherit from this. Do not add language-specific logic here - add a new resolver file instead. All binary downloads go through `_download_lsp()` which enforces a 300s timeout and supports optional SHA-256 checksum pinning via `_LSP_CHECKSUMS`. To pin a server binary, add `_LSP_CHECKSUMS["server-name"] = "<sha256-hex>"` at the top of the file. Binary servers are pinned to fixed releases via version constants (`_KOTLIN_LS_VERSION`, `_RUST_ANALYZER_VERSION`, `_OMNISHARP_VERSION`, `_CLANGD_VERSION`) - never revert these to `latest`; bump them deliberately. jdtls is the one exception (upstream publishes only a rolling snapshot). Setting `ICX_REQUIRE_LSP_CHECKSUM=1` makes `_download_lsp()` fail closed on any server that has no pinned checksum (default unset preserves prior install behavior). |
 | `connectors/audio.py:WhisperManager._load` | Lock + double-checked locking is required - concurrent A/V attachments run through `asyncio.gather` and hit `_load()` from multiple executor threads. Removing the lock races the first-time download. |
 | `connectors/attachments.py:_extract_audio_from_video` | The `try/except asyncio.TimeoutError -> proc.kill(); await proc.wait()` block prevents orphan ffmpeg processes on timeout. The `proc.returncode != 0 -> raise RuntimeError` check prevents passing empty/partial WAV bytes to Whisper. Do not collapse either guard. |
 | `config_manager.py:_SENTINEL` | Do not change the sentinel string - it would invalidate all existing saved configs. |

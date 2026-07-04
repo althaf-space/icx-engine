@@ -142,7 +142,7 @@ def _mtime_changed_files(
     Falls back to "last hour" if last_built not available.
     """
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         if last_built:
             try:

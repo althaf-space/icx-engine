@@ -112,13 +112,15 @@ def test_check_stale_true_no_stale_note_when_fresh(ready_project):
 # Not registered / not built / building: return fast without blocking
 # ---------------------------------------------------------------------------
 
-def test_unknown_path_auto_registers_and_returns_not_built(tmp_path):
-    """Unknown-but-valid dir is auto-registered and returns not_built (not a hang)."""
+def test_unknown_path_returns_not_registered_and_writes_nothing(tmp_path):
+    """Unknown-but-valid dir must report not_registered and never auto-register."""
     unknown = tmp_path / "unknown_app"
     unknown.mkdir()
+    before = len(storage.list_projects())
     result = graph_info_for_path(str(unknown), check_stale=False)
-    assert result["status"] == "not_built"
+    assert result["status"] == "not_registered"
     assert result["path"] == str(unknown)
+    assert len(storage.list_projects()) == before
 
 
 def test_not_built_returns_status(tmp_path):

@@ -6,13 +6,15 @@ from icx_engine.exceptions import AuthError, ContextBuildError, RateLimited, Sou
 from icx_engine.llm.base import LLMProvider, SYSTEM_PROMPT, build_user_message, finalize, _strip_json_fencing
 from icx_engine.models.config import ChannelConfig
 from icx_engine.models.output import RawIssueData, IssueContext
+from icx_engine.llm.registry import default_base_url
 
 
 class XAIProvider(LLMProvider):
     def __init__(self, config: ChannelConfig):
+        # xAI base URL is fixed (config.base_url intentionally not honored here).
         self.client = AsyncOpenAI(
             api_key=config.api_key,
-            base_url="https://api.x.ai/v1",
+            base_url=default_base_url("xai"),
         )
         self.model = config.model
 

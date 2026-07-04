@@ -1,4 +1,4 @@
-﻿# ICX - Integrated Contextual X-ecution Engine
+# ICX - Integrated Contextual X-ecution Engine
 
 **AI-native intelligence layer for development teams.** Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP.
 
@@ -21,7 +21,7 @@ Run `icx analyze` from your terminal for instant structured output. Register ICX
 
 ## What's being built
 
-ICX is an early-stage product. The core pipeline (fetch → process → analyse → memory) is stable and used in production. The areas below are actively worked on:
+ICX is an early-stage product. The core pipeline (fetch -> process -> analyse -> memory) is stable and used in production. The areas below are actively worked on:
 
 | Area | Current state | Coming next |
 |------|--------------|-------------|
@@ -29,7 +29,7 @@ ICX is an early-stage product. The core pipeline (fetch → process → analyse 
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
 | Attachments | PDF (incl. scanned/OCR), DOCX, XLSX, XLS, PPTX, CSV, ZIP, code/text/config files, images via OCR + vision, audio (MP3/WAV/M4A/OGG/FLAC/AAC/Opus) + video (MP4/MOV/AVI/MKV/WebM, full-duration frame sampling) via local Whisper or LLM-native transcription | Speaker diarisation, language hints |
 | Memory | Local LanceDB + ONNX embeddings (BAAI/bge-base-en-v1.5, 768-dim, no PyTorch) | Team-shared memory, conflict resolution |
-| MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `reinforce_memory_usage`, `get_memory_audit` (20 total) | Batch analysis, project-level summary |
+| MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `reinforce_memory_usage`, `get_memory_audit`, 10 testing tools (`magik_health_check`, `start_testing_session`, `resume_testing_session`, `magik_test_status`, `magik_test_results`, `magik_login_start`, `magik_login_capture`, `magik_login_cancel`, `magik_login_inline`, `magik_logout`), 6 Sonar tools (`sonar_status`, `sonar_ping`, `sonar_projects`, `sonar_pull`, `sonar_scan`, `sonar_report`) (36 total) | Batch analysis, project-level summary |
 | Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), JSP/Servlet, Go, C#, PHP, Rust, C++, Swift, Elixir, Scala, Rails, Angular, gRPC/Protobuf, Terraform/HCL, event broker detection (Kafka, RabbitMQ, Redis, SQS, SNS, NATS), co-change history, gopls/jdtls/kotlin-language-server/rust-analyzer/OmniSharp/intelephense/clangd compiler-grade edges, incremental rebuild (SHA-256 hashing), multi-source edge fusion, PageRank + betweenness centrality, blast radius, cycle detection, dead code, CODEOWNERS integration, staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, team-shared graph cache |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
@@ -42,7 +42,7 @@ ICX operates in three modes depending on how you call it and what you have confi
 
 **CLI mode** - run `icx analyze KEY` from your terminal. ICX fetches the work item, processes every attachment, runs your configured AI model, queries local memory for similar past resolutions, and prints a structured JSON summary to stdout.
 
-**MCP mode** - your AI editor calls ICX directly during a conversation. ICX exposes three tools. The agent calls `analyze_issue_fast` first - it returns structured analysis, memory results, and the codebase graph navigation map in a single response. The agent reads the compact graph index, opens the relevant cluster file, reads core files, then presents a confirmation summary before writing any code. You confirm (or add context), the agent implements, and saves the resolution when you confirm it works.
+**MCP mode** - your AI editor calls ICX directly during a conversation. ICX exposes a set of MCP tools; the agent calls `analyze_issue_fast` first - it returns structured analysis, memory results, and the codebase graph navigation map in a single response. The agent reads the compact graph index, opens the relevant cluster file, reads core files, then presents a confirmation summary before writing any code. You confirm (or add context), the agent implements, and saves the resolution when you confirm it works.
 
 **MCP headless mode** - same as MCP mode but with no AI provider configured. ICX returns all raw content - text, attachment extracts, and image file paths - directly to your editor's AI for analysis. No separate API key required.
 
@@ -71,7 +71,7 @@ Skip all attachment processing and get text-only output immediately. Skipped fil
 flowchart LR
     A([icx analyze KEY --fast]) --> B[Fetch work item]
     B --> C{Attachments?}
-    C -- yes --> D[Split attachments\nimages → pending_images\naudio/video → pending_audio\ntext files processed normally]
+    C -- yes --> D[Split attachments\nimages -> pending_images\naudio/video -> pending_audio\ntext files processed normally]
     C -- no --> E[LLM analysis]
     D --> E
     E --> F[Memory search]
@@ -130,6 +130,8 @@ pipx install icx-engine
 
 The first time you run `icx setup`, ICX downloads a local embedding model (~110 MB) for memory search. This happens once with a live progress bar. Every subsequent start is instant.
 
+After upgrading ICX, run `icx update` to apply any new config defaults and initialise new storage components.
+
 **Optional - OCR for image attachments:**
 
 | Platform | Command |
@@ -140,7 +142,7 @@ The first time you run `icx setup`, ICX downloads a local embedding model (~110 
 
 Without Tesseract, images are still processed via your AI provider's vision model if configured. ICX shows a one-time warning and continues normally.
 
-**Audio and video transcription** ships bundled - `faster-whisper` (~145 MB base model, downloaded once on first audio attachment to `~/.icx/audio/model/`) and the static `imageio-ffmpeg` binary for video → audio extraction. No system packages required. With OpenAI configured, ICX uses the Whisper API (large-v2 accuracy); with Google, it uses Gemini native audio; otherwise it transcribes locally and routes the result through your text LLM for cleanup.
+**Audio and video transcription** ships bundled - `faster-whisper` (~145 MB base model, downloaded once on first audio attachment to `~/.icx/audio/model/`) and the static `imageio-ffmpeg` binary for video -> audio extraction. No system packages required. With OpenAI configured, ICX uses the Whisper API (large-v2 accuracy); with Google, it uses Gemini native audio; otherwise it transcribes locally and routes the result through your text LLM for cleanup.
 
 **Uninstalling:** Use `icx uninstall` instead of bare `pip uninstall` - it removes all data, credentials, editor configs, and the package in one step.
 
@@ -254,6 +256,36 @@ icx graph remove NAME --keep-cache # remove project but keep cached graph files
 
 Graph data (including build cache) is stored in `~/.icx/graphs/` - nothing is written inside your project directories.
 
+### Testing
+
+```sh
+icx test configure                            # set Magik-AI base URL, API key, agent step limits
+icx test rules                                # show the per-gate rulebook (~/.icx/testing_rules); --reset re-seeds
+icx test health                               # check Magik-AI Tester is reachable
+icx test run <URL> --type ui|agent|api       # direct test run, polls until done
+icx test status <ID>                          # check a run or session status
+icx test sessions                             # list all active testing sessions
+icx test cancel <SESSION_ID>                  # cancel an active testing session
+```
+
+**Rulebook.** The mandatory rules the AI agent must follow at each testing gate live as editable Markdown in `~/.icx/testing_rules/` (one file per gate, seeded from bundled defaults on first use). ICX loads the relevant file and injects it into every gate, so the rules apply in every session and can't drift out of the agent's context - edit a file to change agent behavior on the next gate, no code change. For gate 2b (spec generation), ICX also enforces that every section listed in `2b.md` is present and re-asks the agent until the spec is complete, so an incomplete spec can never be silently submitted. Run `icx test rules` to see the files and the sections enforced.
+
+### Sonar (code quality)
+
+ICX reads a SonarQube server directly over its Web API (read-only, no Magik) and hands structured, typed results to your AI agent. You can register multiple servers with one active, exactly like AI profiles - run `icx sonar add` to add one. The CLI is intentionally minimal; the rich surface is the MCP tools (see below), where the agent lists projects and branches, then scopes findings to the exact files a developer is working on.
+
+```sh
+icx sonar --add               # add a server connection (name, URL, token, TLS verify); first becomes active; validates live
+icx sonar --list              # list connections and which is active (bare `icx sonar` also lists)
+icx sonar --active <name>     # set the active connection
+icx sonar --remove <name>     # remove a connection (clears its keyring token)
+icx sonar status              # active connection + live connection health
+icx sonar projects            # list projects the active token can access
+icx sonar report --project <key> [--branch <b>] [--file <path>]...   # compact summary: gate + counts
+```
+
+Connections also show up in `icx status`.
+
 ### MCP server
 
 ```sh
@@ -269,6 +301,8 @@ icx mcp run                      # start the MCP server (editors call this autom
 ### General
 
 ```sh
+icx setup        # download AI model files (run once after install)
+icx update       # apply config migrations and verify storage after a package upgrade
 icx status       # show all connections and AI profiles
 icx logout       # remove all credentials from this machine
 icx uninstall    # fully remove ICX - data, credentials, editor configs, package
@@ -344,13 +378,34 @@ After setup, restart your editor. ICX will appear in its list of available tools
 | `memory_find_by_file` | Before editing a file - surface all past work items that touched it. Input: `file_path`. |
 | `memory_get_related` | Find work items that touched the same files. Primary: pass `files` from `graph_find_context` (works for new tickets, computes overlap on-the-fly). Secondary: pass `issue_key` for reopened tickets with prior history (uses pre-stored edges). |
 | `memory_get_patterns` | Return auto-detected statistical patterns: `frequent_file`, `dominant_tag`, `top_work_item_type`, `citation_hub`, `semantic_signal`. Recomputed every 5 saves. |
+| `magik_health_check` | Check Magik-AI Tester connectivity |
+| `start_testing_session` | Begin AI testing loop for changed files |
+| `resume_testing_session` | Continue at any human gate. At the `compat_scan` gate the agent assesses testability from first principles (leave nothing, and never pass a problem off as something the test tool will "work around"); every concern it finds is shown to the user at `compat_check`, who decides each one (apply change / drop / manual / accept-as-is). ICX routes only - it does not judge or verify |
+| `magik_test_status` | Poll a run's state and counters |
+| `magik_test_results` | Fetch completed run results as clean JSON |
+| `magik_login_start` | Open a visible browser for manual login (capture mode) |
+| `magik_login_capture` | Capture the session after manual login -> sessionId |
+| `magik_login_cancel` | Cancel an interactive login |
+| `magik_login_inline` | Credential login -> sessionId (never stored by ICX) |
+| `magik_logout` | Delete a captured session |
+| `sonar_status` | Show Sonar config and live connection health - always works, even when Sonar is disabled |
+| `sonar_projects` | Discover projects the token can access; input: `{query?}` - large lists are withheld with a mandatory `instructions` block guiding the agent to ask the user to paste a key or filter by `query` (requires `sonar_enabled`) |
+| `sonar_branches` | Discover branches for a project; input: `{project, query?}` - same guarded selection protocol (requires `sonar_enabled`) |
+| `sonar_measures` | Project measures (bugs, vulnerabilities, code smells, hotspots, coverage, duplication, debt, ratings, tests); input: `{project, branch?}` (requires `sonar_enabled`) |
+| `sonar_quality_gate` | Quality gate status + failing conditions; input: `{project, branch?}` (requires `sonar_enabled`) |
+| `sonar_findings` | Scoped findings (issues + security hotspots); input: `{project, branch?, files?, types?, severities?, statuses?, author?, assignee?, new_code_only?, limit?}` - pass user-supplied `files` to scope to a developer's working set (requires `sonar_enabled`) |
+| `sonar_report` | Full report: gate + project/per-file measures + findings + duplication blocks + test-coverage gaps; same input as `sonar_findings` (requires `sonar_enabled`) |
 | `save_memory` | After the developer confirms the fix is tested and working. Required fields: `root_cause_pattern` (from 21-value enum, use `"uncategorized"` if none fits), `pattern_confidence`. Optional: `outcome_verified`, `outcome_feedback_note`, `negate`, `negation_reason`, `graph_cluster`, `files_agent_opened`, `prior_resolution_used`, `root_cause_confirmed`, `diagnosis_steps`. Routes to `verify_resolution()` or `negate_resolution()` when those flags are set. |
 | `reinforce_memory_usage` | Call immediately after using a past `memory_search` result to solve a new ticket. Records the citation, auto-elevates entries cited 5+ times. Required: `source_key`, `new_ticket_key`. |
 | `get_memory_audit` | Retrieve the full audit trail for a memory entry in reverse chronological order. Shows every reinforcement, verification, negation, and hub detection event. Required: `issue_key`. |
 
 **Multi-repo support:** Pass `project_paths` as a list. Two modes the agent must follow:
 - **User named specific repos** ("fix the auth service and UI") - agent resolves those paths and passes them: `project_paths: ["/projects/auth-svc", "/projects/ui"]`. Do not include the workspace root.
-- **User named no specific repo** - agent passes the open workspace root: `project_paths: ["/projects/my-app"]`.
+- **User named no specific repo** - agent passes `[]`. ICX resolves the registered project(s) from the ticket's tracker project key. The agent must never guess a path or auto-detect the workspace root.
+
+Unregistered paths are never auto-registered and never used. Any supplied path that is not a registered ICX project is dropped; if nothing registered remains, ICX self-corrects by resolving the ticket's tracker project key. So a guessed path can never create a junk project, change behaviour, or produce a spurious `icx graph build <path>` prompt. When no graph exists at all, ICX shows the user how to create one (`icx graph add` then `icx graph build`, with the user supplying the path) - it never auto-triggers a build.
+
+**ICX is the only tracker interface.** When ICX is available the agent must use it for every ticket and must not connect to or call any other tracker/issue MCP or integration. This is stated generically (no provider singled out) in the MCP tool descriptions themselves, so it reaches every MCP-capable editor identically - Claude Code, Codex, Cursor, Windsurf, Antigravity, and others - with no per-editor config file required.
 
 ICX returns `graphs[]` (always a list - one entry per path in `project_paths`) with per-path status - READY, BUILDING, NOT BUILT, or NOT REGISTERED. Single project = list of one. The agent reads `graphs[0].path` / `graphs[0].report_path` for single-path work, and iterates `graphs[*]` for multi-project. The agent uses available graphs and informs the user about paths that still need `icx graph build`.
 

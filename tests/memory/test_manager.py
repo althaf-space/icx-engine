@@ -51,6 +51,77 @@ def test_save_creates_entry(tmp_path):
     assert any(r["issue_key"] == "PROJ-100" for r in rows)
 
 
+def test_save_fileless_entry_skips_scan(tmp_path):
+    """A file-less entry persists but does not trigger the auto_link candidate
+    scan (finding R1) - auto_link is a no-op without files_changed."""
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        entry = _make_entry(issue_key="PROJ-1", files_changed=[])
+        with patch.object(mgr, "_lean_link_candidates", wraps=mgr._lean_link_candidates) as spy:
+            mgr.save(entry)
+        assert spy.call_count == 0             # no candidate scan for a file-less save
+        assert mgr.show("PROJ-1") is not None   # still persisted
+
+
+def test_save_file_bearing_entry_runs_auto_link(tmp_path):
+    """A file-bearing entry runs auto_link via the lean candidate scan (behavior
+    preserved, cheaper load)."""
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        entry = _make_entry(issue_key="PROJ-2", files_changed=["src/a.py"])
+        with patch.object(mgr, "_lean_link_candidates", wraps=mgr._lean_link_candidates) as spy:
+            mgr.save(entry)
+        assert spy.call_count >= 1             # auto_link candidate scan happened
+
+
+def test_lean_link_candidates_match_full_entries(tmp_path):
+    """Projected-scan candidates carry the same (issue_key, files_changed) as the
+    full load - the only fields auto_link reads (finding R1 speedup)."""
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        for i in range(6):
+            mgr.save(_make_entry(issue_key=f"PROJ-{i}", files_changed=[f"src/f{i % 3}.py", "src/shared.py"]))
+        lean = {c.issue_key: sorted(c.files_changed) for c in mgr._lean_link_candidates()}
+        full = {e.issue_key: sorted(e.files_changed) for e in mgr.list_entries()}
+        assert lean == full
+
+
+def test_lean_candidates_yield_identical_edges(tmp_path):
+    """Overlap computed against lean candidates == against full entries."""
+    from icx_engine.memory.manager import MemoryManager
+
+    def _norm(fs):
+        return {f.replace("\\", "/").lower() for f in fs}
+
+    def _overlap_keys(cands, target):
+        needle = _norm(target.files_changed)
+        return {
+            c.issue_key for c in cands
+            if c.issue_key != target.issue_key and needle & _norm(c.files_changed)
+        }
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        for i in range(6):
+            mgr.save(_make_entry(issue_key=f"PROJ-{i}", files_changed=[f"src/f{i % 3}.py", "src/shared.py"]))
+        target = _make_entry(issue_key="PROJ-99", files_changed=["SRC\\F1.py"])  # mixed case/sep
+        assert _overlap_keys(mgr._lean_link_candidates(), target) == \
+               _overlap_keys(mgr.list_entries(), target)
+
+
+def test_lean_candidates_empty_table(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        assert mgr._lean_link_candidates() == []
+
+
 def test_save_upserts_on_duplicate_issue_key(tmp_path):
     from icx_engine.memory.manager import MemoryManager
 
@@ -413,7 +484,7 @@ def test_migrate_preserves_confirmation_state(tmp_path):
         assert after.memory_confidence == 0.25
 
 
-# ── _recompute_decay ─────────────────────────────────────────────────────────
+# -- _recompute_decay ---------------------------------------------------------
 
 def test_recompute_decay_handles_non_utc_offset(tmp_path):
     from icx_engine.memory.manager import MemoryManager
@@ -443,7 +514,7 @@ def test_recompute_decay_future_saved_at_not_above_one(tmp_path):
         assert decay <= 1.0
 
 
-# ── prewarm ──────────────────────────────────────────────────────────────────
+# -- prewarm ------------------------------------------------------------------
 
 def test_prewarm_calls_check_ready_and_load_model(tmp_path):
     from icx_engine.memory.manager import MemoryManager
@@ -469,7 +540,7 @@ def test_prewarm_propagates_check_ready_error(tmp_path):
             mgr.prewarm()
 
 
-# ── Phase 3: confirmation_count + memory_confidence ──────────────────────────
+# -- Phase 3: confirmation_count + memory_confidence --------------------------
 
 def test_confirmed_save_increments_confirmation_count(tmp_path):
     from icx_engine.memory.manager import MemoryManager
@@ -577,7 +648,7 @@ def test_fts_fields_do_not_include_resolution_note():
     assert "problem_description" in _FTS_FIELDS
 
 
-# ── restore=True (import path) ────────────────────────────────────────────────
+# -- restore=True (import path) ------------------------------------------------
 
 def test_restore_preserves_confirmation_count(tmp_path):
     """save(restore=True) must write confirmation_count/memory_confidence as-is."""

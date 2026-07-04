@@ -108,6 +108,94 @@ def test_vector_dim_constant_is_768():
     assert VECTOR_DIM == 768
 
 
+# -- Model integrity verification (finding S1a) --------------------------------
+
+def _seed_model_dir(model_dir, tok_bytes: bytes, onnx_bytes: bytes):
+    (model_dir / "onnx").mkdir(parents=True)
+    (model_dir / "tokenizer.json").write_bytes(tok_bytes)
+    (model_dir / "onnx" / "model_quantized.onnx").write_bytes(onnx_bytes)
+
+
+def test_verify_model_files_checksum_match(tmp_path, monkeypatch):
+    import hashlib
+    from icx_engine.memory import embeddings as emb_mod
+    model_dir = tmp_path / "model"
+    _seed_model_dir(model_dir, b"tokenizer-bytes", b"onnx-bytes")
+    monkeypatch.setattr(emb_mod, "MODEL_DIR", model_dir)
+    monkeypatch.setattr(emb_mod, "_MODEL_CHECKSUMS", {
+        "tokenizer.json": hashlib.sha256(b"tokenizer-bytes").hexdigest(),
+        "onnx/model_quantized.onnx": hashlib.sha256(b"onnx-bytes").hexdigest(),
+    })
+    emb_mod.EmbeddingsManager()._verify_model_files()  # no raise
+
+
+def test_verify_model_files_checksum_mismatch_raises(tmp_path, monkeypatch):
+    from icx_engine.memory import embeddings as emb_mod
+    model_dir = tmp_path / "model"
+    _seed_model_dir(model_dir, b"good", b"tampered")
+    monkeypatch.setattr(emb_mod, "MODEL_DIR", model_dir)
+    monkeypatch.setattr(emb_mod, "_MODEL_CHECKSUMS", {
+        "onnx/model_quantized.onnx": "0" * 64,
+    })
+    with pytest.raises(OSError, match="checksum mismatch"):
+        emb_mod.EmbeddingsManager()._verify_model_files()
+
+
+def test_verify_model_files_missing_file_raises(tmp_path, monkeypatch):
+    from icx_engine.memory import embeddings as emb_mod
+    (tmp_path / "model" / "onnx").mkdir(parents=True)
+    (tmp_path / "model" / "tokenizer.json").write_bytes(b"x")
+    # onnx file absent
+    monkeypatch.setattr(emb_mod, "MODEL_DIR", tmp_path / "model")
+    monkeypatch.setattr(emb_mod, "_MODEL_CHECKSUMS", {})
+    with pytest.raises(OSError, match="missing or empty"):
+        emb_mod.EmbeddingsManager()._verify_model_files()
+
+
+def test_embed_lazy_load_is_thread_safe(monkeypatch):
+    """Concurrent embed() calls load the model exactly once (finding R2)."""
+    import threading
+    import time
+    from unittest.mock import MagicMock
+    import numpy as np
+    from icx_engine.memory import embeddings as emb_mod
+
+    mgr = emb_mod.EmbeddingsManager()
+    load_calls = []
+
+    def fake_load():
+        load_calls.append(1)
+        time.sleep(0.02)  # widen the race window
+        sess = MagicMock()
+        sess.get_inputs.return_value = []
+        sess.run.return_value = [np.zeros((1, 3, emb_mod.VECTOR_DIM), dtype=np.float32)]
+        mgr._session = sess
+        tok = MagicMock()
+        enc = MagicMock()
+        enc.ids = [1, 2, 3]
+        enc.attention_mask = [1, 1, 1]
+        tok.encode.return_value = enc
+        mgr._tokenizer = tok
+
+    monkeypatch.setattr(mgr, "_load_model", fake_load)
+    errors = []
+
+    def worker():
+        try:
+            mgr.embed("hello world")
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert len(load_calls) == 1
+
+
 def test_embed_returns_768_dim_list(tmp_path, monkeypatch):
     from icx_engine.memory import embeddings as emb_mod
     monkeypatch.setattr(emb_mod, "MEMORY_DIR", tmp_path)

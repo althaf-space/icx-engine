@@ -90,13 +90,23 @@ def resolve_go(files: list, project_path, extraction: dict) -> list:
                                        struct_file, iface_file, "go_implements", 0.75))
 
     # 3. Intra-package function calls
+    # Precompute each directory's (func_name, file) declarations once - in contents
+    # iteration + finditer order - instead of re-scanning every sibling file per file.
+    # The per-file pkg_funcs is then rebuilt from this list with the same last-write-wins
+    # semantics (excluding self), so the resolved call edges are identical.
+    dir_func_entries: dict[str, list[tuple[str, str]]] = {}
+    for _f, _content in contents.items():
+        _d = Path(_f).parent.as_posix()
+        _lst = dir_func_entries.setdefault(_d, [])
+        for _m in _GO_FUNC_DECL.finditer(_content):
+            _lst.append((_m.group(1), _f))
+
     for go_file, content in contents.items():
         pkg_dir = Path(go_file).parent.as_posix()
         pkg_funcs: dict[str, str] = {}
-        for other in contents:
-            if Path(other).parent.as_posix() == pkg_dir and other != go_file:
-                for m in _GO_FUNC_DECL.finditer(contents.get(other, "")):
-                    pkg_funcs[m.group(1)] = other
+        for fname, other in dir_func_entries.get(pkg_dir, ()):
+            if other != go_file:
+                pkg_funcs[fname] = other
         for fname, tgt_file in pkg_funcs.items():
             if re.search(rf'\b{re.escape(fname)}\s*\(', content):
                 for sn in node_by_file.get(go_file, []):

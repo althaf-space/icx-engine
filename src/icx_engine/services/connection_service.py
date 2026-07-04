@@ -96,7 +96,7 @@ def _connect_jira_token(debug: bool = False) -> None:
         config.default_connection = f"jira:{domain}"
     ConfigManager.save(config)
     ConfigManager.warn_if_plaintext()
-    console.print(f"[green]✓ Connected to {domain} as {display_name}[/green]")
+    console.print(f"[green]OK Connected to {domain} as {display_name}[/green]")
 
 
 def _connect_jira_oauth(debug: bool = False) -> None:
@@ -223,4 +223,4 @@ def _connect_jira_oauth(debug: bool = False) -> None:
         config.default_connection = f"jira:{domain}"
     ConfigManager.save(config)
     ConfigManager.warn_if_plaintext()
-    console.print(f"[green]✓ Connected to {domain} via OAuth PKCE[/green]")
+    console.print(f"[green]OK Connected to {domain} via OAuth PKCE[/green]")

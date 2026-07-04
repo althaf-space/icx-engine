@@ -36,13 +36,13 @@ def _make_icx_entry() -> dict:
 ICX_MCP_ENTRY: dict = _make_icx_entry()
 
 
-# ── Path helpers ──────────────────────────────────────────────────────────────
+# -- Path helpers --------------------------------------------------------------
 
 def _home() -> Path:
     return Path.home()
 
 
-# ── Data models ───────────────────────────────────────────────────────────────
+# -- Data models ---------------------------------------------------------------
 
 @dataclass(frozen=True)
 class MCPHost:
@@ -60,7 +60,7 @@ class WriteResult:
     fallback: bool
 
 
-# ── Host registry ─────────────────────────────────────────────────────────────
+# -- Host registry -------------------------------------------------------------
 
 def list_hosts() -> list[MCPHost]:
     """All known MCP hosts with their config file paths."""
@@ -109,7 +109,7 @@ def get_host(name: str) -> MCPHost | None:
     return next((h for h in list_hosts() if h.name == name), None)
 
 
-# ── Write / remove ────────────────────────────────────────────────────────────
+# -- Write / remove ------------------------------------------------------------
 
 def write_icx_entry(host: MCPHost) -> WriteResult:
     """Write (or overwrite) the ICX entry in a host's MCP config file.
@@ -147,7 +147,7 @@ def remove_icx_entry(host: MCPHost) -> bool:
     return removed
 
 
-# ── Atomic write ──────────────────────────────────────────────────────────────
+# -- Atomic write --------------------------------------------------------------
 
 def _atomic_write(path: Path, content: str) -> None:
     tmp = path.parent / f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
@@ -162,7 +162,7 @@ def _atomic_write(path: Path, content: str) -> None:
         raise
 
 
-# ── JSON helpers ──────────────────────────────────────────────────────────────
+# -- JSON helpers --------------------------------------------------------------
 
 def _write_json(path: Path) -> None:
     existing: dict = {}
@@ -188,7 +188,7 @@ def _remove_json(path: Path) -> bool:
     return True
 
 
-# ── TOML helpers (Codex) ──────────────────────────────────────────────────────
+# -- TOML helpers (Codex) ------------------------------------------------------
 
 def _write_toml(path: Path) -> None:
     existing: dict = {}

@@ -5,12 +5,13 @@ from icx_engine.exceptions import AuthError, ContextBuildError, RateLimited, Sou
 from icx_engine.llm.base import LLMProvider, SYSTEM_PROMPT, build_user_message, finalize, _strip_json_fencing
 from icx_engine.models.config import ChannelConfig
 from icx_engine.models.output import RawIssueData, IssueContext
+from icx_engine.llm.registry import default_base_url
 
 
 class NIMProvider(LLMProvider):
     def __init__(self, config: ChannelConfig):
         self.client = AsyncOpenAI(
-            base_url=config.base_url or "https://integrate.api.nvidia.com/v1",
+            base_url=config.base_url or default_base_url("nim"),
             api_key=config.api_key,
         )
         self.model = config.model

@@ -2,8 +2,8 @@ from __future__ import annotations
 from rich.console import Console
 from rich.panel import Panel
 from icx_engine.exceptions import (
-    AuthError, ContextBuildError, ICXError, InvalidInput, IssueNotFound,
-    MemoryError, NoConnectionError, NoLLMError, OAuthRefreshError, RateLimited, SourceUnavailable,
+    AuthError, ContextBuildError, ICXMemoryError, InvalidInput, IssueNotFound,
+    NoConnectionError, NoLLMError, OAuthRefreshError, RateLimited, SourceUnavailable,
 )
 
 # Maps each ICXError subclass to (why_text, how_text) shown in the error panel.
@@ -44,7 +44,7 @@ _GUIDANCE: dict[type, tuple[str, str]] = {
         "The LLM returned output that could not be parsed into structured context.",
         "Pass --traceback to see the raw LLM response. Try a different model or retry.",
     ),
-    MemoryError: (
+    ICXMemoryError: (
         "Local memory operation failed.",
         "Run `icx memory status` to check storage state. "
         "If the issue persists, run `icx memory clear --confirm` to reset.",

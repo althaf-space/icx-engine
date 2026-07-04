@@ -64,11 +64,14 @@ def _mime_type(filename: str) -> str:
     return _MIME_TYPES.get(Path(filename).suffix.lower(), "image/png")
 
 
-_DEFAULT_BASE_URLS = {
-    "nim": "https://integrate.api.nvidia.com/v1",
-    "ollama": "http://localhost:11434/v1",
-    "xai": "https://api.x.ai/v1",
-}
+from icx_engine.llm.registry import (
+    api_style as _api_style,
+    openai_compat_base_urls as _openai_compat_base_urls,
+)
+
+# OpenAI-compatible providers with a non-default base URL. Derived from the
+# provider registry (single source of truth) - keys: ollama, nim, xai.
+_DEFAULT_BASE_URLS = _openai_compat_base_urls()
 
 _whisper_singleton: "WhisperManager | None" = None
 _whisper_singleton_lock = threading.Lock()
@@ -221,9 +224,9 @@ async def vision_enrich(config: ChannelConfig, image_bytes: bytes, ocr_text: str
     Raises ContextBuildError if the selected model does not support image input.
     """
     try:
-        if config.provider == "anthropic":
+        if _api_style(config.provider) == "anthropic":
             return await _vision_enrich_anthropic(config, image_bytes, ocr_text, fname)
-        if config.provider == "google":
+        if _api_style(config.provider) == "google":
             return await _vision_enrich_google(config, image_bytes, ocr_text, fname)
         return await _vision_enrich_openai_compat(config, image_bytes, ocr_text, fname)
     except Exception as exc:
@@ -547,7 +550,7 @@ async def _llm_summarize_chunk(config: ChannelConfig, filename: str, content: st
     """Summarize one chunk of content via the configured text LLM. Raises on failure -
     callers (`_summarize_content`) handle the fallback."""
     prompt = f"Summarize this content from attachment '{filename}':\n\n{content}"
-    if config.provider == "anthropic":
+    if _api_style(config.provider) == "anthropic":
         from anthropic import AsyncAnthropic
         client = AsyncAnthropic(api_key=config.api_key)
         resp = await client.messages.create(
@@ -558,7 +561,7 @@ async def _llm_summarize_chunk(config: ChannelConfig, filename: str, content: st
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.content[0].text.strip() if resp.content else content
-    if config.provider == "google":
+    if _api_style(config.provider) == "google":
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=config.api_key)
@@ -678,7 +681,9 @@ async def _process_image(
             log(f"    {filename}: download failed ({exc}) - skipped")
         return filename, "", {}
     b64 = base64.b64encode(image_bytes).decode()
-    text = ocr_image(image_bytes)
+    # OCR is blocking CPU work - offload so it never stalls the async event loop
+    # (the MCP server must stay responsive). Return value is identical.
+    text = await asyncio.to_thread(ocr_image, image_bytes)
     if log:
         log(f"    {filename}: OCR: {len(text)} chars")
     if image_config:
@@ -706,7 +711,10 @@ async def _process_document(
         if log:
             log(f"    {filename}: download failed ({exc}) - skipped")
         return filename, "", {}
-    text, page_images = _convert_document(filename, data, log=log)
+    # Document conversion (PDF render, docx/xlsx parse) is blocking CPU work - offload
+    # so it never stalls the async event loop. log callback is thread-safe (stdlib
+    # logging / stderr). Return value is identical.
+    text, page_images = await asyncio.to_thread(_convert_document, filename, data, log=log)
     if not text:
         return filename, "", {}
     if log:
@@ -846,7 +854,7 @@ async def _describe_video_frames(
         f"[Frame {i}]: {text or '(no OCR output)'}" for i, text in enumerate(ocr_texts, start=1)
     )
     prompt = _VIDEO_FRAMES_PROMPT.format(n=len(frames), ocr_block=ocr_block)
-    if config.provider == "anthropic":
+    if _api_style(config.provider) == "anthropic":
         from anthropic import AsyncAnthropic
         client = AsyncAnthropic(api_key=config.api_key)
         content: list[dict] = [
@@ -860,7 +868,7 @@ async def _describe_video_frames(
             messages=[{"role": "user", "content": content}],
         )
         return resp.content[0].text.strip() if resp.content else ""
-    if config.provider == "google":
+    if _api_style(config.provider) == "google":
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=config.api_key)

@@ -4,13 +4,19 @@ import logging
 import math
 import re
 import sys
+from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 _log = logging.getLogger(__name__)
 
-from icx_engine.exceptions import MemoryError
+# Minimal shape auto_link reads from candidate entries: issue_key + files_changed.
+# Loaded via a column-projected scan so the 768-dim vector and JSON columns are
+# never hydrated for the file-overlap comparison.
+_LinkCandidate = namedtuple("_LinkCandidate", ["issue_key", "files_changed"])
+
+from icx_engine.exceptions import ICXMemoryError
 
 _SAFE_KEY_RE = re.compile(r'^[A-Z][A-Z0-9]*-[0-9]+$')
 _BARE_KEY_RE = re.compile(r'[A-Z][A-Z0-9]*-[0-9]+')
@@ -187,7 +193,7 @@ class MemoryManager:
             try:
                 existing_dim = self._table.schema.field("vector").type.list_size
                 if existing_dim != VECTOR_DIM:
-                    raise MemoryError(
+                    raise ICXMemoryError(
                         f"Memory vector dimension mismatch: stored={existing_dim}, "
                         f"current={VECTOR_DIM}. "
                         "Run `icx memory migrate` to re-embed all saved work items "
@@ -667,11 +673,14 @@ class MemoryManager:
                         _log.warning("FTS index on '%s' failed: %s; field excluded from keyword search", _fts_field, exc)
                 self._fts_ready = True
         except Exception as exc:
-            raise MemoryError(f"Failed to save memory entry for {entry.issue_key}: {exc}") from exc
+            raise ICXMemoryError(f"Failed to save memory entry for {entry.issue_key}: {exc}") from exc
 
-        if not self._in_migrate:
+        # auto_link is a no-op when the entry has no files_changed (its needle
+        # set is empty), so skip the full-table load entirely in that case -
+        # semantically identical, avoids an O(N) scan per file-less save.
+        if not self._in_migrate and entry.files_changed:
             try:
-                self._relations.auto_link(entry, self.list_entries())
+                self._relations.auto_link(entry, self._lean_link_candidates())
             except Exception as exc:
                 _log.warning("auto_link failed for %s: %s", entry.issue_key, exc)
 
@@ -683,6 +692,33 @@ class MemoryManager:
                 self._patterns.refresh(project_entries, entry.project_key, manager=self)
         except Exception as exc:
             _log.warning("Pattern refresh failed after save of %s: %s", entry.issue_key, exc)
+
+    def _lean_link_candidates(self) -> list:
+        """Candidate entries for auto_link: issue_key + files_changed only.
+
+        Uses a column-projected scan so the 768-dim vector and JSON columns are
+        never hydrated. Returns the same rows list_entries() would (identical
+        auto_link input -> identical shares_file edges), just far cheaper.
+        Falls back to the full load on any error, preserving prior behavior.
+        """
+        try:
+            table = self._get_table()
+            total = table.count_rows()
+            if total == 0:
+                return []
+            rows = (
+                table.search()
+                .select(["issue_key", "files_changed"])
+                .limit(total)
+                .to_list()
+            )
+            return [
+                _LinkCandidate(r["issue_key"], list(r.get("files_changed") or []))
+                for r in rows
+            ]
+        except Exception as exc:
+            _log.debug("[memory] lean candidate scan failed (%s); using full load", exc)
+            return self.list_entries()
 
     def list_entries(
         self,
@@ -745,13 +781,13 @@ class MemoryManager:
         """
         try:
             self._embeddings.check_ready()
-        except MemoryError:
+        except ICXMemoryError:
             return {"results": [], "negative_signals": [], "decay_applied": False}
 
         query_text = f"{query_input.summary} {query_input.description}"
         try:
             query_vector = self._embeddings.embed(query_text)
-        except MemoryError:
+        except ICXMemoryError:
             return {"results": [], "negative_signals": [], "decay_applied": False}
 
         try:
@@ -822,6 +858,8 @@ class MemoryManager:
 
         for rid, sim in cosine_sim.items():
             entry = _row_to_entry(id_to_row[rid])
+            _old_decay = entry.temporal_decay_factor
+            _old_drift = entry.semantic_drift_score
             decay = self._recompute_decay(entry, query_vector=query_vector)
             rrf = rrf_scores.get(rid, 0.0)
             adjusted = (
@@ -831,7 +869,15 @@ class MemoryManager:
                 * (1.0 + entry.cross_reference_boost)
             )
             entries_with_scores.append((entry, sim, round(adjusted, 6)))
-            entries_to_update.append(entry)
+            # _recompute_decay only mutates temporal_decay_factor and semantic_drift_score
+            # (both quantized to 4 decimals; time-decay is day-quantized). Only write back
+            # when a value actually changed - a skipped row would persist byte-identical,
+            # so stored state is unchanged while same-day repeat searches avoid N no-op writes.
+            if (
+                abs(entry.temporal_decay_factor - _old_decay) > 1e-9
+                or abs(entry.semantic_drift_score - _old_drift) > 1e-9
+            ):
+                entries_to_update.append(entry)
 
         # Write back decay + drift scores best-effort
         for entry in entries_to_update:
@@ -924,14 +970,14 @@ class MemoryManager:
         """Remove the entry for issue_key. No-op if not found."""
         normalised = issue_key.strip().upper()
         if not _SAFE_KEY_RE.match(normalised):
-            raise MemoryError(
+            raise ICXMemoryError(
                 f"Invalid issue key format: {issue_key!r}. Expected format: PROJ-123"
             )
         try:
             table = self._get_table()
             table.delete(f"issue_key = '{_sq(normalised)}'")
         except Exception as exc:
-            raise MemoryError(f"Failed to delete memory entry for {normalised}: {exc}") from exc
+            raise ICXMemoryError(f"Failed to delete memory entry for {normalised}: {exc}") from exc
         self._relations.delete_for(normalised)
 
     def clear(self) -> None:
@@ -955,7 +1001,7 @@ class MemoryManager:
             self._relations.reset()
             self._patterns.reset()
         except Exception as exc:
-            raise MemoryError(f"Failed to clear memory: {exc}") from exc
+            raise ICXMemoryError(f"Failed to clear memory: {exc}") from exc
 
     def status(self) -> dict:
         """Return a stats dict including new Phase 1-7 metrics."""

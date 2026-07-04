@@ -911,7 +911,7 @@ def to_obsidian(
 
     node_community = _node_community_map(communities)
 
-    # Map node_id → safe filename so wikilinks stay consistent.
+    # Map node_id -> safe filename so wikilinks stay consistent.
     # Deduplicate: if two nodes produce the same filename, append a numeric suffix.
     def safe_name(label: str) -> str:
         cleaned = re.sub(r'[\\/*?:"<>|#^[\]]', "", label.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")).strip()
@@ -939,7 +939,7 @@ def to_obsidian(
             return "EXTRACTED"
         return Counter(confs).most_common(1)[0][0]
 
-    # Map file_type → icx-graph tag
+    # Map file_type -> icx-graph tag
     _FTYPE_TAG = {
         "code": "graphify/code",
         "document": "graphify/document",
@@ -1181,8 +1181,6 @@ def to_canvas(
 
     # Lay out communities in a grid
     gap = 80
-    group_x_offsets: list[int] = []
-    group_y_offsets: list[int] = []
 
     # Precompute group sizes so we can calculate offsets
     sorted_cids = sorted(communities.keys())
@@ -1218,7 +1216,7 @@ def to_canvas(
                 max_h = max(max_h, h)
         row_heights.append(max_h)
 
-    # Map from cid → (group_x, group_y, group_w, group_h)
+    # Map from cid -> (group_x, group_y, group_w, group_h)
     group_layout: dict[int, tuple[int, int, int, int]] = {}
     for idx, cid in enumerate(sorted_cids):
         col_idx = idx % cols

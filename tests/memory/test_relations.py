@@ -37,7 +37,7 @@ def _mock_embeddings():
     return mgr
 
 
-# ── RelationManager unit tests ────────────────────────────────────────────────
+# -- RelationManager unit tests ------------------------------------------------
 
 def test_shares_file_edge_created(tmp_path):
     from icx_engine.memory.relations import RelationManager
@@ -132,7 +132,7 @@ def test_no_edge_when_files_changed_empty(tmp_path):
     assert rel.get_related("PROJ-1") == []
 
 
-# ── add_relation direct tests ─────────────────────────────────────────────────
+# -- add_relation direct tests -------------------------------------------------
 
 def test_add_relation_self_link_is_noop(tmp_path):
     from icx_engine.memory.relations import RelationManager
@@ -165,7 +165,7 @@ def test_add_relation_update_replaces_existing_strength(tmp_path):
     assert related[0]["strength"] == pytest.approx(0.9, abs=0.001)
 
 
-# ── Integration: auto_link called from MemoryManager.save ────────────────────
+# -- Integration: auto_link called from MemoryManager.save --------------------
 
 def test_auto_link_via_memory_manager_save(tmp_path):
     from icx_engine.memory.manager import MemoryManager
@@ -195,7 +195,7 @@ def test_delete_cleans_up_relations(tmp_path):
     assert rel.get_related("PROJ-2") == []
 
 
-# ── get_related_by_files tests ────────────────────────────────────────────────
+# -- get_related_by_files tests ------------------------------------------------
 
 def test_get_related_by_files_returns_overlap(tmp_path):
     from icx_engine.memory.relations import RelationManager

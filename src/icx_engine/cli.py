@@ -40,6 +40,20 @@ def _author_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _version_tuple(v: str) -> tuple:
+    """Parse leading digits of each of the first 3 version segments so
+    pre-release suffixes (e.g. "0.4.0rc1") compare without raising."""
+    out: list[int] = []
+    for seg in v.split(".")[:3]:
+        digits = ""
+        for ch in seg:
+            if not ch.isdigit():
+                break
+            digits += ch
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
+
+
 def _check_for_update() -> None:
     """Check PyPI for a newer version in a daemon thread to avoid blocking CLI startup."""
     import importlib.metadata
@@ -62,15 +76,9 @@ def _check_for_update() -> None:
         except Exception:
             return
 
-        def _ver(v: str) -> tuple:
-            try:
-                return tuple(int(x) for x in v.split(".")[:3])
-            except Exception:
-                return (0, 0, 0)
-
-        if _ver(latest) > _ver(current):
+        if _version_tuple(latest) > _version_tuple(current):
             print(
-                f"\n  ⬆  Update available: icx-engine {current} → {latest}\n"
+                f"\n  ^  Update available: icx-engine {current} -> {latest}\n"
                 "     Run: pipx upgrade icx-engine   or   pip install --upgrade icx-engine\n",
                 file=sys.stderr,
             )
@@ -87,6 +95,7 @@ AI-native intelligence layer for development teams. Connect your work tracker to
 
 [bold]First-time Setup[/bold]
   [cyan]icx setup[/cyan]                                              Download AI model files (run once after install)
+  [cyan]icx update[/cyan]                                             Apply config migrations after a package upgrade
 
 [bold]Analysis[/bold]
   [cyan]icx analyze <KEY>[/cyan]                                      Fetch and analyze a work item (bug, story, task, feature)
@@ -148,6 +157,22 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx graph status <NAME>[/cyan]                                Show detail: staleness, changed files, ETA
   [cyan]icx graph remove <NAME>[/cyan]                                Delete registration and graph files
   [cyan]icx graph remove <NAME> --keep-cache[/cyan]                   Delete registration only, keep cache on disk
+
+[bold]Testing[/bold]
+  [cyan]icx test health[/cyan]                                          Check Magik-AI Tester is reachable
+  [cyan]icx test run <URL> --type ui|agent|api[/cyan]                   Direct test run (polls until done)
+  [cyan]icx test status <ID>[/cyan]                                     Check run or session status
+  [cyan]icx test sessions[/cyan]                                        List all active testing sessions
+  [cyan]icx test cancel <SESSION_ID>[/cyan]                             Cancel an active testing session
+
+[bold]Code Quality (SonarQube)[/bold]
+  [cyan]icx sonar --add[/cyan]                                          Add a SonarQube server connection (name, URL, token)
+  [cyan]icx sonar --list[/cyan]                                         List connections and which is active
+  [cyan]icx sonar --active <NAME>[/cyan]                                Set the active connection
+  [cyan]icx sonar --remove <NAME>[/cyan]                                Remove a connection
+  [cyan]icx sonar status[/cyan]                                         Show the active connection status
+  [cyan]icx sonar projects[/cyan]                                       List projects the token can access
+  [cyan]icx sonar report --project <KEY> --branch <B>[/cyan]           Compact summary: quality gate + counts (MCP tools give full detail)
 
 [bold]MCP Server[/bold]
   [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio transport)
@@ -236,9 +261,26 @@ graph_app = typer.Typer(
 )
 app.add_typer(graph_app, name="graph", rich_help_panel="Codebase Graph")
 
+test_app = typer.Typer(
+    help=(
+        "Manage AI-driven testing sessions with Magik-AI Tester.\n\n"
+        "[bold]Subcommands:[/bold]\n\n"
+        "  [bold]health[/bold]    Check Magik-AI Tester is reachable\n"
+        "  [bold]run[/bold]       Direct test run (no LangGraph, no gates)\n"
+        "  [bold]status[/bold]    Check a run or session status\n"
+        "  [bold]sessions[/bold]  List all active testing sessions\n"
+        "  [bold]cancel[/bold]    Cancel an active testing session"
+    ),
+    rich_markup_mode="rich",
+)
+app.add_typer(test_app, name="test", rich_help_panel="Testing")
+
+sonar_app = typer.Typer(help="SonarQube code-quality integration (distinct from testing).", rich_markup_mode="rich")
+app.add_typer(sonar_app, name="sonar", rich_help_panel="Code Quality")
+
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
-# Ensure UTF-8 output on Windows (cp1252 can't encode ✓, →, etc.)
+# Ensure UTF-8 output on Windows (cp1252 can't encode [x], ->, etc.)
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -410,7 +452,7 @@ def memory_show(
         console.print(f"  [bold]Problem:[/bold] {entry.problem_description[:200]}")
         console.print(f"\n  [bold]Resolution:[/bold] {entry.resolution_note}")
         if entry.files_changed:
-            console.print(f"\n  [bold]Files changed:[/bold]")
+            console.print("\n  [bold]Files changed:[/bold]")
             for f in entry.files_changed:
                 console.print(f"    {f}")
         if entry.tags:
@@ -586,7 +628,7 @@ def memory_patterns(
         pm = PatternManager()
         pats = pm.get_patterns(project_key=project)
         if not pats:
-            console.print("  No patterns detected yet. Patterns are computed every 10 saved work items.")
+            console.print("  No patterns detected yet. Patterns are computed every 5 saved work items.")
             return
         console.print(f"\n  [bold]{len(pats)} pattern(s) detected[/bold]\n")
         for p in pats:
@@ -710,7 +752,7 @@ def memory_import_cmd(
 
 
 # ---------------------------------------------------------------------------
-# Entry point - no subcommand → REPL
+# Entry point - no subcommand -> REPL
 # ---------------------------------------------------------------------------
 
 @app.callback(invoke_without_command=True, add_help_option=False)
@@ -769,7 +811,7 @@ def setup(
     try:
         from icx_engine.memory.embeddings import EmbeddingsManager, _is_initialized, MEMORY_DIR
         if _is_initialized():
-            con.print("[green]✓[/green] Already downloaded.")
+            con.print("[green]OK[/green] Already downloaded.")
         else:
             EmbeddingsManager().ensure_ready(console=con)
             # Advisory: existing LanceDB data uses old vectors - needs re-embedding.
@@ -784,7 +826,7 @@ def setup(
                 pass
     except Exception as exc:
         any_failed = True
-        con.print(f"[red]✗[/red] Failed: {exc}")
+        con.print(f"[red]X[/red] Failed: {exc}")
         if debug or traceback:
             _tb_mod.print_exc()
 
@@ -793,12 +835,12 @@ def setup(
     try:
         from icx_engine.connectors.audio import WhisperManager, _is_whisper_ready
         if _is_whisper_ready():
-            con.print("[green]✓[/green] Already downloaded.")
+            con.print("[green]OK[/green] Already downloaded.")
         else:
             WhisperManager().download()
     except Exception as exc:
         any_failed = True
-        con.print(f"[red]✗[/red] Failed: {exc}")
+        con.print(f"[red]X[/red] Failed: {exc}")
         if debug or traceback:
             _tb_mod.print_exc()
 
@@ -809,12 +851,12 @@ def setup(
         _TIKTOKEN_ENC = "cl100k_base"
         enc = tiktoken.get_encoding(_TIKTOKEN_ENC)
         enc.encode("warmup")
-        con.print("[green]✓[/green] Token encoder ready.")
+        con.print("[green]OK[/green] Token encoder ready.")
     except ImportError:
         con.print("[dim]Skipped (tiktoken not installed).[/dim]")
     except Exception as exc:
         any_failed = True
-        con.print(f"[red]✗[/red] Failed: {exc}")
+        con.print(f"[red]X[/red] Failed: {exc}")
         if debug or traceback:
             _tb_mod.print_exc()
 
@@ -822,6 +864,104 @@ def setup(
         con.print("\n[yellow]Setup completed with errors.[/yellow] Check output above.\n")
     else:
         con.print("\n[bold green]Setup complete.[/bold green] All models ready.\n")
+
+
+# ---------------------------------------------------------------------------
+# update - apply post-install migrations after a package upgrade
+# ---------------------------------------------------------------------------
+
+@app.command(rich_help_panel="Setup")
+def update(
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Apply migrations and verify your ICX installation after a package upgrade.
+
+    Run this after upgrading ICX to apply any new config defaults, initialise
+    new storage, and confirm all components are reachable.
+
+    \b
+    Example:
+      pipx upgrade icx-engine
+      icx update
+    """
+    import traceback as _tb_mod
+    import json as _json
+
+    con = Console()
+    any_failed = False
+    total_steps = 3
+
+    # Step 1: Config migration - write any new default fields introduced in this version.
+    con.print(f"\n[bold]Step 1/{total_steps}[/bold] Config migration [dim](apply new defaults to ~/.icx/config.json)[/dim]")
+    try:
+        from icx_engine.config_manager import ConfigManager, CONFIG_PATH
+
+        cfg = ConfigManager.load()
+
+        # Detect which new fields are not yet present in the raw JSON on disk.
+        raw_on_disk: dict = {}
+        if CONFIG_PATH.exists():
+            try:
+                raw_on_disk = _json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        new_fields: list[str] = []
+        for field in ("magik_base_url", "magik_max_iterations"):
+            if field not in raw_on_disk:
+                new_fields.append(field)
+
+        ConfigManager.save(cfg)
+
+        if new_fields:
+            con.print(f"[green]OK[/green] Wrote new defaults: {', '.join(new_fields)}")
+        else:
+            con.print("[green]OK[/green] Config already current.")
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]X[/red] Config migration failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
+    # Step 2: Testing sessions database - create and verify WAL mode.
+    con.print(f"\n[bold]Step 2/{total_steps}[/bold] Testing sessions DB [dim](~/.icx/testing_sessions.db)[/dim]")
+    try:
+        from icx_engine.testing.graph import get_db_path, _make_checkpointer
+        db_path = get_db_path()
+        existed = db_path.exists()
+        _make_checkpointer()
+        if existed:
+            con.print("[green]OK[/green] Testing sessions DB accessible.")
+        else:
+            con.print("[green]OK[/green] Testing sessions DB created.")
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]X[/red] Testing sessions DB failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
+    # Step 3: Memory DB check (non-destructive - verify connection only).
+    con.print(f"\n[bold]Step 3/{total_steps}[/bold] Memory DB [dim](~/.icx/memory/)[/dim]")
+    try:
+        from icx_engine.memory.manager import MemoryManager
+        mgr = MemoryManager()
+        s = mgr.status()
+        count = s.get("entry_count", s.get("total_entries", "?"))
+        con.print(f"[green]OK[/green] Memory DB accessible. [dim]({count} saved entries)[/dim]")
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]X[/red] Memory DB check failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
+    if any_failed:
+        con.print("\n[yellow]Update completed with errors.[/yellow] Check output above.\n")
+    else:
+        con.print(
+            "\n[bold green]Update complete.[/bold green] All components current.\n"
+            "  Run [cyan]icx test configure[/cyan] to set up Magik-AI Tester (if not done).\n"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -864,7 +1004,7 @@ def connection(
             config = ConfigManager.load()
             config = management.disconnect(config, remove)
             ConfigManager.save(config)
-            console.print("[green]✓ Connection removed.[/green]")
+            console.print("[green]OK Connection removed.[/green]")
             return
         if active is not None:
             from icx_engine.config_manager import ConfigManager
@@ -872,7 +1012,7 @@ def connection(
             config = ConfigManager.load()
             config = management.set_default_connection(config, active)
             ConfigManager.save(config)
-            console.print("[green]✓ Active connection updated.[/green]")
+            console.print("[green]OK Active connection updated.[/green]")
             return
         console.print("Use --add, --remove, or --active. See [bold]icx connection --help[/bold].")
     except typer.Exit:
@@ -937,22 +1077,14 @@ def _connect_jira(debug: bool = False) -> None:
         _connect_jira_token(debug=debug)
 
 
-_PROVIDERS = [
-    ("ollama",    "Ollama / LM Studio  (local, free, no API key needed)"),
-    ("nim",       "Nvidia NIM          (cloud, free tier at build.nvidia.com)"),
-    ("openai",    "OpenAI              (cloud, paid)"),
-    ("anthropic", "Claude / Anthropic  (cloud, paid)"),
-    ("google",    "Google Gemini       (cloud, free tier + paid)"),
-    ("xai",       "xAI Grok            (cloud, paid)"),
-]
+# Provider menu + default models are derived from the single-source registry.
+from icx_engine.llm.registry import PROVIDERS as _PROVIDER_SPECS
+
+_PROVIDERS = [(name, spec.cli_label) for name, spec in _PROVIDER_SPECS.items()]
 
 _DEFAULT_MODELS: dict[str, dict[str, str]] = {
-    "ollama":    {"text": "llama3",                         "image": "llava"},
-    "nim":       {"text": "deepseek-ai/deepseek-v3",        "image": "meta/llama-3.2-11b-vision-instruct"},
-    "openai":    {"text": "gpt-4o",                         "image": "gpt-4o"},
-    "anthropic": {"text": "claude-opus-4-5",                "image": "claude-opus-4-5"},
-    "google":    {"text": "gemini-1.5-pro",                 "image": "gemini-1.5-flash"},
-    "xai":       {"text": "grok-beta",                      "image": "grok-vision-beta"},
+    name: {"text": spec.default_text_model, "image": spec.default_image_model}
+    for name, spec in _PROVIDER_SPECS.items()
 }
 
 
@@ -960,7 +1092,7 @@ def _prompt_channel_config(label: str, provider_key: str | None = None) -> "Chan
     """Interactively prompt for one channel's provider/model/key/url."""
     from icx_engine.models.config import ChannelConfig
 
-    typer.echo(f"\n── {label} ──")
+    typer.echo(f"\n-- {label} --")
     if provider_key is None:
         for i, (_, lbl) in enumerate(_PROVIDERS, 1):
             typer.echo(f"  {i}. {lbl}")
@@ -1044,7 +1176,7 @@ def _validate_and_save_model(
     async def _run(channel_config):
         await get_provider(channel_config).analyze(test_raw)
 
-    # ── Text model: hard fail ─────────────────────────────────────────────────
+    # -- Text model: hard fail -------------------------------------------------
     try:
         txt_label = new_llm.text_config.model
         if debug:
@@ -1057,7 +1189,7 @@ def _validate_and_save_model(
         render_icx_error(exc, err_console, show_traceback=traceback)
         raise typer.Exit(1)
 
-    # ── Image model: soft fail - offer skip ───────────────────────────────────
+    # -- Image model: soft fail - offer skip -----------------------------------
     active_llm = new_llm
     if new_llm.image_config is not None:
         img_model = new_llm.image_config.model
@@ -1083,7 +1215,7 @@ def _validate_and_save_model(
                 image_config=None,
             )
 
-    # ── Save + confirm ─────────────────────────────────────────────────────────
+    # -- Save + confirm ---------------------------------------------------------
     is_first = not config.llm_profiles
     new_profiles = dict(config.llm_profiles)
     new_profiles[profile_name] = active_llm
@@ -1101,7 +1233,7 @@ def _validate_and_save_model(
     )
     img_display = f" + {ic.provider}/{ic.model}" if ic else " (OCR only)"
     console.print(
-        f"[green]✓ Profile '{profile_name}' saved. "
+        f"[green]OK Profile '{profile_name}' saved. "
         f"Text: {tc.provider}/{tc.model} key={key_display}{img_display}[/green]"
     )
 
@@ -1152,7 +1284,7 @@ def model(
     from icx_engine import management
 
     try:
-        # ── --add ──────────────────────────────────────────────────────────────
+        # -- --add --------------------------------------------------------------
         if add:
             config = ConfigManager.load()
             profile_name = target
@@ -1204,35 +1336,35 @@ def model(
             _validate_and_save_model(profile_name, new_llm, config, debug, traceback)
             return
 
-        # ── --active ───────────────────────────────────────────────────────────
+        # -- --active -----------------------------------------------------------
         if active is not None:
             config = ConfigManager.load()
             config = management.use_ai_profile(config, active)
             ConfigManager.save(config)
-            console.print("[green]✓ Active AI profile updated.[/green]")
+            console.print("[green]OK Active AI profile updated.[/green]")
             return
 
-        # ── --remove ───────────────────────────────────────────────────────────
+        # -- --remove -----------------------------------------------------------
         if remove is not None:
             config = ConfigManager.load()
             if channel is not None:
                 config = management.unset_llm_channel(config, remove, channel)
                 if channel.lower() == "image":
-                    console.print("[green]✓ Image channel removed from profile.[/green]")
+                    console.print("[green]OK Image channel removed from profile.[/green]")
                 else:
-                    console.print("[green]✓ AI profile removed.[/green]")
+                    console.print("[green]OK AI profile removed.[/green]")
             else:
                 config = management.unset_llm_profile(config, remove)
-                console.print("[green]✓ AI profile removed.[/green]")
+                console.print("[green]OK AI profile removed.[/green]")
             ConfigManager.save(config)
             return
 
-        # ── bare target - set active ───────────────────────────────────────────
+        # -- bare target - set active -------------------------------------------
         if target is not None:
             config = ConfigManager.load()
             config = management.use_ai_profile(config, target)
             ConfigManager.save(config)
-            console.print("[green]✓ Active AI profile updated.[/green]")
+            console.print("[green]OK Active AI profile updated.[/green]")
             return
 
         console.print("Use --add, --active, or --remove. See [bold]icx model --help[/bold].")
@@ -1428,7 +1560,7 @@ def analyze(
     if isinstance(result, IssueContext) and result.missing_information:
         err_console.print("\nMISSING REQUIREMENTS")
         for item in result.missing_information:
-            err_console.print(f"  • {item}")
+            err_console.print(f"  - {item}")
 
     if paths:
         from rich.table import Table
@@ -1479,7 +1611,7 @@ def status(
     try:
         config = ConfigManager.load()
 
-        # ── Connections ────────────────────────────────────────────────────────
+        # -- Connections --------------------------------------------------------
         conn_table = Table(title="Connections", show_header=True, header_style="bold cyan")
         conn_table.add_column("#", style="dim", width=3)
         conn_table.add_column("Platform")
@@ -1505,7 +1637,7 @@ def status(
 
         console.print()
 
-        # ── AI Profiles ────────────────────────────────────────────────────────
+        # -- AI Profiles --------------------------------------------------------
         profile_table = Table(title="AI Profiles", show_header=True, header_style="bold cyan")
         profile_table.add_column("#", style="dim", width=3)
         profile_table.add_column("Profile")
@@ -1545,6 +1677,24 @@ def status(
             profile_table.caption = "Run [bold]icx model --add[/bold] to configure one."
         console.print(profile_table)
 
+        # -- Sonar connections --------------------------------------------------
+        console.print()
+        sonar_table = Table(title="Sonar Connections", show_header=True, header_style="bold cyan")
+        sonar_table.add_column("#", style="dim", width=3)
+        sonar_table.add_column("Name")
+        sonar_table.add_column("URL")
+        sonar_table.add_column("TLS", width=5)
+        sonar_table.add_column("Token", width=8)
+        sonar_table.add_column("Active")
+        for i, (name, sc) in enumerate(config.sonar_connections.items(), 1):
+            active_cell = "[bold green][ACTIVE][/bold green]" if name == config.active_sonar else ""
+            token_cell = "[dim]set[/dim]" if sc.token else "[red]missing[/red]"
+            sonar_table.add_row(
+                str(i), name, sc.url, "yes" if sc.verify_tls else "no", token_cell, active_cell)
+        if not config.sonar_connections:
+            sonar_table.caption = "Run [bold]icx sonar --add[/bold] to add one."
+        console.print(sonar_table)
+
     except Exception as exc:
         render_icx_error(exc, err_console, show_traceback=traceback)
         raise typer.Exit(1)
@@ -1566,7 +1716,7 @@ def logout(
         current = ConfigManager.load()
         ConfigManager.delete_all_secrets(current)
         ConfigManager.save(AppConfig())
-        console.print("[green]✓ All credentials removed.[/green]")
+        console.print("[green]OK All credentials removed.[/green]")
     except Exception as exc:
         render_icx_error(exc, err_console, show_traceback=traceback)
         raise typer.Exit(1)
@@ -1620,7 +1770,7 @@ def _uninstall_package(console: Console) -> None:
 
     if sys.platform != "win32":
         subprocess.run(cmd, check=True)
-        console.print("[bold green]✓ ICX fully removed. Goodbye![/bold green]\n")
+        console.print("[bold green]OK ICX fully removed. Goodbye![/bold green]\n")
         return
 
     def _ps_quote(arg: str) -> str:
@@ -1672,7 +1822,7 @@ def _uninstall_package(console: Console) -> None:
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
     )
     console.print(
-        "[bold green]✓ Data and configs removed.[/bold green]\n"
+        "[bold green]OK Data and configs removed.[/bold green]\n"
         "[dim]Package uninstall running in background.[/dim]\n"
         "[dim]Open a new terminal in ~5 seconds and run "
         "[bold]icx --version[/bold] - 'not recognized' means success.[/dim]\n"
@@ -1688,10 +1838,10 @@ def uninstall(
 
     \b
     Removes:
-      • ~/.icx/             (config, memory database, embedding model)
-      • Keyring secrets     (all stored API keys and work tracker tokens)
-      • MCP editor configs  (Claude Code, Cursor, Windsurf, Codex)
-      • icx-engine package  (via pipx or pip)
+      - ~/.icx/             (config, memory database, embedding model)
+      - Keyring secrets     (all stored API keys and work tracker tokens)
+      - MCP editor configs  (Claude Code, Cursor, Windsurf, Codex)
+      - icx-engine package  (via pipx or pip)
 
     Run this instead of bare 'pip uninstall' to leave nothing behind.
     """
@@ -1703,10 +1853,10 @@ def uninstall(
 
     console.print("\n[bold red]ICX Uninstall[/bold red]\n")
     console.print("This will permanently remove:\n")
-    console.print(f"  [dim]•[/dim] [cyan]{icx_dir}[/cyan]  (config, memory, embedding model)")
-    console.print("  [dim]•[/dim] All stored API keys and tokens from system keyring")
-    console.print("  [dim]•[/dim] ICX entry from all detected AI editor configs")
-    console.print("  [dim]•[/dim] [bold]icx-engine[/bold] package\n")
+    console.print(f"  [dim]-[/dim] [cyan]{icx_dir}[/cyan]  (config, memory, embedding model)")
+    console.print("  [dim]-[/dim] All stored API keys and tokens from system keyring")
+    console.print("  [dim]-[/dim] ICX entry from all detected AI editor configs")
+    console.print("  [dim]-[/dim] [bold]icx-engine[/bold] package\n")
 
     if not yes:
         confirmed = typer.confirm("Proceed with full uninstall?")
@@ -1720,7 +1870,7 @@ def uninstall(
     try:
         current = ConfigManager.load()
         ConfigManager.delete_all_secrets(current)
-        console.print("[green]✓[/green] Keyring secrets removed.")
+        console.print("[green]OK[/green] Keyring secrets removed.")
     except Exception as exc:
         errors.append(f"Keyring: {exc}")
         console.print(f"[yellow]Keyring cleanup failed:[/yellow] {exc}")
@@ -1731,7 +1881,7 @@ def uninstall(
         removed_hosts = [h for h in hosts if remove_icx_entry(h)]
         if removed_hosts:
             for h in removed_hosts:
-                console.print(f"[green]✓[/green] Removed from {h.config_path}")
+                console.print(f"[green]OK[/green] Removed from {h.config_path}")
         else:
             console.print("[dim]  No editor MCP configs found to clean.[/dim]")
     except Exception as exc:
@@ -1742,7 +1892,7 @@ def uninstall(
     try:
         if icx_dir.exists():
             shutil.rmtree(icx_dir)
-            console.print(f"[green]✓[/green] Deleted {icx_dir}")
+            console.print(f"[green]OK[/green] Deleted {icx_dir}")
         else:
             console.print(f"[dim]  {icx_dir} not found - nothing to delete.[/dim]")
     except Exception as exc:
@@ -1889,7 +2039,7 @@ def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: Tracebac
                     f"  {target.label}: not detected - wrote fallback config to {result.path}"
                 )
             else:
-                console.print(f"[green]✓ ICX entry written to {result.path}[/green]")
+                console.print(f"[green]OK ICX entry written to {result.path}[/green]")
     except typer.Exit:
         raise
     except Exception as exc:
@@ -1926,7 +2076,7 @@ def mcp_remove(host: HostOpt = None, debug: DebugOpt = False, traceback: Traceba
         for target in targets:
             removed = remove_icx_entry(target)
             if removed:
-                console.print(f"[green]✓ ICX entry removed from {target.config_path}[/green]")
+                console.print(f"[green]OK ICX entry removed from {target.config_path}[/green]")
             else:
                 typer.echo(f"No ICX entry found in {target.config_path}")
     except typer.Exit:
@@ -1970,7 +2120,7 @@ def graph_add(
         mgr = GraphManager()
         project_id = mgr.register(name, path, tracker_project_key=project)
         console.print(
-            f"[green]✓ Project '[bold]{name.lower()}[/bold]' registered "
+            f"[green]OK Project '[bold]{name.lower()}[/bold]' registered "
             f"(project: [bold]{project.upper()}[/bold], id: {project_id}).[/green]\n"
             f"  Run [cyan]icx graph build {name.lower()}[/cyan] to build the knowledge graph."
         )
@@ -2356,9 +2506,9 @@ def graph_remove(
 
         mgr.remove(project_id, keep_cache=keep_cache)
         if keep_cache:
-            console.print(f"[green]✓ Registration removed. Cache kept at ~/.icx/graphs/{project_id}/cache/[/green]")
+            console.print(f"[green]OK Registration removed. Cache kept at ~/.icx/graphs/{project_id}/cache/[/green]")
         else:
-            console.print(f"[green]✓ Project '{name}' removed.[/green]")
+            console.print(f"[green]OK Project '{name}' removed.[/green]")
 
     except typer.Exit:
         raise
@@ -2368,6 +2518,457 @@ def graph_remove(
     except Exception as exc:
         render_icx_error(exc, err_console)
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Test subcommands
+# ---------------------------------------------------------------------------
+
+@test_app.command("health")
+def test_health() -> None:
+    """Check Magik-AI Tester connectivity and print status.
+
+    \b
+    Example:
+      icx test health
+    """
+    import asyncio as _asyncio
+    from icx_engine.testing.client import MagikClient, MagikUnreachable
+    from icx_engine.config_manager import ConfigManager
+
+    cfg = ConfigManager.load()
+
+    async def _check() -> dict:
+        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
+        try:
+            return await client.health_check()
+        finally:
+            await client.aclose()
+
+    try:
+        data = _asyncio.run(_check())
+        console.print(f"[green]Magik-AI Tester is up[/green] - {cfg.magik_base_url}")
+        console.print(f"  status: {data.get('status')}  uptime: {data.get('uptimeSec')}s")
+    except MagikUnreachable as exc:
+        err_console.print(f"[red]Magik-AI unreachable:[/red] {exc}")
+        err_console.print(f"  Configured URL: {cfg.magik_base_url}")
+        err_console.print("  Edit ~/.icx/config.json to update magik_base_url.")
+        raise typer.Exit(code=1)
+
+
+@test_app.command("run")
+def test_run(
+    url: Annotated[str, typer.Argument(help="Target URL to test")],
+    test_type: Annotated[str, typer.Option("--type", help="Test type: ui, agent, api")] = "ui",
+) -> None:
+    """Submit a direct Magik-AI test run without the session loop. Polls until done, prints result.
+
+    \b
+    Examples:
+      icx test run http://localhost:3000/login --type ui
+      icx test run http://localhost:3000/login --type agent
+      icx test run http://localhost:8080/api/login --type api
+    """
+    import asyncio as _asyncio
+    from icx_engine.testing.client import MagikClient, MagikUnreachable
+    from icx_engine.config_manager import ConfigManager
+
+    if test_type not in ("ui", "agent", "api"):
+        err_console.print("[red]--type must be ui, agent, or api[/red]")
+        raise typer.Exit(code=1)
+
+    cfg = ConfigManager.load()
+    client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
+
+    async def _run() -> None:
+        try:
+            await client.health_check()
+        except MagikUnreachable as exc:
+            err_console.print(f"[red]Magik-AI unreachable:[/red] {exc}")
+            raise typer.Exit(code=1)
+
+        console.print(f"Submitting {test_type} test to {url} ...")
+        if test_type == "ui":
+            data = await client.submit_ui_test(url=url)
+        elif test_type == "agent":
+            goal = typer.prompt("Goal for agent run")
+            data = await client.submit_agent_run(url=url, goal=goal)
+        else:
+            endpoint = typer.prompt("API endpoint URL")
+            method = typer.prompt("HTTP method", default="POST")
+            payload = typer.prompt("Payload (JSON string)")
+            data = await client.submit_api_test(endpoint=endpoint, method=method, payload=payload, payload_type="json")
+
+        run_id = data["runId"]
+        console.print(f"Run started: [cyan]{run_id}[/cyan]  (polling every 30s ...)")
+
+        while True:
+            await _asyncio.sleep(30)
+            snap = await client.get_run_status(run_id)
+            c = snap.get("counters", {})
+            console.print(
+                f"  state={snap['state']}  pass={c.get('pass', 0)}  fail={c.get('fail', 0)}",
+                end="\r",
+            )
+            if snap["state"] in ("completed", "failed", "cancelled"):
+                console.print()
+                break
+
+        console.print(f"\n[bold]Done[/bold] - state: [cyan]{snap['state']}[/cyan]")
+        console.print(f"  pass={c.get('pass', 0)}  fail={c.get('fail', 0)}  warn={c.get('warn', 0)}")
+        await client.aclose()
+
+    _asyncio.run(_run())
+
+
+@test_app.command("status")
+def test_status(
+    id_: Annotated[str, typer.Argument(help="run_id or session_id to check")],
+) -> None:
+    """Check the status of a Magik-AI run or testing session.
+
+    \b
+    Examples:
+      icx test status ui-1748602800-abc123
+      icx test status agent-1748602800-abc1
+    """
+    import asyncio as _asyncio
+    from icx_engine.testing.client import MagikClient, MagikUnreachable, MagikRunLost
+    from icx_engine.config_manager import ConfigManager
+
+    cfg = ConfigManager.load()
+
+    async def _fetch() -> dict:
+        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
+        try:
+            return await client.get_run_status(id_)
+        finally:
+            await client.aclose()
+
+    try:
+        data = _asyncio.run(_fetch())
+        console.print(f"run_id:  {data.get('runId', id_)}")
+        console.print(f"state:   {data.get('state')}")
+        c = data.get("counters", {})
+        if c:
+            console.print(f"counters: pass={c.get('pass', 0)} fail={c.get('fail', 0)} total={c.get('total', 0)}")
+        if data.get("reportUrl"):
+            console.print(f"report:  {data['reportUrl']}")
+    except MagikRunLost:
+        err_console.print(f"[yellow]Run {id_!r} not found - Magik may have restarted.[/yellow]")
+        raise typer.Exit(code=1)
+    except MagikUnreachable as exc:
+        err_console.print(f"[red]Magik-AI unreachable:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+
+@test_app.command("sessions")
+def test_sessions() -> None:
+    """List all active testing sessions with their status and file counts.
+
+    \b
+    Example:
+      icx test sessions
+    """
+    from icx_engine.testing.graph import get_db_path
+    from icx_engine.testing.session_store import list_active_sessions
+
+    db_path = get_db_path()
+    sessions = list_active_sessions(db_path)
+    if not sessions:
+        console.print("No active testing sessions.")
+        return
+    console.print(f"[bold]{len(sessions)} session(s):[/bold]")
+    for s in sessions:
+        files = s.get("file_paths", [])
+        console.print(
+            f"  [cyan]{s['session_id']}[/cyan]  "
+            f"status={s.get('status', '?')}  "
+            f"iteration={s.get('iteration', 0)}  "
+            f"files={len(files)}"
+        )
+        if s.get("run_id"):
+            console.print(f"    run_id: {s['run_id']}")
+
+
+@test_app.command("cancel")
+def test_cancel(
+    session_id: Annotated[str, typer.Argument(help="Session UUID to cancel")],
+) -> None:
+    """Cancel an active testing session and remove it from the session store.
+
+    \b
+    Example:
+      icx test cancel 3f7a1c2d-8e4b-4f9a-b2d1-0c5e6f7a8b9c
+    """
+    from icx_engine.testing.graph import get_db_path
+    from icx_engine.testing.session_store import cancel_session
+
+    db_path = get_db_path()
+    if cancel_session(session_id, db_path):
+        console.print(f"Session [cyan]{session_id}[/cyan] cancelled.")
+    else:
+        err_console.print(f"[yellow]Session {session_id!r} not found.[/yellow]")
+        raise typer.Exit(code=1)
+
+
+@test_app.command("configure")
+def test_configure() -> None:
+    """Configure Magik-AI Tester settings: base URL, optional API key, and agent step limits.
+
+    \b
+    Prompts for:
+      - Magik-AI base URL
+      - Magik-AI API key (optional)
+      - Max fix iterations (re-test loops before the limit gate)
+      - Agent max steps   (default per-run step budget for agent test runs)
+      - Agent step cap     (hard ceiling enforced at the config gate)
+
+    \b
+    Example:
+      icx test configure
+      icx test health
+    """
+    from icx_engine.config_manager import ConfigManager
+
+    cfg = ConfigManager.load()
+
+    base_url = typer.prompt(
+        "Magik-AI base URL",
+        default=cfg.magik_base_url,
+    )
+    api_key_input = typer.prompt(
+        "Magik-AI API key (leave blank if not configured)",
+        default="",
+        hide_input=True,
+        show_default=False,
+    )
+    max_iterations = typer.prompt(
+        "Max fix iterations (re-test loops before the limit gate)",
+        default=cfg.magik_max_iterations,
+        type=int,
+    )
+    agent_max_steps = typer.prompt(
+        "Agent max steps (default step budget for agent runs)",
+        default=cfg.magik_agent_max_steps,
+        type=int,
+    )
+    agent_step_cap = typer.prompt(
+        "Agent step cap (hard ceiling)",
+        default=cfg.magik_agent_step_cap,
+        type=int,
+    )
+
+    cfg.magik_base_url = base_url.strip()
+    cfg.magik_api_key = api_key_input.strip() or None
+    cfg.magik_max_iterations = max(1, int(max_iterations))
+    cfg.magik_agent_max_steps = max(1, int(agent_max_steps))
+    cfg.magik_agent_step_cap = max(1, int(agent_step_cap))
+    if cfg.magik_agent_step_cap < cfg.magik_agent_max_steps:
+        console.print(
+            f"[yellow]Note: step cap ({cfg.magik_agent_step_cap}) is below max steps "
+            f"({cfg.magik_agent_max_steps}); runs will be clamped to the cap.[/yellow]"
+        )
+    ConfigManager.save(cfg)
+
+    console.print("[green]Magik-AI settings saved.[/green]")
+    console.print(f"  base_url:        {cfg.magik_base_url}")
+    console.print(f"  api_key:         {'[set]' if cfg.magik_api_key else '[not configured]'}")
+    console.print(f"  max_iters:       {cfg.magik_max_iterations}")
+    console.print(f"  agent_max_steps: {cfg.magik_agent_max_steps}")
+    console.print(f"  agent_step_cap:  {cfg.magik_agent_step_cap}")
+
+
+@test_app.command("rules")
+def test_rules(reset: bool = typer.Option(False, "--reset", help="Re-seed any missing default rule files.")) -> None:
+    """Show the testing rulebook - the mandatory per-gate rules the agent must follow.
+
+    Rules live as editable Markdown in ~/.icx/testing_rules/ (seeded from bundled
+    defaults on first use, never overwriting your edits). ICX loads the relevant
+    <gate>.md and injects its text into every gate, so editing a file changes agent
+    behavior on the next gate - no code change, and it applies in every session.
+
+    \b
+    Example:
+      icx test rules
+      icx test rules --reset
+    """
+    from icx_engine.testing import rules as _rules
+
+    _rules.ensure_seeded()
+    d = _rules.rules_dir()
+    console.print(f"Rulebook directory: [cyan]{d}[/cyan]")
+    files = sorted(d.glob("*.md")) if d.exists() else []
+    if not files:
+        console.print("[yellow]No rule files found.[/yellow]")
+        return
+    for f in files:
+        gate = f.stem
+        req = _rules.required_sections(gate)
+        line = f"  {f.name}"
+        if req:
+            line += f"   [dim](enforced sections: {', '.join(req)})[/dim]"
+        console.print(line)
+    console.print("\nEdit any file to change the mandatory rules for that gate. "
+                  "Delete a file and run [cyan]icx test rules --reset[/cyan] to restore its default.")
+
+
+# ---------------------------------------------------------------------------
+# Sonar subcommands
+# ---------------------------------------------------------------------------
+
+def _sonar_add_flow(default_name: str = "default") -> None:
+    from icx_engine.sonar import service
+    name = typer.prompt("Connection name", default=default_name)
+    url = typer.prompt("SonarQube server URL")
+    token = typer.prompt("SonarQube token (blank to keep existing)", default="", hide_input=True, show_default=False)
+    verify_tls = typer.confirm("Verify TLS certificates?", default=True)
+    make_active = typer.confirm("Make this the active connection?", default=True)
+    out = asyncio.run(service.add_connection(
+        name.strip(), url.strip(), token.strip() or None,
+        verify_tls=verify_tls, make_active=make_active,
+    ))
+    console.print(f"[green]Sonar connection '{out['name']}' saved.[/green]")
+    console.print(f"  url:        {out['url']}")
+    console.print(f"  verify_tls: {out['verify_tls']}")
+    console.print(f"  active:     {out['active']}")
+    v = out.get("validation") or {}
+    if v.get("valid") is True:
+        console.print(f"  connection: [green]ok[/green] (SonarQube {v.get('version', '')})")
+    elif v.get("valid") is False:
+        console.print(f"  connection: [red]failed[/red] {v.get('error', '')}")
+
+
+def _sonar_resolve_name(value: str) -> str:
+    """Map a 1-based index (from `icx status` / `icx sonar --list`) to a connection
+    name; pass a name through unchanged."""
+    if value and value.isdigit():
+        from icx_engine.config_manager import ConfigManager
+        names = list(ConfigManager.load().sonar_connections.keys())
+        idx = int(value) - 1
+        if 0 <= idx < len(names):
+            return names[idx]
+    return value
+
+
+def _sonar_list() -> None:
+    from icx_engine.sonar import service
+    out = service.list_connections()
+    if not out["connections"]:
+        console.print("[yellow]No Sonar connections. Run `icx sonar --add`.[/yellow]")
+        return
+    for c in out["connections"]:
+        mark = "[bold green][ACTIVE][/bold green]" if c["active"] else ""
+        console.print(f"  {c['name']:<16} {c['url']:<40} verify_tls={c['verify_tls']} {mark}")
+
+
+@sonar_app.callback(invoke_without_command=True)
+def sonar_main(
+    ctx: typer.Context,
+    add: Annotated[bool, typer.Option("--add", help="Add a SonarQube server connection (interactive).")] = False,
+    active: Annotated[Optional[str], typer.Option("--active", metavar="NAME", help="Set the active connection.")] = None,
+    remove: Annotated[Optional[str], typer.Option("--remove", metavar="NAME", help="Remove a connection (clears its keyring token).")] = None,
+    list_conns: Annotated[bool, typer.Option("--list", help="List connections and which is active.")] = False,
+) -> None:
+    """Manage SonarQube server connections - add, list, switch active, remove (same flag form as `icx model`).
+
+    \b
+    Examples:
+      icx sonar --add                 Add a server connection (name, URL, token)
+      icx sonar --list                List connections (bare `icx sonar` also lists)
+      icx sonar --active prod         Make 'prod' the active connection
+      icx sonar --active 2            Make connection #2 (from `icx status`) active
+      icx sonar --remove prod         Remove 'prod'
+      icx sonar --remove 2            Remove connection #2 (from `icx status`)
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from icx_engine.sonar import service
+    if add:
+        _sonar_add_flow()
+        return
+    if active:
+        try:
+            out = service.set_active(_sonar_resolve_name(active))
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]Active Sonar connection: {out['active']}[/green]")
+        return
+    if remove:
+        try:
+            out = service.remove_connection(_sonar_resolve_name(remove))
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]Removed '{out['removed']}'.[/green] Active: {out['active'] or '(none)'}")
+        return
+    _sonar_list()
+
+
+@sonar_app.command("status")
+def sonar_status_cmd() -> None:
+    """Show the active Sonar connection status."""
+    from icx_engine.sonar import service
+    out = asyncio.run(service.status())
+    console.print(f"  active:     {out['active'] or '(none)'}")
+    console.print(f"  connections:{out['count']}")
+    console.print(f"  url:        {out['url']}")
+    console.print(f"  configured: {out['configured']}")
+    console.print(f"  verify_tls: {out['verify_tls']}")
+    conn = out.get("connection")
+    if conn is not None:
+        console.print(f"  connection: {conn}")
+
+
+@sonar_app.command("projects")
+def sonar_projects_cmd(
+    query: Annotated[Optional[str], typer.Option("--query", "-q", help="Filter projects by key/name substring")] = None,
+) -> None:
+    """List SonarQube projects the token can access (pick a key for `report`)."""
+    from icx_engine.sonar import service
+    try:
+        out = asyncio.run(service.projects(query=query))
+    except service.SonarDisabled as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1)
+    for p in out["projects"]:
+        console.print(f"  {p['key']}  {p['name']}")
+    if out["truncated"]:
+        console.print(
+            f"[yellow]{out['total']} projects total - list withheld or narrowed. "
+            f"Filter with `icx sonar projects --query <term>`, or if you already know the "
+            f"key run `icx sonar report --project <key> --branch <branch>` directly.[/yellow]")
+
+
+@sonar_app.command("report")
+def sonar_report_cmd(
+    project: Annotated[str, typer.Option("--project", "-p", help="SonarQube project key")],
+    branch: Annotated[Optional[str], typer.Option("--branch", "-b", help="Branch name")] = None,
+    files: Annotated[Optional[list[str]], typer.Option("--file", "-f", help="Restrict to a file path (repeatable)")] = None,
+    new_code: Annotated[bool, typer.Option("--new-code", help="Only findings in new code")] = False,
+) -> None:
+    """Print a compact Sonar summary (gate + counts). Use the MCP tools for full detail."""
+    from icx_engine.sonar import service
+    try:
+        out = asyncio.run(service.report(
+            project, branch=branch, files=list(files or []), new_code_only=new_code,
+        ))
+    except service.SonarDisabled as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1)
+    gate = out.get("quality_gate", {})
+    m = out.get("measures", {})
+    summary = out.get("summary", {})
+    console.print(f"  quality gate: {gate.get('status', '')}")
+    console.print(f"  bugs={m.get('bugs')} vulnerabilities={m.get('vulnerabilities')} "
+                  f"code_smells={m.get('code_smells')} security_hotspots={m.get('security_hotspots')}")
+    console.print(f"  coverage={m.get('coverage')} duplication={m.get('duplicated_lines_density')} "
+                  f"debt={m.get('technical_debt')}")
+    console.print(f"  findings: {summary.get('total', 0)} (truncated={out.get('truncated')})")
+    by_sev = summary.get("by_severity", {})
+    if by_sev:
+        console.print(f"  by severity: {by_sev}")
 
 
 # ---------------------------------------------------------------------------
@@ -2404,6 +3005,8 @@ def _start_repl(debug: bool = False) -> None:
 
 def main() -> None:
     try:
+        from icx_engine.logging_setup import configure_logging
+        configure_logging()
         app()
     except KeyboardInterrupt:
         err_console.print("\nCancelled.")

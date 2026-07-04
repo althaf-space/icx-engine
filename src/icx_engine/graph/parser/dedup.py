@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Safi Shamsi. Modified for icx-engine.
 """Entity deduplication pipeline for icx-graph knowledge graphs.
 
-Pipeline: exact normalization → entropy gate → MinHash/LSH blocking →
-Jaro-Winkler verification → same-community boost → union-find merge.
+Pipeline: exact normalization -> entropy gate -> MinHash/LSH blocking ->
+Jaro-Winkler verification -> same-community boost -> union-find merge.
 """
 from __future__ import annotations
 import logging
@@ -18,7 +18,7 @@ from rapidfuzz.distance import JaroWinkler
 _log = logging.getLogger(__name__)
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# -- helpers -------------------------------------------------------------------
 
 def _norm(label: str | None) -> str:
     """Lowercase + collapse non-alphanumeric runs to space (Unicode-aware)."""
@@ -94,7 +94,7 @@ def _short_label_blocked(a: str, b: str, jw_score: float) -> bool:
     return True
 
 
-# ── union-find ────────────────────────────────────────────────────────────────
+# -- union-find ----------------------------------------------------------------
 
 class _UF:
     def __init__(self) -> None:
@@ -121,7 +121,7 @@ class _UF:
         return dict(groups)
 
 
-# ── constants ─────────────────────────────────────────────────────────────────
+# -- constants -----------------------------------------------------------------
 
 _ENTROPY_THRESHOLD = 2.5
 _LSH_THRESHOLD = 0.7
@@ -131,7 +131,7 @@ _NUM_PERM = 128
 _CHUNK_SUFFIX = re.compile(r"_c\d+$")
 
 
-# ── main entry point ──────────────────────────────────────────────────────────
+# -- main entry point ----------------------------------------------------------
 
 def deduplicate_entities(
     nodes: list[dict],
@@ -175,7 +175,7 @@ def deduplicate_entities(
     if len(unique_nodes) <= 1:
         return unique_nodes, edges
 
-    # ── pass 1: exact normalization ───────────────────────────────────────────
+    # -- pass 1: exact normalization -------------------------------------------
     norm_to_nodes: dict[str, list[dict]] = defaultdict(list)
     for node in unique_nodes:
         key = _norm(node.get("label", node.get("id", "")))
@@ -200,7 +200,7 @@ def deduplicate_entities(
                     uf.union(winner["id"], node["id"])
                 exact_merges += len(file_group) - 1
 
-    # ── pass 2: MinHash/LSH + Jaro-Winkler (high-entropy nodes only) ─────────
+    # -- pass 2: MinHash/LSH + Jaro-Winkler (high-entropy nodes only) ---------
     candidates: list[dict] = []
     seen_norms: set[str] = set()
     for node in unique_nodes:
@@ -263,11 +263,11 @@ def deduplicate_entities(
                     uf.union(winner["id"], neighbor_id)
                     fuzzy_merges += 1
 
-    # ── pass 3: LLM tiebreaker for ambiguous pairs (opt-in) ──────────────────
+    # -- pass 3: LLM tiebreaker for ambiguous pairs (opt-in) ------------------
     if dedup_llm_backend is not None:
         _llm_tiebreak(candidates, uf, communities, minhashes, lsh, backend=dedup_llm_backend)
 
-    # ── build remap table from union-find components ──────────────────────────
+    # -- build remap table from union-find components --------------------------
     components = uf.components()
     remap: dict[str, str] = {}
 
@@ -281,7 +281,7 @@ def deduplicate_entities(
             if member != winner_id:
                 remap[member] = winner_id
 
-    # ── apply remap ───────────────────────────────────────────────────────────
+    # -- apply remap -----------------------------------------------------------
     if not remap:
         return unique_nodes, edges
 

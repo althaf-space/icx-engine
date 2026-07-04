@@ -87,6 +87,8 @@ def extract_spring_edges(
     for _fqn, _rel in _jfm.build_fqn_map(java_files, project_root).items():
         fqn_to_file.setdefault(_fqn, _rel)
 
+    pkg_index = _build_pkg_member_index(fqn_to_file)
+
     seen: set[tuple[str, str, str]] = set()
     edges: list[dict] = []
 
@@ -97,7 +99,7 @@ def extract_spring_edges(
             if path == rel
         }
         package = tree.package.name if tree.package else ""
-        import_map = _build_import_map(tree, package, fqn_to_file)
+        import_map = _build_import_map(tree, package, fqn_to_file, pkg_index)
 
         for type_decl in (tree.types or []):
             type_name = getattr(type_decl, "name", "") or ""
@@ -283,7 +285,7 @@ def extract_spring_edges(
             if path == rel
         }
         package = tree.package.name if tree.package else ""
-        import_map = _build_import_map(tree, package, fqn_to_file)
+        import_map = _build_import_map(tree, package, fqn_to_file, pkg_index)
 
         for type_decl in (tree.types or []):
             type_name = getattr(type_decl, "name", "") or ""
@@ -551,6 +553,8 @@ def _extract_publish_event_edges(
         re.MULTILINE,
     )
 
+    pkg_index = _build_pkg_member_index(fqn_to_file)
+
     for jf, rel, tree in parsed:
         try:
             code = jf.read_text(encoding="utf-8")
@@ -563,7 +567,7 @@ def _extract_publish_event_edges(
             if path == rel
         }
         package = tree.package.name if tree.package else ""
-        import_map = _build_import_map(tree, package, fqn_to_file)
+        import_map = _build_import_map(tree, package, fqn_to_file, pkg_index)
 
         for type_decl in (tree.types or []):
             type_name = getattr(type_decl, "name", "") or ""
@@ -628,7 +632,32 @@ def _position_str(node) -> str:
     return f"L{pos.line}"
 
 
-def _build_import_map(tree, package: str, fqn_to_file: dict[str, str]) -> dict[str, str]:
+def _build_pkg_member_index(fqn_to_file: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Group FQNs by their parent package: {package: {simple_name: fqn}}.
+
+    Built once from fqn_to_file so _build_import_map can do an O(1) package lookup
+    instead of scanning every FQN per file. A FQN `a.b.C` contributes package `a.b`,
+    simple `C`. First FQN wins per (package, simple) to mirror the original setdefault
+    over fqn_to_file insertion order. Only direct members (no further dots) are grouped,
+    matching the original `fqn[len(package)+1:]` / `"." not in simple` condition.
+    """
+    index: dict[str, dict[str, str]] = {}
+    for fqn in fqn_to_file:
+        dot = fqn.rfind(".")
+        if dot <= 0:
+            continue
+        pkg = fqn[:dot]
+        simple = fqn[dot + 1 :]
+        index.setdefault(pkg, {}).setdefault(simple, fqn)
+    return index
+
+
+def _build_import_map(
+    tree,
+    package: str,
+    fqn_to_file: dict[str, str],
+    pkg_index: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str]:
     out: dict[str, str] = {}
     for imp in (tree.imports or []):
         path = imp.path
@@ -638,11 +667,15 @@ def _build_import_map(tree, package: str, fqn_to_file: dict[str, str]) -> dict[s
         if simple:
             out[simple] = path
     if package:
-        for fqn in fqn_to_file:
-            if fqn.startswith(package + "."):
-                simple = fqn[len(package) + 1 :]
-                if "." not in simple:
-                    out.setdefault(simple, fqn)
+        if pkg_index is not None:
+            for simple, fqn in pkg_index.get(package, {}).items():
+                out.setdefault(simple, fqn)
+        else:
+            for fqn in fqn_to_file:
+                if fqn.startswith(package + "."):
+                    simple = fqn[len(package) + 1 :]
+                    if "." not in simple:
+                        out.setdefault(simple, fqn)
     return out
 
 
