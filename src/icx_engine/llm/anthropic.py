@@ -9,7 +9,7 @@ from icx_engine.models.output import RawIssueData, IssueContext
 
 class AnthropicProvider(LLMProvider):
     def __init__(self, config: ChannelConfig):
-        self.client = AsyncAnthropic(api_key=config.api_key)
+        self.client = AsyncAnthropic(api_key=config.api_key, base_url=config.base_url or None)
         self.model = config.model
 
     async def analyze(self, raw: RawIssueData) -> IssueContext:

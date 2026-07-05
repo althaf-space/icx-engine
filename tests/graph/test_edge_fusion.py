@@ -86,6 +86,38 @@ class TestFuseAndDedup:
         result = fuse_and_dedup([None, "bad", {"source_file": "a.py", "target_file": "b.py", "type": "go_import", "confidence": 0.5}])
         assert len(result) == 1
 
+    def test_string_enum_confidence_does_not_crash_fusion(self):
+        # java_symbols validation / LLM edges set `confidence` to a STRING enum
+        # while keeping the numeric `confidence_score`. A fusable group mixing
+        # such an edge with a numeric-only edge must not raise TypeError
+        # (previously: str vs float comparison aborted the whole graph build).
+        edges = [
+            {"source": "na", "target": "nb", "source_file": "A.java",
+             "target_file": "B.java", "type": "java_symbol_import",
+             "confidence": "EXTRACTED", "confidence_score": 1.0, "resolver": "java_symbols"},
+            {"source": "na", "target": "nb", "source_file": "A.java",
+             "target_file": "B.java", "type": "java_symbol_call",
+             "confidence_score": 0.9, "resolver": "java_lsp"},
+        ]
+        result = fuse_and_dedup(edges)
+        assert len(result) == 1
+        # total = 1.0 (string enum -> falls back to confidence_score) + 0.9 -> capped 0.98
+        assert result[0]["confidence"] == 0.98
+        assert set(result[0]["resolver_sources"]) == {"java_symbols", "java_lsp"}
+
+    def test_non_fusable_string_confidence_does_not_crash(self):
+        # Non-fusable family (own-family) with a string-enum confidence edge
+        # must pick highest by numeric score without crashing.
+        edges = [
+            {"source": "na", "target": "nb", "source_file": "a.py", "target_file": "b.py",
+             "type": "kafka_publish", "confidence": "AMBIGUOUS", "confidence_score": 0.3},
+            {"source": "na", "target": "nb", "source_file": "a.py", "target_file": "b.py",
+             "type": "kafka_publish", "confidence_score": 0.8},
+        ]
+        result = fuse_and_dedup(edges)
+        assert len(result) == 1
+        assert result[0]["confidence_score"] == 0.8
+
     def test_deduplicate_entities_still_importable(self):
         from icx_engine.graph.parser.dedup import deduplicate_entities
         assert callable(deduplicate_entities)

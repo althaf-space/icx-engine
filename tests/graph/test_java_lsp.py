@@ -77,6 +77,43 @@ class TestJavaLspPositionCollection:
         assert "import" in kinds
         assert "call" in kinds
 
+    def test_duplicate_call_sites_are_deduped(self):
+        # The same receiver.method() called many times -> queried once.
+        import javalang
+        from icx_engine.graph.parser.resolvers.java_lsp import _collect_positions
+
+        source = (
+            "package com.example;\n"
+            "public class Main {\n"
+            "    void run(Svc svc) {\n"
+            "        svc.foo();\n"
+            "        svc.foo();\n"
+            "        svc.foo();\n"
+            "    }\n"
+            "}\n"
+        )
+        tree = javalang.parse.parse(source)
+        calls = [p for p in _collect_positions(tree) if p[2] == "call"]
+        assert len(calls) == 1  # three identical calls collapse to one query
+
+    def test_distinct_receivers_not_deduped(self):
+        # a.foo() and b.foo() resolve to different targets -> both queried.
+        import javalang
+        from icx_engine.graph.parser.resolvers.java_lsp import _collect_positions
+
+        source = (
+            "package com.example;\n"
+            "public class Main {\n"
+            "    void run(A a, B b) {\n"
+            "        a.foo();\n"
+            "        b.foo();\n"
+            "    }\n"
+            "}\n"
+        )
+        tree = javalang.parse.parse(source)
+        calls = [p for p in _collect_positions(tree) if p[2] == "call"]
+        assert len(calls) == 2  # distinct receivers kept separate
+
 
 class TestJavaLspPersistentWorkspace:
     """Workspace persists per project; marker stores java version; wipe only on version change."""

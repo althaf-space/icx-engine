@@ -240,7 +240,15 @@ class LLMProvider(ABC):
     async def analyze(self, raw: RawIssueData) -> IssueContext: ...
 
 
-def get_provider(config: ChannelConfig) -> LLMProvider:
+_PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {}
+
+
+def _default_providers() -> dict[str, type[LLMProvider]]:
+    """Return the built-in provider name -> class mapping.
+
+    Kept as a single literal dict so registry parity stays verifiable and the
+    resolution order matches historical behavior.
+    """
     from icx_engine.llm.ollama import OllamaProvider
     from icx_engine.llm.nim import NIMProvider
     from icx_engine.llm.openai import OpenAIProvider
@@ -248,7 +256,7 @@ def get_provider(config: ChannelConfig) -> LLMProvider:
     from icx_engine.llm.google import GeminiProvider
     from icx_engine.llm.xai import XAIProvider
 
-    providers: dict[str, type[LLMProvider]] = {
+    return {
         "ollama": OllamaProvider,
         "nim": NIMProvider,
         "openai": OpenAIProvider,
@@ -256,10 +264,35 @@ def get_provider(config: ChannelConfig) -> LLMProvider:
         "google": GeminiProvider,
         "xai": XAIProvider,
     }
-    cls = providers.get(config.provider)
+
+
+def register_provider(name: str, provider_cls: type[LLMProvider]) -> None:
+    """Register an LLM provider class for lookup by name.
+
+    Lets third parties add (or override) a provider without editing this module,
+    mirroring `connectors.base.register_connector`. A later registration for an
+    existing name overrides the earlier one.
+    """
+    _PROVIDER_CLASSES[name] = provider_cls
+
+
+def _provider_registry() -> dict[str, type[LLMProvider]]:
+    """Return the provider registry, lazily seeding built-ins on first use.
+
+    `setdefault` means an explicit `register_provider` override is preserved and
+    never clobbered by the built-in seed.
+    """
+    for name, cls in _default_providers().items():
+        _PROVIDER_CLASSES.setdefault(name, cls)
+    return _PROVIDER_CLASSES
+
+
+def get_provider(config: ChannelConfig) -> LLMProvider:
+    registry = _provider_registry()
+    cls = registry.get(config.provider)
     if cls is None:
         raise ValueError(
             f"Unknown provider '{config.provider}'. "
-            f"Valid options: {', '.join(providers)}"
+            f"Valid options: {', '.join(registry)}"
         )
     return cls(config)

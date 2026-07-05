@@ -27,8 +27,10 @@ This is the complete reference for contributing to ICX. Read it before writing a
 
 ICX (Integrated Contextual X-ecution Engine) is an AI-native intelligence layer for development
 teams. It connects to your work tracker, reads every item at full depth - descriptions, comments,
-attachments, screenshots, spreadsheets - and delivers structured, high-fidelity context your AI
-can act on. Local memory captures every resolution so past fixes surface when a similar problem appears.
+attachments, screenshots, spreadsheets, audio and video - and delivers structured, high-fidelity
+context your AI can act on. Local memory captures every resolution so past fixes surface when a
+similar problem appears. Beyond issue context it builds a multi-language codebase knowledge graph,
+reads SonarQube code-quality findings, and drives AI-assisted testing - all exposed over MCP and the CLI.
 
 ICX runs as:
 
@@ -1155,17 +1157,32 @@ Never let provider-SDK exceptions escape `analyze()` uncaught - the CLI's single
 
 ### Step 3 - Register the provider (`llm/base.py`)
 
-```python
-def get_provider(config: LLMConfig) -> LLMProvider:
-    from icx_engine.llm.myprovider import MyProvider
+Provider classes resolve through a registry (`_PROVIDER_CLASSES`), mirroring
+`connectors.base.register_connector`. Built-ins are seeded from
+`_default_providers()`; `get_provider` reads the registry.
 
-    providers = {
+For a **built-in** provider shipped with icx, add it to `_default_providers()`:
+
+```python
+def _default_providers() -> dict[str, type[LLMProvider]]:
+    from icx_engine.llm.myprovider import MyProvider
+    return {
         "ollama": OllamaProvider,
         "nim": NIMProvider,
         "openai": OpenAIProvider,
         "anthropic": AnthropicProvider,
+        "google": GeminiProvider,
+        "xai": XAIProvider,
         "myprovider": MyProvider,   # <- add this
     }
+```
+
+For a **third-party / out-of-tree** provider, register it at import time without
+editing this module - a later registration overrides an existing name:
+
+```python
+from icx_engine.llm.base import register_provider
+register_provider("myprovider", MyProvider)
 ```
 
 ### Step 4 - Add a registry entry (`llm/registry.py`)
@@ -1287,7 +1304,7 @@ When adding a new connector, no changes to the memory module are needed. `engine
 | Field | Type | Description |
 |---|---|---|
 | `confirmation_count` | `int` | Number of confirmed saves + `verify_resolution()` calls for this key |
-| `memory_confidence` | `float` | `min(1.0, confirmation_count * 0.25)` - 0.25 per confirmation, capped at 1.0 |
+| `memory_confidence` | `float` | Monotonic-up: `max(current, min(1.0, confirmation_count * 0.25))` - 0.25 per confirmation, capped at 1.0. Also raised by `reinforce_usage`; a later confirmation never lowers a value already raised by usage |
 
 **Phase 1 - Root cause classification:**
 
@@ -1427,7 +1444,7 @@ Call `manager.reinforce_usage(source_key, used_by_key)` when a past resolution i
 
 `verify_resolution(issue_key, feedback_note)`:
 - Increments `confirmation_count`, sets `outcome_verified=True`
-- `memory_confidence = min(1.0, confirmation_count * 0.25)`
+- `memory_confidence = max(current, min(1.0, confirmation_count * 0.25))` - never lowers a confidence already raised by `reinforce_usage` (monotonic-up)
 - Writes `"verified"` audit event
 - Returns `{"error": "entry not found"}` if the key has no prior entry
 
@@ -1573,6 +1590,15 @@ The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/p
 | `graph/parser/centrality.py` | PageRank + betweenness + degree centrality; writes `pagerank`, `betweenness`, `degree_centrality`, `importance` attributes onto graph nodes |
 | `graph/parser/ownership.py` | CODEOWNERS file parser; `GraphQuerier.get_ownership()` resolves file owners and cross-team dependency edges |
 | `graph/parser/resolvers/_common.py` | `make_edge()` - shared edge-dict constructor used by go/terraform/jsp/proto/rails/event resolvers |
+
+**Maintainer note - do not split `extract.py`.** It is large by design. The parallel
+extraction path runs a module-level worker under `ProcessPoolExecutor` with the
+`spawn` start method (Windows, and Python 3.14 default). Spawn workers re-import
+this module and unpickle the worker function by qualified name, so the worker and
+the helpers it calls must remain importable at module level from `extract.py`.
+Relocating them to submodules can break worker bootstrap / pickling and the whole
+parallel build. Refactor only with a full cross-platform parallel-build test on
+Windows spawn, never as a blind file split.
 
 ### Semantic resolvers
 
@@ -1843,8 +1869,10 @@ The env var is derived by `_env_key(account)` in `config_manager.py`: replace ev
 1. Create `src/icx_engine/llm/<name>.py` with a class inheriting `LLMProvider`.
 2. Constructor accepts `ChannelConfig` (not `LLMConfig`).
 3. Use `config.model` for the model name.
-4. Register in `get_provider()` in `llm/base.py`.
-5. Add to `_PROVIDERS` and `_DEFAULT_MODELS` in `cli.py`.
+4. Wire the class into the provider registry: add it to `_default_providers()` in
+   `llm/base.py` (built-in), or call `register_provider(name, cls)` (out-of-tree).
+5. Add a `ProviderSpec` to `PROVIDERS` in `llm/registry.py` (drives the CLI menu
+   and default models - no need to touch `cli.py` directly).
 
 ### Engine flow
 
@@ -1913,6 +1941,10 @@ pytest tests/ -x -q
 **Connector base tests** live in `tests/connectors/test_base.py`. Cover `get_connector_class` (known type, unknown type), `register_connector`, `refresh_credentials` no-op, `extract_project_key`.
 
 **Use real data fixtures** - see `tests/test_data.py` for the shared Jira payload. Add your platform's equivalent there, not inline in test files.
+
+**Use the production-realistic factories for graph and memory fixtures.** Inline ad-hoc edge/node dicts drift from the shape `build.py` actually writes, which has hidden real bugs (edges carry `confidence` as a STRING enum plus a `confidence_score` float; a fixture that sets `confidence` to a float does not match production).
+- `tests/graph/factories.py` - `graph_node()`, `graph_edge()` (emits both confidence keys, enum derived from score exactly as `build.py` does), `build_graph()`, `build_querier()`. `test_factories.py` asserts the factory stays in sync with `build.py`'s normalization.
+- `tests/memory/factories.py` - `make_entry()`, `make_reinforced_entry()`, `make_verified_entry()` to seed post-reinforce / post-verify states (not just the `memory_confidence=0.0` default). Persisting a pre-set confidence needs `save(entry, restore=True)`; a plain `save()` recomputes it for `resolution_confirmed` entries. `test_factories.py` asserts the factory math matches the real `MemoryManager`.
 
 **Never mock `ConfigManager` directly** - use the `isolated_config` fixture from `conftest.py` which redirects `CONFIG_PATH` to a temp file:
 

@@ -522,6 +522,23 @@ _EDGE_FAMILIES: dict[str, str] = {
 _FUSABLE_FAMILIES = frozenset({"import", "call", "implements"})
 
 
+def _num_confidence(e: dict) -> float:
+    """Numeric confidence for fusion math.
+
+    `confidence` is numeric on most resolver edges, but some (e.g.
+    java_symbols validation, LLM extraction) set it to a STRING enum
+    ("EXTRACTED"/"INFERRED"/"AMBIGUOUS"). Comparing/summing that string against
+    a float raises TypeError, aborting the whole build. Prefer the numeric
+    `confidence`; when it is a string, fall back to the canonical
+    `confidence_score` float; otherwise 0.0.
+    """
+    c = e.get("confidence")
+    if isinstance(c, (int, float)):
+        return float(c)
+    cs = e.get("confidence_score")
+    return float(cs) if isinstance(cs, (int, float)) else 0.0
+
+
 def fuse_and_dedup(edges: list[dict]) -> list[dict]:
     """Deduplicate and fuse cross-resolver edges.
 
@@ -554,8 +571,8 @@ def fuse_and_dedup(edges: list[dict]) -> list[dict]:
             continue
 
         if family in _FUSABLE_FAMILIES:
-            base = max(group, key=lambda e: e.get("confidence", 0.0))
-            total = sum(e.get("confidence", 0.0) for e in group)
+            base = max(group, key=_num_confidence)
+            total = sum(_num_confidence(e) for e in group)
             fused = dict(base)
             fused["confidence"] = round(min(0.98, total), 4)
             fused["resolver"] = "fused"
@@ -564,6 +581,6 @@ def fuse_and_dedup(edges: list[dict]) -> list[dict]:
             )
             result.append(fused)
         else:
-            result.append(max(group, key=lambda e: e.get("confidence", 0.0)))
+            result.append(max(group, key=_num_confidence))
 
     return result

@@ -1239,6 +1239,20 @@ def test_convert_zip_skips_oversized_entry():
     assert "ok" in result
 
 
+def test_convert_zip_does_not_recurse_into_nested_zip():
+    # A zip-in-zip must be listed, not expanded - guards against unbounded
+    # recursion / zip-quine DoS. The inner zip's own entries must not appear.
+    inner = _make_zip({"secret.txt": b"inner payload"})
+    outer = _make_zip({"nested.zip": inner, "note.txt": b"top level"})
+
+    result = _convert_zip("outer.zip", outer)
+
+    assert "nested.zip" in result
+    assert "not expanded" in result.lower()
+    assert "top level" in result       # sibling non-zip entry still converted
+    assert "inner payload" not in result  # inner entry never expanded
+
+
 def test_convert_document_dispatches_xls_pptx_zip():
     """`.xls`, `.pptx`, `.zip` are routed to their converters via _convert_document."""
     with patch("icx_engine.connectors.attachments._convert_xls", return_value="xls text") as m_xls:

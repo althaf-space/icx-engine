@@ -124,6 +124,22 @@ class GraphQuerier:
     def edge_count(self) -> int:
         return sum(len(v) for v in self._out_edges.values())
 
+    @staticmethod
+    def _edge_confidence(e: dict) -> float:
+        """Numeric edge confidence in [0,1].
+
+        `confidence_score` is the canonical float (export guarantees it on every
+        edge). `confidence` is a STRING enum in a real graph.json
+        ("EXTRACTED"/"INFERRED"/"AMBIGUOUS", set by build), so it must never be
+        compared numerically. Test fixtures sometimes carry only a float
+        `confidence`; accept that as a fallback but ignore the string form.
+        """
+        cs = e.get("confidence_score")
+        if isinstance(cs, (int, float)):
+            return float(cs)
+        c = e.get("confidence")
+        return float(c) if isinstance(c, (int, float)) else 0.0
+
     def _max_edge_confidence(self, node_id: str) -> float:
         best = 0.0
         for e in self._out_edges.get(node_id, []) + self._in_edges.get(node_id, []):
@@ -386,7 +402,7 @@ class GraphQuerier:
             for nid in frontier:
                 # Incoming edges: files that use/import this node
                 for e in self._in_edges.get(nid, []):
-                    conf = e.get("confidence", e.get("confidence_score", 0.0))
+                    conf = self._edge_confidence(e)
                     if conf < min_confidence:
                         continue
                     src = e.get("source")
@@ -402,7 +418,7 @@ class GraphQuerier:
                                 transitive_files.add(dep_file)
                 # Outgoing edges: files this node uses (could be changed by ripple)
                 for e in self._out_edges.get(nid, []):
-                    conf = e.get("confidence", e.get("confidence_score", 0.0))
+                    conf = self._edge_confidence(e)
                     if conf < min_confidence:
                         continue
                     tgt = e.get("target")

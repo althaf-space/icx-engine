@@ -531,7 +531,12 @@ class MemoryManager:
         entry.outcome_verified = True
         entry.outcome_feedback_note = feedback_note[:500]
         entry.confirmation_count = entry.confirmation_count + 1
-        entry.memory_confidence = min(1.0, entry.confirmation_count * 0.25)
+        # max() guard: positive confirmation must never lower a confidence already
+        # raised by reinforce_usage (usage_count >= 10 -> 1.0). Monotonic-up, matching
+        # negate_resolution which never touches memory_confidence.
+        entry.memory_confidence = max(
+            entry.memory_confidence, min(1.0, entry.confirmation_count * 0.25)
+        )
 
         self._upsert_entry(entry)
         try:

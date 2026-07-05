@@ -89,7 +89,7 @@ def _check_for_update() -> None:
 
 _FULL_HELP = """
 [bold]ICX: Integrated Contextual X-ecution Engine[/bold]
-AI-native intelligence layer for development teams. Connect your work tracker to your AI editor via MCP. Local memory, multi-modal analysis, and codebase knowledge graph.
+AI-native intelligence layer for development teams. Connect your work tracker to your AI editor via MCP. Local memory, multi-modal analysis, a codebase knowledge graph, SonarQube code-quality insights, and AI-assisted testing.
 
 [bold]Quick start:[/bold]  [cyan]icx setup[/cyan]  ->  [cyan]icx connection --add[/cyan]  ->  [cyan]icx model --add[/cyan]  ->  [cyan]icx analyze <KEY>[/cyan]
 
@@ -211,7 +211,8 @@ app = typer.Typer(
     context_settings={"max_content_width": 9999},
     help=(
         "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development teams. "
-        "Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. "
+        "Deep context extraction, multi-modal analysis, local-first RAG memory, a multi-language codebase "
+        "knowledge graph, SonarQube code-quality insights, and AI-assisted testing. "
         "Securely bridge your work tracker to your AI agents via MCP.\n\n"
         "[bold]Quick start:[/bold]  "
         "[cyan]icx connection --add[/cyan]  ->  "

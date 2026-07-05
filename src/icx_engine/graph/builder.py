@@ -208,9 +208,14 @@ def _merge_incremental(
     ]
     # Edges that reference a node removed above (e.g. file renamed/deleted)
     # become dangling even if the edge itself isn't tagged with that file.
+    # A node id re-emitted by the fresh extraction is NOT removed - the changed
+    # file was re-parsed and produced the same deterministic id (_make_id is
+    # path/symbol based, no line numbers). Subtracting new ids keeps the changed
+    # file's freshly-extracted edges instead of pruning them as dangling.
     existing_node_ids = {n.get("id") for n in existing_graph.get("nodes", [])}
     surviving_node_ids = {n.get("id") for n in surviving_nodes}
-    removed_ids = existing_node_ids - surviving_node_ids
+    new_node_ids = {n.get("id") for n in new_extraction.get("nodes", [])}
+    removed_ids = existing_node_ids - surviving_node_ids - new_node_ids
 
     merged_links = surviving_edges + new_extraction.get(
         "links", new_extraction.get("edges", [])

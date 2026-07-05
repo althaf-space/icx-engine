@@ -103,6 +103,15 @@ def _collect_positions(tree) -> list[tuple[int, int, str]]:
     """Collect (line_0indexed, col_0indexed, kind) from a javalang CompilationUnit.
 
     kind "import": import statement  kind "call": method invocation name.
+
+    Method-call positions are de-duplicated by (qualifier, member): the same
+    `receiver.method(...)` invoked N times in one file resolves to the same
+    definition every time, so only the first call site is queried. This cuts a
+    large share of redundant LSP round-trips with zero effect on output - the
+    edge-building loop already collapses duplicate resolutions via its `seen`
+    set, so the dropped queries produced only duplicate edges. Distinct
+    receivers keep distinct keys (`a.foo()` and `b.foo()` are both queried), so
+    no real edge is lost.
     """
     import javalang.tree as jt
 
@@ -114,11 +123,17 @@ def _collect_positions(tree) -> list[tuple[int, int, str]]:
             if len(positions) >= _MAX_POSITIONS_PER_FILE:
                 return positions
 
+    seen_calls: set[tuple[str, str]] = set()
     for _, node in tree.filter(jt.MethodInvocation):
         if len(positions) >= _MAX_POSITIONS_PER_FILE:
             break
-        if node.position:
-            positions.append((node.position.line - 1, max(0, node.position.column - 1), "call"))
+        if not node.position:
+            continue
+        key = (str(node.qualifier or ""), node.member or "")
+        if key in seen_calls:
+            continue
+        seen_calls.add(key)
+        positions.append((node.position.line - 1, max(0, node.position.column - 1), "call"))
 
     return positions
 

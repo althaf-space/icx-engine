@@ -88,39 +88,44 @@ async def test_poll_worker_stores_error_on_run_lost():
 
 # ---------------------------------------------------------------------------
 # SQL-bearing session management: list_active_sessions / cancel_session /
-# purge_old_sessions against a real temp sqlite db (no mocking the database).
+# purge_old_sessions against a REAL langgraph AsyncSqliteSaver-created db.
+#
+# The DB these helpers read in production is written by AsyncSqliteSaver, whose
+# `checkpoints` table stores each checkpoint as a serialized BLOB (not JSON) and
+# has no `ts` column. Seeding with the real saver guarantees the tests validate
+# production behavior, not a fabricated schema.
 # ---------------------------------------------------------------------------
 
-import json as _json
 import sqlite3 as _sqlite3
 from pathlib import Path as _Path
 
 
-def _seed_checkpoints_db(db_path: _Path, rows: list[tuple]) -> None:
-    """rows: list of (thread_id, checkpoint_json_str, metadata_str, ts_str)."""
-    conn = _sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            "CREATE TABLE checkpoints (thread_id TEXT, checkpoint TEXT, metadata TEXT, ts TEXT)"
-        )
-        conn.executemany(
-            "INSERT INTO checkpoints (thread_id, checkpoint, metadata, ts) VALUES (?, ?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-    finally:
-        conn.close()
+def _seed_real_db(db_path: _Path, puts: list[tuple[str, dict]]) -> None:
+    """puts: ordered list of (thread_id, channel_values). Each entry is one
+    checkpoint written via the real AsyncSqliteSaver; later puts for the same
+    thread are newer (higher checkpoint_id)."""
+    import aiosqlite
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    async def _seed() -> None:
+        conn = await aiosqlite.connect(str(db_path))
+        try:
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            for tid, channel_values in puts:
+                cfg = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
+                chk = empty_checkpoint()
+                chk["channel_values"] = dict(channel_values)
+                await saver.aput(cfg, chk, {"source": "loop"}, {})
+        finally:
+            await conn.close()
+
+    asyncio.run(_seed())
 
 
-def _chk(status: str, iteration: int, files: list[str], run_id: str | None) -> str:
-    return _json.dumps({
-        "channel_values": {
-            "status": status,
-            "iteration": iteration,
-            "file_paths": files,
-            "run_id": run_id,
-        }
-    })
+def _cv(status: str, iteration: int, files: list[str], run_id: str | None) -> dict:
+    return {"status": status, "iteration": iteration, "file_paths": files, "run_id": run_id}
 
 
 def test_list_active_sessions_missing_db_returns_empty(tmp_path):
@@ -138,16 +143,16 @@ def test_list_active_sessions_missing_table_returns_empty(tmp_path):
 def test_list_active_sessions_dedups_by_thread_id_and_parses_channel_values(tmp_path):
     from icx_engine.testing.session_store import list_active_sessions
     db = tmp_path / "s.db"
-    # Two rows for thread A (newest first via ORDER BY checkpoint DESC) + one for B.
-    _seed_checkpoints_db(db, [
-        ("A", _chk("running", 2, ["x.jsx"], "run-A2"), "{}", "2026-01-02"),
-        ("A", _chk("running", 1, ["x.jsx"], "run-A1"), "{}", "2026-01-01"),
-        ("B", _chk("completed", 5, ["y.jsx"], None), "{}", "2026-01-03"),
+    # Thread A written twice (iteration 1 then 2 -> 2 is newest); thread B once.
+    _seed_real_db(db, [
+        ("A", _cv("running", 1, ["x.jsx"], "run-A1")),
+        ("A", _cv("running", 2, ["x.jsx"], "run-A2")),
+        ("B", _cv("completed", 5, ["y.jsx"], None)),
     ])
     sessions = list_active_sessions(db)
     by_id = {s["session_id"]: s for s in sessions}
     assert set(by_id) == {"A", "B"}            # deduped to one entry per thread
-    assert by_id["A"]["run_id"] == "run-A2"    # newest checkpoint wins (DESC)
+    assert by_id["A"]["run_id"] == "run-A2"    # newest checkpoint wins
     assert by_id["A"]["iteration"] == 2
     assert by_id["A"]["file_paths"] == ["x.jsx"]
     assert by_id["B"]["status"] == "completed"
@@ -156,19 +161,28 @@ def test_list_active_sessions_dedups_by_thread_id_and_parses_channel_values(tmp_
 def test_cancel_session_deletes_and_reports(tmp_path):
     from icx_engine.testing.session_store import cancel_session
     db = tmp_path / "c.db"
-    _seed_checkpoints_db(db, [("A", _chk("running", 1, [], None), "{}", "2026-01-01")])
+    _seed_real_db(db, [("A", _cv("running", 1, [], None))])
     assert cancel_session("A", db) is True       # row existed -> deleted
     assert cancel_session("A", db) is False      # already gone
     assert cancel_session("missing", tmp_path / "nope.db") is False  # no db
 
 
-def test_purge_old_sessions_deletes_by_age(tmp_path):
-    from icx_engine.testing.session_store import purge_old_sessions
+def test_purge_keeps_fresh_and_deletes_old(tmp_path):
+    from icx_engine.testing.session_store import purge_old_sessions, list_active_sessions
     db = tmp_path / "p.db"
-    _seed_checkpoints_db(db, [
-        ("old", _chk("running", 1, [], None), "{}", "2000-01-01 00:00:00"),
-        ("new", _chk("running", 1, [], None), "{}", "2999-01-01 00:00:00"),
+    _seed_real_db(db, [
+        ("s1", _cv("running", 1, [], None)),
+        ("s2", _cv("completed", 3, [], None)),
     ])
-    purged = purge_old_sessions(db, days=7)
-    assert purged == 1                            # only the ancient row
-    assert purge_old_sessions(tmp_path / "nope.db", days=7) == 0  # no db
+    # Freshly-written sessions must NOT be purged by the 7-day cutoff.
+    assert purge_old_sessions(db, days=7) == 0
+    assert {s["session_id"] for s in list_active_sessions(db)} == {"s1", "s2"}
+    # A cutoff in the future (days=-1 -> cutoff = tomorrow) makes every session
+    # "old", exercising the real delete path.
+    assert purge_old_sessions(db, days=-1) == 2
+    assert list_active_sessions(db) == []
+
+
+def test_purge_missing_db_returns_zero(tmp_path):
+    from icx_engine.testing.session_store import purge_old_sessions
+    assert purge_old_sessions(tmp_path / "nope.db", days=7) == 0

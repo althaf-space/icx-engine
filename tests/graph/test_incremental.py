@@ -135,6 +135,32 @@ class TestMergeIncremental:
         assert "n1" not in node_ids
         assert "n2" in node_ids
 
+    def test_regenerated_id_keeps_new_edges_but_prunes_truly_removed(self):
+        # Re-parsing a changed file regenerates the SAME deterministic node id.
+        # Its freshly-extracted edges must survive (they were wrongly dropped
+        # when the re-created id was treated as "removed"), while an edge to a
+        # genuinely deleted node is still pruned as dangling.
+        existing = {
+            "nodes": [
+                {"id": "re", "source_file": "a.py"},     # changed -> re-extracted
+                {"id": "gone", "source_file": "gone.py"},  # deleted -> not re-extracted
+                {"id": "keep", "source_file": "b.py"},
+            ],
+            # Untagged dangling edge to the deleted node (not caught by file filter).
+            "links": [{"source": "keep", "target": "gone"}],
+        }
+        new_extraction = {
+            "nodes": [{"id": "re", "source_file": "a.py"}],  # same id, re-created
+            "links": [
+                {"source": "re", "target": "keep",
+                 "source_file": "a.py", "target_file": "b.py"},
+            ],
+        }
+        merged = _merge_incremental(existing, new_extraction, ["a.py"], ["gone.py"])
+        links = merged["links"]
+        assert any(e["source"] == "re" and e["target"] == "keep" for e in links)  # kept
+        assert not any(e.get("source") == "gone" or e.get("target") == "gone" for e in links)  # pruned
+
     def test_absolute_edge_source_file_purged_with_root_posix(self):
         existing = {
             "nodes": [{"id": "n1", "source_file": "src/a.py"}],

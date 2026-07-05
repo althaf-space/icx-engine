@@ -62,6 +62,19 @@ class TestVerifyResolution:
         entry = mgr._find_by_key("PROJ-1")
         assert entry.memory_confidence == 1.0
 
+    def test_verify_does_not_regress_reinforced_confidence(self, tmp_path):
+        # reinforce_usage raises confidence to 1.0 (>=10 citations). A single
+        # positive verify_resolution must NOT drop it back to 0.25.
+        mgr = _make_manager(tmp_path)
+        _save_entry(mgr, "PROJ-1")
+        for i in range(10):
+            mgr.reinforce_usage("PROJ-1", f"PROJ-{200 + i}")
+        assert mgr._find_by_key("PROJ-1").memory_confidence == 1.0
+        result = mgr.verify_resolution("PROJ-1", "Confirmed working")
+        assert result["confirmation_count"] == 1
+        assert result["memory_confidence"] == 1.0
+        assert mgr._find_by_key("PROJ-1").memory_confidence == 1.0
+
 
 class TestNegateResolution:
     def test_negate_sets_negated_flag(self, tmp_path):

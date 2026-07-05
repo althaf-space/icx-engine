@@ -485,6 +485,12 @@ def _convert_zip(filename: str, data: bytes, log=None) -> str:
                     f"[Skipped - exceeds {_ZIP_ENTRY_MAX_BYTES // (1024 * 1024)} MB entry limit]"
                 )
                 continue
+            # One level deep only: never recurse into a nested archive. Without this
+            # guard a zip-in-zip (or a self-referential zip quine) recurses without
+            # bound - a crafted attachment could exhaust CPU/memory (DoS).
+            if Path(info.filename).suffix.lower() == ".zip":
+                parts.append(f"### {info.filename}\n\n[Nested ZIP archive - not expanded]")
+                continue
             try:
                 entry_data = zf.read(info)
             except Exception:
