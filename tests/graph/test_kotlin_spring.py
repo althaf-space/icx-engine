@@ -10,6 +10,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 _FILES = {
     "User.kt": (
@@ -53,6 +55,11 @@ _FILES = {
 
 
 def _build_edges(tmp: Path):
+    # tree-sitter-kotlin is an optional grammar (not a declared dependency);
+    # without it `extract` emits no nodes and the resolver has nothing to map
+    # edges onto. Skip rather than fail where the grammar is absent (e.g. CI).
+    pytest.importorskip("tree_sitter_kotlin")
+
     from icx_engine.graph.parser.extract import extract
     from icx_engine.graph.parser.resolvers.kotlin_spring import extract_kotlin_spring_edges
 
