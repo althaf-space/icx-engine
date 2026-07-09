@@ -3,7 +3,17 @@ from icx_engine.config_manager import ConfigManager
 from icx_engine.models.config import AppConfig, SonarConnection
 
 
-def test_sonar_connection_token_roundtrip_and_excluded(isolated_config):
+def test_sonar_connection_token_roundtrip_and_excluded(isolated_config, monkeypatch):
+    # Pin a deterministic in-memory keychain so the test exercises the secure
+    # path (sentinel on disk, token in keychain) on every platform. Headless CI
+    # has no OS keyring, where save() would otherwise fall back to intentional
+    # plaintext storage and this exclusion assertion would spuriously fail.
+    store: dict[str, str] = {}
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kset", lambda account, value: store.__setitem__(account, value) or True)
+    monkeypatch.setattr(cm, "_kget", lambda account: store.get(account))
+    monkeypatch.setattr(cm, "_kdel", lambda account: store.pop(account, None))
+
     cfg = AppConfig()
     cfg.sonar_connections = {
         "prod": SonarConnection(name="prod", url="http://prod:9000", token="secret-token-123"),
