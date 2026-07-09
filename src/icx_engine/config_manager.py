@@ -187,15 +187,14 @@ def _warn_plaintext(account: str, label: str) -> None:
     """Plaintext storage warning - fires once per account, never again."""
     if account in _warned_accounts():
         return
-    env_var = _env_key(account)
-    # env_var is a non-secret environment-variable NAME derived from the account
-    # key (e.g. "ICX_SONAR_TOKEN"); no secret value is ever logged here. CodeQL
-    # taints it only because `account` is also used as a keyring lookup key.
-    hint = f"  Set {env_var}=<value> to avoid plaintext storage."  # codeql[py/clear-text-logging-sensitive-data]
+    # The exact ICX_* environment-variable name is intentionally NOT echoed here.
+    # It is a non-secret identifier, but logging any account-derived string trips
+    # clear-text-secret scanners; the concrete variable-name scheme is printed
+    # once by warn_if_plaintext(), so this per-account notice stays generic.
     print(
         f"Warning: keyring unavailable - {label} stored as plaintext "
         f"in {CONFIG_PATH} (mode 0600).\n"
-        f"{hint}",
+        f"  Set the matching ICX_ environment variable to avoid plaintext storage.",
         file=sys.stderr,
     )
     _mark_warned(account)
