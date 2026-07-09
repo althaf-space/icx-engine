@@ -188,10 +188,14 @@ def _warn_plaintext(account: str, label: str) -> None:
     if account in _warned_accounts():
         return
     env_var = _env_key(account)
+    # env_var is a non-secret environment-variable NAME derived from the account
+    # key (e.g. "ICX_SONAR_TOKEN"); no secret value is ever logged here. CodeQL
+    # taints it only because `account` is also used as a keyring lookup key.
+    hint = f"  Set {env_var}=<value> to avoid plaintext storage."  # codeql[py/clear-text-logging-sensitive-data]
     print(
         f"Warning: keyring unavailable - {label} stored as plaintext "
         f"in {CONFIG_PATH} (mode 0600).\n"
-        f"  Set {env_var}=<value> to avoid plaintext storage.",
+        f"{hint}",
         file=sys.stderr,
     )
     _mark_warned(account)
