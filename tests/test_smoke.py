@@ -519,3 +519,12 @@ def test_version_tuple_handles_prerelease_suffix():
     assert _version_tuple("0.4.0rc1") < _version_tuple("0.4.1")
     assert _version_tuple("2.0.0") > _version_tuple("1.9.9")
     assert _version_tuple("") == (0,)
+
+
+def test_format_build_duration():
+    """Graph-build duration shown in the 'Graph ready' summary."""
+    from icx_engine.cli import _format_build_duration
+    assert _format_build_duration(8) == "8s"
+    assert _format_build_duration(45.4) == "45s"
+    assert _format_build_duration(97) == "1m 37s"
+    assert _format_build_duration(3660) == "1h 01m"

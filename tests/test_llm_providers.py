@@ -467,3 +467,31 @@ def test_xai_handles_markdown_wrapped_json():
 
     result = asyncio.run(provider.analyze(_raw()))
     assert result.problem_summary == "p"
+
+
+def test_gemini_parses_recommended_persona_when_present():
+    mock_response = MagicMock()
+    mock_response.text = json.dumps({
+        "problem_summary": "p", "detailed_description": "d",
+        "reproduction_steps": [], "expected_behavior": None, "actual_behavior": None,
+        "acceptance_criteria": [], "impact": "i", "priority": "High",
+        "issue_type": "Task", "confidence_score": 0.9, "completeness_score": 0.5,
+        "missing_information": [],
+        "recommended_persona": "principal-security-architect",
+        "persona_rationale": "auth token bug",
+    })
+    provider = _make_gemini_provider()
+    with patch("google.genai.Client", return_value=_gemini_mock_client(mock_response)):
+        result = asyncio.run(provider.analyze(_raw()))
+    assert result.recommended_persona == "principal-security-architect"
+    assert result.persona_rationale == "auth token bug"
+
+
+def test_gemini_persona_defaults_when_llm_omits_it():
+    mock_response = MagicMock()
+    mock_response.text = _gemini_ctx_json()
+    provider = _make_gemini_provider()
+    with patch("google.genai.Client", return_value=_gemini_mock_client(mock_response)):
+        result = asyncio.run(provider.analyze(_raw()))
+    assert result.recommended_persona == ""
+    assert result.persona_rationale == ""

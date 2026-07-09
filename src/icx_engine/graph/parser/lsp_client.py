@@ -254,19 +254,16 @@ class LSPClient:
             "textDocument": {"uri": path.as_uri()}
         })
 
-    def definition(self, path: Path, line: int, character: int) -> list[Location]:
-        """Query definition. line/character are 0-indexed (LSP convention)."""
-        result = self._request("textDocument/definition", {
-            "textDocument": {"uri": path.as_uri()},
-            "position": {"line": line, "character": character},
-        })
+    @staticmethod
+    def _parse_definition_result(result: object) -> list["Location"]:
+        """Normalize a textDocument/definition result into Location objects.
+        Shared by definition() and definition_batch() so both parse identically."""
         if not result:
             return []
         if isinstance(result, dict):
             result = [result]
         if not isinstance(result, list):
             return []
-
         locations: list[Location] = []
         for item in result:
             if not isinstance(item, dict):
@@ -286,6 +283,64 @@ class LSPClient:
                     start.get("character", 0),
                 ))
         return locations
+
+    def definition(self, path: Path, line: int, character: int) -> list[Location]:
+        """Query definition. line/character are 0-indexed (LSP convention)."""
+        result = self._request("textDocument/definition", {
+            "textDocument": {"uri": path.as_uri()},
+            "position": {"line": line, "character": character},
+        })
+        return self._parse_definition_result(result)
+
+    def definition_batch(
+        self,
+        requests: list[tuple[Path, int, int]],
+        window: int = 12,
+        abort_after_consecutive_timeouts: int | None = None,
+    ) -> list[list[Location]]:
+        """Pipelined textDocument/definition. Sends up to `window` requests before
+        draining their replies, overlapping the round-trips instead of blocking one
+        query at a time - uses the LSP server's worker threads / idle CPU cores.
+
+        Results are returned in the SAME order as `requests` (matched by request
+        id), so the caller builds an identical edge set to a serial loop - only
+        faster. Windowed draining preserves the circuit breaker: after
+        `abort_after_consecutive_timeouts` consecutive timeouts the remaining
+        requests are abandoned (empty result), matching the serial abort.
+        """
+        results: list[list[Location]] = [[] for _ in requests]
+        n = len(requests)
+        i = 0
+        while i < n:
+            if (abort_after_consecutive_timeouts is not None
+                    and self._consecutive_timeouts >= abort_after_consecutive_timeouts):
+                break
+            chunk = requests[i:i + window]
+            pending: list[tuple[int, queue.Queue]] = []
+            for (path, line, character) in chunk:
+                with self._lock:
+                    self._seq += 1
+                    seq = self._seq
+                    q: queue.Queue = queue.Queue()
+                    self._pending[seq] = q
+                self._send({
+                    "jsonrpc": "2.0", "id": seq, "method": "textDocument/definition",
+                    "params": {"textDocument": {"uri": path.as_uri()},
+                               "position": {"line": line, "character": character}},
+                })
+                pending.append((seq, q))
+            for offset, (seq, q) in enumerate(pending):
+                try:
+                    response = q.get(timeout=self._timeout)
+                    self._consecutive_timeouts = 0
+                    results[i + offset] = self._parse_definition_result(response.get("result"))
+                except queue.Empty:
+                    self._consecutive_timeouts += 1
+                finally:
+                    with self._lock:
+                        self._pending.pop(seq, None)
+            i += window
+        return results
 
     def shutdown(self) -> None:
         self._running = False

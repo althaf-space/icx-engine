@@ -117,7 +117,7 @@ class TestRegressionScenariosOnRealShape:
             graph_edge("a", "b", score=1.0, etype="java_symbol_import",
                        source_file="A.java", target_file="B.java", resolver="java_symbols"),
             graph_edge("a", "b", score=0.9, etype="java_symbol_call",
-                       source_file="A.java", target_file="B.java", resolver="java_lsp"),
+                       source_file="A.java", target_file="B.java", resolver="java_symbols_call"),
         ]
         result = fuse_and_dedup(edges)  # must not raise
         assert len(result) == 1

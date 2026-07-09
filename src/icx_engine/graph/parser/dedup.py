@@ -543,23 +543,32 @@ def fuse_and_dedup(edges: list[dict]) -> list[dict]:
     """Deduplicate and fuse cross-resolver edges.
 
     FUSION RULE (import, call, implements families only):
-      When multiple resolvers produce edges for the same (source_file, target_file)
-      in the same family, sum their confidence scores capped at 0.98.
+      When multiple resolvers produce edges for the same (source, target) NODE
+      pair in the same family, sum their confidence scores capped at 0.98.
       Store all contributing resolver names in resolver_sources[].
       Keep all other fields from the highest-confidence source edge.
 
     NO FUSION (all other families):
-      Keep the highest-confidence edge per (source_file, target_file, type).
+      Keep the highest-confidence edge per (source, target, type) NODE pair.
+
+    Grouping is by NODE pair, not file pair: distinct node-level edges that
+    share a (source_file, target_file) - e.g. three route handlers in main.py
+    each depending on get_db in db.py, or several functions in A calling
+    different methods in B - are genuinely different edges and must all survive.
+    An earlier file-pair grouping collapsed them to one, silently dropping real
+    call/DI/route/event edges (major recall loss on every framework project).
+    True cross-resolver duplicates (identical node pair, multiple resolvers)
+    still fuse, because they share the same node-pair key.
 
     0.98 cap: never exactly 1.0 - reserved for verified ground truth only.
     """
-    # Group by (source_file, target_file, family)
+    # Group by (source_node, target_node, family)
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for edge in edges:
         if not isinstance(edge, dict):
             continue
-        src = edge.get("source_file", "")
-        tgt = edge.get("target_file", "")
+        src = edge.get("source", "")
+        tgt = edge.get("target", "")
         edge_type = edge.get("type", edge.get("relation", ""))
         family = _EDGE_FAMILIES.get(edge_type, edge_type)  # unknown type = own family
         grouped[(src, tgt, family)].append(edge)

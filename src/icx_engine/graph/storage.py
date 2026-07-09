@@ -12,6 +12,7 @@ import re
 import stat
 import sys
 import threading
+import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -164,6 +165,52 @@ def _normalize_issue_key(issue_ref: str) -> str:
 def temp_images_dir(issue_ref: str) -> Path:
     """Return ~./icx/temp/<normalized_key>/ for storing issue images."""
     return temp_root() / _normalize_issue_key(issue_ref)
+
+
+_FILENAME_FORBIDDEN = set('<>:"/\\|?*')
+
+
+def safe_temp_filename(filename: str, used: set[str] | None = None) -> str:
+    """Return a filesystem-safe ASCII basename for on-disk temp storage.
+
+    Fixes filenames that do not round-trip through path tools on Windows - e.g. a
+    screenshot named with a U+202F NARROW NO-BREAK SPACE between the time and "PM",
+    or other invisible/non-ASCII/Windows-illegal characters. Steps: strip path
+    components, NFKC-normalize (turns exotic spaces like U+202F/U+00A0 into a normal
+    space), then replace any remaining non-printable-ASCII or Windows-illegal char
+    with '_'. Normal ASCII names (including spaces and parentheses) pass through
+    unchanged. Pass a `used` set to guarantee uniqueness within a write batch.
+    """
+    name = unicodedata.normalize("NFKC", Path(filename).name)
+    cleaned = "".join(
+        ch if (0x20 <= ord(ch) < 0x7f and ch not in _FILENAME_FORBIDDEN) else "_"
+        for ch in name
+    ).strip(" .") or "file"
+    cleaned = cleaned[:200]
+    if used is not None:
+        stem, dot, ext = cleaned.rpartition(".")
+        base, i = cleaned, 1
+        while cleaned in used:
+            cleaned = f"{stem}_{i}.{ext}" if dot else f"{base}_{i}"
+            i += 1
+        used.add(cleaned)
+    return cleaned
+
+
+def ensure_issue_temp_dir(issue_ref: str) -> Path:
+    """Return the per-issue temp dir, created with owner-only perms (0o700) on POSIX.
+
+    Defense-in-depth: the parent ~/.icx/temp already gates traversal at 0o700; this also
+    restricts the per-issue subdir itself. Windows relies on the user-scoped home ACL.
+    """
+    d = temp_images_dir(issue_ref)
+    d.mkdir(parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        try:
+            d.chmod(stat.S_IRWXU)
+        except OSError:
+            pass
+    return d
 
 
 def sweep_stale_temp_dirs(max_age_seconds: int = 86400, _root: Path | None = None) -> None:

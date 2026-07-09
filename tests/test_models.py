@@ -144,6 +144,55 @@ def test_raw_issue_data_fields():
 
 # -- IssueContext --------------------------------------------------------------
 
+def test_issue_context_persona_fields_default_empty():
+    ctx = IssueContext(
+        problem_summary="p", detailed_description="d", reproduction_steps=[],
+        expected_behavior=None, actual_behavior=None, acceptance_criteria=[],
+        impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.5, missing_information=[],
+    )
+    assert ctx.recommended_persona == ""
+    assert ctx.persona_rationale == ""
+
+
+def test_issue_context_persona_fields_accept_values():
+    ctx = IssueContext(
+        problem_summary="p", detailed_description="d", reproduction_steps=[],
+        expected_behavior=None, actual_behavior=None, acceptance_criteria=[],
+        impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.5, missing_information=[],
+        recommended_persona="staff-backend-engineer", persona_rationale="api bug",
+    )
+    assert ctx.recommended_persona == "staff-backend-engineer"
+    assert ctx.persona_rationale == "api bug"
+
+
+def test_issue_context_attachment_fields_default_and_excluded():
+    ctx = IssueContext(
+        problem_summary="p", detailed_description="d", reproduction_steps=[],
+        expected_behavior=None, actual_behavior=None, acceptance_criteria=[],
+        impact="i", priority="High", issue_type="Bug",
+        confidence_score=0.9, completeness_score=0.5, missing_information=[],
+        attachment_full_texts={"a.csv": "full"}, attachment_raw={"a.csv": "b64"},
+    )
+    assert ctx.attachment_full_texts == {"a.csv": "full"}
+    dumped = json.loads(ctx.model_dump_json())
+    assert "attachment_full_texts" not in dumped
+    assert "attachment_raw" not in dumped
+
+
+def test_raw_issue_response_attachment_fields_excluded():
+    from icx_engine.models.output import RawIssueResponse
+    r = RawIssueResponse(
+        issue_key="P-1", issue_type="Bug", summary="s", description="d",
+        comments=[], attachments=[], priority="High", status="Open", metadata={},
+        attachment_full_texts={"a.csv": "full"}, attachment_raw={"a.csv": "b64"},
+    )
+    dumped = json.loads(r.model_dump_json())
+    assert "attachment_full_texts" not in dumped
+    assert "attachment_raw" not in dumped
+
+
 def test_issue_context_nullable_fields():
     ctx = IssueContext(
         problem_summary="p", detailed_description="d",

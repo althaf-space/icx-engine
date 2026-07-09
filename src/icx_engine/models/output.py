@@ -55,6 +55,10 @@ class IssueContext(BaseModel):
     pending_audio: list[str] = Field(default_factory=list)
     pending_documents: list[str] = Field(default_factory=list)
     pending_unsupported: list[str] = Field(default_factory=list)
+    recommended_persona: str = ""       # LLM-picked senior role slug; "" if unset
+    persona_rationale: str = ""         # one-line reason for the pick
+    attachment_full_texts: dict[str, str] = Field(default_factory=dict, exclude=True)  # full conversions for sidecars
+    attachment_raw: dict[str, str] = Field(default_factory=dict, exclude=True)          # base64 originals for MCP writer
 
 
 class RawIssueResponse(BaseModel):
@@ -77,6 +81,8 @@ class RawIssueResponse(BaseModel):
     pending_audio: list[str] = Field(default_factory=list)
     pending_documents: list[str] = Field(default_factory=list)
     pending_unsupported: list[str] = Field(default_factory=list)
+    attachment_full_texts: dict[str, str] = Field(default_factory=dict, exclude=True)  # full conversions for sidecars
+    attachment_raw: dict[str, str] = Field(default_factory=dict, exclude=True)          # base64 originals for MCP writer
     note: str = (
         "No LLM analysis performed - no API key configured. "
         "Raw issue data, digested documents, and raw images are provided for your direct analysis."

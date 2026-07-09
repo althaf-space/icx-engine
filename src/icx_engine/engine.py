@@ -244,6 +244,8 @@ async def run(
     docs_pending: list[str] = []
     unsupported_pending: list[str] = []
     images: dict[str, str] = {}
+    attachment_full_texts: dict[str, str] = {}
+    attachment_raw: dict[str, str] = {}
 
     if skip_vision:
         images_pending, av_pending, docs_pending, unsupported_pending = _split_attachments(
@@ -253,7 +255,7 @@ async def run(
         if log:
             names = ", ".join(raw.attachment_content_urls)
             log(f"  attachments: {names}")
-        attachment_texts, images = await connector.process_attachments(raw, active_llm, log=log)
+        attachment_texts, images, attachment_full_texts, attachment_raw = await connector.process_attachments(raw, active_llm, log=log)
         raw = raw.model_copy(update={"attachment_texts": attachment_texts})
 
     if active_llm is None:
@@ -276,6 +278,8 @@ async def run(
                 pending_audio=av_pending,
                 pending_documents=docs_pending,
                 pending_unsupported=unsupported_pending,
+                attachment_full_texts=attachment_full_texts,
+                attachment_raw=attachment_raw,
                 note=(
                     "Fast mode: text analysis only. Call analyze_issue for full OCR/transcription/document extraction."
                     if skip_vision else
@@ -329,6 +333,14 @@ async def run(
         if log and _heuristic_confidence_triggered(result, raw, images):
             log("  Low confidence or poor OCR - raw images attached to output for verification")
         result = result.model_copy(update={"images": images})
+
+    # Attach full-fidelity attachment maps (full mode only) - excluded from serialization,
+    # consumed by the MCP writer to produce sidecars + raw originals on disk.
+    if attachment_full_texts or attachment_raw:
+        result = result.model_copy(update={
+            "attachment_full_texts": attachment_full_texts,
+            "attachment_raw": attachment_raw,
+        })
 
     # Attach pending attachment lists for fast mode with LLM.
     if skip_vision:

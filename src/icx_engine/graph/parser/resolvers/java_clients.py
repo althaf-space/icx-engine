@@ -24,6 +24,11 @@ _log = logging.getLogger(__name__)
 
 _FEIGN_ANNOTATION = "FeignClient"
 
+# Substrings that any HTTP-client source must contain. Cheap per-file gate:
+# a file with none of these cannot emit client edges, so skip its tree walk
+# (perf only, zero edge loss).
+_CLIENT_TRIGGERS = ("FeignClient", "RestTemplate", "WebClient")
+
 _CONTROLLER_ANNOTATIONS: frozenset[str] = frozenset({
     "RestController", "Controller",
 })
@@ -70,17 +75,27 @@ def extract_java_client_edges(
     if not node_index["by_symbol"] and not node_index["by_file"]:
         return []
 
-    # First pass: parse all files, build FQN index and collect metadata.
+    # First pass: parse only files that use an HTTP client, build metadata.
     fqn_to_file: dict[str, str] = {}
     parsed: list[tuple[Path, str, object]] = []
+
+    from . import _java_parse_cache as _jpc
 
     for jf in java_files:
         try:
             rel = jf.relative_to(project_root).as_posix()
         except ValueError:
             continue
-        from . import _java_parse_cache as _jpc
-        tree = _jpc.get_tree(jf)
+        # Cheap gate: only files referencing an HTTP client can emit client
+        # edges. Skip the parse-tree walk for the rest - zero edge loss, since
+        # fqn_to_file is rebuilt for ALL files below via the regex fqn map.
+        try:
+            src = jf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not any(trigger in src for trigger in _CLIENT_TRIGGERS):
+            continue
+        tree = _jpc.get_tree(jf, src)
         if tree is None:
             continue
         package = tree.package.name if tree.package else ""
@@ -91,7 +106,8 @@ def extract_java_client_edges(
                 fqn_to_file.setdefault(fqn, rel)
         parsed.append((jf, rel, tree))
 
-    # Supplement with regex scan for files javalang timed out on
+    # Build the full fqn -> file map over ALL files (call targets may live in
+    # gated-out files). Regex-based, also covers javalang timeouts.
     from . import _java_fqn_map as _jfm
     for _fqn, _rel in _jfm.build_fqn_map(java_files, project_root).items():
         fqn_to_file.setdefault(_fqn, _rel)

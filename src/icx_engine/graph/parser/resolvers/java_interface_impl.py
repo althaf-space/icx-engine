@@ -1,9 +1,14 @@
 """Java interface-to-implementation resolver.
 
-For every Spring DI edge (depends_on) whose target is an interface file,
-emits a companion `injects` edge pointing to the concrete implementation class.
+For every structural edge whose target is an interface file, emits a companion
+edge pointing to the concrete implementation class(es):
+  - `depends_on` (Spring DI) -> `injects` edge to the impl
+  - `calls` / `uses`         -> same-relation edge to the impl
 
-Uses pure regex - no javalang required.
+This recovers interface-dispatch relationships (a caller invoking a method on an
+interface-typed field actually reaches the concrete impl) purely from the AST +
+import graph - the same information a language server resolves through the type
+system, without any external LSP process. Pure regex - no javalang required.
 """
 from __future__ import annotations
 
@@ -84,14 +89,18 @@ def extract_java_interface_impl_edges(
     if not iface_node_to_impl_nodes:
         return []
 
-    # Pass 3: emit injects edges for depends_on edges targeting interface nodes.
-    seen: set[tuple[str, str]] = set()
+    # Pass 3: for structural edges targeting an interface node, emit a companion
+    # edge to each concrete impl. depends_on -> injects; calls/uses keep their
+    # relation (interface-dispatch: the caller really reaches the impl).
+    _COMPANION_RELATION = {"depends_on": "injects", "calls": "calls", "uses": "uses"}
+    seen: set[tuple[str, str, str]] = set()
     edges: list[dict] = []
 
     for existing_edge in ast_extraction.get("edges", []):
         if not isinstance(existing_edge, dict):
             continue
-        if existing_edge.get("relation") != "depends_on":
+        companion = _COMPANION_RELATION.get(existing_edge.get("relation", ""))
+        if companion is None:
             continue
         src_id = existing_edge.get("source", "")
         tgt_id = existing_edge.get("target", "")
@@ -100,12 +109,14 @@ def extract_java_interface_impl_edges(
             continue
         src_rel = existing_edge.get("source_file", "")
         for impl_id in impl_ids:
-            key = (src_id, impl_id)
+            if impl_id == src_id:
+                continue
+            key = (src_id, impl_id, companion)
             if key in seen:
                 continue
             seen.add(key)
             edge = {
-                "relation": "injects",
+                "relation": companion,
                 "source": src_id,
                 "target": impl_id,
                 "source_file": src_rel,

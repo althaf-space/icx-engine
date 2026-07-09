@@ -76,7 +76,7 @@ _MAX_SUB_PROJECTS = 20
 
 # Staleness threshold: warn-and-continue if changed < this fraction of total files;
 # at or above this fraction the tools hard-stop and tell the user to rebuild.
-_STALE_THRESHOLD = 0.03
+_STALE_THRESHOLD = 0.01
 
 
 def _is_git_repo(path: Path) -> bool:

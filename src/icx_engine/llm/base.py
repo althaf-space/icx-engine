@@ -66,7 +66,9 @@ fences, no prose, no leading or trailing text):
   "issue_type": "",
   "confidence_score": 0.0,
   "completeness_score": 0.0,
-  "missing_information": []
+  "missing_information": [],
+  "recommended_persona": "",
+  "persona_rationale": ""
 }
 
 RULES:
@@ -93,7 +95,16 @@ RULES:
   input is.
 - completeness_score (0.0-1.0): fraction of required details present. The
   system will recompute this deterministically - return your best estimate.
-- missing_information: return []. The system recomputes it deterministically.\
+- missing_information: return []. The system recomputes it deterministically.
+- recommended_persona: choose the SINGLE best-fit senior role for THIS problem, reasoning
+  from the actual issue intent and any attached image/vision content - not from surface
+  keywords alone. Pick exactly one slug from this catalog, or "" if genuinely unsure:
+  cto, principal-engineer, solution-architect, system-architect, enterprise-architect,
+  staff-backend-engineer, staff-frontend-engineer, principal-ui-ux-architect,
+  principal-data-architect, principal-database-architect, staff-devops-sre,
+  principal-security-architect, staff-performance-engineer, principal-ml-engineer,
+  staff-mobile-engineer, principal-integration-architect, staff-qa-architect.
+- persona_rationale: one short phrase (<= 12 words) explaining the persona choice. "" if none.\
 """
 
 

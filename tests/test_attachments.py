@@ -502,7 +502,7 @@ async def test_process_attachments_downloads_and_ocrs():
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
 
     with patch("icx_engine.connectors.attachments.ocr_image", return_value="OCR result"):
-        texts, images = await process_attachments(raw, client, llm_config=None)
+        texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
 
     assert texts == {"screenshot.png": "OCR result"}
     assert "screenshot.png" in images
@@ -520,7 +520,7 @@ async def test_process_attachments_handles_pdf():
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
 
     with patch("icx_engine.connectors.attachments._convert_document", return_value=("Extracted PDF text", [])):
-        texts, images = await process_attachments(raw, client, llm_config=None)
+        texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
 
     assert texts == {"report.pdf": "Extracted PDF text"}
     assert images == {}  # documents produce no Base64
@@ -529,7 +529,7 @@ async def test_process_attachments_handles_pdf():
 async def test_process_attachments_skips_unsupported_extension():
     raw = _make_raw({"archive.rar": "https://test.atlassian.net/rest/api/3/attachment/content/100"})
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
-    texts, images = await process_attachments(raw, client, llm_config=None)
+    texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
     assert texts == {}
     assert images == {}
 
@@ -540,7 +540,7 @@ async def test_process_attachments_skips_on_download_error():
     respx.get(content_url).mock(return_value=httpx.Response(403))
     raw = _make_raw({"screenshot.png": content_url})
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
-    texts, images = await process_attachments(raw, client, llm_config=None)
+    texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
     assert texts == {}
     assert images == {}
 
@@ -557,7 +557,7 @@ async def test_process_attachments_skips_vision_when_image_model_is_none():
 
     with patch("icx_engine.connectors.attachments.ocr_image", return_value="raw ocr"):
         with patch("icx_engine.connectors.attachments.vision_enrich", new=AsyncMock()) as mock_vision:
-            texts, images = await process_attachments(raw, client, llm_config=llm)
+            texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=llm)
 
     mock_vision.assert_not_called()
     assert texts == {"screenshot.png": "raw ocr"}
@@ -577,7 +577,7 @@ async def test_process_attachments_calls_vision_when_llm_config_provided():
 
     with patch("icx_engine.connectors.attachments.ocr_image", return_value="raw ocr"):
         with patch("icx_engine.connectors.attachments.vision_enrich", new=AsyncMock(return_value="vision refined")) as mock_vision:
-            texts, images = await process_attachments(raw, client, llm_config=llm)
+            texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=llm)
 
     mock_vision.assert_called_once()
     assert texts == {"screenshot.png": "vision refined"}
@@ -597,7 +597,7 @@ async def test_process_attachments_processes_multiple_in_parallel():
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
 
     with patch("icx_engine.connectors.attachments.ocr_image", return_value="OCR text"):
-        texts, images = await process_attachments(raw, client, llm_config=None)
+        texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
 
     assert "screen.png" in texts
     assert "data.csv" in texts
@@ -618,7 +618,7 @@ async def test_process_attachments_summarizes_large_document_with_llm():
     llm = LLMConfig(text_config=ChannelConfig(provider="ollama", model="llama3"), image_config=None)
 
     with patch("icx_engine.connectors.attachments._llm_summarize_chunk", new=AsyncMock(return_value="summary")) as mock_sum:
-        texts, images = await process_attachments(raw, client, llm_config=llm)
+        texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=llm)
 
     mock_sum.assert_called_once()
     assert texts == {"notes.txt": "summary"}
@@ -635,7 +635,7 @@ async def test_process_attachments_no_truncation_without_llm():
     raw = _make_raw({"notes.txt": content_url})
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
 
-    texts, images = await process_attachments(raw, client, llm_config=None)
+    texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
     assert texts["notes.txt"] == big_content
     assert images == {}
 
@@ -644,7 +644,7 @@ async def test_process_attachments_no_truncation_without_llm():
 async def test_process_attachments_returns_empty_tuple_when_no_urls():
     raw = _make_raw({})
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
-    texts, images = await process_attachments(raw, client, llm_config=None)
+    texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
     assert texts == {}
     assert images == {}
 
@@ -660,7 +660,7 @@ async def test_process_attachments_captures_base64_for_images():
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
 
     with patch("icx_engine.connectors.attachments.ocr_image", return_value=""):
-        texts, images = await process_attachments(raw, client, llm_config=None)
+        texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
 
     assert "error_screenshot.png" not in texts   # no OCR text -> not in texts
     assert "error_screenshot.png" in images       # but Base64 still captured
@@ -766,7 +766,7 @@ async def test_process_audio_downloads_and_transcribes():
     whisper = WhisperManager()
 
     with patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="Transcribed audio text.")):
-        fname, text, images = await _process_audio("meeting.mp3", content_url, client, None, whisper, None)
+        fname, text, images, _ft, _rb = await _process_audio("meeting.mp3", content_url, client, None, whisper, None)
 
     assert fname == "meeting.mp3"
     assert text == "Transcribed audio text."
@@ -784,7 +784,7 @@ async def test_process_audio_returns_empty_on_download_error():
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
     whisper = WhisperManager()
 
-    fname, text, images = await _process_audio("meeting.mp3", content_url, client, None, whisper, None)
+    fname, text, images, _ft, _rb = await _process_audio("meeting.mp3", content_url, client, None, whisper, None)
 
     assert text == ""
     assert images == {}
@@ -804,7 +804,7 @@ async def test_process_audio_returns_empty_on_transcription_error():
 
     with patch("icx_engine.connectors.audio.transcribe",
                new=AsyncMock(side_effect=Exception("boom"))):
-        fname, text, images = await _process_audio(
+        fname, text, images, _ft, _rb = await _process_audio(
             "meeting.mp3", content_url, client, None, whisper, log_messages.append
         )
 
@@ -836,7 +836,7 @@ async def test_process_audio_returns_setup_msg_when_whisper_not_installed():
                new=AsyncMock(side_effect=RuntimeError(
                    "Whisper model not found. Run `icx setup` to download it."
                ))):
-        fname, text, images = await _process_audio(
+        fname, text, images, _ft, _rb = await _process_audio(
             "meeting.mp3", content_url, client, None, whisper, log_messages.append
         )
 
@@ -862,7 +862,7 @@ async def test_process_video_extracts_audio_then_transcribes():
     with patch("icx_engine.connectors.attachments._extract_audio_from_video", new=AsyncMock(return_value=b"\x00" * 44)), \
          patch("icx_engine.connectors.attachments._extract_frames_from_video", new=AsyncMock(return_value=[])), \
          patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="Video transcript.")):
-        fname, text, images = await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
+        fname, text, images, _ft, _rb = await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
 
     assert fname == "demo.mp4"
     assert text == "**Transcript:**\n\nVideo transcript."
@@ -884,7 +884,7 @@ async def test_process_video_returns_empty_on_extraction_error():
                new=AsyncMock(side_effect=Exception("ffmpeg failed"))), \
          patch("icx_engine.connectors.attachments._extract_frames_from_video",
                new=AsyncMock(return_value=[])):
-        fname, text, images = await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
+        fname, text, images, _ft, _rb = await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
 
     assert text == ""
     assert images == {}
@@ -934,7 +934,7 @@ async def test_process_video_returns_empty_when_no_audio_track():
                new=AsyncMock(return_value=empty_wav)), \
          patch("icx_engine.connectors.attachments._extract_frames_from_video",
                new=AsyncMock(return_value=[])):
-        fname, text, images = await _process_video(
+        fname, text, images, _ft, _rb = await _process_video(
             "silent.mp4", content_url, client, None, None, whisper, log_messages.append
         )
 
@@ -971,7 +971,7 @@ async def test_process_video_returns_setup_msg_when_whisper_not_installed():
                ))), \
          patch("icx_engine.connectors.attachments._extract_frames_from_video",
                new=AsyncMock(return_value=[])):
-        fname, text, images = await _process_video(
+        fname, text, images, _ft, _rb = await _process_video(
             "demo.mp4", content_url, client, None, None, whisper, log_messages.append
         )
 
@@ -1033,7 +1033,7 @@ async def test_process_attachments_transcribes_audio_attachment():
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
 
     with patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="Meeting transcript.")):
-        texts, images = await process_attachments(raw, client, llm_config=None)
+        texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
 
     assert texts == {"meeting.mp3": "Meeting transcript."}
     assert images == {}
@@ -1050,7 +1050,7 @@ async def test_process_attachments_transcribes_video_attachment():
     with patch("icx_engine.connectors.attachments._extract_audio_from_video", new=AsyncMock(return_value=b"\x00" * 44)), \
          patch("icx_engine.connectors.attachments._extract_frames_from_video", new=AsyncMock(return_value=[])), \
          patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="Demo video transcript.")):
-        texts, images = await process_attachments(raw, client, llm_config=None)
+        texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
 
     assert texts == {"demo.mp4": "**Transcript:**\n\nDemo video transcript."}
     assert images == {}
@@ -1081,7 +1081,7 @@ async def test_process_attachments_handles_mixed_image_audio_video_doc():
          patch("icx_engine.connectors.attachments._extract_audio_from_video", new=AsyncMock(return_value=b"\x00" * 44)), \
          patch("icx_engine.connectors.attachments._extract_frames_from_video", new=AsyncMock(return_value=[])), \
          patch("icx_engine.connectors.audio.transcribe", new=AsyncMock(return_value="audio text")):
-        texts, images = await process_attachments(raw, client, llm_config=None)
+        texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None)
 
     assert "screen.png" in texts
     assert "note.mp3" in texts
@@ -1556,7 +1556,7 @@ async def test_process_video_returns_frames_in_images_without_vision_config():
     with patch("icx_engine.connectors.attachments._extract_audio_from_video", new=AsyncMock(return_value=b"")), \
          patch("icx_engine.connectors.attachments._extract_frames_from_video", new=AsyncMock(return_value=frames)), \
          patch("icx_engine.connectors.attachments.ocr_image", side_effect=["frame one text", ""]):
-        fname, text, images = await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
+        fname, text, images, _ft, _rb = await _process_video("demo.mp4", content_url, client, None, None, whisper, None)
 
     assert images == {
         "demo.mp4::frame_01.jpg": base64.b64encode(frames[0]).decode(),
@@ -1576,7 +1576,7 @@ async def test_process_attachments_logs_unsupported_type():
     client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
     log_messages: list[str] = []
 
-    texts, images = await process_attachments(raw, client, llm_config=None, log=log_messages.append)
+    texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=None, log=log_messages.append)
 
     assert texts == {}
     assert images == {}

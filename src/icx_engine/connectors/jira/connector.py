@@ -134,7 +134,7 @@ class JiraConnector(ConnectorBase):
         rewritten = self._rewrite_attachment_url(url)
         return await self._client.download_attachment(rewritten)
 
-    async def process_attachments(self, raw: RawIssueData, llm_config, log=None) -> tuple[dict[str, str], dict[str, str]]:
+    async def process_attachments(self, raw: RawIssueData, llm_config, log=None) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
         from icx_engine.connectors.attachments import process_attachments as _pa
         if self._client is None:
             # Preserve original lazy behavior: no client yet means download_attachment

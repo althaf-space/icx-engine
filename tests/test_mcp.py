@@ -2422,6 +2422,36 @@ async def test_graph_find_context_nonexistent_path_returns_error():
     assert data.get("status") == "error"
 
 
+def test_degraded_graph_response_shape():
+    """No-graph/stale is non-blocking: warn the user + fall back to native tools,
+    never stop-and-wait."""
+    from icx_engine.mcp_server import _degraded_graph_response
+    r = _degraded_graph_response(
+        code="NO_GRAPH", project_path="/proj",
+        warn_user="Graph not built - build it for richer results.",
+    )
+    assert r["status"] == "degraded"
+    assert r["code"] == "NO_GRAPH"
+    assert r["action_required"] == "tell_user_then_use_native_tools"
+    assert "warn_user" in r and r["warn_user"]
+    assert "grep" in r["instruction"].lower()
+    assert r["build_command"].startswith("icx graph build")
+    # must NOT be a hard stop
+    assert "stop" not in r["action_required"]
+
+
+def test_degraded_graph_response_stale_includes_counts():
+    from icx_engine.mcp_server import _degraded_graph_response
+    r = _degraded_graph_response(
+        code="GRAPH_STALE", project_path="/proj",
+        warn_user="Graph 5% stale.",
+        extra={"changed_files": 12, "total_files": 240, "changed_pct": 5.0},
+    )
+    assert r["status"] == "degraded"
+    assert r["changed_files"] == 12 and r["changed_pct"] == 5.0
+    assert r["action_required"] == "tell_user_then_use_native_tools"
+
+
 # -- graph_subsystem -----------------------------------------------------------
 
 async def test_graph_subsystem_missing_project_path_returns_error():
@@ -3058,3 +3088,242 @@ async def test_sonar_report_tool_disabled(monkeypatch):
     assert payload["ok"] is False
     assert "sonar add" in payload["error"].lower()
 
+
+# -- Persona selection layer ---------------------------------------------------
+
+from icx_engine.mcp_server import _select_persona, _PERSONA_SLUGS
+
+
+def _analysis(**kw):
+    base = {
+        "recommended_persona": "", "problem_summary": "", "detailed_description": "",
+        "impact": "", "issue_type": "Bug",
+    }
+    base.update(kw)
+    return base
+
+
+def test_select_persona_llm_slug_wins():
+    a = _analysis(recommended_persona="principal-security-architect",
+                  problem_summary="jwt token refresh fails")
+    slug, source = _select_persona(a)
+    assert slug == "principal-security-architect"
+    assert source == "llm"
+
+
+def test_select_persona_unknown_slug_falls_to_keyword():
+    a = _analysis(recommended_persona="wizard",
+                  problem_summary="database index missing on orders query")
+    slug, source = _select_persona(a)
+    assert slug == "principal-database-architect"
+    assert source == "keyword"
+
+
+def test_select_persona_no_llm_uses_keyword():
+    a = _analysis(problem_summary="api endpoint returns 500 in the service layer")
+    slug, source = _select_persona(a)
+    assert slug == "staff-backend-engineer"
+    assert source == "keyword"
+
+
+def test_select_persona_ui_pick_clamped_when_text_is_backend_only():
+    a = _analysis(recommended_persona="principal-ui-ux-architect",
+                  problem_summary="service api endpoint throws null pointer in repository")
+    slug, source = _select_persona(a)
+    assert slug == "staff-backend-engineer"
+    assert source == "keyword"
+
+
+def test_select_persona_ui_pick_kept_when_ui_vocab_present():
+    a = _analysis(recommended_persona="principal-ui-ux-architect",
+                  problem_summary="submit button layout broken on the form modal")
+    slug, source = _select_persona(a)
+    assert slug == "principal-ui-ux-architect"
+    assert source == "llm"
+
+
+def test_select_persona_default_when_nothing_matches():
+    a = _analysis(problem_summary="please review this")
+    slug, source = _select_persona(a)
+    assert slug == "system-architect"
+    assert source == "default"
+
+
+def test_all_keyword_targets_are_valid_slugs():
+    from icx_engine.mcp_server import _PERSONA_KEYWORDS
+    for slug, _kws in _PERSONA_KEYWORDS:
+        assert slug in _PERSONA_SLUGS
+
+
+from icx_engine.mcp_server import _persona_preamble
+
+
+def test_persona_preamble_has_role_identity_and_rubric():
+    text = _persona_preamble("system-architect", 0.9, 0.9)
+    assert "senior system architect" in text.lower()
+    assert "root cause" in text.lower()
+    assert "at least two approaches" in text.lower()
+    assert "blast radius" in text.lower()
+
+
+def test_persona_preamble_low_confidence_mandates_questions():
+    text = _persona_preamble("staff-backend-engineer", 0.4, 0.9)
+    assert "ask" in text.lower()
+    assert "clarifying" in text.lower()
+
+
+def test_persona_preamble_high_confidence_no_question_mandate():
+    text = _persona_preamble("staff-backend-engineer", 0.95, 0.95)
+    assert "before presenting a plan" not in text.lower()
+
+
+def test_persona_preamble_none_scores_no_gate():
+    text = _persona_preamble("system-architect", None, None)
+    assert "senior system architect" in text.lower()
+
+
+def test_persona_preamble_unknown_slug_uses_default_title():
+    text = _persona_preamble("not-a-real-slug", 0.9, 0.9)
+    assert "senior system architect" in text.lower()
+
+
+def test_preamble_prepends_without_altering_body():
+    body = "STEP 1: do the thing\nRULE 0 - ...\n"
+    slug, source = _select_persona({"recommended_persona": "system-architect",
+                                     "problem_summary": "architecture refactor",
+                                     "detailed_description": "", "impact": "",
+                                     "issue_type": "Task"})
+    preamble = _persona_preamble(slug, 0.9, 0.9)
+    combined = preamble + "\n\n" + body
+    assert combined.endswith(body)
+    assert "OPERATING PERSONA" in combined
+    assert "STEP 1: do the thing" in combined
+    assert source == "llm"
+
+
+def test_persona_wiring_guard_returns_body_on_failure():
+    from icx_engine.mcp_server import _apply_persona
+    body = "STEP 1\n"
+    out, persona = _apply_persona(None, body)  # None analysis -> guarded, unchanged
+    assert out == body
+    assert persona is None
+
+
+def test_persona_wiring_prepends_and_reports():
+    from icx_engine.mcp_server import _apply_persona
+    body = "STEP 1: locate files\n"
+    analysis = {"recommended_persona": "principal-security-architect",
+                "problem_summary": "jwt token refresh fails",
+                "detailed_description": "", "impact": "", "issue_type": "Bug",
+                "confidence_score": 0.9, "completeness_score": 0.9}
+    out, persona = _apply_persona(analysis, body)
+    assert out.endswith(body)
+    assert "OPERATING PERSONA" in out
+    assert persona == {"role": "principal-security-architect", "source": "llm"}
+
+
+def test_kw_hit_prefix_word_not_midword():
+    from icx_engine.mcp_server import _kw_hit
+    assert _kw_hit("list of endpoints", "endpoint") is True   # suffix ok
+    assert _kw_hit("we made a decision", "ci") is False        # no mid-word
+    assert _kw_hit("build the payment service", "ui") is False # no mid-word
+    assert _kw_hit("upload the file", "load") is False         # no mid-word
+    assert _kw_hit("react native app", "react native") is True # phrase substring
+
+
+def test_select_persona_build_ui_pick_still_clamps():
+    a = _analysis(recommended_persona="staff-frontend-engineer",
+                  problem_summary="build the payment api service, null pointer in controller")
+    slug, source = _select_persona(a)
+    assert slug == "staff-backend-engineer"
+    assert source == "keyword"
+
+
+def test_select_persona_decision_word_does_not_route_to_devops():
+    a = _analysis(problem_summary="we made a decision to refactor the endpoint handler")
+    slug, source = _select_persona(a)
+    assert slug != "staff-devops-sre"
+
+
+def test_select_persona_no_llm_rawissue_shape_uses_keyword():
+    # RawIssueResponse shape: summary/description, no problem_summary/impact.
+    a = {"summary": "jwt auth token refresh fails", "description": "", "issue_type": "Bug"}
+    slug, source = _select_persona(a)
+    assert slug == "principal-security-architect"
+    assert source == "keyword"
+
+
+def test_persona_profile_keys_match_slugs():
+    from icx_engine.mcp_server import _PERSONA_PROFILE, _PERSONA_SLUGS
+    assert set(_PERSONA_PROFILE.keys()) == _PERSONA_SLUGS
+
+
+def test_write_attachment_files_creates_sidecar_and_raw(tmp_path, monkeypatch):
+    import base64
+    from types import SimpleNamespace
+    import icx_engine.mcp_server as mcp
+    from icx_engine.graph import storage
+
+    monkeypatch.setattr(storage, "temp_root", lambda: tmp_path)
+    result = SimpleNamespace(
+        attachment_full_texts={"report.xlsx": "FULL TABLE", "page.html": "<h1>hi</h1>"},
+        attachment_raw={"report.xlsx": base64.b64encode(b"XLSXBYTES").decode(),
+                        "page.html": base64.b64encode(b"<h1>hi</h1>").decode()},
+    )
+    paths = mcp._write_attachment_files(result, "P-1")
+    assert paths["report.xlsx"]["full_text"].endswith("report.xlsx.full.md")
+    assert paths["report.xlsx"]["raw"].endswith("report.xlsx")
+    from pathlib import Path as _P
+    assert _P(paths["report.xlsx"]["full_text"]).read_text(encoding="utf-8") == "FULL TABLE"
+    assert _P(paths["report.xlsx"]["raw"]).read_bytes() == b"XLSXBYTES"
+
+
+def test_write_attachment_files_guarded_on_bad_input():
+    import icx_engine.mcp_server as mcp
+    from types import SimpleNamespace
+    assert mcp._write_attachment_files(SimpleNamespace(), "P-1") == {}
+
+
+def test_periodic_temp_sweep_calls_sweep(monkeypatch):
+    import asyncio
+    import icx_engine.mcp_server as mcp
+    calls = {"n": 0}
+
+    def _fake_sweep(*a, **k):
+        calls["n"] += 1
+
+    from icx_engine.graph import storage
+    monkeypatch.setattr(storage, "sweep_stale_temp_dirs", _fake_sweep)
+
+    async def _run():
+        task = asyncio.create_task(mcp._periodic_temp_sweep(interval_seconds=0.01))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert calls["n"] >= 1
+
+
+def test_write_attachment_files_sanitizes_exotic_filename(tmp_path, monkeypatch):
+    import base64
+    from pathlib import Path as _P
+    from types import SimpleNamespace
+    import icx_engine.mcp_server as mcp
+    from icx_engine.graph import storage
+
+    monkeypatch.setattr(storage, "temp_root", lambda: tmp_path)
+    # Filename with U+202F narrow no-break space (the real Windows-breaking case).
+    exotic = "Screenshot 2026-07-07 at 3.45" + "\u202f" + "PM.png"  # \u202f = narrow no-break space
+    result = SimpleNamespace(
+        attachment_full_texts={},
+        attachment_raw={exotic: base64.b64encode(b"IMGBYTES").decode()},
+    )
+    paths = mcp._write_attachment_files(result, "P-1")
+    raw_path = paths[exotic]["raw"]
+    assert all(ord(c) < 128 for c in raw_path)      # returned path is ASCII -> round-trips
+    assert _P(raw_path).exists()                    # file actually written and openable
+    assert _P(raw_path).read_bytes() == b"IMGBYTES"

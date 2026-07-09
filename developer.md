@@ -603,10 +603,10 @@ A path is only ever **used** if it is a registered ICX project, or it was resolv
 | `ICX_ERROR` | Other `ICXError` subclass | `report_error_to_user` |
 | `INTERNAL_ERROR` | Unhandled exception | `report_error_to_user` |
 | `NO_PATH` | Graph tool called without `project_path` | `ask_user_for_path` |
-| `NO_GRAPH` | Graph not built for path | `stop_and_tell_user_to_build_graph` |
-| `GRAPH_STALE` | Staleness exceeds 3% threshold | `stop_and_tell_user_to_rebuild_graph` |
+| `NO_GRAPH` | Graph not built for path | `tell_user_then_use_native_tools` |
+| `GRAPH_STALE` | Staleness exceeds 1% threshold | `tell_user_then_use_native_tools` |
 
-Graph tool errors (`NO_PATH`, `NO_GRAPH`, `GRAPH_STALE`) use `status`/`code`/`message`/`action_required` and may include `build_command` and `project_path` for convenience.
+**Graceful degradation (graph is an enhancement layer, never a hard blocker).** When the graph is absent (`NO_GRAPH`) or stale beyond the 1% threshold (`GRAPH_STALE`), graph tools do NOT stop the agent. They return `status: "degraded"` via `_degraded_graph_response()` with a `warn_user` message (tells the user why graph enrichment is off + the `icx graph build` command) and `action_required: "tell_user_then_use_native_tools"` - the agent surfaces the warning, then answers from its own native file search (grep/glob/read) with zero delay. The graph simply upgrades results once the user builds it. `NO_PATH` still uses `status: "error"` (the agent must ask for the path). Staleness threshold is `_STALE_THRESHOLD = 0.01` (`graph/paths.py`) and `_SMALL_DELTA_MAX_RATIO = 0.01` (`graph/change.py`); a change under 1% is served as `incremental` (graph still used, minor warning).
 
 **Windows UTF-8 startup fix:** `run_mcp_server()` calls `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` and `sys.stderr.reconfigure(encoding="utf-8", errors="replace")` before starting the event loop. On Windows, the default console codepage (cp1252) cannot encode characters like `->` that can appear in Jira issue content or LLM analysis output. Without this fix, any such character written to a text-mode stream raises `UnicodeEncodeError`, which on an uncaught path crashes the MCP server process and causes the MCP host to receive no response. The `errors="replace"` fallback ensures a single unencodable character never terminates the server.
 
@@ -638,6 +638,10 @@ All statuses share a mandatory **STEP 0 vision gate** prepended to the instructi
 
 **Iteration rule (mandatory tail, all branches):** Every `_icx_next.instruction` ends with two rules: (1) if the user requests a different approach, re-present the confirmation format and wait for approval again before writing code; (2) **ITERATION RULE** - after EVERY code change, including fixes requested mid-iteration, the agent must stop and ask the user to test before making any further change or calling `reinforce_memory_usage`/`save_memory`. This applies to the 2nd, 3rd, and every subsequent fix - a prior "looks good"/"works" does not carry over to a new edit, each change needs its own fresh test confirmation. Implemented once in the shared `_MANDATORY_TAIL` constant so it covers every graph-status branch.
 
+**Senior-persona planning layer (prepended to `_icx_next.instruction`):** Every successful `_handle_analyze_issue` response also prepends a role-tuned preamble above the instruction so the connected agent plans like a senior specialist rather than a junior. The analysis LLM emits `recommended_persona` (one of 17 senior slugs: `cto`, `principal-engineer`, `solution-architect`, `system-architect`, and staff/principal domain roles). `_select_persona(analysis)` reconciles the LLM pick with a keyword heuristic over the ticket text: the LLM pick wins, except a UI-family pick with backend-only text (no UI vocabulary) is clamped to the keyword persona; with no LLM value it falls back to the keyword heuristic, then to `system-architect`. `_persona_preamble(slug, confidence, completeness)` builds the role identity plus a senior planning rubric (root cause before fix, two approaches, blast radius, test/verify strategy, risks) and a confidence gate that mandates clarifying questions when `confidence_score < _CONFIDENCE_GATE` (0.6) or `completeness_score < _COMPLETENESS_GATE` (0.5). `_apply_persona` is fully guarded - any failure returns the instruction unchanged, so persona can never break `analyze_issue`. The existing STEP/RULE flow is untouched; the chosen role is echoed in `response["persona"] = {"role", "source"}`.
+
+**Attachment full-fidelity paths (MCP):** `analyze_issue` writes each processed non-image attachment to `~/.icx/temp/<key>/` as two files - `<name>.full.md` (the COMPLETE uncapped/unsummarized conversion; the model reads this for binary sources like xlsx/pdf it cannot parse) and `<name>` (the untouched original). Row-capped types (csv/xlsx/xls) are converted twice in parallel (capped inline + uncapped sidecar); other types once. `process_attachments` returns four maps (texts, images, full_texts, raw); `engine.run` carries full_texts/raw on the result via the excluded fields; `_write_attachment_files` (guarded) writes the files and returns `work_item.attachment_paths = {filename: {full_text, raw}}`. Cleanup: `sweep_stale_temp_dirs` (24h TTL) runs on every analyze call, on MCP startup, hourly via `_periodic_temp_sweep`, and immediately after `save_memory` confirms a fix.
+
 Error responses from `_handle_analyze_issue` and `_handle_save_memory` do **not** include `_icx_next` - the agent should surface the error to the user instead.
 
 MCP mode skips automatic memory enrichment in `engine.run()`. Memory runs inside `_handle_analyze_issue` via `_search_memory_sync` with `top_k=10` - agents never call a separate memory tool.
@@ -661,6 +665,11 @@ MCP mode skips automatic memory enrichment in `engine.run()`. Memory runs inside
 `write_icx_entry(host) -> WriteResult` returns `WriteResult(path, fallback)`. When `host.detect_path` does not exist (tool not installed), it writes to `Path.cwd() / ".mcp.json"` and returns `fallback=True`. There is no `"manual"` config format - all hosts write automatically. The `MCPHost.config_path` field is always a `Path`, never `None`.
 
 **Test isolation:** Patch `icx_engine.mcp_hosts._home` in tests to redirect home-relative paths into `tmp_path`. All five hosts now use home-relative paths - `monkeypatch.chdir` is only needed if the test itself opens files relative to cwd.
+
+**ICX-first ticket-routing enforcement (Claude Code):** `MCPHost.enforces` (True only for `claude`) gates a routing layer installed by `install_enforcement(host)` on `icx mcp setup` and torn down by `remove_enforcement(host)` on `icx mcp remove`. Non-enforcing hosts return `[]` (no-op). Two idempotent, merge-safe layers, so a bare ticket reference the user types (`ABC-123`, or a Jira/GitHub/Linear/GitLab issue URL - no "use icx" needed) is routed through `mcp__icx__analyze_issue_fast` before any other tracker or a repo read:
+- **UserPromptSubmit hook:** a standalone pure-stdlib detector (`_HOOK_SCRIPT`) is written to `~/.icx/hooks/icx-ticket-gate.py`; a keyed group (identified by the `icx-ticket-gate.py` command substring, via `_is_icx_hook_group`) is merged into `~/.claude/settings.json` UserPromptSubmit, preserving all other hooks. On a ticket match it emits `hookSpecificOutput.additionalContext` with a CONDITIONAL directive (self-neutralizes when the match is not a real ticket or ICX is not connected). The command uses `sys.executable` so a working Python is guaranteed at hook time.
+- **CLAUDE.md rule:** a marker-delimited block (`_RULE_START`/`_RULE_END`) inserted into `~/.claude/CLAUDE.md`, replaced in place on re-run, stripped on remove; surrounding user content is preserved.
+Both layers are guarded per-step - a failure installing enforcement warns but never aborts MCP registration.
 
 ### Service layer (`services/`)
 
@@ -846,7 +855,13 @@ class IssueContext(BaseModel):
     pending_audio: list[str] = Field(default_factory=list)        # audio + video filenames not processed (fast mode only)
     pending_documents: list[str] = Field(default_factory=list)    # document filenames not processed (fast mode only)
     pending_unsupported: list[str] = Field(default_factory=list)  # unrecognised attachment types (fast mode only)
+    recommended_persona: str = ""      # senior role slug the analysis LLM picked; "" if unset
+    persona_rationale: str = ""        # one-line reason for the persona pick
+    attachment_full_texts: dict[str, str] = {}  # exclude=True - full conversions for MCP sidecars
+    attachment_raw: dict[str, str] = {}          # exclude=True - base64 originals for the MCP writer
 ```
+
+`attachment_full_texts` and `attachment_raw` are `Field(..., exclude=True)` - never serialized (like `images`) - and mirror the `images` transport: `engine.run` sets them from `process_attachments`, `RawIssueResponse` carries the same two fields, and the MCP writer consumes them to produce on-disk sidecars/originals.
 
 `completeness_score` and `missing_information` are **always recomputed deterministically** by `llm/base.py:finalize()` - the LLM's values for these fields are discarded. Do not change this behavior.
 
@@ -1582,9 +1597,9 @@ The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/p
 | `graph/parser/roles.py` | File role tag detection (mirrors `querier.py:_role_tag`) |
 | `graph/parser/validate.py` | Graph integrity validation |
 | `graph/parser/dedup.py` | Duplicate edge deduplication |
-| `graph/parser/lsp_client.py` | Generic LSP stdio JSON-RPC client; `wait_ready(timeout, grace)` blocks until all `$/progress` tokens complete (workDoneProgress protocol), enabling heavy servers (jdtls, kotlin-ls) to finish indexing before definition queries begin |
+| `graph/parser/lsp_client.py` | Generic LSP stdio JSON-RPC client; `wait_ready(timeout, grace)` blocks until all `$/progress` tokens complete (workDoneProgress protocol), enabling heavy servers (kotlin-ls) to finish indexing before definition queries begin |
 | `graph/parser/lsp_manager.py` | LSP lifecycle: detect runtime, install language server into a per-runtime-version cache dir (`~/.icx/<server>/<version>/`), spawn, kill |
-| `graph/parser/resolvers/` | Semantic edge resolvers: Spring, React, Django, FastAPI, Flask, Next.js, Vue, Svelte, Remix, SQLAlchemy, Celery, pytest fixtures, Redux, GraphQL, JPA, JAX-RS, Lombok, Kotlin, TypeScript LSP, Pyright LSP, gopls LSP, jdtls LSP, kotlin-language-server LSP, rust-analyzer LSP, OmniSharp LSP, intelephense LSP, clangd LSP, Java symbols, Python Jedi, Python type-checking, cross-service REST, JSP/Servlet, Go, C++, Swift, Elixir, Scala, Rails, gRPC/Protobuf, Terraform/HCL, event brokers, co-change history, and more |
+| `graph/parser/resolvers/` | Semantic edge resolvers: Spring, React, Django, FastAPI, Flask, Next.js, Vue, Svelte, Remix, SQLAlchemy, Celery, pytest fixtures, Redux, GraphQL, JPA, JAX-RS, Lombok, Kotlin, TypeScript LSP, Pyright LSP, gopls LSP, kotlin-language-server LSP, rust-analyzer LSP, OmniSharp LSP, intelephense LSP, clangd LSP, Java symbols (AST-based cross-file resolution, incl. interface-dispatch), Python Jedi, Python type-checking, cross-service REST, JSP/Servlet, Go, C++, Swift, Elixir, Scala, Rails, gRPC/Protobuf, Terraform/HCL, event brokers, co-change history, and more |
 | `graph/parser/file_cache.py` | SHA-256 file hash cache for incremental graph rebuilds |
 | `graph/parser/dedup.py` | `fuse_and_dedup()` - multi-source edge fusion; confidence summing for fusable families; highest-confidence deduplication for all others |
 | `graph/parser/centrality.py` | PageRank + betweenness + degree centrality; writes `pagerank`, `betweenness`, `degree_centrality`, `importance` attributes onto graph nodes |
@@ -1617,7 +1632,6 @@ Each resolver in `graph/parser/resolvers/` appends edges to the extraction dict 
 | scala | `graph/parser/resolvers/scala_resolver.py` | `scala_import` (0.90), `scala_extends` (0.80), `scala_calls` (0.75) | `.scala` present |
 | angular | `graph/parser/resolvers/angular_resolver.py` | `angular_declares` (0.85), `angular_imports` (0.85), `angular_di` (0.75), `angular_template` (0.90), `angular_selector` (0.75) | `.ts` present (`.html` templates resolved via minimal `extract_html`) |
 | go_lsp | `graph/parser/resolvers/go_lsp.py` | `imports` (0.95), `calls` (0.95) | `.go` present and Go toolchain on PATH (gopls auto-installed) |
-| java_lsp | `graph/parser/resolvers/java_lsp.py` | `imports` (0.95), `calls` (0.95) | `.java` present and JDK on PATH (jdtls auto-downloaded) |
 | kotlin_lsp | `graph/parser/resolvers/kotlin_lsp.py` | `imports` (0.95), `calls` (0.95) | `.kt`/`.kts` present and JDK on PATH (kotlin-language-server auto-downloaded) |
 | rust_lsp | `graph/parser/resolvers/rust_lsp.py` | `imports` (0.95), `calls` (0.95) | `.rs` present and Rust toolchain on PATH (rust-analyzer auto-downloaded) |
 | csharp_lsp | `graph/parser/resolvers/csharp_lsp.py` | `imports` (0.95), `calls` (0.95) | `.cs` present and .NET SDK on PATH (OmniSharp auto-downloaded) |
@@ -1648,9 +1662,11 @@ On second and subsequent builds, the graph avoids full re-extraction for unchang
 
 After all resolvers have run, `fuse_and_dedup()` in `graph/parser/dedup.py` consolidates duplicate edges produced by different resolver passes:
 
-- **Fusable families** (`_FUSABLE_FAMILIES`): `import`, `call`, `implements` - when two edges of the same family connect the same source/target pair, their confidence values are summed, capped at `0.98`. This rewards signal convergence: if both the AST resolver and the LSP resolver agree on the same import, the combined confidence is higher than either alone.
-- **All other families** (`_EDGE_FAMILIES`): highest confidence wins; the lower-confidence duplicate is discarded.
+- **Grouping is by NODE pair** `(source, target, family)` - NOT file pair. Distinct node-level edges that share a `(source_file, target_file)` are genuinely different edges (e.g. three route handlers in `main.py` each depending on `get_db` in `db.py`, or several functions in `A` calling different methods in `B`) and must all survive. An earlier file-pair grouping collapsed them to one, silently dropping real call/DI/route/event edges - halving recall on framework projects. True cross-resolver duplicates (identical node pair, multiple resolvers) still fuse because they share the node-pair key.
+- **Fusable families** (`_FUSABLE_FAMILIES`): `import`, `call`, `implements` - when two edges of the same family connect the same source/target NODE pair, their confidence values are summed, capped at `0.98`. This rewards signal convergence: if both the AST resolver and the LSP resolver agree on the same edge, the combined confidence is higher than either alone.
+- **All other families** (`_EDGE_FAMILIES`): highest confidence wins per node pair; the lower-confidence duplicate is discarded.
 - `_EDGE_FAMILIES` lists every known edge type. Unknown edge types pass through unchanged.
+- Regression gate: `tests/graph/test_edge_fusion.py::test_distinct_node_edges_same_file_pair_all_survive`. Fixture recall baselines in `tests/graph/eval/baselines.json` (`phase_2_node_level_fusion`): ~1.0 on 21/22 fixtures after this fix.
 
 ### Centrality
 
@@ -2078,7 +2094,7 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 | `graph/parser/icxignore.py:_SEED_CONTENT` | Default exclusion pattern list seeded into new `.icxignore` files on first build. Removing patterns here means future first-build users include those files; changing format requires updating the file header comments. |
 | `graph/progress.py:STAGES` | Stage string constants consumed by the parent-side renderer to display named progress steps. Adding stages is additive (renderer shows unknown stages as-is); removing or renaming stages silently drops the corresponding progress bar step. |
 | `graph/tsserver.py` | tsserver install path and version-tracking logic must stay aligned with `lsp_manager.py` and `resolvers/ts_lsp.py`. If you change the install dir (`~/.icx/tsserver/`), update all three files and the `readme.md` reference. |
-| `graph/parser/lsp_manager.py` | Generic LSP lifecycle. Language-specific servers (ts_lsp, pyright_lsp) inherit from this. Do not add language-specific logic here - add a new resolver file instead. All binary downloads go through `_download_lsp()` which enforces a 300s timeout and supports optional SHA-256 checksum pinning via `_LSP_CHECKSUMS`. To pin a server binary, add `_LSP_CHECKSUMS["server-name"] = "<sha256-hex>"` at the top of the file. Binary servers are pinned to fixed releases via version constants (`_KOTLIN_LS_VERSION`, `_RUST_ANALYZER_VERSION`, `_OMNISHARP_VERSION`, `_CLANGD_VERSION`) - never revert these to `latest`; bump them deliberately. jdtls is the one exception (upstream publishes only a rolling snapshot). Setting `ICX_REQUIRE_LSP_CHECKSUM=1` makes `_download_lsp()` fail closed on any server that has no pinned checksum (default unset preserves prior install behavior). |
+| `graph/parser/lsp_manager.py` | Generic LSP lifecycle. Language-specific servers (ts_lsp, pyright_lsp) inherit from this. Do not add language-specific logic here - add a new resolver file instead. All binary downloads go through `_download_lsp()` which enforces a 300s timeout and supports optional SHA-256 checksum pinning via `_LSP_CHECKSUMS`. To pin a server binary, add `_LSP_CHECKSUMS["server-name"] = "<sha256-hex>"` at the top of the file. Binary servers are pinned to fixed releases via version constants (`_KOTLIN_LS_VERSION`, `_RUST_ANALYZER_VERSION`, `_OMNISHARP_VERSION`, `_CLANGD_VERSION`) - never revert these to `latest`; bump them deliberately. Setting `ICX_REQUIRE_LSP_CHECKSUM=1` makes `_download_lsp()` fail closed on any server that has no pinned checksum (default unset preserves prior install behavior). |
 | `connectors/audio.py:WhisperManager._load` | Lock + double-checked locking is required - concurrent A/V attachments run through `asyncio.gather` and hit `_load()` from multiple executor threads. Removing the lock races the first-time download. |
 | `connectors/attachments.py:_extract_audio_from_video` | The `try/except asyncio.TimeoutError -> proc.kill(); await proc.wait()` block prevents orphan ffmpeg processes on timeout. The `proc.returncode != 0 -> raise RuntimeError` check prevents passing empty/partial WAV bytes to Whisper. Do not collapse either guard. |
 | `config_manager.py:_SENTINEL` | Do not change the sentinel string - it would invalidate all existing saved configs. |

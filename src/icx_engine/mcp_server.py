@@ -141,6 +141,247 @@ def _verify_resolution_sync(issue_key: str, feedback_note: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Senior-persona planning layer (additive; prepended to _icx_next.instruction).
+# ---------------------------------------------------------------------------
+
+_PERSONA_SLUGS: set[str] = {
+    "cto", "principal-engineer", "solution-architect", "system-architect",
+    "enterprise-architect", "staff-backend-engineer", "staff-frontend-engineer",
+    "principal-ui-ux-architect", "principal-data-architect", "principal-database-architect",
+    "staff-devops-sre", "principal-security-architect", "staff-performance-engineer",
+    "principal-ml-engineer", "staff-mobile-engineer", "principal-integration-architect",
+    "staff-qa-architect",
+}
+
+_DEFAULT_PERSONA = "system-architect"
+_UI_PERSONAS = {"principal-ui-ux-architect", "staff-frontend-engineer"}
+
+# Ordered: first slug whose keyword set hits the ticket text wins the keyword heuristic.
+_PERSONA_KEYWORDS: list[tuple[str, set[str]]] = [
+    ("principal-security-architect", {"auth", "login", "token", "jwt", "oauth", "password",
+        "credential", "secret", "vulnerab", "injection", "xss", "csrf", "encrypt", "permission"}),
+    ("principal-database-architect", {"index", "query plan", "slow query", "sql", "join",
+        "deadlock", "n+1", "orm query", "table scan"}),
+    ("principal-data-architect", {"schema", "migration", "pipeline", "etl", "data model",
+        "warehouse", "ingest", "dataset"}),
+    ("staff-performance-engineer", {"latency", "throughput", "slow", "timeout", "memory leak",
+        "cpu", "performance", "profil", "bottleneck", "p99", "load"}),
+    ("staff-devops-sre", {"deploy", "ci/cd", "terraform", "kubernetes", "docker",
+        "infra", "cluster", "helm", "reliability", "outage", "rollout"}),
+    ("principal-ml-engineer", {"inference", "training", "embedding", "ml",
+        "prediction", "dataset drift", "fine-tune"}),
+    ("staff-mobile-engineer", {"android", "ios", "react native", "swift", "kotlin app",
+        "mobile", "app store", "play store"}),
+    ("principal-integration-architect", {"webhook", "third-party", "integration", "event bus",
+        "kafka", "message queue", "api contract", "grpc", "proto"}),
+    ("staff-qa-architect", {"test coverage", "flaky", "regression suite", "qa", "test plan",
+        "e2e"}),
+    ("principal-ui-ux-architect", {"button", "layout", "css", "styling", "modal", "form",
+        "screen", "ui", "ux", "responsive", "accessib", "component render"}),
+    ("staff-frontend-engineer", {"react", "vue", "state management", "redux", "hook", "frontend",
+        "client-side", "dom"}),
+    ("staff-backend-engineer", {"api", "endpoint", "service", "controller", "repository",
+        "backend", "server", "handler", "null pointer", "500"}),
+    ("solution-architect", {"integrate systems", "end-to-end", "cross-service", "microservice"}),
+    ("system-architect", {"architecture", "data flow", "scaling", "refactor", "coupling"}),
+]
+
+_UI_VOCAB = {"button", "layout", "css", "styling", "modal", "form", "screen", "ui", "ux",
+    "responsive", "accessib", "render", "component", "page", "click"}
+_BACKEND_VOCAB = {"api", "endpoint", "service", "controller", "repository", "backend",
+    "server", "handler", "database", "query", "schema", "null pointer"}
+
+_KW_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _kw_hit(text: str, kw: str) -> bool:
+    """Match kw against lowercased text. Multi-word or non-alnum tokens match as a
+    substring; a single alphanumeric token matches at a word start with any suffix
+    (prefix-word), so 'endpoint' hits 'endpoints' but 'ci' does NOT hit 'decision'."""
+    if " " in kw or not kw.isalnum():
+        return kw in text
+    pat = _KW_RE_CACHE.get(kw)
+    if pat is None:
+        pat = re.compile(r"\b" + re.escape(kw) + r"\w*")
+        _KW_RE_CACHE[kw] = pat
+    return pat.search(text) is not None
+
+
+def _persona_text(analysis: dict) -> str:
+    parts = [
+        str(analysis.get("problem_summary") or analysis.get("summary", "")),
+        str(analysis.get("detailed_description") or analysis.get("description", "")),
+        str(analysis.get("impact", "")),
+    ]
+    return " ".join(parts).lower()
+
+
+def _keyword_persona(text: str, issue_type: str) -> str | None:
+    for slug, kws in _PERSONA_KEYWORDS:
+        if any(_kw_hit(text, kw) for kw in kws):
+            return slug
+    if issue_type.lower() == "epic":
+        return "system-architect"
+    return None
+
+
+def _select_persona(analysis: dict) -> tuple[str, str]:
+    """Return (persona_slug, source). source in {'llm','keyword','default'}.
+
+    LLM pick wins when valid, except a UI pick with zero UI vocabulary and strong backend
+    vocabulary is clamped to the keyword persona. No graph/file signal is available at
+    analyze time, so the keyword heuristic operates on ticket text only.
+    """
+    text = _persona_text(analysis)
+    issue_type = str(analysis.get("issue_type", ""))
+    llm_pick = str(analysis.get("recommended_persona", "")).strip()
+
+    if llm_pick in _PERSONA_SLUGS:
+        if llm_pick in _UI_PERSONAS:
+            has_ui = any(_kw_hit(text, w) for w in _UI_VOCAB)
+            has_backend = any(_kw_hit(text, w) for w in _BACKEND_VOCAB)
+            if not has_ui and has_backend:
+                return (_keyword_persona(text, issue_type) or _DEFAULT_PERSONA, "keyword")
+        return (llm_pick, "llm")
+
+    kw = _keyword_persona(text, issue_type)
+    if kw:
+        return (kw, "keyword")
+    return (_DEFAULT_PERSONA, "default")
+
+
+_CONFIDENCE_GATE = 0.6
+_COMPLETENESS_GATE = 0.5
+
+# slug -> (spoken role title, one-line domain focus for the rubric)
+_PERSONA_PROFILE: dict[str, tuple[str, str]] = {
+    "cto": ("CTO", "weigh business impact, risk, and long-term maintainability above local convenience"),
+    "principal-engineer": ("principal engineer", "attack the hardest ambiguity first and prove the mechanism, not the symptom"),
+    "solution-architect": ("solution architect", "design the end-to-end flow across every system the change touches"),
+    "system-architect": ("senior system architect", "reason about service boundaries, data flow, scaling, and migration safety"),
+    "enterprise-architect": ("enterprise architect", "keep the change consistent with organization-wide standards and other systems"),
+    "staff-backend-engineer": ("staff backend engineer", "trace the request path, service and data layers, and error handling"),
+    "staff-frontend-engineer": ("staff frontend engineer", "reason about component state, data fetching, and render correctness"),
+    "principal-ui-ux-architect": ("principal UI/UX architect", "reason about layout, interaction, accessibility, and visual states"),
+    "principal-data-architect": ("principal data architect", "reason about the schema, data modeling, and pipeline integrity"),
+    "principal-database-architect": ("principal database architect", "reason about query plans, indexing, and transactional correctness"),
+    "staff-devops-sre": ("staff DevOps/SRE", "reason about deployment, reliability, rollout, and blast radius in production"),
+    "principal-security-architect": ("principal security architect", "reason about the trust boundary, authn/authz, and exploit paths"),
+    "staff-performance-engineer": ("staff performance engineer", "reason about latency, throughput, allocation, and measured bottlenecks"),
+    "principal-ml-engineer": ("principal ML engineer", "reason about the model, data, evaluation, and inference path"),
+    "staff-mobile-engineer": ("staff mobile engineer", "reason about the platform lifecycle, device constraints, and app state"),
+    "principal-integration-architect": ("principal integration architect", "reason about API contracts, events, retries, and third-party failure modes"),
+    "staff-qa-architect": ("staff QA architect", "reason about coverage, edge cases, and how correctness will be proven"),
+}
+
+
+def _persona_preamble(slug: str, confidence: float | None, completeness: float | None) -> str:
+    title, focus = _PERSONA_PROFILE.get(slug, _PERSONA_PROFILE[_DEFAULT_PERSONA])
+    lines = [
+        "==============================================================================",
+        f"OPERATING PERSONA: you are acting as a {title}.",
+        "Hold every decision to that bar. Junior-level guessing is not acceptable for",
+        f"this ticket. As a {title}, {focus}.",
+        "",
+        "SENIOR PLANNING RUBRIC - satisfy this before proposing the plan in the",
+        "confirmation format below (it raises what must appear in your Approach):",
+        "  1. For bugs: establish the root cause with concrete evidence before proposing a",
+        "     fix. For features: pin the exact requirement and the interface/data contracts.",
+        "  2. Consider at least two approaches and state why the chosen one wins.",
+        "  3. State the blast radius and the affected callers (use the graph impact and",
+        "     blast-radius steps already in this workflow).",
+        "  4. Define done: the test strategy and how correctness will be verified.",
+        "  5. Name the risks, edge cases, failure modes, and the rollback.",
+    ]
+    gate_hit = (
+        (confidence is not None and confidence < _CONFIDENCE_GATE)
+        or (completeness is not None and completeness < _COMPLETENESS_GATE)
+    )
+    if gate_hit:
+        lines.append(
+            "  6. CONFIDENCE GATE: this ticket scored low on clarity/completeness. You MUST"
+        )
+        lines.append(
+            "     ask the user targeted clarifying questions before presenting a plan - do"
+        )
+        lines.append("     not guess.")
+    lines.append(
+        "=============================================================================="
+    )
+    return "\n".join(lines)
+
+
+def _apply_persona(analysis: dict | None, icx_instruction: str) -> tuple[str, dict | None]:
+    """Prepend the persona preamble to icx_instruction. Fully guarded: any failure
+    returns the instruction unchanged and persona=None, so analyze_issue can never break."""
+    try:
+        if not isinstance(analysis, dict):
+            return icx_instruction, None
+        slug, source = _select_persona(analysis)
+        conf = analysis.get("confidence_score")
+        comp = analysis.get("completeness_score")
+        conf = conf if isinstance(conf, (int, float)) else None
+        comp = comp if isinstance(comp, (int, float)) else None
+        preamble = _persona_preamble(slug, conf, comp)
+        return preamble + "\n\n" + icx_instruction, {"role": slug, "source": source}
+    except Exception:
+        _log.warning("persona layer skipped", exc_info=True)
+        return icx_instruction, None
+
+
+def _write_attachment_files(result, issue_key_val: str) -> dict[str, dict[str, str]]:
+    """Write full-text sidecars (<name>.full.md) and raw originals (<name>) for non-image
+    attachments to the per-issue temp dir. Returns {filename: {full_text, raw}}. Fully guarded -
+    any failure skips that entry and never raises."""
+    attachment_paths: dict[str, dict[str, str]] = {}
+    full_texts = getattr(result, "attachment_full_texts", None) or {}
+    raw_b64 = getattr(result, "attachment_raw", None) or {}
+    if not full_texts and not raw_b64:
+        return attachment_paths
+    import base64 as _b64
+    from icx_engine.graph.storage import ensure_issue_temp_dir as _ensure_dir, safe_temp_filename
+    try:
+        a_dir = _ensure_dir(issue_key_val)
+    except Exception:
+        return attachment_paths
+    _used: set[str] = set()
+    for fname in sorted(set(full_texts) | set(raw_b64)):
+        safe = safe_temp_filename(fname, _used)
+        entry: dict[str, str] = {}
+        ft = full_texts.get(fname)
+        if ft:
+            try:
+                p = a_dir / (safe + ".full.md")
+                p.write_text(ft, encoding="utf-8")
+                entry["full_text"] = str(p)
+            except Exception:
+                pass
+        rb = raw_b64.get(fname)
+        if rb:
+            try:
+                p = a_dir / safe
+                p.write_bytes(_b64.b64decode(rb))
+                entry["raw"] = str(p)
+            except Exception:
+                pass
+        if entry:
+            attachment_paths[fname] = entry
+    return attachment_paths
+
+
+async def _periodic_temp_sweep(interval_seconds: int = 3600) -> None:
+    """Background daemon: sweep stale temp dirs (24h TTL) every interval. Guarantees cleanup
+    even when ICX is idle, for the lifetime of the MCP server. Guarded and non-fatal."""
+    from icx_engine.graph.storage import sweep_stale_temp_dirs
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            sweep_stale_temp_dirs()
+        except Exception:
+            _log.debug("periodic temp sweep failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Tool names
 # ---------------------------------------------------------------------------
 
@@ -2593,14 +2834,15 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
 
             graph_json = _st.graph_path(_project_id)
             if not graph_json.exists():
-                return {
-                    "status": "error",
-                    "code": "NO_GRAPH",
-                    "message": f"Graph file missing for '{_project_path}'. Tell the user to build it first.",
-                    "action_required": "stop_and_tell_user_to_build_graph",
-                    "build_command": f"icx graph build \"{_project_path}\"",
-                    "project_path": str(_project_path),
-                }
+                return _degraded_graph_response(
+                    code="NO_GRAPH",
+                    project_path=_project_path,
+                    warn_user=(
+                        f"The codebase graph is not built for '{_project_path}', so I'm "
+                        "answering from direct file search (grep/read) instead. For richer "
+                        f"results, build the graph: icx graph build \"{_project_path}\""
+                    ),
+                )
 
             q = _cached_querier(graph_json)
             if name == _GRAPH_CONTEXT_TOOL:
@@ -3405,6 +3647,33 @@ def _cached_querier(graph_json_path):
     return q
 
 
+def _degraded_graph_response(code: str, project_path, warn_user: str, extra: dict | None = None) -> dict:
+    """Non-blocking graph-unavailable response.
+
+    The codebase graph is an enhancement layer, not a hard dependency. When it is
+    absent / still building / stale, we do NOT stop the agent - we tell it to warn
+    the user (so they know why graph enrichment is off and how to enable it) and
+    then answer from its own native file tools (grep/glob/read). Zero delay; the
+    graph simply upgrades results once the user builds it.
+    """
+    resp = {
+        "status": "degraded",
+        "code": code,
+        "warn_user": warn_user,
+        "action_required": "tell_user_then_use_native_tools",
+        "instruction": (
+            "Show the warn_user message to the user, then answer their request now "
+            "using your built-in file search (grep/glob/read). Do NOT stop, wait, or "
+            "block on the graph."
+        ),
+        "build_command": f"icx graph build \"{project_path}\"",
+        "project_path": str(project_path),
+    }
+    if extra:
+        resp.update(extra)
+    return resp
+
+
 def _load_querier_simple(project_path: str) -> tuple | dict:
     """Validate path, derive project_id, load GraphQuerier.
 
@@ -3419,17 +3688,15 @@ def _load_querier_simple(project_path: str) -> tuple | dict:
     _pid = _st.derive_project_id(_validated)
     _gpath = _st.graph_path(_pid)
     if not _gpath.exists():
-        return {
-            "status": "error",
-            "code": "NO_GRAPH",
-            "message": (
-                f"No graph found for '{_validated}'. "
-                "Tell the user to build it first with the command below, then retry."
+        return _degraded_graph_response(
+            code="NO_GRAPH",
+            project_path=_validated,
+            warn_user=(
+                f"The codebase graph is not built for '{_validated}', so I'm answering "
+                "from direct file search (grep/read) instead. For richer, more accurate "
+                f"results, build the graph: icx graph build \"{_validated}\""
             ),
-            "action_required": "stop_and_tell_user_to_build_graph",
-            "build_command": f"icx graph build \"{_validated}\"",
-            "project_path": str(_validated),
-        }
+        )
     return _cached_querier(_gpath), _validated
 
 
@@ -3453,43 +3720,36 @@ def _resolve_graph_path(raw_path: str):
     stale_status = staleness["status"]
 
     if stale_status in ("no_graph", "no_manifest"):
-        return {
-            "status": "error",
-            "code": "NO_GRAPH",
-            "message": (
-                f"No graph found for '{project_path}'. "
-                "Tell the user to build it first with the command below, then retry."
+        return _degraded_graph_response(
+            code="NO_GRAPH",
+            project_path=project_path,
+            warn_user=(
+                f"The codebase graph is not built for '{project_path}', so I'm answering "
+                "from direct file search (grep/read) instead. For richer, more accurate "
+                f"results, build the graph: icx graph build \"{project_path}\""
             ),
-            "action_required": "stop_and_tell_user_to_build_graph",
-            "build_command": f"icx graph build \"{project_path}\"",
-            "project_path": str(project_path),
-        }
+        )
 
     if stale_status == "stale":
         pct = staleness.get("pct", 0)
         changed = staleness.get("changed", 0)
         total = staleness.get("total", 0)
-        return {
-            "status": "error",
-            "code": "GRAPH_STALE",
-            "message": (
-                f"Graph is {pct}% stale ({changed}/{total} files changed). "
-                "This exceeds the 3% threshold. "
-                "Tell the user to rebuild the graph manually, then retry."
+        return _degraded_graph_response(
+            code="GRAPH_STALE",
+            project_path=project_path,
+            warn_user=(
+                f"The codebase graph is {pct}% stale ({changed}/{total} files changed), so "
+                "I'm answering from direct file search (grep/read) instead. For up-to-date, "
+                f"richer results, rebuild the graph: icx graph build \"{project_path}\""
             ),
-            "action_required": "stop_and_tell_user_to_rebuild_graph",
-            "build_command": f"icx graph build \"{project_path}\"",
-            "project_path": str(project_path),
-            "changed_files": changed,
-            "total_files": total,
-            "changed_pct": pct,
-        }
+            extra={"changed_files": changed, "total_files": total, "changed_pct": pct},
+        )
 
     staleness_warning: str | None = None
     if stale_status == "incremental":
         pct = staleness.get("pct", 0)
         staleness_warning = (
-            f"Graph is slightly stale ({pct}% of files changed, under 3% threshold). "
+            f"Graph is slightly stale ({pct}% of files changed, under 1% threshold). "
             "Results may not reflect the very latest changes. "
             f"Inform the user and suggest running: icx graph build \"{project_path}\""
         )
@@ -3773,22 +4033,21 @@ async def _handle_analyze_issue(
         if _images_raw:
             import base64 as _b64
             from icx_engine.graph.storage import (
-                temp_images_dir as _tid,
+                ensure_issue_temp_dir as _ensure_dir,
                 sweep_stale_temp_dirs as _sweep,
+                safe_temp_filename,
             )
             _sweep()  # TTL cleanup - non-fatal, fast
             try:
-                img_dir = _tid(issue_key_val)
-                img_dir.mkdir(parents=True, exist_ok=True)
+                img_dir = _ensure_dir(issue_key_val)
                 _ALLOWED_IMAGE_EXTS = frozenset({
                     ".png", ".jpg", ".jpeg", ".gif", ".webp",
                     ".bmp", ".tiff", ".tif",
                 })
+                _used_img: set[str] = set()
                 for fname, b64_data in _images_raw.items():
                     try:
-                        safe_name = Path(fname).name
-                        if not safe_name:
-                            continue  # skip entries that resolve to empty after stripping path
+                        safe_name = safe_temp_filename(fname, _used_img)
                         if Path(safe_name).suffix.lower() not in _ALLOWED_IMAGE_EXTS:
                             continue  # skip non-image files
                         img_path = img_dir / safe_name
@@ -3798,6 +4057,10 @@ async def _handle_analyze_issue(
                         pass  # skip individual image on decode/write failure
             except Exception:
                 pass  # directory creation failure - proceed without images on disk
+
+        # Write full-fidelity attachment sidecars (<name>.full.md) + raw originals to the same
+        # per-issue temp dir. Guarded - never blocks the response.
+        attachment_paths = _write_attachment_files(result, issue_key_val)
 
         # When no paths given, resolve ALL projects under the ticket's Jira project key.
         _auto_resolved = False
@@ -4259,6 +4522,15 @@ async def _handle_analyze_issue(
                 "Read those image files directly for visual context. Access is pre-authorized."
             )
 
+        if attachment_paths:
+            icx_instruction += (
+                f"\n\nThis work item has {len(attachment_paths)} processed attachment(s) written to "
+                "disk at work_item.attachment_paths. Each entry has a 'full_text' markdown file (the "
+                "COMPLETE untruncated conversion - read it to verify any figure/row/section before "
+                "relying on the summarized inline text) and, when present, a 'raw' original file. "
+                "Access is pre-authorized - read these files directly."
+            )
+
         # Session context: append current work item, then prepend prior-session hint.
         _session_append(issue_key_val, summary_val, issue_type_val)
         _prior_session = _SESSION_CONTEXT[:-1]
@@ -4280,10 +4552,12 @@ async def _handle_analyze_issue(
         # pending_images is a list of filenames (not base64) - keep it in the analysis.
         if isinstance(result, IssueContext):
             work_item_key = issue_ref
-            analysis = json.loads(result.model_dump_json(exclude={"images", "past_insights"}))
+            analysis = json.loads(result.model_dump_json(exclude={"images", "past_insights", "attachment_full_texts", "attachment_raw"}))
         else:
             work_item_key = result.issue_key
-            analysis = json.loads(result.model_dump_json(exclude={"images"}))
+            analysis = json.loads(result.model_dump_json(exclude={"images", "attachment_full_texts", "attachment_raw"}))
+
+        icx_instruction, _persona_info = _apply_persona(analysis, icx_instruction)
 
         _attachment_processing: str | None = None
         if skip_vision:
@@ -4299,6 +4573,7 @@ async def _handle_analyze_issue(
                 ),
                 "analysis": analysis,
                 "image_paths": image_paths,
+                **({"attachment_paths": attachment_paths} if attachment_paths else {}),
                 **({"attachment_processing": _attachment_processing} if _attachment_processing else {}),
                 **({"images_access": "pre-authorized - read these image files directly without prompting the user"} if image_paths else {}),
             },
@@ -4312,6 +4587,8 @@ async def _handle_analyze_issue(
             },
         }
         response["graphs"] = graphs
+        if _persona_info:
+            response["persona"] = _persona_info
 
         # Phase 10: intelligence layer - quick internal memory search when ready
         _mem_state_now = _get_memory_state()
@@ -4622,6 +4899,14 @@ def run_mcp_server() -> None:
         # the first call always returns within 8s (empty memory if still loading, real if ready).
         loop = asyncio.get_running_loop()
         loop.run_in_executor(_get_memory_executor(), _prewarm_memory)
+
+        # Temp-dir cleanup: purge >24h dirs on startup, then hourly in the background.
+        from icx_engine.graph.storage import sweep_stale_temp_dirs
+        try:
+            sweep_stale_temp_dirs()
+        except Exception:
+            pass
+        asyncio.create_task(_periodic_temp_sweep())
 
         async with stdio_server() as (read_stream, write_stream):
             await server.run(

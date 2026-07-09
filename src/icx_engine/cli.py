@@ -1537,14 +1537,14 @@ def analyze(
     if raw_images:
         try:
             import base64 as _b64
-            from icx_engine.graph.storage import temp_images_dir as _tid, sweep_stale_temp_dirs as _sweep
+            from icx_engine.graph.storage import ensure_issue_temp_dir as _ensure_dir, sweep_stale_temp_dirs as _sweep, safe_temp_filename
             _ALLOWED_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"})
             _sweep()
-            img_dir = _tid(url)
-            img_dir.mkdir(parents=True, exist_ok=True)
+            img_dir = _ensure_dir(url)
+            _used_img: set[str] = set()
             for fname, b64_data in raw_images.items():
-                safe = Path(fname).name
-                if safe and Path(safe).suffix.lower() in _ALLOWED_EXTS:
+                safe = safe_temp_filename(fname, _used_img)
+                if Path(safe).suffix.lower() in _ALLOWED_EXTS:
                     img_path = img_dir / safe
                     img_path.write_bytes(_b64.b64decode(b64_data))
                     image_paths[fname] = str(img_path)
@@ -2015,7 +2015,7 @@ def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: Tracebac
       icx mcp setup --host claude    Configure Claude Code only
       icx mcp setup --host cursor    Configure Cursor only
     """
-    from icx_engine.mcp_hosts import get_host, detect_installed_hosts, write_icx_entry
+    from icx_engine.mcp_hosts import get_host, detect_installed_hosts, write_icx_entry, install_enforcement
 
     try:
         if host is not None:
@@ -2041,6 +2041,10 @@ def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: Tracebac
                 )
             else:
                 console.print(f"[green]OK ICX entry written to {result.path}[/green]")
+            # Install ICX-first ticket-routing enforcement (Claude Code only; no-op elsewhere).
+            if not result.fallback:
+                for msg in install_enforcement(target):
+                    console.print(f"[green]OK {msg}[/green]")
     except typer.Exit:
         raise
     except Exception as exc:
@@ -2057,7 +2061,7 @@ def mcp_remove(host: HostOpt = None, debug: DebugOpt = False, traceback: Traceba
       icx mcp remove                 Remove ICX from all detected editors
       icx mcp remove --host claude   Remove from Claude Code only
     """
-    from icx_engine.mcp_hosts import get_host, detect_installed_hosts, remove_icx_entry
+    from icx_engine.mcp_hosts import get_host, detect_installed_hosts, remove_icx_entry, remove_enforcement
 
     try:
         if host is not None:
@@ -2080,6 +2084,9 @@ def mcp_remove(host: HostOpt = None, debug: DebugOpt = False, traceback: Traceba
                 console.print(f"[green]OK ICX entry removed from {target.config_path}[/green]")
             else:
                 typer.echo(f"No ICX entry found in {target.config_path}")
+            # Remove ICX-first ticket-routing enforcement (Claude Code only; no-op elsewhere).
+            for msg in remove_enforcement(target):
+                console.print(f"[green]OK {msg}[/green]")
     except typer.Exit:
         raise
     except Exception as exc:
@@ -2131,6 +2138,16 @@ def graph_add(
     except Exception as exc:
         render_icx_error(exc, err_console)
         raise typer.Exit(1)
+
+
+def _format_build_duration(seconds: float) -> str:
+    """Human-readable build duration: '8s', '1m 37s', '1h 04m'."""
+    total = int(round(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m {total % 60:02d}s"
+    return f"{total // 3600}h {(total % 3600) // 60:02d}m"
 
 
 def _run_build_with_progress(mgr, project_id: str, force: bool, skip_llm: bool = False) -> dict:
@@ -2333,7 +2350,10 @@ def graph_build(
             display_name = meta.name or pid
             console.print(f"\n  Building codebase graph: [bold]{display_name}[/bold]")
 
+            import time as _time
+            _build_started = _time.perf_counter()
             result = _run_build_with_progress(mgr, pid, force, skip_llm=no_llm)
+            _build_elapsed = _time.perf_counter() - _build_started
 
             if result.get("error"):
                 err_console.print(f"[red]Build failed:[/red] {result['error']}")
@@ -2347,7 +2367,8 @@ def graph_build(
 
             console.print(
                 f"\n  [green]Graph ready.[/green] "
-                f"{file_count} files | {node_count} nodes | {edge_count} edges | {community_count} communities\n"
+                f"{file_count} files | {node_count} nodes | {edge_count} edges | {community_count} communities | "
+                f"{_format_build_duration(_build_elapsed)}\n"
                 f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
             )
 

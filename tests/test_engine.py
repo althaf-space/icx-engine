@@ -1088,7 +1088,7 @@ async def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
         connector = MagicMock()
         connector.parse_input.return_value = MagicMock(issue_key="TEST-1")
         connector.fetch = AsyncMock(return_value=raw_ticket)
-        connector.process_attachments = AsyncMock(return_value=({}, {}))
+        connector.process_attachments = AsyncMock(return_value=({}, {}, {}, {}))
         mock_gc.return_value = connector
 
         provider = MagicMock()
@@ -1148,7 +1148,7 @@ async def test_engine_injects_past_insights_when_memory_hits():
     mock_connector = MagicMock()
     mock_connector.parse_input.return_value = MagicMock(issue_key="PROJ-456")
     mock_connector.fetch = AsyncMock(return_value=raw)
-    mock_connector.process_attachments = AsyncMock(return_value=({}, {}))
+    mock_connector.process_attachments = AsyncMock(return_value=({}, {}, {}, {}))
     mock_connector.connector_type.return_value = "jira"
 
     mock_provider = MagicMock()
@@ -1201,7 +1201,7 @@ async def test_engine_memory_exception_does_not_propagate():
     mock_connector = MagicMock()
     mock_connector.parse_input.return_value = MagicMock(issue_key="PROJ-456")
     mock_connector.fetch = AsyncMock(return_value=raw)
-    mock_connector.process_attachments = AsyncMock(return_value=({}, {}))
+    mock_connector.process_attachments = AsyncMock(return_value=({}, {}, {}, {}))
     mock_connector.connector_type.return_value = "jira"
 
     from icx_engine.models.output import IssueContext
@@ -1483,11 +1483,31 @@ async def test_full_mode_calls_process_attachments(app_config):
         mock_cls.return_value = mock_client
         mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
         with patch("icx_engine.connectors.jira.connector.JiraConnector.process_attachments", new_callable=AsyncMock) as mock_pa:
-            mock_pa.return_value = ({}, {})
+            mock_pa.return_value = ({}, {}, {}, {})
             with patch("icx_engine.memory.MemoryManager"):
                 result = await run("TEST-123", app_config, skip_vision=False)
     mock_pa.assert_called_once()
     assert isinstance(result, IssueContext)
+
+
+@respx.mock
+async def test_full_mode_sets_attachment_full_texts(app_config):
+    """Full mode carries attachment_full_texts / attachment_raw onto the result."""
+    from icx_engine.models.output import IssueContext
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
+    )
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.connectors.jira.connector.JiraConnector.process_attachments", new_callable=AsyncMock) as mock_pa:
+            mock_pa.return_value = ({"a.csv": "inline"}, {}, {"a.csv": "FULL"}, {"a.csv": "B64"})
+            with patch("icx_engine.memory.MemoryManager"):
+                result = await run("TEST-123", app_config, skip_vision=False)
+    assert isinstance(result, IssueContext)
+    assert result.attachment_full_texts == {"a.csv": "FULL"}
+    assert result.attachment_raw == {"a.csv": "B64"}
 
 
 @respx.mock

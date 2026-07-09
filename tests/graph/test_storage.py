@@ -29,8 +29,51 @@ from icx_engine.graph.storage import (
     _project_dir_path,
     temp_images_dir,
     sweep_stale_temp_dirs,
+    ensure_issue_temp_dir,
+    safe_temp_filename,
 )
 from icx_engine.exceptions import GraphError
+
+
+def test_safe_temp_filename_narrow_nbsp_becomes_ascii():
+    # U+202F NARROW NO-BREAK SPACE between time and PM (the real failing case).
+    name = "Screenshot 2026-07-07 at 3.45\u202fPM.png"
+    out = safe_temp_filename(name)
+    assert all(ord(c) < 128 for c in out)          # fully ASCII -> round-trips
+    assert out.endswith(".png")
+    assert "\u202f" not in out
+
+
+def test_safe_temp_filename_normal_names_unchanged():
+    for n in ["report.xlsx", "my file (1).png", "data.csv"]:
+        assert safe_temp_filename(n) == n
+
+
+def test_safe_temp_filename_strips_path_and_illegal_chars():
+    assert safe_temp_filename("a/b/../evil.png") == "evil.png"
+    assert "|" not in safe_temp_filename("bad|name?.png")
+
+
+def test_safe_temp_filename_dedup_within_batch():
+    used: set[str] = set()
+    a = safe_temp_filename("shot\u202f.png", used)
+    b = safe_temp_filename("shot\xa0.png", used)   # both normalize to "shot .png"
+    assert a != b
+
+
+def test_ensure_issue_temp_dir_creates_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.graph.storage.temp_root", lambda: tmp_path)
+    d = ensure_issue_temp_dir("PROJ-1")
+    assert d.exists() and d.is_dir()
+    assert d.parent == tmp_path
+
+
+def test_ensure_issue_temp_dir_owner_only_perms_posix(tmp_path, monkeypatch):
+    import sys, stat
+    monkeypatch.setattr("icx_engine.graph.storage.temp_root", lambda: tmp_path)
+    d = ensure_issue_temp_dir("PROJ-2")
+    if sys.platform != "win32":
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
 
 
 # ---------------------------------------------------------------------------
