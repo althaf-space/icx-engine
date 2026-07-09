@@ -10,7 +10,7 @@ from icx_engine.models.config import AppConfig, LLMConfig, ChannelConfig
 def test_help_exits_cleanly(cli_runner):
     result = cli_runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("connection", "model", "analyze", "status", "logout", "mcp", "graph"):
+    for cmd in ("connection", "model", "analyze", "status", "logout", "mcp", "graph", "test"):
         assert cmd in result.output
 
 
@@ -71,6 +71,15 @@ def test_mcp_help(cli_runner):
         assert cmd in result.output
 
 
+def test_test_rules_command(cli_runner, tmp_path, monkeypatch):
+    from icx_engine.testing import rules as _rules
+    monkeypatch.setattr(_rules, "rules_dir", lambda: tmp_path / "testing_rules")
+    result = cli_runner.invoke(app, ["test", "rules"])
+    assert result.exit_code == 0
+    assert "2b.md" in result.output
+    assert "compat_scan.md" in result.output
+
+
 def test_status_runs_with_no_config(cli_runner):
     from unittest.mock import patch
     with patch.object(ConfigManager, "load", return_value=AppConfig()):
@@ -115,9 +124,9 @@ def test_status_shows_indexed_ai_profiles(cli_runner):
     assert result.exit_code == 0
     # Profile names may be truncated by Rich when terminal width is narrow in tests.
     # Check for a prefix that survives truncation.
-    assert "perso" in result.output  # "personal" or "perso…"
+    assert "perso" in result.output  # "personal" or "perso..."
     assert "work" in result.output
-    assert "ACTI" in result.output   # "[ACTIVE]" or "[ACTI…"
+    assert "ACTI" in result.output   # "[ACTIVE]" or "[ACTI..."
 
 
 def test_analyze_requires_argument(cli_runner):
@@ -375,3 +384,147 @@ def test_logout_help(cli_runner):
 def test_uninstall_help(cli_runner):
     result = cli_runner.invoke(app, ["uninstall", "--help"])
     assert result.exit_code in (0, 2)
+
+
+def test_test_group_in_help(cli_runner):
+    result = cli_runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "test" in result.output
+
+
+def test_test_help_shows_subcommands(cli_runner):
+    result = cli_runner.invoke(app, ["test", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    for cmd in ("health", "run", "status", "sessions", "cancel"):
+        assert cmd in output
+
+
+def test_test_health_requires_magik_running(cli_runner):
+    result = cli_runner.invoke(app, ["test", "health"])
+    # Either succeeds (Magik running) or exits with non-zero (unreachable).
+    # We just check it doesn't crash with an unhandled exception.
+    # typer.Exit raises SystemExit - that is the controlled exit path, not a crash.
+    assert result.exit_code in (0, 1)
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_test_module_importable():
+    from icx_engine.testing.client import MagikClient
+    from icx_engine.testing.state import TestingState, make_initial_state
+    from icx_engine.testing.graph import get_db_path
+    assert callable(MagikClient)
+    assert callable(make_initial_state)
+    assert callable(get_db_path)
+
+
+def test_v2_testing_modules_importable():
+    import icx_engine.testing.classify          # noqa: F401
+    import icx_engine.testing.compat             # noqa: F401
+    import icx_engine.testing.handlers           # noqa: F401
+    import icx_engine.testing.expand             # noqa: F401
+    from icx_engine.testing.nodes import (        # noqa: F401
+        node_pick_type, node_compat_check, route_after_expand, route_after_compat,
+    )
+
+
+def test_appconfig_has_sonar_fields():
+    from icx_engine.models.config import AppConfig
+    cfg = AppConfig()
+    assert hasattr(cfg, "sonar_project_key")
+    assert hasattr(cfg, "sonar_token")
+    assert "sonar_token" not in cfg.model_dump()
+
+
+def test_appconfig_has_agent_step_fields():
+    from icx_engine.models.config import AppConfig
+    cfg = AppConfig()
+    assert cfg.magik_agent_max_steps == 50
+    assert cfg.magik_agent_step_cap == 60
+
+
+def test_test_configure_sets_agent_steps(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    from icx_engine.config_manager import ConfigManager
+    # answers in prompt order: base_url, api_key, max_iterations, agent_max_steps, agent_step_cap
+    result = cli_runner.invoke(app, ["test", "configure"], input="http://host-x:7646\n\n7\n40\n80\n")
+    assert result.exit_code == 0
+    cfg = ConfigManager.load()
+    assert cfg.magik_max_iterations == 7
+    assert cfg.magik_agent_max_steps == 40
+    assert cfg.magik_agent_step_cap == 80
+
+
+def test_test_configure_help_mentions_steps(cli_runner):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["test", "configure", "--help"])
+    assert result.exit_code == 0
+    assert "step" in result.stdout.lower()
+
+
+def test_appconfig_has_sonar_enable_fields():
+    from icx_engine.models.config import AppConfig
+    cfg = AppConfig()
+    assert cfg.sonar_enabled is False
+    assert cfg.sonar_url is None
+
+
+def test_sonar_help_lists_commands(cli_runner):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["sonar", "--help"])
+    assert result.exit_code == 0
+    out = result.stdout.lower()
+    for cmd in ("add", "list", "active", "remove", "status", "projects", "report"):
+        assert cmd in out
+
+
+def test_sonar_report_no_connection_message(cli_runner, isolated_config):
+    # default config has no Sonar connection -> report should guide, not crash
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["sonar", "report", "--project", "my-project"])
+    assert "sonar add" in result.stdout.lower()
+
+
+def test_sonar_report_prints_summary(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    from icx_engine.sonar import service
+    captured = {}
+
+    async def fake_report(project, branch=None, files=None, new_code_only=False):
+        captured["project"] = project
+        captured["files"] = files
+        return {
+            "quality_gate": {"status": "ERROR"},
+            "measures": {"bugs": 3, "vulnerabilities": 1, "code_smells": 5,
+                         "security_hotspots": 2, "coverage": 70.0,
+                         "duplicated_lines_density": 4.0, "technical_debt": "1d"},
+            "summary": {"total": 9, "by_severity": {"MAJOR": 9}},
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(service, "report", fake_report)
+    result = cli_runner.invoke(
+        app, ["sonar", "report", "--project", "my-project", "--file", "src/a.py"])
+    assert result.exit_code == 0
+    assert captured["project"] == "my-project"
+    assert captured["files"] == ["src/a.py"]
+    assert "error" in result.stdout.lower()
+
+
+def test_version_tuple_handles_prerelease_suffix():
+    """_version_tuple parses pre-release segments without raising (finding C2)."""
+    from icx_engine.cli import _version_tuple
+    assert _version_tuple("0.4.0rc1") == (0, 4, 0)
+    assert _version_tuple("1.2.3") == (1, 2, 3)
+    assert _version_tuple("0.4.0rc1") < _version_tuple("0.4.1")
+    assert _version_tuple("2.0.0") > _version_tuple("1.9.9")
+    assert _version_tuple("") == (0,)
+
+
+def test_format_build_duration():
+    """Graph-build duration shown in the 'Graph ready' summary."""
+    from icx_engine.cli import _format_build_duration
+    assert _format_build_duration(8) == "8s"
+    assert _format_build_duration(45.4) == "45s"
+    assert _format_build_duration(97) == "1m 37s"
+    assert _format_build_duration(3660) == "1h 01m"

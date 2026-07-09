@@ -73,6 +73,34 @@ class TestGetBlastRadius:
         assert "b.py" not in result["direct_dependents"]
         assert "b.py" not in result["transitive_dependents"]
 
+    def test_production_edges_with_string_confidence_enum(self):
+        # A real graph.json edge carries `confidence` as a STRING enum
+        # ("EXTRACTED"/"INFERRED"/"AMBIGUOUS", set by build) plus a numeric
+        # `confidence_score`. blast_radius must compare the numeric score and
+        # never the string (previously raised TypeError: str < float).
+        nodes = [_n("n_core", "core.py"), _n("n_user", "user.py")]
+        links = [{
+            "source": "n_user", "target": "n_core",
+            "source_file": "user.py", "target_file": "core.py",
+            "confidence": "EXTRACTED", "confidence_score": 0.95,
+        }]
+        q = _build_querier(nodes, links)
+        result = q.get_blast_radius(["core.py"], min_confidence=0.5)
+        assert "user.py" in (
+            result["direct_dependents"] + result["transitive_dependents"]
+        )
+        # An AMBIGUOUS edge below the threshold must be filtered, not crash.
+        links_low = [{
+            "source": "n_user", "target": "n_core",
+            "source_file": "user.py", "target_file": "core.py",
+            "confidence": "AMBIGUOUS", "confidence_score": 0.2,
+        }]
+        q2 = _build_querier(nodes, links_low)
+        result2 = q2.get_blast_radius(["core.py"], min_confidence=0.5)
+        assert "user.py" not in (
+            result2["direct_dependents"] + result2["transitive_dependents"]
+        )
+
     def test_missing_changes_includes_cochange_partners(self):
         nodes = [_n("n_a", "a.py"), _n("n_b", "b.py"), _n("n_c", "c.py")]
         links = [

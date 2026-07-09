@@ -59,5 +59,5 @@ def test_build_returns_error_on_empty_dir(tmp_path):
         str(tmp_path / "cache"),
     )
     assert isinstance(result, dict)
-    # Empty dir: no git, no source files → file_count == 0 or error
+    # Empty dir: no git, no source files -> file_count == 0 or error
     assert result["file_count"] == 0 or result.get("error") is not None

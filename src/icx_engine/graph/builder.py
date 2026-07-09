@@ -208,9 +208,14 @@ def _merge_incremental(
     ]
     # Edges that reference a node removed above (e.g. file renamed/deleted)
     # become dangling even if the edge itself isn't tagged with that file.
+    # A node id re-emitted by the fresh extraction is NOT removed - the changed
+    # file was re-parsed and produced the same deterministic id (_make_id is
+    # path/symbol based, no line numbers). Subtracting new ids keeps the changed
+    # file's freshly-extracted edges instead of pruning them as dangling.
     existing_node_ids = {n.get("id") for n in existing_graph.get("nodes", [])}
     surviving_node_ids = {n.get("id") for n in surviving_nodes}
-    removed_ids = existing_node_ids - surviving_node_ids
+    new_node_ids = {n.get("id") for n in new_extraction.get("nodes", [])}
+    removed_ids = existing_node_ids - surviving_node_ids - new_node_ids
 
     merged_links = surviving_edges + new_extraction.get(
         "links", new_extraction.get("edges", [])
@@ -437,7 +442,6 @@ def _build_project_isolated(
             + (1 if _has_csharp else 0)  # OmniSharp LSP
             + (1 if _has_php else 0)     # intelephense LSP
             + (1 if _has_cpp else 0)     # clangd LSP
-            + (1 if _has_java else 0)    # jdtls LSP
             + (1 if _has_kotlin else 0)  # kotlin-language-server LSP
             + 1                           # final edges summary
         ))
@@ -521,21 +525,6 @@ def _build_project_isolated(
             except Exception as kt_exc:
                 _log.debug("kotlin_symbols resolver failed (%s)", type(kt_exc).__name__)
             _lsp_tick("kotlin symbols")
-
-        if _has_java:
-            _lsp_pre("jdtls LSP")
-            try:
-                from icx_engine.graph.parser.resolvers.java_lsp import extract_java_lsp_edges
-                java_lsp_edges = _abs_edges(extract_java_lsp_edges(files, project_path, extraction))
-                if java_lsp_edges:
-                    extraction = {
-                        **extraction,
-                        "edges": list(extraction.get("edges", [])) + java_lsp_edges,
-                    }
-                lsp_edge_count += len(java_lsp_edges)
-            except Exception as java_lsp_exc:
-                _log.debug("java_lsp resolver failed (%s)", type(java_lsp_exc).__name__)
-            _lsp_tick("jdtls LSP")
 
         if _has_kotlin:
             _lsp_pre("kotlin-language-server LSP")
@@ -911,6 +900,22 @@ def _build_project_isolated(
                 )
                 _Path(graph_tmp_path_str).write_text(
                     _json.dumps(merged, separators=(",", ":")), encoding="utf-8"
+                )
+                # The counts emitted above reflect only the freshly-parsed
+                # changed files (pre-merge). Recompute from the merged graph so
+                # the "Graph ready" summary shows the true total, not the small
+                # incremental delta.
+                _merged_nodes = merged.get("nodes", [])
+                _merged_links = merged.get("links", merged.get("edges", []))
+                result["node_count"] = len(_merged_nodes)
+                result["edge_count"] = len(_merged_links)
+                result["community_count"] = len({
+                    n.get("community") for n in _merged_nodes
+                    if n.get("community") is not None
+                })
+                progress.emit(
+                    "export", current=1, total=1,
+                    message=f"{result['node_count']} nodes, {result['edge_count']} edges (merged)",
                 )
             except Exception as _merge_exc:
                 _log.debug("incremental merge failed (%s), keeping full build", type(_merge_exc).__name__)

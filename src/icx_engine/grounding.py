@@ -10,15 +10,16 @@ _log = logging.getLogger(__name__)
 from icx_engine.models.config import ChannelConfig
 from icx_engine.models.output import RawIssueData, IssueContext
 from icx_engine.connectors.attachments import _mime_type as _media_type, _DEFAULT_BASE_URLS
+from icx_engine.llm.registry import api_style as _api_style
 
 _CONFIDENCE_THRESHOLD = 0.8
 
 _VERIFY_USER_TEMPLATE = """\
-You previously analyzed a Jira issue and produced this structured JSON:
+You previously analyzed a work item and produced this structured JSON:
 
 {initial_json}
 
-The original Jira description was:
+The original description was:
 {description}
 
 Examine the image(s) attached above for any contradictions with the JSON analysis.
@@ -88,9 +89,10 @@ async def visual_grounding_pass(
         return initial
 
     try:
-        if image_config.provider == "anthropic":
+        _style = _api_style(image_config.provider)
+        if _style == "anthropic":
             corrected = await _verify_anthropic(initial, raw, image_config, image_data)
-        elif image_config.provider == "google":
+        elif _style == "google":
             corrected = await _verify_google(initial, raw, image_config, image_data)
         else:
             corrected = await _verify_openai_compat(initial, raw, image_config, image_data)

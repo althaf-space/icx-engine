@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -6,16 +7,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from pydantic import BaseModel, Field
 
-from icx_engine.exceptions import MemoryError
+from icx_engine.exceptions import ICXMemoryError
+
+
+_SQ_MAX_LEN = 512
+_SQ_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _sq(value: str) -> str:
-    """Escape a string for use in a LanceDB SQL filter (single-quote escape)."""
+    """Escape a string for a LanceDB (Datafusion) SQL filter string literal.
+
+    Doubling single quotes is the correct and sufficient escape for Datafusion
+    string literals - backslash is literal there and must NOT be altered.
+    Control characters are stripped and length is capped as defense-in-depth
+    against pathological filter inputs; neither affects valid keys/ids/patterns.
+    """
+    value = _SQ_CONTROL_RE.sub("", value)[:_SQ_MAX_LEN]
     return value.replace("'", "''")
 
 
 def connect_with_timeout(db_path: Path, timeout: float = 3.0):
-    """Connect to LanceDB on a daemon thread, raising MemoryError if it hangs.
+    """Connect to LanceDB on a daemon thread, raising ICXMemoryError if it hangs.
 
     Guards against a stale file lock left by a previous server process.
     """
@@ -34,13 +46,13 @@ def connect_with_timeout(db_path: Path, timeout: float = 3.0):
     _t.start()
     _t.join(timeout)
     if _t.is_alive():
-        raise MemoryError(
+        raise ICXMemoryError(
             f"LanceDB connection timed out after {timeout:g} s at {db_path}. "
             "A stale file lock from a previous server process may be blocking access. "
             "Restart your system or kill orphan icx processes to release the lock."
         )
     if _exc[0] is not None:
-        raise MemoryError(f"LanceDB connection failed: {_exc[0]}") from _exc[0]
+        raise ICXMemoryError(f"LanceDB connection failed: {_exc[0]}") from _exc[0]
     return _result[0]
 
 

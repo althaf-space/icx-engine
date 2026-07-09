@@ -26,7 +26,7 @@ def _body_content(content: bytes) -> bytes:
     return content
 
 
-# Stat-based index: maps absolute path → {size, mtime_ns, hash}.
+# Stat-based index: maps absolute path -> {size, mtime_ns, hash}.
 # Loaded once per process, flushed via atexit. Skips full file reads when
 # size+mtime_ns are unchanged - same trade-off as make(1).
 # Correctness risks: `touch` causes a harmless extra re-hash; same-size edits

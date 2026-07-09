@@ -28,8 +28,8 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
     Tries Leiden (graspologic) first - best quality.
     Falls back to Louvain (built into networkx) if graspologic is not installed.
 
-    resolution > 1.0 → more, smaller communities.
-    resolution < 1.0 → fewer, larger communities.
+    resolution > 1.0 -> more, smaller communities.
+    resolution < 1.0 -> fewer, larger communities.
 
     Output from graspologic is suppressed to prevent ANSI escape codes
     from corrupting terminal scroll buffers on Windows PowerShell 5.1.
@@ -125,6 +125,20 @@ def _apply_confidence_weights(G: nx.Graph) -> nx.Graph:
 _PARTITION_TIMEOUT = 90  # seconds before injecting SystemExit into stuck louvain thread
 
 
+def _louvain_is_bounded() -> bool:
+    """True when networkx louvain accepts `max_level` (>=3.x), which caps its
+    iteration count so it CANNOT loop forever. When bounded, we skip the
+    background-thread timeout guard entirely - that guard exists only for the
+    pathological unbounded loop, and monitoring a CPU-bound pure-Python louvain
+    thread can spuriously fire (report a timeout the partition never actually
+    hit) under CPU pressure, wrongly dropping the result to a much poorer
+    connected-components fallback."""
+    try:
+        return "max_level" in inspect.signature(nx.community.louvain_communities).parameters
+    except Exception:
+        return False
+
+
 def _partition_safe(G: nx.Graph, resolution: float = 1.0) -> dict[str, int] | None:
     """Run _partition with a timeout. Returns None on timeout (caller falls back).
 
@@ -136,6 +150,17 @@ def _partition_safe(G: nx.Graph, resolution: float = 1.0) -> dict[str, int] | No
     Python 3.14 note: threading.Event.wait() may raise KeyboardInterrupt during
     interpreter shutdown in subprocess contexts. All wait() calls are guarded.
     """
+    # When louvain is bounded (max_level caps iterations) it completes in
+    # seconds and cannot hang, so run it inline - no background thread, no
+    # spurious-timeout fallback. The thread+timeout guard below is kept only for
+    # old networkx without max_level, where the inner loop can genuinely run
+    # forever on oscillating high-degree hubs.
+    if _louvain_is_bounded():
+        try:
+            return _partition(G, resolution)
+        except SystemExit:
+            return None
+
     result: list[dict[str, int] | None] = [None]
     error: list[BaseException | None] = [None]
     finished = threading.Event()

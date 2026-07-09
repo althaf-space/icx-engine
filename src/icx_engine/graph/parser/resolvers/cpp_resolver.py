@@ -96,14 +96,23 @@ def resolve_cpp(files: list, project_path, extraction: dict) -> list:
                         break
 
     # 3. intra-directory function calls
+    # Precompute each directory's (func_name, file) declarations once - in contents
+    # iteration + finditer order - instead of re-scanning every sibling file per file.
+    # Per-file dir_fns is rebuilt with the same last-write-wins (excluding self) semantics,
+    # so the resolved call edges are identical.
+    dir_fn_entries: dict[str, list[tuple[str, str]]] = {}
+    for _f, _content in contents.items():
+        _d = Path(_f).parent.as_posix()
+        _lst = dir_fn_entries.setdefault(_d, [])
+        for _m in _CPP_FN_DECL.finditer(_content):
+            _lst.append((_m.group(1), _f))
+
     for cpp_file, content in contents.items():
         dir_ = Path(cpp_file).parent.as_posix()
         dir_fns: dict[str, str] = {}
-        for other in contents:
-            if other == cpp_file or Path(other).parent.as_posix() != dir_:
-                continue
-            for m in _CPP_FN_DECL.finditer(contents.get(other, "")):
-                dir_fns[m.group(1)] = other
+        for fname, other in dir_fn_entries.get(dir_, ()):
+            if other != cpp_file:
+                dir_fns[fname] = other
         for fname, tgt_file in dir_fns.items():
             if re.search(rf'\b{re.escape(fname)}\s*\(', content):
                 for sn in node_by_file.get(cpp_file, []):

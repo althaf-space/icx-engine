@@ -1,7 +1,7 @@
 """
 Shared HTTP utilities for connector implementations.
 
-Provides a standard HTTP status → ICX exception mapping so connectors don't
+Provides a standard HTTP status -> ICX exception mapping so connectors don't
 each duplicate the same error-handling logic. Import check_http_status() in
 any connector that makes HTTP requests and needs to surface domain exceptions.
 

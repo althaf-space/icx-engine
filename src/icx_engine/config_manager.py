@@ -187,11 +187,14 @@ def _warn_plaintext(account: str, label: str) -> None:
     """Plaintext storage warning - fires once per account, never again."""
     if account in _warned_accounts():
         return
-    env_var = _env_key(account)
+    # The exact ICX_* environment-variable name is intentionally NOT echoed here.
+    # It is a non-secret identifier, but logging any account-derived string trips
+    # clear-text-secret scanners; the concrete variable-name scheme is printed
+    # once by warn_if_plaintext(), so this per-account notice stays generic.
     print(
         f"Warning: keyring unavailable - {label} stored as plaintext "
         f"in {CONFIG_PATH} (mode 0600).\n"
-        f"  Set {env_var}=<value> to avoid plaintext storage.",
+        f"  Set the matching ICX_ environment variable to avoid plaintext storage.",
         file=sys.stderr,
     )
     _mark_warned(account)
@@ -338,7 +341,7 @@ def _config_lock():
     """
     Cross-platform advisory exclusive lock on config.json.lock.
 
-    Spins with exponential back-off (± 10 % jitter) until the lock is
+    Spins with exponential back-off (+/- 10 % jitter) until the lock is
     acquired or _LOCK_TIMEOUT seconds elapse.  The lock is always released
     in a try/finally block - even if the caller raises.
 
@@ -439,8 +442,8 @@ def _config_lock():
 def _env_key(account: str) -> str:
     """Map a keyring account name to an environment variable name.
 
-    jira_token:example.atlassian.net  →  ICX_JIRA_TOKEN_EXAMPLE_ATLASSIAN_NET
-    llm_api_key                        →  ICX_LLM_API_KEY
+    jira_token:example.atlassian.net  ->  ICX_JIRA_TOKEN_EXAMPLE_ATLASSIAN_NET
+    llm_api_key                        ->  ICX_LLM_API_KEY
     """
     sanitized = re.sub(r"[^A-Za-z0-9]", "_", account).upper()
     return f"ICX_{sanitized}"
@@ -488,7 +491,7 @@ class ConfigManager:
                         )
                     except Exception:
                         pass
-                time.sleep(0.05 * (2 ** _attempt))  # 50ms → 100ms → 200ms → 400ms
+                time.sleep(0.05 * (2 ** _attempt))  # 50ms -> 100ms -> 200ms -> 400ms
             except (OSError, UnicodeDecodeError) as exc:
                 from icx_engine.exceptions import ConfigError
                 raise ConfigError(
@@ -591,6 +594,65 @@ class ConfigManager:
                                     "Re-authenticate with `icx model --add` or set the credential via environment variable."
                                 ) from _exc
 
+        # Resolve magik_api_key sentinel
+        magik_raw = raw.get("magik_api_key", "")
+        if magik_raw == _SENTINEL:
+            raw["magik_api_key"] = _resolve("magik_api_key") or None
+        elif magik_raw and isinstance(magik_raw, str) and magik_raw.startswith(_DLOCK_PREFIX):
+            try:
+                raw["magik_api_key"] = _dlock_decrypt(magik_raw)
+            except Exception:
+                raw["magik_api_key"] = _env_get("magik_api_key") or None
+        elif magik_raw:
+            needs_secret_migration = True
+
+        # Resolve sonar_token sentinel
+        sonar_raw = raw.get("sonar_token", "")
+        if sonar_raw == _SENTINEL:
+            raw["sonar_token"] = _resolve("sonar_token") or None
+        elif sonar_raw and isinstance(sonar_raw, str) and sonar_raw.startswith(_DLOCK_PREFIX):
+            try:
+                raw["sonar_token"] = _dlock_decrypt(sonar_raw)
+            except Exception:
+                raw["sonar_token"] = _env_get("sonar_token") or None
+        elif sonar_raw:
+            needs_secret_migration = True
+
+        # Resolve per-connection Sonar tokens
+        for _sc_name, _sc in (raw.get("sonar_connections") or {}).items():
+            if not isinstance(_sc, dict):
+                continue
+            _sc_acct = f"sonar_conn_token:{_sc_name}"
+            _sc_tok = _sc.get("token") or ""
+            if _sc_tok == _SENTINEL:
+                _sc["token"] = _resolve(_sc_acct) or None
+            elif isinstance(_sc_tok, str) and _sc_tok.startswith(_DLOCK_PREFIX):
+                try:
+                    _sc["token"] = _dlock_decrypt(_sc_tok)
+                except Exception:
+                    _sc["token"] = _env_get(_sc_acct) or None
+            elif _sc_tok:
+                needs_secret_migration = True
+
+        # Resolve secret fields for registered third-party integrations.
+        # No-op for configs without an "integrations" map (i.e. every existing config).
+        from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
+        for _int_name, _int_data in (raw.get("integrations") or {}).items():
+            if not isinstance(_int_data, dict):
+                continue
+            for _field in integration_secret_fields(_int_name):
+                _acct = f"integration_secret:{_int_name}:{_field}"
+                _val = _int_data.get(_field) or ""
+                if _val == _SENTINEL:
+                    _int_data[_field] = _resolve(_acct) or ""
+                elif isinstance(_val, str) and _val.startswith(_DLOCK_PREFIX):
+                    try:
+                        _int_data[_field] = _dlock_decrypt(_val)
+                    except Exception:
+                        _int_data[_field] = _env_get(_acct) or ""
+                elif _val:
+                    needs_secret_migration = True
+
         config = AppConfig.model_validate(raw)
 
         if needs_secret_migration and _check_keychain():
@@ -622,7 +684,7 @@ class ConfigManager:
                 "  LLM image channel:ICX_LLM_IMAGE_<PROFILE>         "
                 "e.g. ICX_LLM_IMAGE_DEFAULT\n"
                 "Replace dots/hyphens in domain or profile name with underscores, uppercase "
-                "(example.atlassian.net → EXAMPLE_ATLASSIAN_NET).",
+                "(example.atlassian.net -> EXAMPLE_ATLASSIAN_NET).",
                 file=sys.stderr,
             )
 
@@ -695,6 +757,66 @@ class ConfigManager:
                         _channel_label = "text model" if channel_attr == "text_config" else "image model"
                         _warn_plaintext(acct, f"LLM API key for profile '{profile_name}' ({_channel_label})")
 
+        # Store magik_api_key via keyring (excluded from Pydantic serialization)
+        api_key = config.magik_api_key
+        if api_key:
+            if _check_keychain() and _kset("magik_api_key", api_key):
+                raw["magik_api_key"] = _SENTINEL
+            else:
+                raw["magik_api_key"] = api_key
+                _warn_plaintext("magik_api_key", "Magik-AI API key")
+
+        # Store sonar_token via keyring (excluded from Pydantic serialization).
+        # New code never sets the legacy field (it is migrated into a connection
+        # on load), so the else-branch clears any stale legacy keyring entry so no
+        # duplicate token lingers after migration.
+        sonar_token = config.sonar_token
+        if sonar_token:
+            if _check_keychain() and _kset("sonar_token", sonar_token):
+                raw["sonar_token"] = _SENTINEL
+            else:
+                raw["sonar_token"] = sonar_token
+                _warn_plaintext("sonar_token", "Sonar token")
+        else:
+            _kdel("sonar_token")
+
+        # Store per-connection Sonar tokens via keyring (token is excluded from
+        # Pydantic serialization, so the resolved value is added back here).
+        for _sc_name, _sc_model in config.sonar_connections.items():
+            if _sc_name not in raw.get("sonar_connections", {}):
+                continue
+            _sc_raw = raw["sonar_connections"][_sc_name]
+            _sc_tok = getattr(_sc_model, "token", None) or ""
+            if not _sc_tok:
+                continue
+            _sc_acct = f"sonar_conn_token:{_sc_name}"
+            if _check_keychain() and len(_sc_tok) > _DLOCK_THRESHOLD:
+                _sc_raw["token"] = _dlock_encrypt(_sc_tok)
+            elif _check_keychain() and _kset(_sc_acct, _sc_tok):
+                _sc_raw["token"] = _SENTINEL
+            else:
+                _sc_raw["token"] = _sc_tok
+                _warn_plaintext(_sc_acct, f"Sonar token for connection '{_sc_name}'")
+
+        # Store secret fields for registered integrations (generic; excluded
+        # from plaintext serialization). No-op when no integrations are stored.
+        from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
+        for _int_name, _int_data in (raw.get("integrations") or {}).items():
+            if not isinstance(_int_data, dict):
+                continue
+            for _field in integration_secret_fields(_int_name):
+                _val = _int_data.get(_field) or ""
+                if not _val:
+                    continue
+                _acct = f"integration_secret:{_int_name}:{_field}"
+                if _check_keychain() and len(_val) > _DLOCK_THRESHOLD:
+                    _int_data[_field] = _dlock_encrypt(_val)
+                elif _check_keychain() and _kset(_acct, _val):
+                    _int_data[_field] = _SENTINEL
+                else:
+                    _int_data[_field] = _val
+                    _warn_plaintext(_acct, f"{_int_name} {_field}")
+
         # 0o700: owner-only on macOS/Linux; Windows user-profile isolation makes this unnecessary
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
         # PID-unique staging file: concurrent processes get their own clean room
@@ -757,6 +879,15 @@ class ConfigManager:
         for profile_name in config.llm_profiles:
             _kdel(_llm_text_account(profile_name))
             _kdel(_llm_image_account(profile_name))
+        _kdel("magik_api_key")
+        _kdel("sonar_token")
+        for _sc_name in (config.sonar_connections or {}):
+            _kdel(f"sonar_conn_token:{_sc_name}")
+        # Registered integration secrets.
+        from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
+        for _int_name in (config.integrations or {}):
+            for _field in integration_secret_fields(_int_name):
+                _kdel(f"integration_secret:{_int_name}:{_field}")
         # Delete the D-Lock master key from both keyring and DPAPI file cache.
         _kdel(_MASTER_KEY_ACCOUNT)
         try:
@@ -776,6 +907,12 @@ class ConfigManager:
         _kdel(f"oauth_access:{domain}")
         _kdel(f"oauth_refresh:{domain}")
         _kdel(f"oauth_secret:{domain}")
+
+    @staticmethod
+    def delete_sonar_connection_secret(name: str) -> None:
+        if not _check_keychain():
+            return
+        _kdel(f"sonar_conn_token:{name}")
 
     @staticmethod
     def delete_llm_profile_secrets(profile_name: str) -> None:

@@ -140,6 +140,17 @@ def test_resolve_by_path(registered, project_dir):
     assert mgr.resolve_project(project_path=str(project_dir)) == pid
 
 
+def test_resolve_unregistered_path_raises_and_writes_nothing(tmp_path):
+    """An unregistered valid dir must raise - never silently auto-register."""
+    unknown = tmp_path / "guessed_root"
+    unknown.mkdir()
+    mgr = GraphManager()
+    before = len(storage.list_projects())
+    with pytest.raises(GraphError, match="not registered"):
+        mgr.resolve_project(project_path=str(unknown))
+    assert len(storage.list_projects()) == before
+
+
 def test_resolve_no_args_raises():
     mgr = GraphManager()
     with pytest.raises(GraphError):

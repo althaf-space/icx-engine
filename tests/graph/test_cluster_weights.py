@@ -66,3 +66,27 @@ def test_cluster_uses_weights():
     for nodes in communities.values():
         all_nodes.update(nodes)
     assert all_nodes == {"a", "b", "c", "d", "e"}
+
+
+def test_bounded_louvain_runs_inline_without_timeout_thread():
+    """When networkx louvain supports max_level (bounded), _partition_safe runs
+    inline - no background thread, no spurious-timeout fallback. Result must be a
+    real partition (dict), not None."""
+    from icx_engine.graph.parser.cluster import _partition_safe, _louvain_is_bounded
+    import networkx as nx
+    assert _louvain_is_bounded()  # networkx >= 3.x
+    G = nx.Graph()
+    G.add_edges_from([("a", "b"), ("b", "c"), ("x", "y"), ("y", "z")])
+    result = _partition_safe(G)
+    assert isinstance(result, dict) and result  # real partition, not a timeout None
+
+
+def test_partition_safe_never_returns_none_on_normal_graph():
+    """Regression: a healthy graph must never fall back to connected-components
+    via a spurious timeout - _partition_safe returns a partition."""
+    from icx_engine.graph.parser.cluster import _partition_safe
+    import networkx as nx
+    G = nx.gnm_random_graph(500, 1500, seed=1)
+    G = nx.relabel_nodes(G, {n: f"n{n}" for n in G.nodes()})
+    result = _partition_safe(G)
+    assert isinstance(result, dict) and len(result) == G.number_of_nodes()

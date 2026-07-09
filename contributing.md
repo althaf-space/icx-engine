@@ -1,4 +1,4 @@
-﻿# Contributing to ICX
+# Contributing to ICX
 
 Thank you for considering a contribution to ICX. This project is built and maintained
 by a small team, and every improvement - whether a bug fix, a new connector, or better

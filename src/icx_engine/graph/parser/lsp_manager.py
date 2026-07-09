@@ -51,6 +51,14 @@ def _download_lsp(url: str, dest: Path, server_name: str = "") -> None:
                 f"{_LSP_CHECKSUMS[server_name]!r}, got {digest!r}"
             )
     elif server_name:
+        # Opt-in strict mode: refuse an unverified binary when the operator
+        # requires pinned checksums. Default (unset) preserves prior behavior.
+        if os.environ.get("ICX_REQUIRE_LSP_CHECKSUM") == "1":
+            dest.unlink(missing_ok=True)
+            raise ValueError(
+                f"No pinned checksum for {server_name} and ICX_REQUIRE_LSP_CHECKSUM=1 "
+                "is set - refusing to install an unverified language-server binary."
+            )
         _log.debug("No checksum pinned for %s - binary authenticity unverified", server_name)
 
 
@@ -233,7 +241,7 @@ def _unlink_quiet(path: Path) -> None:
         pass
 
 
-# ── Runtime detectors ─────────────────────────────────────────────────────────
+# -- Runtime detectors ---------------------------------------------------------
 
 def node_runtime() -> tuple[str, str] | None:
     """Detect Node and return (node_path, version_string)."""
@@ -372,7 +380,7 @@ def php_runtime() -> tuple[str, str] | None:
     return (php, out[0]) if out else None
 
 
-# ── Pre-built configs ─────────────────────────────────────────────────────────
+# -- Pre-built configs ---------------------------------------------------------
 
 def _ts_ls_binary(install_dir: Path) -> Path | None:
     pkg = install_dir / "node_modules" / "typescript-language-server"
@@ -518,70 +526,10 @@ GOPLS = LSPServerConfig(
 )
 
 
-_JDTLS_URL = "https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz"
-
-
-def _jdtls_config_dir_name() -> str:
-    if sys.platform == "win32":
-        return "config_win"
-    if sys.platform == "darwin":
-        return "config_mac"
-    return "config_linux"
-
-
-def _jdtls_binary(install_dir: Path) -> Path | None:
-    plugins = install_dir / "plugins"
-    if not plugins.is_dir():
-        return None
-    candidates = sorted(plugins.glob("org.eclipse.equinox.launcher_*.jar"))
-    return candidates[0] if candidates else None
-
-
-def _jdtls_install(runtime_path: str, install_dir: Path) -> bool:
-    import tarfile
-
-    archive = install_dir / "jdtls.tar.gz"
-    try:
-        _download_lsp(_JDTLS_URL, archive, "jdtls")
-        with tarfile.open(archive) as tf:
-            _safe_extract_tar(tf, install_dir)
-    except Exception as exc:
-        _log.debug("jdtls: download/extract failed: %s", exc)
-        return False
-    finally:
-        _unlink_quiet(archive)
-    return True
-
-
-def _jdtls_start(binary: Path, runtime_path: str) -> list[str]:
-    install_dir = binary.parent.parent
-    config_dir = install_dir / _jdtls_config_dir_name()
-    return [
-        runtime_path,
-        "-Declipse.application=org.eclipse.jdt.ls.core.id1",
-        "-Dosgi.bundles.defaultStartLevel=4",
-        "-Declipse.product=org.eclipse.jdt.ls.core.product",
-        "-Dlog.level=ERROR",
-        "-Xmx1G",
-        "--add-modules=ALL-SYSTEM",
-        "--add-opens", "java.base/java.util=ALL-UNNAMED",
-        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
-        "-jar", str(binary),
-        "-configuration", str(config_dir),
-    ]
-
-
-JDTLS = LSPServerConfig(
-    name="jdtls",
-    get_runtime=java_runtime,
-    install_dir=ICX_HOME / "jdtls",
-    binary_fn=_jdtls_binary,
-    install_fn=_jdtls_install,
-    start_fn=_jdtls_start,
-)
-
-
-_KOTLIN_LS_URL = "https://github.com/fwcd/kotlin-language-server/releases/latest/download/server.zip"
+# Pinned to a fixed release so the downloaded bytes are deterministic (was
+# `latest`). Bump this version deliberately; do not revert to `latest`.
+_KOTLIN_LS_VERSION = "1.3.13"
+_KOTLIN_LS_URL = f"https://github.com/fwcd/kotlin-language-server/releases/download/{_KOTLIN_LS_VERSION}/server.zip"
 
 
 def _kotlin_ls_binary(install_dir: Path) -> Path | None:
@@ -631,7 +579,9 @@ def _arch_x64_or_arm64() -> str:
     return "arm64" if machine in ("arm64", "aarch64") else "x64"
 
 
-_RUST_ANALYZER_BASE = "https://github.com/rust-lang/rust-analyzer/releases/latest/download"
+# Pinned release (was `latest`). Bump deliberately.
+_RUST_ANALYZER_VERSION = "2026-06-29"
+_RUST_ANALYZER_BASE = f"https://github.com/rust-lang/rust-analyzer/releases/download/{_RUST_ANALYZER_VERSION}"
 
 
 def _rust_analyzer_asset() -> str:
@@ -687,7 +637,9 @@ RUST_ANALYZER = LSPServerConfig(
 )
 
 
-_OMNISHARP_BASE = "https://github.com/OmniSharp/omnisharp-roslyn/releases/latest/download"
+# Pinned release (was `latest`). Bump deliberately.
+_OMNISHARP_VERSION = "v1.39.15"
+_OMNISHARP_BASE = f"https://github.com/OmniSharp/omnisharp-roslyn/releases/download/{_OMNISHARP_VERSION}"
 
 
 def _omnisharp_asset() -> tuple[str, bool]:
@@ -783,21 +735,8 @@ INTELEPHENSE = LSPServerConfig(
 )
 
 
-_CLANGD_API_URL = "https://api.github.com/repos/clangd/clangd/releases/latest"
-
-
-def _clangd_release_tag() -> str | None:
-    import urllib.request
-
-    try:
-        req = urllib.request.Request(_CLANGD_API_URL, headers={"Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=_VERSION_TIMEOUT_SECONDS) as resp:
-            data = json.load(resp)
-        tag = data.get("tag_name")
-        return tag if tag else None
-    except Exception as exc:
-        _log.debug("clangd: failed to fetch latest release tag: %s", exc)
-        return None
+# Pinned release (was a mutable GitHub `releases/latest` API lookup). Bump deliberately.
+_CLANGD_VERSION = "22.1.6"
 
 
 def _clangd_asset(tag: str) -> str:
@@ -817,10 +756,7 @@ def _clangd_binary(install_dir: Path) -> Path | None:
 def _clangd_install(runtime_path: str, install_dir: Path) -> bool:
     import zipfile
 
-    tag = _clangd_release_tag()
-    if not tag:
-        return False
-
+    tag = _CLANGD_VERSION
     asset = _clangd_asset(tag)
     archive = install_dir / asset
     try:

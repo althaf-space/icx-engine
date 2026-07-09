@@ -24,7 +24,7 @@ class ChangeResult:
 
 
 _SMALL_DELTA_MAX_FILES = 5
-_SMALL_DELTA_MAX_RATIO = 0.03   # 3%
+_SMALL_DELTA_MAX_RATIO = 0.01   # 1%
 _MTIME_SAMPLE_SIZE = 50          # files sampled for mtime fallback
 _GIT_TIMEOUT = 10        # build-time ops (current_git_commit during graph build)
 _GIT_FAST_TIMEOUT = 2    # staleness checks - must not block MCP event loop
@@ -142,7 +142,7 @@ def _mtime_changed_files(
     Falls back to "last hour" if last_built not available.
     """
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         if last_built:
             try:

@@ -1,5 +1,5 @@
 """
-Jira API response → RawIssueData mapping.
+Jira API response -> RawIssueData mapping.
 
 Responsible for all data transformation from Jira's JSON format into the
 platform-agnostic RawIssueData contract. Kept separate from the HTTP client

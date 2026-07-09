@@ -91,7 +91,7 @@ def test_render_non_ice_exception_uses_fallback():
     assert "unexpected" in out
 
 
-# ── Context-aware AuthError guidance ─────────────────────────────────────────
+# -- Context-aware AuthError guidance -----------------------------------------
 
 @pytest.mark.parametrize("msg,expected_how", [
     ("Gemini API key is invalid", "icx model --add"),

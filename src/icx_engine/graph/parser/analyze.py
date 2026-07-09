@@ -116,7 +116,7 @@ def surprising_connections(
 
     Strategy:
     - Multi-file corpora: cross-file edges between real entities (not concept nodes).
-      Sorted AMBIGUOUS → INFERRED → EXTRACTED.
+      Sorted AMBIGUOUS -> INFERRED -> EXTRACTED.
     - Single-file / single-source corpora: cross-community edges that bridge
       distant parts of the graph (betweenness centrality on edges).
       These reveal non-obvious structural couplings.
@@ -151,7 +151,7 @@ def _is_concept_node(G: nx.Graph, node_id: str) -> bool:
     source = data.get("source_file", "")
     if not source:
         return True
-    # Has no file extension → probably a concept label, not a real file
+    # Has no file extension -> probably a concept label, not a real file
     if "." not in source.split("/")[-1]:
         return True
     return False
@@ -200,7 +200,7 @@ def _surprise_score(
 
     # Suppress all structural bonuses for INFERRED calls/uses that cross language
     # boundaries or connect code to a doc file.  Both cases are resolver pollution:
-    # label-matching fires across language families in monorepos, and code→doc
+    # label-matching fires across language families in monorepos, and code->doc
     # "calls" edges are extraction artefacts, not real architecture.
     # Excludes `semantically_similar_to` (genuine cross-boundary insight) and all
     # AMBIGUOUS/EXTRACTED edges (not from the resolver path).
@@ -216,10 +216,10 @@ def _surprise_score(
     if conf in ("AMBIGUOUS", "INFERRED"):
         reasons.append(f"{conf.lower()} connection - not explicitly stated in source")
 
-    # 2. Cross file-type bonus - code↔paper or code↔image is non-obvious
+    # 2. Cross file-type bonus - code<->paper or code<->image is non-obvious
     if cat_u != cat_v and not _suppress_structural:
         score += 2
-        reasons.append(f"crosses file types ({cat_u} ↔ {cat_v})")
+        reasons.append(f"crosses file types ({cat_u} <-> {cat_v})")
 
     # 3. Cross-repo bonus - different top-level directory
     if _top_level_dir(u_source) != _top_level_dir(v_source) and not _suppress_structural:
@@ -238,7 +238,7 @@ def _surprise_score(
         score = int(score * 1.5)
         reasons.append("semantically similar concepts with no structural link")
 
-    # 5. Peripheral→hub: a low-degree node connecting to a high-degree one
+    # 5. Peripheral->hub: a low-degree node connecting to a high-degree one
     deg_u = degrees[u] if degrees is not None else G.degree(u)
     deg_v = degrees[v] if degrees is not None else G.degree(v)
     if min(deg_u, deg_v) <= 2 and max(deg_u, deg_v) >= 5:
@@ -257,10 +257,10 @@ def _cross_file_surprises(G: nx.Graph, communities: dict[int, list[str]], top_n:
 
     Surprise score accounts for:
     - Confidence (AMBIGUOUS > INFERRED > EXTRACTED)
-    - Cross file-type (code↔paper is more surprising than code↔code)
+    - Cross file-type (code<->paper is more surprising than code<->code)
     - Cross-repo (different top-level directory)
     - Cross-community (Leiden says structurally distant)
-    - Peripheral→hub (low-degree node reaching a god node)
+    - Peripheral->hub (low-degree node reaching a god node)
 
     Each result includes a 'why' field explaining what makes it non-obvious.
     """
@@ -349,7 +349,7 @@ def _cross_community_surprises(
             })
         return result
 
-    # Build node → community map
+    # Build node -> community map
     node_community = _node_community_map(communities)
 
     surprises = []
@@ -381,7 +381,7 @@ def _cross_community_surprises(
             ],
             "confidence": confidence,
             "relation": relation,
-            "note": f"Bridges community {cid_u} → community {cid_v}",
+            "note": f"Bridges community {cid_u} -> community {cid_v}",
             "_pair": tuple(sorted([cid_u, cid_v])),
         })
 
@@ -389,7 +389,7 @@ def _cross_community_surprises(
     order = {"AMBIGUOUS": 0, "INFERRED": 1, "EXTRACTED": 2}
     surprises.sort(key=lambda x: order.get(x["confidence"], 3))
 
-    # Deduplicate by community pair - one representative edge per (A→B) boundary.
+    # Deduplicate by community pair - one representative edge per (A->B) boundary.
     # Without this, a single high-betweenness god node dominates all results.
     seen_pairs: set[tuple] = set()
     deduped = []
@@ -418,7 +418,7 @@ def suggest_questions(
     questions = []
     node_community = _node_community_map(communities)
 
-    # 1. AMBIGUOUS edges → unresolved relationship questions
+    # 1. AMBIGUOUS edges -> unresolved relationship questions
     for u, v, data in G.edges(data=True):
         if data.get("confidence") == "AMBIGUOUS":
             ul = G.nodes[u].get("label", u)
@@ -430,7 +430,7 @@ def suggest_questions(
                 "why": f"Edge tagged AMBIGUOUS (relation: {relation}) - confidence is low.",
             })
 
-    # 2. Bridge nodes (high betweenness) → cross-cutting concern questions
+    # 2. Bridge nodes (high betweenness) -> cross-cutting concern questions
     if G.number_of_edges() > 0:
         k = min(100, G.number_of_nodes()) if G.number_of_nodes() > 1000 else None
         betweenness = nx.betweenness_centrality(G, k=k, seed=42)
@@ -455,7 +455,7 @@ def suggest_questions(
                     "why": f"High betweenness centrality ({score:.3f}) - this node is a cross-community bridge.",
                 })
 
-    # 3. God nodes with many INFERRED edges → verification questions
+    # 3. God nodes with many INFERRED edges -> verification questions
     degree = dict(G.degree())
     top_nodes = sorted(
         [(n, d) for n, d in degree.items() if not _is_file_node(G, n)],
@@ -486,7 +486,7 @@ def suggest_questions(
                 "why": f"`{label}` has {len(inferred)} INFERRED edges - model-reasoned connections that need verification.",
             })
 
-    # 4. Isolated or weakly-connected nodes → exploration questions
+    # 4. Isolated or weakly-connected nodes -> exploration questions
     isolated = [
         n for n in G.nodes()
         if G.degree(n) <= 1 and not _is_file_node(G, n) and not _is_concept_node(G, n)
@@ -499,7 +499,7 @@ def suggest_questions(
             "why": f"{len(isolated)} weakly-connected nodes found - possible documentation gaps or missing edges.",
         })
 
-    # 5. Low-cohesion communities → structural questions
+    # 5. Low-cohesion communities -> structural questions
     from .cluster import cohesion_score
     for cid, nodes in communities.items():
         score = cohesion_score(G, nodes)

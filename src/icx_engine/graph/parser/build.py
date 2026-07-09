@@ -34,7 +34,7 @@ from .validate import validate_extraction
 
 
 # Synonym mapper for known invalid file_type values that LLM subagents commonly
-# emit. Keeps semantic intent close (markdown→document, tool→code) and falls
+# emit. Keeps semantic intent close (markdown->document, tool->code) and falls
 # back to "concept" for any other invalid value (see #840).
 _FILE_TYPE_SYNONYMS = {
     "markdown": "document",
@@ -111,7 +111,7 @@ def edge_datas(G: nx.Graph, u: str, v: str) -> list[dict]:
 def build_from_json(extraction: dict, *, directed: bool = False, root: str | Path | None = None) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
-    directed=True produces a DiGraph that preserves edge direction (source→target).
+    directed=True produces a DiGraph that preserves edge direction (source->target).
     directed=False (default) produces an undirected Graph for backward compatibility.
     root: if given, absolute source_file paths from semantic subagents are made
         relative to root so all nodes share a consistent path key (#932).
@@ -216,7 +216,7 @@ def build(
 ) -> nx.Graph:
     """Merge multiple extraction results into one graph.
 
-    directed=True produces a DiGraph that preserves edge direction (source→target).
+    directed=True produces a DiGraph that preserves edge direction (source->target).
     directed=False (default) produces an undirected Graph for backward compatibility.
     dedup=True (default) runs entity deduplication before building the graph.
     dedup_llm_backend: if set (e.g. "gemini", "claude", or "kimi"), uses LLM to resolve
@@ -378,7 +378,7 @@ def build_merge(
         new_n = G.number_of_nodes()
         if new_n < existing_n:
             raise ValueError(
-                f"graphify: build_merge would shrink graph from {existing_n} → {new_n} nodes. "
+                f"graphify: build_merge would shrink graph from {existing_n} -> {new_n} nodes. "
                 f"Pass prune_sources explicitly if you intend to remove nodes."
             )
 

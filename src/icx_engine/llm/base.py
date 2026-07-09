@@ -66,7 +66,9 @@ fences, no prose, no leading or trailing text):
   "issue_type": "",
   "confidence_score": 0.0,
   "completeness_score": 0.0,
-  "missing_information": []
+  "missing_information": [],
+  "recommended_persona": "",
+  "persona_rationale": ""
 }
 
 RULES:
@@ -93,7 +95,16 @@ RULES:
   input is.
 - completeness_score (0.0-1.0): fraction of required details present. The
   system will recompute this deterministically - return your best estimate.
-- missing_information: return []. The system recomputes it deterministically.\
+- missing_information: return []. The system recomputes it deterministically.
+- recommended_persona: choose the SINGLE best-fit senior role for THIS problem, reasoning
+  from the actual issue intent and any attached image/vision content - not from surface
+  keywords alone. Pick exactly one slug from this catalog, or "" if genuinely unsure:
+  cto, principal-engineer, solution-architect, system-architect, enterprise-architect,
+  staff-backend-engineer, staff-frontend-engineer, principal-ui-ux-architect,
+  principal-data-architect, principal-database-architect, staff-devops-sre,
+  principal-security-architect, staff-performance-engineer, principal-ml-engineer,
+  staff-mobile-engineer, principal-integration-architect, staff-qa-architect.
+- persona_rationale: one short phrase (<= 12 words) explaining the persona choice. "" if none.\
 """
 
 
@@ -240,7 +251,15 @@ class LLMProvider(ABC):
     async def analyze(self, raw: RawIssueData) -> IssueContext: ...
 
 
-def get_provider(config: ChannelConfig) -> LLMProvider:
+_PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {}
+
+
+def _default_providers() -> dict[str, type[LLMProvider]]:
+    """Return the built-in provider name -> class mapping.
+
+    Kept as a single literal dict so registry parity stays verifiable and the
+    resolution order matches historical behavior.
+    """
     from icx_engine.llm.ollama import OllamaProvider
     from icx_engine.llm.nim import NIMProvider
     from icx_engine.llm.openai import OpenAIProvider
@@ -248,7 +267,7 @@ def get_provider(config: ChannelConfig) -> LLMProvider:
     from icx_engine.llm.google import GeminiProvider
     from icx_engine.llm.xai import XAIProvider
 
-    providers: dict[str, type[LLMProvider]] = {
+    return {
         "ollama": OllamaProvider,
         "nim": NIMProvider,
         "openai": OpenAIProvider,
@@ -256,10 +275,35 @@ def get_provider(config: ChannelConfig) -> LLMProvider:
         "google": GeminiProvider,
         "xai": XAIProvider,
     }
-    cls = providers.get(config.provider)
+
+
+def register_provider(name: str, provider_cls: type[LLMProvider]) -> None:
+    """Register an LLM provider class for lookup by name.
+
+    Lets third parties add (or override) a provider without editing this module,
+    mirroring `connectors.base.register_connector`. A later registration for an
+    existing name overrides the earlier one.
+    """
+    _PROVIDER_CLASSES[name] = provider_cls
+
+
+def _provider_registry() -> dict[str, type[LLMProvider]]:
+    """Return the provider registry, lazily seeding built-ins on first use.
+
+    `setdefault` means an explicit `register_provider` override is preserved and
+    never clobbered by the built-in seed.
+    """
+    for name, cls in _default_providers().items():
+        _PROVIDER_CLASSES.setdefault(name, cls)
+    return _PROVIDER_CLASSES
+
+
+def get_provider(config: ChannelConfig) -> LLMProvider:
+    registry = _provider_registry()
+    cls = registry.get(config.provider)
     if cls is None:
         raise ValueError(
             f"Unknown provider '{config.provider}'. "
-            f"Valid options: {', '.join(providers)}"
+            f"Valid options: {', '.join(registry)}"
         )
     return cls(config)

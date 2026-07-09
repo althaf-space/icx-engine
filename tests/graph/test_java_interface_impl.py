@@ -120,3 +120,34 @@ def test_no_injects_when_no_impl_exists():
     )
     injects = [e for e in result if e.get("relation") == "injects"]
     assert len(injects) == 0
+
+
+def test_calls_to_interface_emit_companion_call_to_impl():
+    """Interface-dispatch: a `calls` edge to an interface file gets a companion
+    `calls` edge to the concrete impl (the AST-based replacement for what a
+    language server resolves through the type system)."""
+    from icx_engine.graph.parser.resolvers.java_interface_impl import (
+        extract_java_interface_impl_edges,
+    )
+    if not _FIXTURE.exists():
+        pytest.skip("fixture not found")
+
+    iface_id = _node_id_for("src/main/java/com/example/OrderService.java")
+    impl_id = _node_id_for("src/main/java/com/example/OrderServiceImpl.java")
+    nodes = [
+        {"id": iface_id, "label": "OrderService.java",
+         "source_file": str(_SRC / "OrderService.java"), "file_type": "code"},
+        {"id": impl_id, "label": "OrderServiceImpl.java",
+         "source_file": str(_SRC / "OrderServiceImpl.java"), "file_type": "code"},
+    ]
+    edges = [{"source": "caller", "target": iface_id, "relation": "calls",
+              "source_file": "caller.java", "confidence_score": 0.8}]
+    result = extract_java_interface_impl_edges(
+        [_SRC / "OrderService.java", _SRC / "OrderServiceImpl.java"],
+        _FIXTURE, {"nodes": nodes, "edges": edges},
+    )
+    calls_to_impl = [e for e in result
+                     if e.get("relation") == "calls" and e.get("target") == impl_id]
+    assert len(calls_to_impl) == 1
+    assert calls_to_impl[0]["source"] == "caller"
+    assert calls_to_impl[0]["confidence_source"] == "java_interface_impl"

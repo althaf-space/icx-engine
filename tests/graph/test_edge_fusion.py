@@ -86,6 +86,77 @@ class TestFuseAndDedup:
         result = fuse_and_dedup([None, "bad", {"source_file": "a.py", "target_file": "b.py", "type": "go_import", "confidence": 0.5}])
         assert len(result) == 1
 
+    def test_distinct_node_edges_same_file_pair_all_survive(self):
+        # Regression: three route handlers in main.py each depending on get_db in
+        # db.py are DISTINCT node-level edges. An earlier file-pair grouping
+        # collapsed them to one, silently dropping real DI/call/route edges
+        # (halved recall on every framework project). They must all survive.
+        edges = [
+            {"source": "main_list_users", "target": "db_get_db", "relation": "depends_on",
+             "type": "depends_on", "source_file": "app/main.py", "target_file": "app/db.py",
+             "confidence_score": 0.9},
+            {"source": "main_read_user", "target": "db_get_db", "relation": "depends_on",
+             "type": "depends_on", "source_file": "app/main.py", "target_file": "app/db.py",
+             "confidence_score": 0.9},
+            {"source": "main_create_user", "target": "db_get_db", "relation": "depends_on",
+             "type": "depends_on", "source_file": "app/main.py", "target_file": "app/db.py",
+             "confidence_score": 0.9},
+        ]
+        out = fuse_and_dedup(edges)
+        assert len(out) == 3  # distinct node pairs, NOT collapsed by file pair
+        assert {e["source"] for e in out} == {"main_list_users", "main_read_user", "main_create_user"}
+
+    def test_fusable_family_distinct_node_pairs_not_merged(self):
+        # Two DIFFERENT calls between the same file pair (A.foo->B.bar, A.baz->B.qux)
+        # are distinct edges - fusion must not merge them into one just because
+        # they share the import/call family and file pair.
+        edges = [
+            _edge("a.py", "b.py", "pyright_import", 0.8, "pyright"),
+            _edge("a.py", "b.py", "scip_reference", 0.9, "scip"),
+        ]
+        # same node pair (helper sets source=node_a.py/target=node_b.py) -> these DO fuse
+        assert len(fuse_and_dedup(edges)) == 1
+        # but distinct node pairs in the same family do NOT
+        edges2 = [
+            {"source": "a_foo", "target": "b_bar", "type": "pyright_import",
+             "source_file": "a.py", "target_file": "b.py", "confidence": 0.8},
+            {"source": "a_baz", "target": "b_qux", "type": "pyright_import",
+             "source_file": "a.py", "target_file": "b.py", "confidence": 0.9},
+        ]
+        assert len(fuse_and_dedup(edges2)) == 2
+
+    def test_string_enum_confidence_does_not_crash_fusion(self):
+        # java_symbols validation / LLM edges set `confidence` to a STRING enum
+        # while keeping the numeric `confidence_score`. A fusable group mixing
+        # such an edge with a numeric-only edge must not raise TypeError
+        # (previously: str vs float comparison aborted the whole graph build).
+        edges = [
+            {"source": "na", "target": "nb", "source_file": "A.java",
+             "target_file": "B.java", "type": "java_symbol_import",
+             "confidence": "EXTRACTED", "confidence_score": 1.0, "resolver": "java_symbols"},
+            {"source": "na", "target": "nb", "source_file": "A.java",
+             "target_file": "B.java", "type": "java_symbol_call",
+             "confidence_score": 0.9, "resolver": "java_symbols_call"},
+        ]
+        result = fuse_and_dedup(edges)
+        assert len(result) == 1
+        # total = 1.0 (string enum -> falls back to confidence_score) + 0.9 -> capped 0.98
+        assert result[0]["confidence"] == 0.98
+        assert set(result[0]["resolver_sources"]) == {"java_symbols", "java_symbols_call"}
+
+    def test_non_fusable_string_confidence_does_not_crash(self):
+        # Non-fusable family (own-family) with a string-enum confidence edge
+        # must pick highest by numeric score without crashing.
+        edges = [
+            {"source": "na", "target": "nb", "source_file": "a.py", "target_file": "b.py",
+             "type": "kafka_publish", "confidence": "AMBIGUOUS", "confidence_score": 0.3},
+            {"source": "na", "target": "nb", "source_file": "a.py", "target_file": "b.py",
+             "type": "kafka_publish", "confidence_score": 0.8},
+        ]
+        result = fuse_and_dedup(edges)
+        assert len(result) == 1
+        assert result[0]["confidence_score"] == 0.8
+
     def test_deduplicate_entities_still_importable(self):
         from icx_engine.graph.parser.dedup import deduplicate_entities
         assert callable(deduplicate_entities)

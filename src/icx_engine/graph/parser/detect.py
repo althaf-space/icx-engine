@@ -337,7 +337,6 @@ def docx_to_markdown(path: Path) -> str:
     """Convert a .docx file to markdown text using python-docx."""
     try:
         from docx import Document
-        from docx.oxml.ns import qn
         doc = Document(str(path))
         lines = []
         for para in doc.paragraphs:
@@ -597,7 +596,7 @@ def _parse_gitignore_line(raw: str) -> str:
         return ""
     # Strip inline comments: require whitespace before # (gitignore extension)
     line = re.sub(r"\s+#+[^\\].*$", "", line)
-    # Unescape \# → literal #
+    # Unescape \# -> literal #
     line = line.replace("\\#", "#")
     # Remove unescaped trailing spaces (per gitignore spec)
     line = re.sub(r"(?<!\\) +$", "", line)
@@ -630,7 +629,7 @@ def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
     root = root.resolve()
     ceiling = _find_vcs_root(root) or root
 
-    # Collect ancestor dirs from ceiling down to root (outer → inner)
+    # Collect ancestor dirs from ceiling down to root (outer -> inner)
     dirs: list[Path] = []
     current = root
     while True:
@@ -733,115 +732,6 @@ def _is_ignored(path: Path, root: Path, patterns: list[tuple[Path, str]]) -> boo
     return _eval(path)
 
 
-def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
-    """Read .graphifyinclude allowlist patterns from root and ancestors.
-
-    Include patterns opt matching hidden files/dirs into traversal. Sensitive
-    files and hard-skipped noise directories are still excluded later.
-    Uses the same VCS-root ceiling logic as _load_graphifyignore.
-    """
-    root = root.resolve()
-    ceiling = _find_vcs_root(root) or root
-
-    dirs: list[Path] = []
-    current = root
-    while True:
-        dirs.append(current)
-        if current == ceiling:
-            break
-        current = current.parent
-    dirs.reverse()
-
-    patterns: list[tuple[Path, str]] = []
-    for d in dirs:
-        include_file = d / ".graphifyinclude"
-        if include_file.exists():
-            for raw in include_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                line = _parse_gitignore_line(raw)
-                if line:
-                    patterns.append((d, line))
-    return patterns
-
-
-def _is_included(path: Path, root: Path, patterns: list[tuple[Path, str]]) -> bool:
-    """Return True if path matches any .graphifyinclude allowlist pattern."""
-    if not patterns:
-        return False
-
-    def _matches(rel: str, p: str) -> bool:
-        parts = rel.split("/")
-        if fnmatch.fnmatch(rel, p):
-            return True
-        if fnmatch.fnmatch(path.name, p):
-            return True
-        for i, part in enumerate(parts):
-            if fnmatch.fnmatch(part, p):
-                return True
-            if fnmatch.fnmatch("/".join(parts[:i + 1]), p):
-                return True
-        return False
-
-    for anchor, pattern in patterns:
-        anchored = pattern.startswith("/")
-        p = pattern.strip("/")
-        if not p:
-            continue
-        if anchored:
-            try:
-                rel_anchor = str(path.relative_to(anchor)).replace(os.sep, "/")
-                if _matches(rel_anchor, p):
-                    return True
-            except ValueError:
-                pass
-        else:
-            try:
-                rel = str(path.relative_to(root)).replace(os.sep, "/")
-                if _matches(rel, p):
-                    return True
-            except ValueError:
-                pass
-            if anchor != root:
-                try:
-                    rel_anchor = str(path.relative_to(anchor)).replace(os.sep, "/")
-                    if _matches(rel_anchor, p):
-                        return True
-                except ValueError:
-                    pass
-    return False
-
-
-def _could_contain_included_path(path: Path, root: Path, patterns: list[tuple[Path, str]]) -> bool:
-    """Return True if a directory may contain files matched by .graphifyinclude."""
-    if not patterns:
-        return False
-
-    rels: list[str] = []
-    try:
-        rels.append(str(path.relative_to(root)).replace(os.sep, "/"))
-    except ValueError:
-        pass
-    for anchor, _ in patterns:
-        if anchor != root:
-            try:
-                rels.append(str(path.relative_to(anchor)).replace(os.sep, "/"))
-            except ValueError:
-                pass
-
-    for rel in rels:
-        rel = rel.strip("/")
-        if not rel:
-            return True
-        for _, pattern in patterns:
-            p = pattern.strip("/")
-            if not p:
-                continue
-            if p == rel or p.startswith(rel + "/"):
-                return True
-            if fnmatch.fnmatch(rel, p):
-                return True
-    return False
-
-
 def _auto_follow_symlinks(root: Path) -> bool:
     """Auto-detect: ``True`` if ``root`` has any direct symlinked child.
 
@@ -900,7 +790,6 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             line = _parse_gitignore_line(pat)
             if line:
                 ignore_patterns.append((root, line))
-    include_patterns = _load_graphifyinclude(root)
 
     # Always include icx-graph-out/memory/ - query results filed back into the graph
     memory_dir = root / "icx-graph-out" / "memory"
@@ -1006,7 +895,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         )
     elif total_words >= CORPUS_UPPER_THRESHOLD or total_files >= FILE_COUNT_UPPER:
         warning = (
-            f"Large corpus: {total_files} files · ~{total_words:,} words. "
+            f"Large corpus: {total_files} files - ~{total_words:,} words. "
             f"Semantic extraction will be expensive (many Claude tokens). "
             f"Consider running on a subfolder."
         )
@@ -1128,8 +1017,8 @@ def detect_incremental(
     kind="ast": a file is "changed" when its ast_hash is missing or its
         content has changed. Use this for `icx-graph update`.
 
-    Fast path: mtime unchanged + hash matches → unchanged (free, no disk IO
-    beyond stat). Slow path: mtime bumped → compare MD5 against the relevant
+    Fast path: mtime unchanged + hash matches -> unchanged (free, no disk IO
+    beyond stat). Slow path: mtime bumped -> compare MD5 against the relevant
     hash field before re-extracting.
 
     Backwards compatible with legacy manifests storing plain float mtime values

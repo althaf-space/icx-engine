@@ -146,7 +146,7 @@ class WhisperManager:
 
             con = Console()
             if _is_whisper_ready():
-                con.print("[green]✓[/green] Whisper model already downloaded.")
+                con.print("[green]OK[/green] Whisper model already downloaded.")
                 return
 
             con.print(
@@ -187,7 +187,7 @@ class WhisperManager:
                 )
 
             _mark_whisper_ready()
-            con.print("[bold green]✓[/bold green] Audio engine ready.\n")
+            con.print("[bold green]OK[/bold green] Audio engine ready.\n")
 
     def _transcribe_sync(self, audio_path: str) -> str:
         self._load()
@@ -303,10 +303,10 @@ async def transcribe(
     """
     Main dispatch for audio transcription.
 
-    openai  → Whisper API (large-v2, highest accuracy), local fallback on error
-    google  → Gemini native audio, local fallback on error
-    others  → local Whisper base → text LLM cleanup
-    no LLM  → local Whisper base only
+    openai  -> Whisper API (large-v2, highest accuracy), local fallback on error
+    google  -> Gemini native audio, local fallback on error
+    others  -> local Whisper base -> text LLM cleanup
+    no LLM  -> local Whisper base only
     """
     if config is None:
         return await _local_transcribe(audio_bytes, fname, whisper)

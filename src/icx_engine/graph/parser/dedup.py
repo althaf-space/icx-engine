@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Safi Shamsi. Modified for icx-engine.
 """Entity deduplication pipeline for icx-graph knowledge graphs.
 
-Pipeline: exact normalization → entropy gate → MinHash/LSH blocking →
-Jaro-Winkler verification → same-community boost → union-find merge.
+Pipeline: exact normalization -> entropy gate -> MinHash/LSH blocking ->
+Jaro-Winkler verification -> same-community boost -> union-find merge.
 """
 from __future__ import annotations
 import logging
@@ -18,7 +18,7 @@ from rapidfuzz.distance import JaroWinkler
 _log = logging.getLogger(__name__)
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# -- helpers -------------------------------------------------------------------
 
 def _norm(label: str | None) -> str:
     """Lowercase + collapse non-alphanumeric runs to space (Unicode-aware)."""
@@ -94,7 +94,7 @@ def _short_label_blocked(a: str, b: str, jw_score: float) -> bool:
     return True
 
 
-# ── union-find ────────────────────────────────────────────────────────────────
+# -- union-find ----------------------------------------------------------------
 
 class _UF:
     def __init__(self) -> None:
@@ -121,7 +121,7 @@ class _UF:
         return dict(groups)
 
 
-# ── constants ─────────────────────────────────────────────────────────────────
+# -- constants -----------------------------------------------------------------
 
 _ENTROPY_THRESHOLD = 2.5
 _LSH_THRESHOLD = 0.7
@@ -131,7 +131,7 @@ _NUM_PERM = 128
 _CHUNK_SUFFIX = re.compile(r"_c\d+$")
 
 
-# ── main entry point ──────────────────────────────────────────────────────────
+# -- main entry point ----------------------------------------------------------
 
 def deduplicate_entities(
     nodes: list[dict],
@@ -175,7 +175,7 @@ def deduplicate_entities(
     if len(unique_nodes) <= 1:
         return unique_nodes, edges
 
-    # ── pass 1: exact normalization ───────────────────────────────────────────
+    # -- pass 1: exact normalization -------------------------------------------
     norm_to_nodes: dict[str, list[dict]] = defaultdict(list)
     for node in unique_nodes:
         key = _norm(node.get("label", node.get("id", "")))
@@ -200,7 +200,7 @@ def deduplicate_entities(
                     uf.union(winner["id"], node["id"])
                 exact_merges += len(file_group) - 1
 
-    # ── pass 2: MinHash/LSH + Jaro-Winkler (high-entropy nodes only) ─────────
+    # -- pass 2: MinHash/LSH + Jaro-Winkler (high-entropy nodes only) ---------
     candidates: list[dict] = []
     seen_norms: set[str] = set()
     for node in unique_nodes:
@@ -263,11 +263,11 @@ def deduplicate_entities(
                     uf.union(winner["id"], neighbor_id)
                     fuzzy_merges += 1
 
-    # ── pass 3: LLM tiebreaker for ambiguous pairs (opt-in) ──────────────────
+    # -- pass 3: LLM tiebreaker for ambiguous pairs (opt-in) ------------------
     if dedup_llm_backend is not None:
         _llm_tiebreak(candidates, uf, communities, minhashes, lsh, backend=dedup_llm_backend)
 
-    # ── build remap table from union-find components ──────────────────────────
+    # -- build remap table from union-find components --------------------------
     components = uf.components()
     remap: dict[str, str] = {}
 
@@ -281,7 +281,7 @@ def deduplicate_entities(
             if member != winner_id:
                 remap[member] = winner_id
 
-    # ── apply remap ───────────────────────────────────────────────────────────
+    # -- apply remap -----------------------------------------------------------
     if not remap:
         return unique_nodes, edges
 
@@ -522,27 +522,53 @@ _EDGE_FAMILIES: dict[str, str] = {
 _FUSABLE_FAMILIES = frozenset({"import", "call", "implements"})
 
 
+def _num_confidence(e: dict) -> float:
+    """Numeric confidence for fusion math.
+
+    `confidence` is numeric on most resolver edges, but some (e.g.
+    java_symbols validation, LLM extraction) set it to a STRING enum
+    ("EXTRACTED"/"INFERRED"/"AMBIGUOUS"). Comparing/summing that string against
+    a float raises TypeError, aborting the whole build. Prefer the numeric
+    `confidence`; when it is a string, fall back to the canonical
+    `confidence_score` float; otherwise 0.0.
+    """
+    c = e.get("confidence")
+    if isinstance(c, (int, float)):
+        return float(c)
+    cs = e.get("confidence_score")
+    return float(cs) if isinstance(cs, (int, float)) else 0.0
+
+
 def fuse_and_dedup(edges: list[dict]) -> list[dict]:
     """Deduplicate and fuse cross-resolver edges.
 
     FUSION RULE (import, call, implements families only):
-      When multiple resolvers produce edges for the same (source_file, target_file)
-      in the same family, sum their confidence scores capped at 0.98.
+      When multiple resolvers produce edges for the same (source, target) NODE
+      pair in the same family, sum their confidence scores capped at 0.98.
       Store all contributing resolver names in resolver_sources[].
       Keep all other fields from the highest-confidence source edge.
 
     NO FUSION (all other families):
-      Keep the highest-confidence edge per (source_file, target_file, type).
+      Keep the highest-confidence edge per (source, target, type) NODE pair.
+
+    Grouping is by NODE pair, not file pair: distinct node-level edges that
+    share a (source_file, target_file) - e.g. three route handlers in main.py
+    each depending on get_db in db.py, or several functions in A calling
+    different methods in B - are genuinely different edges and must all survive.
+    An earlier file-pair grouping collapsed them to one, silently dropping real
+    call/DI/route/event edges (major recall loss on every framework project).
+    True cross-resolver duplicates (identical node pair, multiple resolvers)
+    still fuse, because they share the same node-pair key.
 
     0.98 cap: never exactly 1.0 - reserved for verified ground truth only.
     """
-    # Group by (source_file, target_file, family)
+    # Group by (source_node, target_node, family)
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for edge in edges:
         if not isinstance(edge, dict):
             continue
-        src = edge.get("source_file", "")
-        tgt = edge.get("target_file", "")
+        src = edge.get("source", "")
+        tgt = edge.get("target", "")
         edge_type = edge.get("type", edge.get("relation", ""))
         family = _EDGE_FAMILIES.get(edge_type, edge_type)  # unknown type = own family
         grouped[(src, tgt, family)].append(edge)
@@ -554,8 +580,8 @@ def fuse_and_dedup(edges: list[dict]) -> list[dict]:
             continue
 
         if family in _FUSABLE_FAMILIES:
-            base = max(group, key=lambda e: e.get("confidence", 0.0))
-            total = sum(e.get("confidence", 0.0) for e in group)
+            base = max(group, key=_num_confidence)
+            total = sum(_num_confidence(e) for e in group)
             fused = dict(base)
             fused["confidence"] = round(min(0.98, total), 4)
             fused["resolver"] = "fused"
@@ -564,6 +590,6 @@ def fuse_and_dedup(edges: list[dict]) -> list[dict]:
             )
             result.append(fused)
         else:
-            result.append(max(group, key=lambda e: e.get("confidence", 0.0)))
+            result.append(max(group, key=_num_confidence))
 
     return result

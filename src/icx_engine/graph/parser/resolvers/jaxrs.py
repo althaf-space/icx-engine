@@ -44,6 +44,18 @@ _ALL_ROUTE_ANNOTATIONS = _JAXRS_ROUTE_ANNOTATIONS | _MICRONAUT_ROUTE_ANNOTATIONS
     "Path",
 })
 
+# Every annotation jaxrs can emit an edge from: routes, providers, plus CDI
+# @Inject / @Observes and @Scheduled. A source lacking ALL of these `@`-tokens
+# cannot produce a jaxrs edge, so its parse-tree walk is skipped (perf only,
+# zero edge loss). MUST stay complete - any annotation the walk reacts to below
+# has to appear here. Built once at import time.
+_JAXRS_TRIGGER_TOKENS = tuple(
+    "@" + ann for ann in (
+        _ALL_ROUTE_ANNOTATIONS | _PROVIDER_ANNOTATIONS
+        | frozenset({"Inject", "Observes", "Scheduled"})
+    )
+)
+
 
 def extract_jaxrs_edges(
     files: Iterable[Path],
@@ -67,13 +79,25 @@ def extract_jaxrs_edges(
     fqn_to_file: dict[str, str] = {}
     parsed: list[tuple[Path, str, object]] = []
 
+    from . import _java_parse_cache as _jpc
+
     for jf in java_files:
         try:
             rel = jf.relative_to(project_root).as_posix()
         except ValueError:
             continue
-        from . import _java_parse_cache as _jpc
-        tree = _jpc.get_tree(jf)
+        # Cheap gate: only files importing a JAX-RS / Micronaut HTTP package can
+        # declare routes. Skip the parse-tree walk for the rest (usually the vast
+        # majority) - zero edge loss, since fqn_to_file is rebuilt for ALL files
+        # below via the regex fqn map. This turns an O(all-files) walk into
+        # O(jaxrs-files).
+        try:
+            src = jf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not any(trigger in src for trigger in _JAXRS_TRIGGER_TOKENS):
+            continue
+        tree = _jpc.get_tree(jf, src)
         if tree is None:
             continue
         package = tree.package.name if tree.package else ""
@@ -84,7 +108,8 @@ def extract_jaxrs_edges(
                 fqn_to_file.setdefault(fqn, rel)
         parsed.append((jf, rel, tree))
 
-    # Supplement with regex scan for files javalang timed out on
+    # Build the full fqn -> file map over ALL files (targets may live in files
+    # that were gated out above). Regex-based, also covers javalang timeouts.
     from . import _java_fqn_map as _jfm
     for _fqn, _rel in _jfm.build_fqn_map(java_files, project_root).items():
         fqn_to_file.setdefault(_fqn, _rel)

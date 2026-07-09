@@ -20,7 +20,7 @@ from icx_engine.exceptions import GraphError
 from icx_engine.graph import storage
 from icx_engine.graph.builder import _build_project_isolated, estimate_build_eta, _detect_llm_backend
 
-# Provider names from ICX ChannelConfig → parser backend names
+# Provider names from ICX ChannelConfig -> parser backend names
 _ICX_PROVIDER_TO_PARSER: dict[str, str] = {
     "anthropic": "claude",
     "openai": "openai",
@@ -338,7 +338,7 @@ class GraphManager:
         llm_cfg = None if skip_llm else _read_icx_llm_cfg()
         # Fresh single-worker executor per foreground build so shutdown(wait=True)
         # is called explicitly after result() returns, avoiding Python 3.14 atexit
-        # interaction where _python_exit → t.join() raises KeyboardInterrupt.
+        # interaction where _python_exit -> t.join() raises KeyboardInterrupt.
         with ProcessPoolExecutor(max_workers=1) as executor:
             future: Future = executor.submit(
                 _build_project_isolated,
@@ -505,9 +505,14 @@ class GraphManager:
             path = validate_project_path(project_path)
             info = storage.lookup_by_path(path)
             if info is None:
-                # Auto-register: writes both meta.json AND registry.json
-                project_id = storage.register_project(path.name.lower(), path)
-                return project_id
+                # Never auto-register from a resolve lookup. A caller-supplied path
+                # (e.g. an editor agent guessing the workspace root) must not silently
+                # create a registry entry. Explicit registration goes through
+                # GraphManager.register() / `icx graph add` only.
+                raise GraphError(
+                    f"Project path not registered: {path}. "
+                    "Run `icx graph add --name <name> --path <path>` then `icx graph build <name>`."
+                )
             return info.project_id
 
         if cwd:

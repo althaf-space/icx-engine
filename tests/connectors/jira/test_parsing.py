@@ -21,7 +21,7 @@ def connector():
     return JiraConnector(conn)
 
 
-# ── Bare key ──────────────────────────────────────────────────────────────────
+# -- Bare key ------------------------------------------------------------------
 
 def test_parse_input_bare_key(connector):
     parsed = connector.parse_input("ABC-123")
@@ -43,7 +43,7 @@ def test_parse_input_bare_key_alphanumeric_project_lowercase(connector):
     assert parsed.issue_key == "AI6D-362"
 
 
-# ── Standard URL patterns ─────────────────────────────────────────────────────
+# -- Standard URL patterns -----------------------------------------------------
 
 def test_parse_input_full_browse_url(connector):
     parsed = connector.parse_input(f"https://{JIRA_DOMAIN}/browse/ABC-123")
@@ -70,7 +70,7 @@ def test_parse_input_url_with_trailing_query_params(connector):
     assert parsed.issue_key == "ABC-123"
 
 
-# ── Board / backlog URL ───────────────────────────────────────────────────────
+# -- Board / backlog URL -------------------------------------------------------
 
 def test_parse_input_selected_issue_query_param(connector):
     parsed = connector.parse_input(
@@ -79,7 +79,7 @@ def test_parse_input_selected_issue_query_param(connector):
     assert parsed.issue_key == "ABC-42"
 
 
-# ── Invalid inputs ────────────────────────────────────────────────────────────
+# -- Invalid inputs ------------------------------------------------------------
 
 def test_parse_input_invalid_string_raises(connector):
     with pytest.raises(InvalidInput):
@@ -89,3 +89,15 @@ def test_parse_input_invalid_string_raises(connector):
 def test_parse_input_bad_url_path_raises(connector):
     with pytest.raises(InvalidInput):
         connector.parse_input(f"https://{JIRA_DOMAIN}/projects/ABC-123")
+
+
+def test_parse_input_browse_url_non_key_raises(connector):
+    # /browse/<segment> that is not a valid issue key must be rejected at parse
+    # time rather than passed through to fetch (finding C4).
+    with pytest.raises(InvalidInput):
+        connector.parse_input(f"https://{JIRA_DOMAIN}/browse/not-a-key")
+
+
+def test_parse_input_issues_url_non_key_raises(connector):
+    with pytest.raises(InvalidInput):
+        connector.parse_input(f"https://{JIRA_DOMAIN}/issues/random-page")

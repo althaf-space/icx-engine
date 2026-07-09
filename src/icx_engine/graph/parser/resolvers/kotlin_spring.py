@@ -196,7 +196,11 @@ def extract_kotlin_spring_edges(
                 ctor_blob = _extract_ctor_from_class_match(source, cls_match)
                 if ctor_blob:
                     for m in _KT_PRIMARY_CTOR_PARAM.finditer(ctor_blob):
-                        type_name = m.group(2)
+                        # _KT_PRIMARY_CTOR_PARAM captures the parameter type in
+                        # group 1 (there is no group 2) - reading group(2) raised
+                        # IndexError and crashed the whole resolver, silently
+                        # dropping every Kotlin-Spring edge (di/route/dao/relation).
+                        type_name = m.group(1)
                         _emit_di(
                             type_name, import_map, fqn_to_file, node_index,
                             edges, seen, src_id=class_node_id, rel=rel,

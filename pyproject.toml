@@ -4,15 +4,21 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.3.9"
-description = "ICX: Integrated Contextual X-ecution Engine - AI-native intelligence layer for development teams. Deep context extraction, local-first RAG memory, multi-modal analysis, and codebase knowledge graph. Securely bridge your work tracker to your AI agents via MCP."
+version = "0.4.0"
+description = "ICX (Integrated Contextual X-ecution Engine): an AI-native intelligence layer for development teams. Extracts deep issue context from work trackers, processes attachments including images, documents, audio and video, runs multi-provider LLM analysis, maintains a local-first RAG memory, builds a multi-language codebase knowledge graph, reads SonarQube code-quality findings, and drives AI-assisted testing. Exposes everything to AI editors over MCP and the CLI."
 readme = "readme.md"
 license = { file = "license" }
 authors = [
     { name = "althaf", email = "althaf.space@gmail.com" }
 ]
 requires-python = ">=3.11, <3.15"
-keywords = ["ai", "context", "mcp", "cli", "llm", "developer-tools", "memory", "jira", "knowledge-graph", "codebase-analysis"]
+keywords = [
+    "ai", "llm", "mcp", "cli", "developer-tools", "context-engineering",
+    "rag", "embeddings", "vector-search", "knowledge-graph", "code-graph",
+    "static-analysis", "code-intelligence", "codebase-analysis", "jira",
+    "sonarqube", "code-quality", "software-testing", "multimodal",
+    "transcription", "ocr", "memory",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -25,6 +31,8 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Utilities",
 ]
 dependencies = [
@@ -33,6 +41,9 @@ dependencies = [
     "shellingham>=1.5",
     "pydantic>=2.0",
     "httpx>=0.27",
+    "langgraph>=0.2",
+    "langgraph-checkpoint-sqlite>=2.0",
+    "aiosqlite>=0.20",
     "openai>=1.0",
     "anthropic>=0.30",
     "mcp>=1.0",
@@ -100,6 +111,9 @@ icx = "icx_engine.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/icx_engine"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/icx_engine/py.typed" = "icx_engine/py.typed"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -113,4 +127,8 @@ filterwarnings = [
     # leave GC-cleanup coroutines of engine.run that are finalized during later test
     # class/model setup. The test itself passes; this is a GC timing artifact only.
     "ignore:coroutine 'run' was never awaited:RuntimeWarning",
+    # TestingState TypedDict name starts with "Test" - pytest false-positive collection attempt.
+    "ignore::pytest.PytestCollectionWarning",
+    # langchain-core Pydantic V1 shim not compatible with Python 3.14 - transitive dep of langgraph.
+    "ignore:Core Pydantic V1 functionality.*:UserWarning:langchain_core",
 ]

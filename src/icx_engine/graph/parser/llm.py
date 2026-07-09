@@ -21,7 +21,7 @@ _FILE_CHAR_CAP = 20_000
 # `_read_files` also wraps each file in a `=== {rel} ===\n...\n\n` separator;
 # this is roughly the per-file overhead in characters that the prompt adds.
 _PER_FILE_OVERHEAD_CHARS = 80
-# Coarse fallback used only when `tiktoken` is not installed. 1 token ≈ 4 chars
+# Coarse fallback used only when `tiktoken` is not installed. 1 token ~ 4 chars
 # is the standard heuristic for English/code on BPE tokenizers.
 _CHARS_PER_TOKEN = 4
 
@@ -972,7 +972,7 @@ def extract_corpus_parallel(
         - When the LLM returns `finish_reason="length"` (output truncated at
           `max_completion_tokens`), the chunk is split in half and each half
           re-extracted recursively, up to `max_retry_depth` levels deep
-          (default 3 → max 8x expansion of one chunk).
+          (default 3 -> max 8x expansion of one chunk).
         - This is signal-driven: chunks too dense to fit in one response
           self-heal by splitting until they do, while well-sized chunks pay
           no extra cost. Set `max_retry_depth=0` to disable retries.
@@ -1331,7 +1331,7 @@ def _validate_ollama_base_url(url: str) -> None:
 def detect_backend() -> str | None:
     """Return the name of whichever backend has an API key set, or None.
 
-    Priority: gemini → kimi → claude → openai → bedrock → ollama (last, opt-in).
+    Priority: gemini -> kimi -> claude -> openai -> bedrock -> ollama (last, opt-in).
 
     Ollama is intentionally checked LAST so a paid API key (Anthropic/OpenAI/etc.)
     is never silently shadowed by an incidental OLLAMA_BASE_URL in the environment

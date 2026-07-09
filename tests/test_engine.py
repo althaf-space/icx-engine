@@ -21,7 +21,7 @@ from icx_engine.exceptions import (
 from test_data import JIRA_DOMAIN, JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS, JIRA_ISSUE_PAYLOAD, MOCK_LLM_JSON
 
 
-# ── output model field presence ────────────────────────────────────────────
+# -- output model field presence --------------------------------------------
 
 def test_raw_issue_response_has_fast_partial_fields():
     from icx_engine.models.output import RawIssueResponse
@@ -53,7 +53,7 @@ def test_issue_context_has_pending_documents_field():
     assert ctx.pending_documents == ["report.pdf"]
 
 
-# ── Extension set synchronization ────────────────────────────────────────────
+# -- Extension set synchronization --------------------------------------------
 
 def test_audio_video_extensions_derived_from_attachments():
     """_AUDIO_VIDEO_EXTENSIONS must be the union of AUDIO_EXTENSIONS and VIDEO_EXTENSIONS from attachments."""
@@ -66,7 +66,7 @@ def test_audio_video_extensions_derived_from_attachments():
     )
 
 
-# ── JiraClient - HTTP error mapping ──────────────────────────────────────────
+# -- JiraClient - HTTP error mapping ------------------------------------------
 
 @respx.mock
 async def test_fetch_returns_raw_issue_data():
@@ -113,7 +113,7 @@ async def test_fetch_raises_source_unavailable_on_500():
         await JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS).fetch("TEST-123")
 
 
-# ── engine.extract_domain ─────────────────────────────────────────────────────
+# -- engine.extract_domain -----------------------------------------------------
 
 def test_extract_domain_bare_key_returns_none():
     assert extract_domain("ABC-123") is None
@@ -140,7 +140,7 @@ def test_extract_domain_invalid_raises():
         extract_domain("notakey")
 
 
-# ── engine.narrow_connections ─────────────────────────────────────────────────
+# -- engine.narrow_connections -------------------------------------------------
 
 def test_narrow_connections_jira_key_matches_jira(token_connection):
     """A Jira-format key matches the Jira connector - no filtering occurs."""
@@ -160,7 +160,7 @@ def test_narrow_connections_both_jira_connections_match(multi_connection_config)
     assert len(result) == 2
 
 
-# ── engine.resolve_connection ─────────────────────────────────────────────────
+# -- engine.resolve_connection -------------------------------------------------
 
 def test_resolve_connection_single(token_connection):
     config = AppConfig(connections=[token_connection])
@@ -186,7 +186,7 @@ def test_resolve_connection_no_connections_raises():
         resolve_connection(None, AppConfig())
 
 
-# ── LLM providers - analyze() contract ───────────────────────────────────────
+# -- LLM providers - analyze() contract ---------------------------------------
 
 def _mock_openai_response():
     """Returns a MagicMock shaped like an OpenAI chat completion."""
@@ -232,7 +232,7 @@ async def test_nim_provider_analyze(raw_ticket):
     assert result.issue_type == "Bug"
 
 
-# ── engine.run - end-to-end ───────────────────────────────────────────────────
+# -- engine.run - end-to-end ---------------------------------------------------
 
 @respx.mock
 async def test_engine_run_returns_issue_context(app_config):
@@ -258,7 +258,7 @@ async def test_engine_run_no_llm_raises(token_connection):
         await run("TEST-123", config)
 
 
-# ── Profile override ──────────────────────────────────────────────────────────
+# -- Profile override ----------------------------------------------------------
 
 @respx.mock
 async def test_engine_run_uses_override_profile(token_connection):
@@ -330,7 +330,7 @@ async def test_engine_run_unknown_profile_override_raises_nollmerror(token_conne
         await run("TEST-123", config, profile_override="nonexistent")
 
 
-# ── Phase 2: exponential backoff retry ───────────────────────────────────────
+# -- Phase 2: exponential backoff retry ---------------------------------------
 
 @respx.mock
 async def test_fetch_retries_on_429_then_succeeds():
@@ -372,7 +372,7 @@ async def test_fetch_raises_after_max_retries_500():
         await JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS).fetch("TEST-123")
 
 
-# ── Phase 2: deterministic completeness scoring ───────────────────────────────
+# -- Phase 2: deterministic completeness scoring -------------------------------
 
 def _make_context(**overrides) -> IssueContext:
     defaults = dict(
@@ -413,7 +413,7 @@ def test_finalize_overrides_issue_type_and_completeness(raw_ticket):
     assert result.completeness_score != 0.1            # deterministically recomputed
 
 
-# ── Phase 2: OAuth refresh skipped for token auth ─────────────────────────────
+# -- Phase 2: OAuth refresh skipped for token auth -----------------------------
 
 @respx.mock
 async def test_engine_skips_oauth_refresh_for_token_auth(app_config):
@@ -439,7 +439,7 @@ def test_raw_issue_data_optional_fields_default():
     assert raw.attachment_texts == {}
 
 
-# ── Phase 4 Task 3: deterministic _compute_missing ───────────────────────────
+# -- deterministic _compute_missing ---------------------------
 
 def test_compute_missing_bug_all_present(raw_ticket):
     ctx = _make_context(issue_type="Bug")
@@ -485,7 +485,7 @@ def test_finalize_does_not_flag_due_date_as_missing_when_present(raw_ticket):
     assert "due_date" not in result.missing_information
 
 
-# ── Phase 4 Task 4: build_user_message new fields ────────────────────────────
+# -- build_user_message new fields ----------------------------
 
 def test_build_user_message_includes_due_date(raw_ticket):
     msg = build_user_message(raw_ticket)
@@ -512,7 +512,7 @@ def test_build_user_message_includes_attachment_texts():
     assert "NullPointerException at line 42" in msg
 
 
-# ── Phase 4 Task 5: JiraClient.download_attachment ───────────────────────────
+# -- JiraClient.download_attachment ---------------------------
 
 @respx.mock
 async def test_download_attachment_returns_bytes():
@@ -555,7 +555,7 @@ async def test_engine_run_processes_attachments(app_config):
     assert "error text from OCR" in llm_call_args
 
 
-# ── MCP headless mode (no LLM) ───────────────────────────────────────────────
+# -- MCP headless mode (no LLM) -----------------------------------------------
 
 @respx.mock
 async def test_engine_run_mcp_mode_returns_raw_response_when_no_llm(token_connection):
@@ -582,7 +582,7 @@ async def test_engine_run_default_mode_still_raises_no_llm(token_connection):
         await run("TEST-123", config)  # mcp_mode=False by default
 
 
-# ── Visual Grounding Pipeline ─────────────────────────────────────────────────
+# -- Visual Grounding Pipeline -------------------------------------------------
 
 @respx.mock
 async def test_visual_grounding_timeout_returns_original_result(app_config):
@@ -683,7 +683,7 @@ async def test_engine_run_visual_grounding_called_on_low_confidence(app_config):
     assert isinstance(result, IssueContext)
 
 
-# ── Heuristic confidence logic ────────────────────────────────────────────────
+# -- Heuristic confidence logic ------------------------------------------------
 
 def _make_raw_data(**overrides):
     defaults = dict(
@@ -745,11 +745,11 @@ def test_heuristic_not_triggered_for_story_with_no_repro():
     assert _heuristic_confidence_triggered(ctx, raw, {}) is False
 
 
-# ── Visual fallback rule ──────────────────────────────────────────────────────
+# -- Visual fallback rule ------------------------------------------------------
 
 @respx.mock
 async def test_engine_attaches_images_when_no_image_model(token_connection):
-    """No image_model → images always attached regardless of heuristics."""
+    """No image_model -> images always attached regardless of heuristics."""
     import base64 as _b64
     from icx_engine.models.config import AppConfig, LLMConfig, ChannelConfig
 
@@ -781,7 +781,7 @@ async def test_engine_attaches_images_when_no_image_model(token_connection):
 
 @respx.mock
 async def test_engine_attaches_images_on_bug_no_repro_heuristic(token_connection):
-    """Condition 3: Bug + empty repro steps → images attached even at high confidence."""
+    """Condition 3: Bug + empty repro steps -> images attached even at high confidence."""
     import json as _json
     import base64 as _b64
     from icx_engine.models.config import AppConfig, LLMConfig, ChannelConfig
@@ -826,7 +826,7 @@ async def test_engine_attaches_images_on_bug_no_repro_heuristic(token_connection
 
 @respx.mock
 async def test_engine_no_images_when_heuristic_clear_and_image_model_present(app_config):
-    """High confidence, sufficient OCR, non-empty repro → images NOT attached."""
+    """High confidence, sufficient OCR, non-empty repro -> images NOT attached."""
     # Override to ensure heuristic does NOT trigger:
     # confidence=0.9 (MOCK_LLM_JSON), repro steps populated, OCR text >= 500 chars
     respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
@@ -976,7 +976,7 @@ def test_finalize_does_not_cap_when_schema_present():
     assert result.completeness_score > 0.79
 
 
-# ── MCP headless mode includes images ────────────────────────────────────────
+# -- MCP headless mode includes images ----------------------------------------
 
 @respx.mock
 async def test_engine_run_mcp_mode_includes_images(token_connection):
@@ -1088,7 +1088,7 @@ async def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
         connector = MagicMock()
         connector.parse_input.return_value = MagicMock(issue_key="TEST-1")
         connector.fetch = AsyncMock(return_value=raw_ticket)
-        connector.process_attachments = AsyncMock(return_value=({}, {}))
+        connector.process_attachments = AsyncMock(return_value=({}, {}, {}, {}))
         mock_gc.return_value = connector
 
         provider = MagicMock()
@@ -1105,7 +1105,7 @@ async def test_engine_run_uses_debug_console_for_prompt(app_config, raw_ticket):
         )
 
     output = buf.getvalue()
-    assert "Prompt" in output or "LLM" in output or "──" in output
+    assert "Prompt" in output or "LLM" in output or "--" in output
 
 
 # --- Memory enrichment tests ---
@@ -1148,7 +1148,7 @@ async def test_engine_injects_past_insights_when_memory_hits():
     mock_connector = MagicMock()
     mock_connector.parse_input.return_value = MagicMock(issue_key="PROJ-456")
     mock_connector.fetch = AsyncMock(return_value=raw)
-    mock_connector.process_attachments = AsyncMock(return_value=({}, {}))
+    mock_connector.process_attachments = AsyncMock(return_value=({}, {}, {}, {}))
     mock_connector.connector_type.return_value = "jira"
 
     mock_provider = MagicMock()
@@ -1201,7 +1201,7 @@ async def test_engine_memory_exception_does_not_propagate():
     mock_connector = MagicMock()
     mock_connector.parse_input.return_value = MagicMock(issue_key="PROJ-456")
     mock_connector.fetch = AsyncMock(return_value=raw)
-    mock_connector.process_attachments = AsyncMock(return_value=({}, {}))
+    mock_connector.process_attachments = AsyncMock(return_value=({}, {}, {}, {}))
     mock_connector.connector_type.return_value = "jira"
 
     from icx_engine.models.output import IssueContext
@@ -1239,7 +1239,7 @@ async def test_engine_memory_exception_does_not_propagate():
     assert result.past_insights == []
 
 
-# ── _split_attachments ────────────────────────────────────────────────────────
+# -- _split_attachments --------------------------------------------------------
 
 def test_split_attachments_separates_images_from_docs():
     from icx_engine.engine import _split_attachments
@@ -1328,7 +1328,7 @@ def test_split_attachments_four_buckets():
     assert unsupported == ["file.xyz"]
 
 
-# ── engine.run skip_vision ────────────────────────────────────────────────────
+# -- engine.run skip_vision ----------------------------------------------------
 
 @respx.mock
 async def test_run_skip_vision_populates_pending_images(app_config):
@@ -1483,11 +1483,31 @@ async def test_full_mode_calls_process_attachments(app_config):
         mock_cls.return_value = mock_client
         mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
         with patch("icx_engine.connectors.jira.connector.JiraConnector.process_attachments", new_callable=AsyncMock) as mock_pa:
-            mock_pa.return_value = ({}, {})
+            mock_pa.return_value = ({}, {}, {}, {})
             with patch("icx_engine.memory.MemoryManager"):
                 result = await run("TEST-123", app_config, skip_vision=False)
     mock_pa.assert_called_once()
     assert isinstance(result, IssueContext)
+
+
+@respx.mock
+async def test_full_mode_sets_attachment_full_texts(app_config):
+    """Full mode carries attachment_full_texts / attachment_raw onto the result."""
+    from icx_engine.models.output import IssueContext
+    respx.get(f"{JIRA_BASE_URL}/issue/TEST-123").mock(
+        return_value=httpx.Response(200, json=JIRA_ISSUE_PAYLOAD)
+    )
+    with patch("icx_engine.llm.ollama.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_openai_response())
+        with patch("icx_engine.connectors.jira.connector.JiraConnector.process_attachments", new_callable=AsyncMock) as mock_pa:
+            mock_pa.return_value = ({"a.csv": "inline"}, {}, {"a.csv": "FULL"}, {"a.csv": "B64"})
+            with patch("icx_engine.memory.MemoryManager"):
+                result = await run("TEST-123", app_config, skip_vision=False)
+    assert isinstance(result, IssueContext)
+    assert result.attachment_full_texts == {"a.csv": "FULL"}
+    assert result.attachment_raw == {"a.csv": "B64"}
 
 
 @respx.mock
@@ -1535,7 +1555,7 @@ async def test_fast_mode_no_llm_returns_raw_issue_response():
     assert "screenshot.png" in result.pending_images
 
 
-# ── engine.run MCP mode memory guard ─────────────────────────────────────────
+# -- engine.run MCP mode memory guard -----------------------------------------
 
 @respx.mock
 async def test_run_mcp_mode_skips_memory_enrichment(app_config):
@@ -1552,7 +1572,7 @@ async def test_run_mcp_mode_skips_memory_enrichment(app_config):
     mock_mem_cls.assert_not_called()
 
 
-# ── engine.run contextual RAG ─────────────────────────────────────────────────
+# -- engine.run contextual RAG -------------------------------------------------
 
 @respx.mock
 async def test_run_cli_memory_query_timeout_does_not_crash(app_config):
@@ -1603,3 +1623,13 @@ async def test_run_cli_mode_uses_contextual_rag(app_config):
     assert query.description == result.detailed_description
     # Must NOT equal the raw summary from the tracker payload
     assert query.summary != "Button not working on mobile"
+
+
+def test_prompts_are_connector_neutral():
+    """Prompts must not hardcode a specific tracker vendor (finding A4)."""
+    from icx_engine.llm.base import SYSTEM_PROMPT
+    from icx_engine.grounding import _VERIFY_USER_TEMPLATE
+    assert "jira" not in SYSTEM_PROMPT.lower()
+    assert "jira" not in _VERIFY_USER_TEMPLATE.lower()
+    # Guard rails still present (wording change did not drop the schema markers).
+    assert "attachment analysis" in SYSTEM_PROMPT.lower()

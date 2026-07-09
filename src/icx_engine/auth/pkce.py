@@ -14,7 +14,7 @@ Usage - connecting a new platform:
         token_endpoint="https://provider.example.com/oauth/token",
         client_id=my_client_id,
         scopes=["read:issues", "offline_access"],
-        # client_secret=None for public PKCE-only clients (RFC 7636 §4)
+        # client_secret=None for public PKCE-only clients (RFC 7636 section 4)
         # client_secret=my_secret for confidential clients (some providers require it)
     )
 """

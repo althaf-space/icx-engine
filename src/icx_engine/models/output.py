@@ -15,8 +15,8 @@ class RawIssueData(BaseModel):
     status: str
     metadata: dict
     due_date: str | None = None
-    attachment_content_urls: dict[str, str] = Field(default_factory=dict)  # filename → download URL
-    attachment_texts: dict[str, str] = Field(default_factory=dict)          # filename → extracted text
+    attachment_content_urls: dict[str, str] = Field(default_factory=dict)  # filename -> download URL
+    attachment_texts: dict[str, str] = Field(default_factory=dict)          # filename -> extracted text
 
 
 class PastInsight(BaseModel):
@@ -49,12 +49,16 @@ class IssueContext(BaseModel):
     confidence_score: float = Field(..., ge=0.0, le=1.0)
     completeness_score: float = Field(..., ge=0.0, le=1.0)
     missing_information: list[str]
-    images: dict[str, str] = Field(default_factory=dict)  # filename → Base64
+    images: dict[str, str] = Field(default_factory=dict)  # filename -> Base64
     past_insights: list[PastInsight] = Field(default_factory=list)
     pending_images: list[str] = Field(default_factory=list)
     pending_audio: list[str] = Field(default_factory=list)
     pending_documents: list[str] = Field(default_factory=list)
     pending_unsupported: list[str] = Field(default_factory=list)
+    recommended_persona: str = ""       # LLM-picked senior role slug; "" if unset
+    persona_rationale: str = ""         # one-line reason for the pick
+    attachment_full_texts: dict[str, str] = Field(default_factory=dict, exclude=True)  # full conversions for sidecars
+    attachment_raw: dict[str, str] = Field(default_factory=dict, exclude=True)          # base64 originals for MCP writer
 
 
 class RawIssueResponse(BaseModel):
@@ -72,11 +76,13 @@ class RawIssueResponse(BaseModel):
     metadata: dict
     due_date: str | None = None
     attachment_texts: dict[str, str] = Field(default_factory=dict)
-    images: dict[str, str] = Field(default_factory=dict)  # filename → Base64
+    images: dict[str, str] = Field(default_factory=dict)  # filename -> Base64
     pending_images: list[str] = Field(default_factory=list)
     pending_audio: list[str] = Field(default_factory=list)
     pending_documents: list[str] = Field(default_factory=list)
     pending_unsupported: list[str] = Field(default_factory=list)
+    attachment_full_texts: dict[str, str] = Field(default_factory=dict, exclude=True)  # full conversions for sidecars
+    attachment_raw: dict[str, str] = Field(default_factory=dict, exclude=True)          # base64 originals for MCP writer
     note: str = (
         "No LLM analysis performed - no API key configured. "
         "Raw issue data, digested documents, and raw images are provided for your direct analysis."

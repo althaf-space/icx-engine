@@ -31,7 +31,7 @@ def _ollama_config() -> ChannelConfig:
     return ChannelConfig(provider="ollama", model="llama3")
 
 
-# ── NIM ──────────────────────────────────────────────────────────────────────
+# -- NIM ----------------------------------------------------------------------
 
 def test_nim_auth_error_raises_auth_error():
     import openai
@@ -82,7 +82,7 @@ def test_nim_405b_model_hint_in_context_build_error():
     assert "405B" in str(exc_info.value) or "reasoning" in str(exc_info.value).lower()
 
 
-# ── OpenAI ───────────────────────────────────────────────────────────────────
+# -- OpenAI -------------------------------------------------------------------
 
 def test_openai_auth_error_raises_auth_error():
     import openai
@@ -120,7 +120,7 @@ def test_openai_connection_error_raises_source_unavailable():
         asyncio.run(provider.analyze(_raw()))
 
 
-# ── Anthropic ────────────────────────────────────────────────────────────────
+# -- Anthropic ----------------------------------------------------------------
 
 def test_anthropic_auth_error_raises_auth_error():
     import anthropic
@@ -162,7 +162,7 @@ def test_anthropic_connection_error_raises_source_unavailable():
         asyncio.run(provider.analyze(_raw()))
 
 
-# ── Ollama ───────────────────────────────────────────────────────────────────
+# -- Ollama -------------------------------------------------------------------
 
 def test_ollama_connection_error_raises_source_unavailable():
     import openai
@@ -176,7 +176,7 @@ def test_ollama_connection_error_raises_source_unavailable():
         asyncio.run(provider.analyze(_raw()))
 
 
-# ── get_provider ─────────────────────────────────────────────────────────────
+# -- get_provider -------------------------------------------------------------
 
 def test_get_provider_unknown_raises_value_error():
     from icx_engine.llm.base import get_provider
@@ -185,7 +185,7 @@ def test_get_provider_unknown_raises_value_error():
         get_provider(ChannelConfig(provider="unknown_llm", model="x"))
 
 
-# ── Google Gemini ─────────────────────────────────────────────────────────────
+# -- Google Gemini -------------------------------------------------------------
 
 def _gemini_config() -> ChannelConfig:
     return ChannelConfig(provider="google", model="gemini-1.5-pro", api_key="AIzaSy-test")
@@ -287,7 +287,7 @@ def test_gemini_finalize_applied():
     assert result.issue_type == "Bug"  # _raw() has issue_type="Bug"
 
 
-# ── xAI Grok ──────────────────────────────────────────────────────────────────
+# -- xAI Grok ------------------------------------------------------------------
 
 def _xai_config() -> ChannelConfig:
     return ChannelConfig(provider="xai", model="grok-beta", api_key="xai-test-key")
@@ -388,7 +388,7 @@ def test_xai_finalize_applied():
     assert result.issue_type == "Bug"  # _raw() has issue_type="Bug", finalize() wins
 
 
-# ── Provider registry ─────────────────────────────────────────────────────────
+# -- Provider registry ---------------------------------------------------------
 
 def test_get_provider_resolves_google():
     from icx_engine.llm.base import get_provider
@@ -417,7 +417,7 @@ def test_providers_list_contains_google_and_xai():
     assert _DEFAULT_MODELS["xai"]["image"] == "grok-vision-beta"
 
 
-# ── JSON sanitizer ────────────────────────────────────────────────────────────
+# -- JSON sanitizer ------------------------------------------------------------
 
 def test_strip_json_fencing_plain_json():
     from icx_engine.llm.base import _strip_json_fencing
@@ -467,3 +467,31 @@ def test_xai_handles_markdown_wrapped_json():
 
     result = asyncio.run(provider.analyze(_raw()))
     assert result.problem_summary == "p"
+
+
+def test_gemini_parses_recommended_persona_when_present():
+    mock_response = MagicMock()
+    mock_response.text = json.dumps({
+        "problem_summary": "p", "detailed_description": "d",
+        "reproduction_steps": [], "expected_behavior": None, "actual_behavior": None,
+        "acceptance_criteria": [], "impact": "i", "priority": "High",
+        "issue_type": "Task", "confidence_score": 0.9, "completeness_score": 0.5,
+        "missing_information": [],
+        "recommended_persona": "principal-security-architect",
+        "persona_rationale": "auth token bug",
+    })
+    provider = _make_gemini_provider()
+    with patch("google.genai.Client", return_value=_gemini_mock_client(mock_response)):
+        result = asyncio.run(provider.analyze(_raw()))
+    assert result.recommended_persona == "principal-security-architect"
+    assert result.persona_rationale == "auth token bug"
+
+
+def test_gemini_persona_defaults_when_llm_omits_it():
+    mock_response = MagicMock()
+    mock_response.text = _gemini_ctx_json()
+    provider = _make_gemini_provider()
+    with patch("google.genai.Client", return_value=_gemini_mock_client(mock_response)):
+        result = asyncio.run(provider.analyze(_raw()))
+    assert result.recommended_persona == ""
+    assert result.persona_rationale == ""

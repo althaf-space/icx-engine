@@ -1,149 +1,379 @@
 {
-  "_comment": "Locked baseline scores per fixture. All fixtures at 100% recall after Phase 1 + Java + JS/TS resolvers.",
+  "_comment": "Locked baselines. phase_2_node_level_fusion: after fixing fuse_and_dedup to group by node pair (not file pair), recall restored to ~1.0 on 21/22 fixtures (kotlin_spring_sample 0.478 is a separate Kotlin-resolver gap, tracked separately).",
   "fastapi_sample": {
     "phase_0_ast_only": {
       "date": "2026-05-24",
       "predicted_total": 10,
       "truth_total": 22,
       "matched": 6,
-      "precision": 0.600,
+      "precision": 0.6,
       "recall": 0.273,
       "per_kind_recall": {
-        "call": 0.500, "inherit": 1.000, "import": 0.000,
-        "di": 0.000, "reference": 0.000
+        "call": 0.5,
+        "inherit": 1.0,
+        "import": 0.0,
+        "di": 0.0,
+        "reference": 0.0
       }
     },
     "phase_1c_ast_plus_jedi_plus_fastapi": {
       "date": "2026-05-24",
-      "predicted_total": 39, "truth_total": 22, "matched": 22,
-      "precision": 0.564, "recall": 1.000,
+      "predicted_total": 39,
+      "truth_total": 22,
+      "matched": 22,
+      "precision": 0.564,
+      "recall": 1.0,
       "per_kind_recall": {
-        "call": 1.000, "inherit": 1.000, "import": 1.000,
-        "di": 1.000, "reference": 1.000
+        "call": 1.0,
+        "inherit": 1.0,
+        "import": 1.0,
+        "di": 1.0,
+        "reference": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 35,
+      "truth_total": 25,
+      "matched": 25,
+      "precision": 0.714,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "inherit": 1.0,
+        "reference": 1.0,
+        "route": 1.0,
+        "call": 1.0,
+        "di": 1.0
       }
     }
   },
   "fastapi_large": {
     "phase_1_locked": {
       "date": "2026-05-24",
-      "predicted_total": 184, "truth_total": 64, "matched": 64,
-      "precision": 0.348, "recall": 1.000,
+      "predicted_total": 184,
+      "truth_total": 64,
+      "matched": 64,
+      "precision": 0.348,
+      "recall": 1.0,
       "per_kind_recall": {
-        "call": 1.000, "di": 1.000, "import": 1.000,
-        "inherit": 1.000, "reference": 1.000
+        "call": 1.0,
+        "di": 1.0,
+        "import": 1.0,
+        "inherit": 1.0,
+        "reference": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 133,
+      "truth_total": 69,
+      "matched": 69,
+      "precision": 0.519,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "call": 1.0,
+        "reference": 1.0,
+        "inherit": 1.0,
+        "import": 1.0,
+        "di": 1.0,
+        "route": 1.0
       }
     }
   },
   "django_sample": {
     "phase_1_locked": {
       "date": "2026-05-24",
-      "predicted_total": 68, "truth_total": 34, "matched": 34,
-      "precision": 0.500, "recall": 1.000,
+      "predicted_total": 68,
+      "truth_total": 34,
+      "matched": 34,
+      "precision": 0.5,
+      "recall": 1.0,
       "per_kind_recall": {
-        "call": 1.000, "import": 1.000, "reference": 1.000
+        "call": 1.0,
+        "import": 1.0,
+        "reference": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 60,
+      "truth_total": 42,
+      "matched": 39,
+      "precision": 0.65,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "reference": 1.0,
+        "relation": 1.0,
+        "route": 1.0,
+        "call": 1.0,
+        "listens": 1.0
       }
     }
   },
   "flask_sample": {
     "phase_1_locked": {
       "date": "2026-05-24",
-      "predicted_total": 25, "truth_total": 17, "matched": 17,
-      "precision": 0.680, "recall": 1.000,
+      "predicted_total": 25,
+      "truth_total": 17,
+      "matched": 17,
+      "precision": 0.68,
+      "recall": 1.0,
       "per_kind_recall": {
-        "call": 1.000, "import": 1.000
+        "call": 1.0,
+        "import": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 26,
+      "truth_total": 20,
+      "matched": 20,
+      "precision": 0.769,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "call": 1.0,
+        "route": 1.0
       }
     }
   },
   "spring_boot_sample": {
     "phase_2_java_locked": {
       "date": "2026-05-24",
-      "predicted_total": 135, "truth_total": 55, "matched": 55,
-      "precision": 0.407, "recall": 1.000,
+      "predicted_total": 135,
+      "truth_total": 55,
+      "matched": 55,
+      "precision": 0.407,
+      "recall": 1.0,
       "per_kind_recall": {
-        "call": 1.000, "dao": 1.000, "di": 1.000, "import": 1.000,
-        "reference": 1.000, "relation": 1.000, "route": 1.000
+        "call": 1.0,
+        "dao": 1.0,
+        "di": 1.0,
+        "import": 1.0,
+        "reference": 1.0,
+        "relation": 1.0,
+        "route": 1.0
       },
       "notes": "Spring Boot + Spring Data JPA + Hibernate. Annotations: @Entity, @Repository extends JpaRepository, @Service, @RestController, @Autowired, @RequestMapping family."
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 168,
+      "truth_total": 64,
+      "matched": 64,
+      "precision": 0.381,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "di": 1.0,
+        "call": 1.0,
+        "provides": 1.0,
+        "route": 1.0,
+        "relation": 1.0,
+        "queries": 1.0,
+        "dao": 1.0,
+        "reference": 1.0,
+        "advises": 1.0,
+        "listens": 1.0,
+        "scheduled": 1.0
+      }
     }
   },
   "react_sample": {
     "phase_3_jsts_locked": {
       "date": "2026-05-24",
-      "predicted_total": 31, "truth_total": 20, "matched": 20,
-      "precision": 0.645, "recall": 1.000,
+      "predicted_total": 31,
+      "truth_total": 20,
+      "matched": 20,
+      "precision": 0.645,
+      "recall": 1.0,
       "per_kind_recall": {
-        "call": 1.000, "import": 1.000, "renders": 1.000
+        "call": 1.0,
+        "import": 1.0,
+        "renders": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 31,
+      "truth_total": 20,
+      "matched": 20,
+      "precision": 0.645,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "renders": 1.0,
+        "call": 1.0
       }
     }
   },
   "next_sample": {
     "phase_3_jsts_locked": {
       "date": "2026-05-24",
-      "predicted_total": 29, "truth_total": 20, "matched": 20,
-      "precision": 0.690, "recall": 1.000,
+      "predicted_total": 29,
+      "truth_total": 20,
+      "matched": 20,
+      "precision": 0.69,
+      "recall": 1.0,
       "per_kind_recall": {
-        "call": 1.000, "import": 1.000, "renders": 1.000, "route": 1.000
+        "call": 1.0,
+        "import": 1.0,
+        "renders": 1.0,
+        "route": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 29,
+      "truth_total": 20,
+      "matched": 20,
+      "precision": 0.69,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "route": 1.0,
+        "renders": 1.0,
+        "import": 1.0,
+        "call": 1.0
       }
     }
   },
   "nestjs_sample": {
     "phase_3_jsts_locked": {
       "date": "2026-05-24",
-      "predicted_total": 47, "truth_total": 27, "matched": 27,
-      "precision": 0.574, "recall": 1.000,
+      "predicted_total": 47,
+      "truth_total": 27,
+      "matched": 27,
+      "precision": 0.574,
+      "recall": 1.0,
       "per_kind_recall": {
-        "di": 1.000, "import": 1.000, "route": 1.000
+        "di": 1.0,
+        "import": 1.0,
+        "route": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 47,
+      "truth_total": 27,
+      "matched": 27,
+      "precision": 0.574,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "route": 1.0,
+        "di": 1.0
       }
     }
   },
   "angular_sample": {
     "phase_3_jsts_locked": {
       "date": "2026-05-24",
-      "predicted_total": 26, "truth_total": 14, "matched": 14,
-      "precision": 0.538, "recall": 1.000,
+      "predicted_total": 26,
+      "truth_total": 14,
+      "matched": 14,
+      "precision": 0.538,
+      "recall": 1.0,
       "per_kind_recall": {
-        "di": 1.000, "import": 1.000
+        "di": 1.0,
+        "import": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 26,
+      "truth_total": 14,
+      "matched": 14,
+      "precision": 0.538,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "di": 1.0
       }
     }
   },
   "express_sample": {
     "phase_3_jsts_locked": {
       "date": "2026-05-24",
-      "predicted_total": 14, "truth_total": 7, "matched": 7,
-      "precision": 0.500, "recall": 1.000,
+      "predicted_total": 14,
+      "truth_total": 7,
+      "matched": 7,
+      "precision": 0.5,
+      "recall": 1.0,
       "per_kind_recall": {
-        "import": 1.000, "route": 1.000
+        "import": 1.0,
+        "route": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 14,
+      "truth_total": 7,
+      "matched": 7,
+      "precision": 0.5,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "route": 1.0
       }
     }
   },
   "fastify_sample": {
     "phase_3_jsts_locked": {
       "date": "2026-05-24",
-      "predicted_total": 10, "truth_total": 6, "matched": 6,
-      "precision": 0.600, "recall": 1.000,
+      "predicted_total": 10,
+      "truth_total": 6,
+      "matched": 6,
+      "precision": 0.6,
+      "recall": 1.0,
       "per_kind_recall": {
-        "import": 1.000, "route": 1.000
+        "import": 1.0,
+        "route": 1.0
+      }
+    },
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 10,
+      "truth_total": 6,
+      "matched": 6,
+      "precision": 0.6,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "route": 1.0
       }
     }
   },
   "_summary": {
     "date": "2026-05-24",
     "fixtures": [
-      "fastapi_sample", "fastapi_large", "django_sample", "flask_sample",
+      "fastapi_sample",
+      "fastapi_large",
+      "django_sample",
+      "flask_sample",
       "spring_boot_sample",
-      "react_sample", "next_sample", "nestjs_sample", "angular_sample",
-      "express_sample", "fastify_sample"
+      "react_sample",
+      "next_sample",
+      "nestjs_sample",
+      "angular_sample",
+      "express_sample",
+      "fastify_sample"
     ],
     "total_ground_truth_edges": 286,
     "total_matched": 286,
-    "weighted_recall": 1.000,
+    "weighted_recall": 1.0,
     "stacks_at_100_percent_recall": [
-      "Python + FastAPI", "Python + Django + DRF", "Python + Flask",
+      "Python + FastAPI",
+      "Python + Django + DRF",
+      "Python + Flask",
       "Java + Spring Boot + Spring Data JPA + Hibernate",
-      "React (TSX)", "Next.js app-router + middleware",
+      "React (TSX)",
+      "Next.js app-router + middleware",
       "NestJS (controllers + modules + DI)",
       "Angular (modules + components + services)",
-      "Express (CommonJS)", "Fastify (plugin-based)"
+      "Express (CommonJS)",
+      "Fastify (plugin-based)"
     ],
     "components": [
       "Vendored graphify v8 tree-sitter AST extractor (46 file extensions)",
@@ -166,5 +396,174 @@
     "skipped": [
       "tsserver LSP client (deferred; AST + framework resolvers already cover the routes/di/imports/renders space at 100% recall on fixtures)"
     ]
+  },
+  "gradle_multi": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 1,
+      "truth_total": 1,
+      "matched": 1,
+      "precision": 1.0,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "module_depends": 1.0
+      }
+    }
+  },
+  "hono_sample": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 22,
+      "truth_total": 12,
+      "matched": 12,
+      "precision": 0.545,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "call": 1.0
+      }
+    }
+  },
+  "jsts_advanced": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 22,
+      "truth_total": 7,
+      "matched": 7,
+      "precision": 0.318,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "relation": 1.0,
+        "di": 1.0,
+        "renders": 1.0
+      }
+    }
+  },
+  "kotlin_spring_sample": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 30,
+      "truth_total": 23,
+      "matched": 23,
+      "precision": 0.767,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "dao": 1.0,
+        "di": 1.0,
+        "import": 1.0,
+        "relation": 1.0,
+        "route": 1.0
+      },
+      "note": "kotlin_spring resolver m.group(2)->group(1) crash fix restored di/route/dao/relation"
+    }
+  },
+  "lombok_sample": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 14,
+      "truth_total": 8,
+      "matched": 8,
+      "precision": 0.571,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "call": 1.0,
+        "import": 1.0
+      }
+    }
+  },
+  "python_advanced": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 26,
+      "truth_total": 20,
+      "matched": 20,
+      "precision": 0.769,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "scheduled": 1.0,
+        "import": 1.0,
+        "relation": 1.0,
+        "call": 1.0,
+        "di": 1.0,
+        "route": 1.0
+      }
+    }
+  },
+  "quarkus_sample": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 7,
+      "truth_total": 4,
+      "matched": 4,
+      "precision": 0.571,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "di": 1.0,
+        "route": 1.0
+      }
+    }
+  },
+  "remix_sample": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 37,
+      "truth_total": 28,
+      "matched": 28,
+      "precision": 0.757,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "call": 1.0,
+        "renders": 1.0,
+        "import": 1.0,
+        "route": 1.0
+      }
+    }
+  },
+  "svelte_sample": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 18,
+      "truth_total": 11,
+      "matched": 11,
+      "precision": 0.611,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "call": 1.0,
+        "renders": 1.0,
+        "route": 1.0
+      }
+    }
+  },
+  "trpc_sample": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 21,
+      "truth_total": 13,
+      "matched": 13,
+      "precision": 0.619,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "call": 1.0
+      }
+    }
+  },
+  "vue_sample": {
+    "phase_2_node_level_fusion": {
+      "date": "2026-07-05",
+      "predicted_total": 25,
+      "truth_total": 21,
+      "matched": 21,
+      "precision": 0.84,
+      "recall": 1.0,
+      "per_kind_recall": {
+        "import": 1.0,
+        "renders": 1.0,
+        "call": 1.0,
+        "route": 1.0
+      }
+    }
   }
 }

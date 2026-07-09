@@ -35,7 +35,7 @@ def _mock_embeddings():
     return mgr
 
 
-# ── detect_patterns unit tests ────────────────────────────────────────────────
+# -- detect_patterns unit tests ------------------------------------------------
 
 def test_detect_returns_empty_below_min_entries():
     from icx_engine.memory.patterns import detect_patterns
@@ -134,7 +134,7 @@ def test_detect_equal_split_no_dominant_type():
     assert not any(p["pattern_type"] == "top_work_item_type" for p in patterns)
 
 
-# ── PatternManager integration tests ─────────────────────────────────────────
+# -- PatternManager integration tests -----------------------------------------
 
 def test_pattern_manager_refresh_and_get(tmp_path):
     from icx_engine.memory.patterns import PatternManager
@@ -212,7 +212,7 @@ def test_pattern_manager_reset_clears_cached_state(tmp_path):
     assert len(patterns) > 0
 
 
-# ── Integration: pattern trigger via MemoryManager ────────────────────────────
+# -- Integration: pattern trigger via MemoryManager ----------------------------
 
 def test_pattern_trigger_on_tenth_save(tmp_path):
     from icx_engine.memory.manager import MemoryManager

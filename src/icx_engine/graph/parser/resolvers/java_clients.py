@@ -24,6 +24,11 @@ _log = logging.getLogger(__name__)
 
 _FEIGN_ANNOTATION = "FeignClient"
 
+# Substrings that any HTTP-client source must contain. Cheap per-file gate:
+# a file with none of these cannot emit client edges, so skip its tree walk
+# (perf only, zero edge loss).
+_CLIENT_TRIGGERS = ("FeignClient", "RestTemplate", "WebClient")
+
 _CONTROLLER_ANNOTATIONS: frozenset[str] = frozenset({
     "RestController", "Controller",
 })
@@ -70,17 +75,27 @@ def extract_java_client_edges(
     if not node_index["by_symbol"] and not node_index["by_file"]:
         return []
 
-    # First pass: parse all files, build FQN index and collect metadata.
+    # First pass: parse only files that use an HTTP client, build metadata.
     fqn_to_file: dict[str, str] = {}
     parsed: list[tuple[Path, str, object]] = []
+
+    from . import _java_parse_cache as _jpc
 
     for jf in java_files:
         try:
             rel = jf.relative_to(project_root).as_posix()
         except ValueError:
             continue
-        from . import _java_parse_cache as _jpc
-        tree = _jpc.get_tree(jf)
+        # Cheap gate: only files referencing an HTTP client can emit client
+        # edges. Skip the parse-tree walk for the rest - zero edge loss, since
+        # fqn_to_file is rebuilt for ALL files below via the regex fqn map.
+        try:
+            src = jf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not any(trigger in src for trigger in _CLIENT_TRIGGERS):
+            continue
+        tree = _jpc.get_tree(jf, src)
         if tree is None:
             continue
         package = tree.package.name if tree.package else ""
@@ -91,7 +106,8 @@ def extract_java_client_edges(
                 fqn_to_file.setdefault(fqn, rel)
         parsed.append((jf, rel, tree))
 
-    # Supplement with regex scan for files javalang timed out on
+    # Build the full fqn -> file map over ALL files (call targets may live in
+    # gated-out files). Regex-based, also covers javalang timeouts.
     from . import _java_fqn_map as _jfm
     for _fqn, _rel in _jfm.build_fqn_map(java_files, project_root).items():
         fqn_to_file.setdefault(_fqn, _rel)
@@ -103,6 +119,8 @@ def extract_java_client_edges(
     controller_index: dict[str, list[str]] = {}  # service_name -> [node_id]
     _build_controller_index(parsed, node_index, controller_index)
 
+    pkg_index = _build_pkg_member_index(fqn_to_file)
+
     seen: set[tuple[str, str, str]] = set()
     edges: list[dict] = []
 
@@ -113,7 +131,7 @@ def extract_java_client_edges(
             if path == rel
         }
         package = tree.package.name if tree.package else ""
-        import_map = _build_import_map(tree, package, fqn_to_file)
+        import_map = _build_import_map(tree, package, fqn_to_file, pkg_index)
 
         for type_decl in (tree.types or []):
             type_name = getattr(type_decl, "name", "") or ""
@@ -575,7 +593,26 @@ def _position_str(node) -> str:
     return f"L{pos.line}"
 
 
-def _build_import_map(tree, package: str, fqn_to_file: dict[str, str]) -> dict[str, str]:
+def _build_pkg_member_index(fqn_to_file: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Group FQNs by parent package: {package: {simple_name: fqn}}. Built once so
+    _build_import_map does an O(1) lookup instead of scanning every FQN per file.
+    Semantics mirror the original `startswith(package + '.')` / `'.' not in simple`
+    direct-member condition, with first-FQN-wins over insertion order."""
+    index: dict[str, dict[str, str]] = {}
+    for fqn in fqn_to_file:
+        dot = fqn.rfind(".")
+        if dot <= 0:
+            continue
+        index.setdefault(fqn[:dot], {}).setdefault(fqn[dot + 1 :], fqn)
+    return index
+
+
+def _build_import_map(
+    tree,
+    package: str,
+    fqn_to_file: dict[str, str],
+    pkg_index: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str]:
     out: dict[str, str] = {}
     for imp in (tree.imports or []):
         path = imp.path
@@ -585,11 +622,15 @@ def _build_import_map(tree, package: str, fqn_to_file: dict[str, str]) -> dict[s
         if simple:
             out[simple] = path
     if package:
-        for fqn in fqn_to_file:
-            if fqn.startswith(package + "."):
-                simple = fqn[len(package) + 1:]
-                if "." not in simple:
-                    out.setdefault(simple, fqn)
+        if pkg_index is not None:
+            for simple, fqn in pkg_index.get(package, {}).items():
+                out.setdefault(simple, fqn)
+        else:
+            for fqn in fqn_to_file:
+                if fqn.startswith(package + "."):
+                    simple = fqn[len(package) + 1:]
+                    if "." not in simple:
+                        out.setdefault(simple, fqn)
     return out
 
 

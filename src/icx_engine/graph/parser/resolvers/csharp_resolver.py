@@ -101,16 +101,27 @@ def resolve_csharp(files: list, project_path, extraction: dict) -> list:
         if m:
             file_namespace[cs_file] = m.group(1)
 
+    # Precompute each namespace's (method_name, file) declarations once - in contents
+    # iteration + finditer order - instead of re-scanning every same-namespace file per
+    # file. Per-file ns_methods is rebuilt with the same last-write-wins (excluding self)
+    # semantics, so the resolved call edges are identical.
+    ns_method_entries: dict[str, list[tuple[str, str]]] = {}
+    for _f, _content in contents.items():
+        _ns = file_namespace.get(_f)
+        if _ns is None:
+            continue
+        _lst = ns_method_entries.setdefault(_ns, [])
+        for _m in _CS_METHOD_DECL.finditer(_content):
+            _lst.append((_m.group(1), _f))
+
     for cs_file, content in contents.items():
         ns = file_namespace.get(cs_file)
         if ns is None:
             continue
         ns_methods: dict[str, str] = {}
-        for other in contents:
-            if other == cs_file or file_namespace.get(other) != ns:
-                continue
-            for m in _CS_METHOD_DECL.finditer(contents.get(other, "")):
-                ns_methods[m.group(1)] = other
+        for mname, other in ns_method_entries.get(ns, ()):
+            if other != cs_file:
+                ns_methods[mname] = other
         for mname, tgt_file in ns_methods.items():
             if re.search(rf'\b{re.escape(mname)}\s*\(', content):
                 for sn in node_by_file.get(cs_file, []):

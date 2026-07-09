@@ -50,8 +50,13 @@ class ConfigError(ICXError):
     """Config file is corrupted or D-Lock decryption failed."""
 
 
-class MemoryError(ICXError):
+class ICXMemoryError(ICXError):
     """Local memory operation failed (LanceDB, embeddings, or storage)."""
+
+
+# Back-compat alias. Prefer ICXMemoryError; the bare name `MemoryError` shadows
+# the Python builtin, so new code must import ICXMemoryError.
+MemoryError = ICXMemoryError
 
 
 class GraphError(ICXError):
