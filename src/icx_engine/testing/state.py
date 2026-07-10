@@ -81,7 +81,7 @@ def make_initial_state(
     context: str | None = None,
     max_iterations: int | None = None,
     test_mode: str | None = None,
-    engine: str = "magik",
+    engine: str = "local",
 ) -> TestingState:
     return TestingState(
         file_paths=list(file_paths),
