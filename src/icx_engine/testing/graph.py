@@ -18,6 +18,8 @@ from icx_engine.testing.nodes import (
     node_compat_check,
     node_config_gate,
     node_auth_gate,
+    node_author_flow,
+    route_after_auth,
     node_local_run,
     node_review,
     node_limit_gate,
@@ -85,6 +87,7 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
     builder.add_node("compat_check",    node_compat_check)
     builder.add_node("config_gate",     node_config_gate)
     builder.add_node("auth_gate",       node_auth_gate)
+    builder.add_node("author_flow",     node_author_flow)
     builder.add_node("local_run",       node_local_run)
     builder.add_node("review",          node_review)
     builder.add_node("limit_gate",      node_limit_gate)
@@ -118,7 +121,11 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
 
     # -- automated path (local engine) ------------------------------------
     builder.add_edge("config_gate", "auth_gate")
-    builder.add_edge("auth_gate",   "local_run")
+    builder.add_conditional_edges("auth_gate", route_after_auth, {
+        "author_flow": "author_flow",
+        "local_run":   "local_run",
+    })
+    builder.add_edge("author_flow", "local_run")
     builder.add_edge("local_run",   "review")
     builder.add_conditional_edges("review", route_after_check_issues, {
         "ui_check":   "ui_check",

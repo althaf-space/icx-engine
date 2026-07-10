@@ -113,6 +113,7 @@ packages = ["src/icx_engine"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/icx_engine/py.typed" = "icx_engine/py.typed"
+"src/icx_engine/testing/runners/assets/icx-replay.mjs" = "icx_engine/testing/runners/assets/icx-replay.mjs"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -79,6 +79,11 @@ def save_flow(key: str, flow: UiFlow) -> str:
     return str(p)
 
 
+def flow_path(key: str) -> str:
+    """Absolute path to the cached flow file for a key (used by the executor for replay)."""
+    return str(_flow_path(key))
+
+
 def load_flow(key: str) -> UiFlow | None:
     p = _flow_path(key)
     if not p.exists():
@@ -126,13 +131,21 @@ class _StagehandUi:
     def build_command(self, repo: Path, runtime_path: str | None) -> RunSpec:
         report = str(repo / ".icx-ui-junit.xml")
         node = runtime_path or "node"
-        # The ICX Node harness runs Stagehand in REPLAY mode against a cached flow and emits JUnit
-        # XML via Playwright. Harness + Node + Stagehand + Playwright are installed under
-        # ~/.icx/testing/ (executor phase); the executor injects --flow <cache> and --url <target>.
-        harness = str(Path.home() / ".icx" / "testing" / "stagehand" / "icx-replay.mjs")
+        # Packaged ICX harness runs Stagehand in REPLAY mode against a cached flow and emits JUnit XML
+        # via Playwright. Stagehand+Playwright are installed by the runner-install manager; the
+        # harness .mjs itself ships with ICX. The executor injects --flow <cache> and --url <target>.
+        harness = str(Path(__file__).parent / "assets" / "icx-replay.mjs")
+        env = {}
+        try:
+            from icx_engine.testing.runners.install import installed_path
+            sh = installed_path("stagehand")
+            if sh:
+                env["NODE_PATH"] = str(Path(sh) / "node_modules")
+        except Exception:
+            pass
         return RunSpec(
             command=[node, harness, "--mode", "replay", "--junit", report],
-            cwd=str(repo), report_path=report,
+            cwd=str(repo), report_path=report, env=env,
             note=("AI authors the flow once (human-gated) then deterministic cached replay - no LLM "
                   "on rerun; a stale selector fails loud. Executor appends --flow <cache> --url <target>."),
         )

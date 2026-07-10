@@ -298,7 +298,8 @@ async def test_node_manual_result_passed_true():
 async def test_node_config_gate_ui_without_url_raises():
     from icx_engine.testing.nodes import node_config_gate
     state = _base_state(url=None)
-    with patch("icx_engine.testing.nodes.interrupt", return_value={"test_type": "ui"}):
+    state["test_type"] = "ui"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={}):
         with pytest.raises(ValueError, match="requires a URL"):
             await node_config_gate(state)
 
@@ -306,76 +307,42 @@ async def test_node_config_gate_ui_without_url_raises():
 async def test_node_config_gate_agent_without_url_raises():
     from icx_engine.testing.nodes import node_config_gate
     state = _base_state(url=None)
-    with patch("icx_engine.testing.nodes.interrupt", return_value={"test_type": "agent"}):
+    state["test_type"] = "agent"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={}):
         with pytest.raises(ValueError, match="requires a URL"):
             await node_config_gate(state)
 
 
-async def test_node_config_gate_agent_max_steps_clamps_high(monkeypatch):
-    from icx_engine.testing.nodes import node_config_gate
-    from icx_engine.models.config import AppConfig
-    fake_cfg = AppConfig()
-    fake_cfg.magik_agent_step_cap = 60
-    fake_cfg.magik_agent_max_steps = 50
-    class _CM:
-        @staticmethod
-        def load(): return fake_cfg
-    import icx_engine.config_manager as _cm_mod
-    monkeypatch.setattr(_cm_mod, "ConfigManager", _CM)
-    state = _base_state()
-    state["test_type"] = "api"
-    with patch("icx_engine.testing.nodes.interrupt",
-               return_value={"agent_max_steps": 999}):
-        result = await node_config_gate(state)
-    assert result["agent_max_steps"] == 60
-
-
-async def test_node_config_gate_agent_max_steps_clamps_low(monkeypatch):
-    from icx_engine.testing.nodes import node_config_gate
-    from icx_engine.models.config import AppConfig
-    fake_cfg = AppConfig()
-    fake_cfg.magik_agent_step_cap = 60
-    fake_cfg.magik_agent_max_steps = 50
-    class _CM:
-        @staticmethod
-        def load(): return fake_cfg
-    import icx_engine.config_manager as _cm_mod
-    monkeypatch.setattr(_cm_mod, "ConfigManager", _CM)
-    state = _base_state()
-    state["test_type"] = "api"
-    with patch("icx_engine.testing.nodes.interrupt",
-               return_value={"agent_max_steps": 0}):
-        result = await node_config_gate(state)
-    assert result["agent_max_steps"] == 1
-
-
-async def test_node_config_gate_agent_max_steps_non_int_falls_back(monkeypatch):
-    from icx_engine.testing.nodes import node_config_gate
-    from icx_engine.models.config import AppConfig
-    fake_cfg = AppConfig()
-    fake_cfg.magik_agent_step_cap = 60
-    fake_cfg.magik_agent_max_steps = 50
-    class _CM:
-        @staticmethod
-        def load(): return fake_cfg
-    import icx_engine.config_manager as _cm_mod
-    monkeypatch.setattr(_cm_mod, "ConfigManager", _CM)
-    state = _base_state(agent_max_steps=42)
-    state["test_type"] = "api"
-    with patch("icx_engine.testing.nodes.interrupt",
-               return_value={"agent_max_steps": "abc"}):
-        result = await node_config_gate(state)
-    assert result["agent_max_steps"] == 42
-
-
-async def test_node_config_gate_headless_no_parses_false():
+async def test_node_config_gate_recommends_layers_and_defaults_to_recommendation():
     from icx_engine.testing.nodes import node_config_gate
     state = _base_state()
-    state["test_type"] = "api"
-    with patch("icx_engine.testing.nodes.interrupt",
-               return_value={"headless": "2"}):
+    state["test_type"] = "unit"
+    # user accepts recommendation (no explicit layers) -> selected == recommended
+    with patch("icx_engine.testing.nodes.interrupt", return_value={}) as m:
         result = await node_config_gate(state)
-    assert result["headless"] is False
+    payload = m.call_args[0][0]
+    assert payload["gate"] == 3
+    assert payload["recommended_layers"]  # risk-based recommendation present
+    assert result["selected_layers"] == payload["recommended_layers"]
+    assert result["risk_tier"] in {"low", "medium", "high", "critical"}
+
+
+async def test_node_config_gate_user_selects_subset_of_layers():
+    from icx_engine.testing.nodes import node_config_gate
+    state = _base_state()
+    state["test_type"] = "unit"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={"layers": ["unit"]}):
+        result = await node_config_gate(state)
+    assert result["selected_layers"] == ["unit"]
+
+
+async def test_node_config_gate_confirms_url():
+    from icx_engine.testing.nodes import node_config_gate
+    state = _base_state(url=None)
+    state["test_type"] = "api"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={"url": "http://svc/api"}):
+        result = await node_config_gate(state)
+    assert result["url"] == "http://svc/api"
 
 
 import pytest
@@ -780,27 +747,6 @@ async def test_expand_falls_back_to_icx_grep(monkeypatch, tmp_path):
     out = await nodes.node_expand_files(s)
     assert called["icx_grep"] is True
     assert "IcxFound.tsx" in out["file_sources"]
-
-
-# ---------------------------------------------------------------------------
-# configurable agent step cap in node_config_gate
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_config_gate_clamps_to_configured_cap(monkeypatch):
-    from icx_engine.models.config import AppConfig
-    fake_cfg = AppConfig()
-    fake_cfg.magik_agent_step_cap = 40   # custom cap
-    class _CM:
-        @staticmethod
-        def load(): return fake_cfg
-    import icx_engine.config_manager as _cm_mod
-    monkeypatch.setattr(_cm_mod, "ConfigManager", _CM)
-    monkeypatch.setattr(nodes, "interrupt", lambda p: {"agent_max_steps": 999})
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "api"   # api skips URL requirement
-    out = await nodes.node_config_gate(s)
-    assert out["agent_max_steps"] == 40   # clamped to configured cap, not 60
 
 
 # ---------------------------------------------------------------------------

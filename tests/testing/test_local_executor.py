@@ -130,3 +130,74 @@ async def test_node_local_run_guarded_on_exception(monkeypatch, tmp_path):
     monkeypatch.setattr(_le, "run_local_verification", _boom)
     out = await node_local_run({"engine": "local", "test_type": "unit", "file_paths": []})
     assert out["status"] == "error" and "boom" in out["last_error"]
+
+
+# -- Step 2: UI authoring gate + Stagehand harness -----------------------------
+
+from icx_engine.testing.nodes import node_author_flow, route_after_auth
+
+
+def test_route_after_auth_ui_authors_first():
+    assert route_after_auth({"test_type": "ui"}) == "author_flow"
+    assert route_after_auth({"test_type": "agent"}) == "author_flow"
+    assert route_after_auth({"test_type": "api"}) == "local_run"
+    assert route_after_auth({"test_type": "unit"}) == "local_run"
+    assert route_after_auth({}) == "local_run"
+
+
+async def test_node_author_flow_caches_flow(monkeypatch, tmp_path):
+    from icx_engine.testing.runners import ui as _ui
+    monkeypatch.setattr(_ui, "_ui_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt", lambda p: {
+        "steps": [
+            {"action": "goto", "target": "http://x/login"},
+            {"action": "fill", "target": "#user", "value": "a", "description": "enter user"},
+            {"action": "click", "target": "#submit"},
+            {"action": "assert", "target": ".welcome", "value": "Welcome"},
+        ],
+        "read_receipts": [],
+    })
+    out = await node_author_flow({"test_type": "ui", "url": "http://x/login",
+                                  "file_paths": ["src/Login.jsx"], "project": "P1"})
+    from icx_engine.testing.runners.ui import load_flow
+    flow = load_flow("P1")
+    assert flow is not None and flow.authored is True
+    assert [s.action for s in flow.steps] == ["goto", "fill", "click", "assert"]
+    assert "read_receipts" in out
+
+
+def test_stagehand_harness_asset_exists():
+    from icx_engine.testing.runners.install import harness_path
+    from pathlib import Path
+    p = Path(harness_path())
+    assert p.exists() and p.name == "icx-replay.mjs"
+    txt = p.read_text(encoding="utf-8")
+    assert "Stagehand" in txt and "writeJUnit" in txt
+    assert all(ord(c) < 128 for c in txt)  # ASCII
+
+
+def test_ui_build_command_points_at_packaged_harness(tmp_path):
+    from icx_engine.testing.runners import get_runner
+    spec = get_runner("stagehand").build_command(tmp_path, runtime_path=None)
+    assert spec.command[1].endswith("icx-replay.mjs")
+    from pathlib import Path
+    assert Path(spec.command[1]).exists()
+
+
+# -- Step 4: DoD confidence surfaced from local_run ----------------------------
+
+async def test_node_local_run_emits_confidence(monkeypatch, tmp_path):
+    import icx_engine.testing.local_executor as _le
+    async def _fake(repo, test_type, target_url=None, **kw):
+        return {"ok": True, "test_type": test_type, "summary": {"total": 2, "passed": 2},
+                "runners": ["pytest"],
+                "reports": [{"runner": "pytest", "report_path": "x.xml", "total": 2, "ok": True}]}
+    monkeypatch.setattr(_le, "run_local_verification", _fake)
+    out = await node_local_run({"engine": "local", "test_type": "unit",
+                                "file_paths": [str(tmp_path / "a.py")],
+                                "risk_tier": "medium", "selected_layers": ["unit"]})
+    fr = out["full_report"]
+    assert "confidence" in fr and "dod_items" in fr
+    assert fr["confidence"]["confidence_score"] == 1.0
+    assert fr["dod_items"][0]["passed"] is True
+    assert fr["dod_items"][0]["command"] == "pytest"

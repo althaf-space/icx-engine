@@ -507,96 +507,49 @@ def _run_gate_2b(base_payload: dict) -> tuple[dict, list[str]]:
 # -- Gate 3: submission config ----------------------------------------------
 
 async def node_config_gate(state: TestingState) -> dict:
-    _PROV_MAP  = {"1": "openai", "2": "claude"}
-    _HEAD_MAP  = {"1": True, "2": False}
-
-    from icx_engine.config_manager import ConfigManager as _CM
-    _cfg = _CM.load()
-    _step_cap = getattr(_cfg, "magik_agent_step_cap", 60)
-
-    cur_prov  = state.get("agent_provider", "openai")
-    cur_head  = state.get("headless", True)
-    cur_url   = state.get("url")
-    cur_prof  = state.get("profile_screen")
-    cur_slow  = state.get("slow_mo", 0)
-    cur_steps = state.get("agent_max_steps", 50)
+    """Gate 3 (local engine): present the RISK-BASED recommended verification layers + the target
+    URL; the USER selects which layers run and confirms the URL. Recommendation only - human decides.
+    """
+    from icx_engine.verification import compute_risk_tier, recommend_layers
+    analysis = {"problem_summary": state.get("context") or ""}
+    tier = compute_risk_tier(analysis)
+    recommended = recommend_layers(tier)
+    cur_url = state.get("url")
 
     response = interrupt({
         "gate": 3,
         "message": (
-            "Answer ALL questions below before submitting. Reply to each.\n\n"
-            "AI PROVIDER (for agent/ui modes):\n"
-            "  1. openai - OpenAI GPT (default, what Magik is tuned for).\n"
-            "  2. claude - Anthropic Claude.\n"
-            f"  Current: {{'1' if cur_prov=='openai' else '2'}}. {cur_prov}\n\n"
-            "HEADLESS MODE:\n"
-            "  1. yes - Run browser hidden (~3x faster). Recommended.\n"
-            "  2. no  - Show the browser window (useful for debugging).\n"
-            f"  Current: {{'1. yes' if cur_head else '2. no'}}\n\n"
-            f"TARGET URL: {cur_url or 'NOT SET - required for agent and ui types'}\n"
-            "  Confirm URL or provide a new one.\n\n"
-            f"PROFILE SCREEN (optional): {cur_prof or 'not set'}\n"
-            "  Screen name from active Magik project profile. Leave blank to skip.\n\n"
-            f"SLOW_MO (ms delay between actions): {cur_slow}\n"
-            "  0 = no delay (recommended). Use >0 only for step-by-step debugging.\n\n"
-            f"AGENT MAX STEPS (agent mode only): {cur_steps}\n"
-            f"  Max browser actions the AI agent can take. Step cap (configurable): {_step_cap}.\n"
-            "  Simple screen: 25-30. Complex multi-step wizard: 40-60. Default: 50."
+            "Confirm the verification configuration.\n\n"
+            f"RECOMMENDED verification layers (risk tier: {tier}):\n"
+            f"  {', '.join(recommended)}\n"
+            "  This is a recommendation - choose which layers to run (reply with a subset or accept).\n\n"
+            f"TARGET URL: {cur_url or 'NOT SET - required for api and ui/agent types'}\n"
+            "  Confirm this URL or provide a new one."
         ),
-        "options": {
-            "agent_provider": ["1. openai", "2. claude"],
-            "headless":       ["1. yes (hidden)", "2. no (visible browser)"],
-        },
-        "current": {
-            "agent_provider":  cur_prov,
-            "headless":        "1. yes" if cur_head else "2. no",
-            "url":             cur_url,
-            "profile_screen":  cur_prof,
-            "slow_mo":         cur_slow,
-            "agent_max_steps": cur_steps,
-        },
-        "json_spec_preview": (state.get("json_spec") or "")[:500] or None,
+        "risk_tier": tier,
+        "recommended_layers": recommended,
+        "current": {"url": cur_url},
     })
 
-    test_type = state.get("test_type") or "agent"
-
-    prov = _resolve_choice(response, "agent_provider", _PROV_MAP)
-    if prov not in ("openai", "claude"):
-        prov = state.get("agent_provider", "openai")
-
-    headless_raw = _resolve_choice(response, "headless", _HEAD_MAP)
-    if isinstance(headless_raw, bool):
-        headless = headless_raw
-    elif str(headless_raw).lower() in ("false", "no", "0"):
-        headless = False
-    else:
-        headless = state.get("headless", True)
-
-    final_url = response.get("url") or state.get("url")
+    test_type = state.get("test_type") or "unit"
+    layers = response.get("layers") if isinstance(response, dict) else None
+    selected = [str(l) for l in layers] if isinstance(layers, list) and layers else recommended
+    final_url = (response.get("url") if isinstance(response, dict) else None) or state.get("url")
 
     if test_type in ("ui", "agent") and not final_url:
         raise ValueError(
             f"test_type '{test_type}' requires a URL. Provide url in your config response."
         )
 
-    raw_steps = response.get("agent_max_steps", state.get("agent_max_steps", 50))
-    try:
-        agent_max_steps = max(1, min(_step_cap, int(raw_steps)))
-    except (TypeError, ValueError):
-        agent_max_steps = state.get("agent_max_steps", 50)
-
     update: dict[str, Any] = {
-        "agent_provider":  prov,
-        "headless":        headless,
-        "profile_screen":  response.get("profile_screen", state.get("profile_screen")),
-        "slow_mo":         int(response.get("slow_mo", state.get("slow_mo", 0))),
-        "agent_max_steps": agent_max_steps,
+        "selected_layers": selected,
+        "risk_tier": tier,
         "status": "running",
     }
     if final_url:
         update["url"] = final_url
     for k in ("api_endpoint", "api_method", "api_payload", "api_payload_type", "api_headers"):
-        if k in response:
+        if isinstance(response, dict) and k in response:
             update[k] = response[k]
     return update
 
@@ -732,6 +685,49 @@ def _local_repo_root(state: TestingState) -> str:
 
 
 
+def _flow_key(state: TestingState) -> str:
+    """Stable cache key for a session's authored UI flow: project id if known, else the first
+    seed file path (normalized). Both node_author_flow and node_local_run use this."""
+    proj = state.get("project")
+    if proj:
+        return str(proj)
+    fps = state.get("file_paths") or []
+    return (fps[0] if fps else "session").replace("\\", "/")
+
+
+def route_after_auth(state: TestingState) -> str:
+    """UI/agent flows author a Stagehand flow before running; unit/api run directly."""
+    return "author_flow" if state.get("test_type") in ("ui", "agent") else "local_run"
+
+
+async def node_author_flow(state: TestingState) -> dict:
+    """AGENT-GENERATE gate: the agent authors the UI test flow (goto/fill/click/assert steps,
+    including login), which ICX caches for deterministic replay. Equivalent to the old spec-gen
+    gate, but for the local Stagehand engine. UI/agent only."""
+    from icx_engine.testing.runners.ui import UiFlow, UiStep, save_flow
+    response = interrupt({
+        "gate": "author_flow",
+        "message": (
+            "Author the UI test flow for this screen. Read the screen source fully, then produce the "
+            "ordered steps a real user takes - including any login steps. Each step: "
+            "{action: goto|fill|click|assert, target: <selector or url>, value?: <text/expected>, "
+            "description?: <intent>}. This is cached and replayed DETERMINISTICALLY (no LLM on rerun)."
+        ),
+        "url": state.get("url"),
+        "file_paths": state.get("file_paths"),
+    })
+    steps_raw = response.get("steps") if isinstance(response, dict) else None
+    steps = [
+        UiStep(action=str(s.get("action", "")), target=str(s.get("target", "")),
+               value=str(s.get("value", "")), description=str(s.get("description", "")))
+        for s in (steps_raw or []) if isinstance(s, dict)
+    ]
+    flow = UiFlow(name=str(state.get("test_type") or "ui"), url=state.get("url") or "",
+                  authored=bool(steps), steps=steps)
+    save_flow(_flow_key(state), flow)
+    return {"read_receipts": _record_receipts(state, "author_flow", response if isinstance(response, dict) else {})}
+
+
 # lang aliases: runner.lang -> Runtime Manager language key
 _RUNTIME_LANG_ALIAS = {"js-ts": "node", "javascript": "node", "typescript": "node"}
 
@@ -760,14 +756,38 @@ async def node_local_run(state: TestingState) -> dict:
     from icx_engine.testing.local_executor import run_local_verification
     test_type = state.get("test_type") or "unit"
     repo = _local_repo_root(state)
+    ui_flow_path = None
+    if test_type in ("ui", "agent"):
+        from icx_engine.testing.runners.ui import flow_path
+        ui_flow_path = flow_path(_flow_key(state))
     try:
         resolver = await _runtime_resolver(repo)
         res = await run_local_verification(
             repo, test_type, target_url=state.get("url"), runtime_resolver=resolver,
+            ui_flow_path=ui_flow_path,
         )
     except Exception as exc:
         return {"status": "error", "last_error": f"local verification failed: {exc}",
                 "run_id": "local", "issues": []}
+
+    # DoD integration: derive a confidence report from the suite result so the agent can feed
+    # record_verification / save_memory. One DoD item per runner (evidence = its command + summary).
+    try:
+        from icx_engine.verification import build_confidence_report
+        tier = str(state.get("risk_tier") or "medium")
+        layers = list(state.get("selected_layers") or [test_type])
+        dod_items = [{
+            "check": f"{rep.get('runner', 'runner')} verification",
+            "method": test_type,
+            "passed": bool(rep.get("ok")),
+            "command": str(rep.get("runner", "")),
+            "output": f"total={rep.get('total', 0)}",
+        } for rep in res.get("reports", [])]
+        res["confidence"] = build_confidence_report(dod_items, tier, layers)
+        res["dod_items"] = dod_items
+    except Exception:
+        pass
+
     if res.get("ok"):
         return {"status": "parsed", "issues": [], "full_report": res, "run_id": "local"}
     issues = [{

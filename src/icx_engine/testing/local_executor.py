@@ -32,6 +32,7 @@ async def run_local_verification(
     runtime_resolver=None,
     parallel: bool = True,
     timeout: float = 600.0,
+    ui_flow_path: str | None = None,
 ) -> dict:
     """Run the local test suite for one layer and return a normalized result.
 
@@ -70,6 +71,8 @@ async def run_local_verification(
         spec = r.build_command(Path(repo), rt)
         if target_url:
             spec.env = {**(spec.env or {}), "ICX_TARGET_URL": target_url}
+        if ui_flow_path and cat == "ui":
+            spec.env = {**(spec.env or {}), "ICX_UI_FLOW": ui_flow_path}
         specs.append(spec)
 
     try:
