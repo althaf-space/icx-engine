@@ -638,6 +638,8 @@ All statuses share a mandatory **STEP 0 vision gate** prepended to the instructi
 
 **Iteration rule (mandatory tail, all branches):** Every `_icx_next.instruction` ends with two rules: (1) if the user requests a different approach, re-present the confirmation format and wait for approval again before writing code; (2) **ITERATION RULE** - after EVERY code change, including fixes requested mid-iteration, the agent must stop and ask the user to test before making any further change or calling `reinforce_memory_usage`/`save_memory`. This applies to the 2nd, 3rd, and every subsequent fix - a prior "looks good"/"works" does not carry over to a new edit, each change needs its own fresh test confirmation. Implemented once in the shared `_MANDATORY_TAIL` constant so it covers every graph-status branch.
 
+**Definition-of-Done verification gate (v0.4.1 Phase 1):** `analyze_issue` appends a DEFINITION OF DONE block to `_icx_next`: a checklist derived from the analysis (`verification.py:build_dod_checklist`) plus a recommended verification layer set from a risk tier (`compute_risk_tier` -> `recommend_layers`; RECOMMENDATION only - the user selects at the gate, human-in-loop). The agent must prove each item, then call `record_verification` with `{issue_key, dod_items:[{check, method, passed, command, output}], self_review_note, layers_run}`. `verification.py:validate_evidence` accepts only when every item has a non-empty command + output + `passed=true`; `build_confidence_report` returns a confidence score + dimensions + remaining risks. An accepted record is stored in the session. `save_memory` then REFUSES `outcome_verified=true` unless an accepted record exists, OR `verified_by_human=true` is passed (the manual override lane). All knobs have best-practice defaults (`DEFAULT_TIER=medium`, `DEFAULT_TIER_LAYERS`, `DEFAULT_PERF_THRESHOLDS`); the layer is fully guarded (`_apply_dod`) and degrades to prior behavior on any error. `response["dod"]` echoes the checklist + recommended layers. (Later phases add the runner engine that produces the evidence; Phase 1 works with agent run-and-observe.)
+
 **Senior-persona planning layer (prepended to `_icx_next.instruction`):** Every successful `_handle_analyze_issue` response also prepends a role-tuned preamble above the instruction so the connected agent plans like a senior specialist rather than a junior. The analysis LLM emits `recommended_persona` (one of 17 senior slugs: `cto`, `principal-engineer`, `solution-architect`, `system-architect`, and staff/principal domain roles). `_select_persona(analysis)` reconciles the LLM pick with a keyword heuristic over the ticket text: the LLM pick wins, except a UI-family pick with backend-only text (no UI vocabulary) is clamped to the keyword persona; with no LLM value it falls back to the keyword heuristic, then to `system-architect`. `_persona_preamble(slug, confidence, completeness)` builds the role identity plus a senior planning rubric (root cause before fix, two approaches, blast radius, test/verify strategy, risks) and a confidence gate that mandates clarifying questions when `confidence_score < _CONFIDENCE_GATE` (0.6) or `completeness_score < _COMPLETENESS_GATE` (0.5). `_apply_persona` is fully guarded - any failure returns the instruction unchanged, so persona can never break `analyze_issue`. The existing STEP/RULE flow is untouched; the chosen role is echoed in `response["persona"] = {"role", "source"}`.
 
 **Attachment full-fidelity paths (MCP):** `analyze_issue` writes each processed non-image attachment to `~/.icx/temp/<key>/` as two files - `<name>.full.md` (the COMPLETE uncapped/unsummarized conversion; the model reads this for binary sources like xlsx/pdf it cannot parse) and `<name>` (the untouched original). Row-capped types (csv/xlsx/xls) are converted twice in parallel (capped inline + uncapped sidecar); other types once. `process_attachments` returns four maps (texts, images, full_texts, raw); `engine.run` carries full_texts/raw on the result via the excluded fields; `_write_attachment_files` (guarded) writes the files and returns `work_item.attachment_paths = {filename: {full_text, raw}}`. Cleanup: `sweep_stale_temp_dirs` (24h TTL) runs on every analyze call, on MCP startup, hourly via `_periodic_temp_sweep`, and immediately after `save_memory` confirms a fix.
@@ -670,6 +672,108 @@ MCP mode skips automatic memory enrichment in `engine.run()`. Memory runs inside
 - **UserPromptSubmit hook:** a standalone pure-stdlib detector (`_HOOK_SCRIPT`) is written to `~/.icx/hooks/icx-ticket-gate.py`; a keyed group (identified by the `icx-ticket-gate.py` command substring, via `_is_icx_hook_group`) is merged into `~/.claude/settings.json` UserPromptSubmit, preserving all other hooks. On a ticket match it emits `hookSpecificOutput.additionalContext` with a CONDITIONAL directive (self-neutralizes when the match is not a real ticket or ICX is not connected). The command uses `sys.executable` so a working Python is guaranteed at hook time.
 - **CLAUDE.md rule:** a marker-delimited block (`_RULE_START`/`_RULE_END`) inserted into `~/.claude/CLAUDE.md`, replaced in place on re-run, stripped on remove; surrounding user content is preserved.
 Both layers are guarded per-step - a failure installing enforcement warns but never aborts MCP registration.
+
+### Runtime Manager (`runtime_manager.py`) - v0.4.1 Phase 2
+
+Per-repo runtime detection + isolation as a REGISTRY, not an installer. Model: Discover -> Ask ->
+Remember -> Reuse. ICX NEVER installs/downloads SDKs, NEVER modifies global PATH, NEVER overwrites or
+removes user software. The only file written is `~/.icx/runtimes.json` (validated, user-approved
+runtime PATHS).
+
+- Per-language detectors read REPO config (repo overrides machine): `detect_java` (.java-version,
+  .sdkmanrc, Maven compiler release/target/source, Gradle toolchain), `detect_node` (.nvmrc,
+  .node-version, package.json volta/engines), `detect_python` (.python-version, pyproject
+  requires-python, runtime.txt, Pipfile), `detect_dotnet` (global.json, *.csproj TargetFramework),
+  `detect_go` (go.mod toolchain/go), `detect_rust` (rust-toolchain.toml, Cargo.toml rust-version),
+  `detect_php` (composer.json), `detect_ruby` (.ruby-version, Gemfile). `detect_required_runtime(lang,
+  repo)` dispatches; returns None when undetectable.
+- Registry: `lookup_runtime(lang, version)` (prunes stale/missing paths), `remember_runtime(lang,
+  version, path)`, atomic write.
+- Discovery/validation (monkeypatchable): `discover_runtimes(lang)` (PATH + which, read-only),
+  `validate_runtime(lang, path)` (runs the version command, parses the version - Java prints to
+  stderr, handled), `detect_version_manager(lang)` (nvm/pyenv/sdkman/rustup/goenv markers in home).
+- `resolve_runtime(lang, repo) -> Resolution` orchestrates: detect -> `not_required` if none ->
+  registry reuse -> discover+validate matches -> 1 match remember+`resolved`, >1 `choose`, 0 `ask`.
+  Never installs. The interactive ask/choose is surfaced by the caller (CLI prompt / MCP gate); the
+  module never blocks on stdin. Testing adapters (later phases) pull the resolved runtime from here
+  so every verification layer executes on the identical, repo-correct runtime.
+
+### Testing runners (`testing/runners/`) - v0.4.1 Phase 3
+
+The polyglot unit-test layer, plugin-registered (mirrors `register_connector`/`register_provider`):
+- `base.py` - normalized `TestCase`/`TestReport` (`.ok` = ran + zero failures/errors) + `RunSpec`
+  (command/cwd/report_path/env/note) + `UnitRunner` protocol + `register_runner`/`get_runner`/
+  `detect_runners(repo)`/`list_runners`. Adding a language = register an adapter, no core change.
+- `junit.py` - `parse_junit_xml(text_or_path) -> TestReport`. JUnit XML is the universal spine;
+  counts are recomputed from cases for internal consistency; malformed XML -> empty report.
+- `unit.py` - Wave-1 adapters (registered on import): pytest, vitest, jest, junit-maven,
+  junit-gradle (covers Java AND Kotlin), go (gotestsum bridge), cargo (nextest bridge). Each does
+  `detect(repo)` + `build_command(repo, runtime_path) -> RunSpec` emitting JUnit XML. Runtime path
+  comes from `runtime_manager.resolve_runtime`. Adapters decide WHAT to run; the executor (later
+  phase) runs it. `RunSpec.note` records any required JUnit-XML bridge tool.
+- `ephemeral.py` - `run_ephemeral_repro(lang, code, runtime_path) -> (passed, output)` for repos
+  with NO test framework: writes a throwaway script under `~/.icx` temp (0o700, sanitized), runs it
+  via the runtime (python/node), returns pass/fail by exit code, deletes it. Repo never mutated.
+  This is the DoD "reproduce -> confirm resolved" path for pure-logic changes.
+
+Wave 2 (c#/php/ruby/elixir/scala/swift) and Wave 3 (c/c++ + remainder) are added later as more
+registered adapters. UI/API layers (Phases 4-5) are language-agnostic.
+
+**API layer + security (v0.4.1 Phase 4):**
+- `api.py` - `schemathesis` (schema-driven fuzz from OpenAPI/Swagger, deterministic, no AI) and
+  `hurl` (scripted `*.hurl` HTTP) adapters, registered with `category="api"`. They test through the
+  HTTP interface so they are identical across every backend language. `detect_runners(repo,
+  category="api")` filters them; unit adapters (no explicit category) default to "unit" via getattr,
+  so nothing existing changed. Adapters build the base command + JUnit-XML report path; the executor
+  injects the user-confirmed target base URL and runs it.
+- `security.py` - deterministic, evidence-based (no AI verdicts). `build_security_plan(analysis)`
+  returns which checks apply (authentication/authorization/sql_injection/xss/csrf/ssrf/
+  insecure_headers/privilege_escalation) from change signals; `check_security_headers(headers)`
+  audits required response headers (CSP/X-Content-Type-Options=nosniff/X-Frame-Options/HSTS/
+  Referrer-Policy) returning SecurityFinding per header. Findings feed the Definition-of-Done record.
+  Broader probes execute via Schemathesis + targeted deterministic requests in the executor phase.
+
+**UI layer (v0.4.1 Phase 5):** `ui.py` - `stagehand` adapter, `category="ui"`. Detects a frontend
+framework in package.json (react/vue/next/svelte/angular/solid/preact). The determinism model:
+AI authors a flow ONCE (human-gated) - resolving each action to a concrete selector - cached to
+`~/.icx/testing/ui-cache/<key>.json` (`UiFlow`/`UiStep`, `save_flow`/`load_flow`). Every run after is
+a deterministic REPLAY of the cached steps with NO LLM call (`plan_ui_run` returns "replay" when an
+authored flow with steps exists, else "author"); a stale selector fails loud, never silently wrong.
+`build_command` runs the ICX Node harness (`~/.icx/testing/stagehand/icx-replay.mjs`) in replay mode
+-> Playwright -> JUnit XML; the executor injects `--flow <cache> --url <target>`. AI exploration +
+browser execution live in the Node harness (installed with the UI tooling), not in Python.
+
+**Executor + intelligence (v0.4.1 Phase 6):**
+- `runners/executor.py` - `run_spec(spec, timeout)` runs a RunSpec (subprocess, resolved-runtime
+  env), then parses its JUnit XML (`report_path`; a directory of `*.xml` for Surefire/Gradle is
+  merged) into a normalized TestReport. Guarded - never raises; the JUnit XML is the source of truth
+  for pass/fail, not the exit code. `run_plan(specs, parallel=True)` runs independent specs
+  concurrently (the DAG leaves). The LangGraph node swap that calls this live lands with Phase 8.
+- `perf.py` - `compare_performance(before, after, thresholds=DEFAULT_PERF_THRESHOLDS)` -> PerfFinding
+  per metric (latency/memory/cpu/sql_query_count/response_time/payload_size); a metric fails when its
+  percent increase exceeds its threshold (sql_query_count default 0% = any increase flagged). A
+  ticket can fail verification on perf even when functional tests pass.
+- `regression.py` - `select_regression_targets(changed_files, candidate_tests, graph_impacted)` maps
+  changed (+ graph-impacted) source stems to related test files (test_auth.py / auth.test.ts /
+  auth_test.go), so only relevant tests run. Empty result -> caller decides full-suite fallback.
+
+**Mutation filter (v0.4.1 Phase 7):** `mutation.py` gates AI-DRAFTED unit tests so a draft that
+asserts nothing ("coverage lies") is rejected. `select_mutation_tool(lang)` (mutmut/Stryker/PIT/
+Infection), `build_mutation_command`, per-tool parsers (`parse_mutmut`/`parse_stryker`/`parse_pit`)
+-> normalized `MutationResult` (killed/survived/score/meaningful), and `evaluate_mutation(result,
+min_score=DEFAULT_MIN_MUTATION_SCORE=0.6)`. Hard floor: killed==0 -> rejected (verifies nothing);
+plus a configurable score minimum. Only mutation-killing drafts count as DoD evidence; drafts still
+pass through the human gate.
+
+**Local verification backend (v0.4.1 Phase 8 - Magik replacement):** `local_executor.py`
+`run_local_verification(repo, test_type, target_url, runtime_resolver)` is the in-process replacement
+for `MagikClient` submit/poll: it detects the runner plugins for the layer (unit/api/ui; `agent`
+maps to ui), builds their commands with the repo-correct runtime (Runtime Manager), runs them via the
+DAG executor (`run_plan`), and returns one normalized suite result (`ok`, per-runner reports,
+aggregate summary). Fully local - no HTTP to any Magik app - and guarded (never raises). The
+remaining Phase 8 wiring (repointing the LangGraph `submit`/`poll` nodes at this backend and deleting
+the Magik `client.py` / Magik-specific nodes + tools) is a controlled follow-up done incrementally to
+preserve zero regression; this backend is the piece that makes that deletion safe.
 
 ### Service layer (`services/`)
 

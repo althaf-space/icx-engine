@@ -329,6 +329,42 @@ def _apply_persona(analysis: dict | None, icx_instruction: str) -> tuple[str, di
         return icx_instruction, None
 
 
+def _apply_dod(analysis: dict | None, icx_instruction: str, graphs: list | None) -> tuple[str, dict | None]:
+    """Append a Definition-of-Done VERIFY phase + checklist to the instruction. Guarded: any
+    failure returns the instruction unchanged and dod=None so analyze_issue never breaks.
+    Risk tier + recommended layers are a RECOMMENDATION; the user selects at the gate."""
+    try:
+        if not isinstance(analysis, dict):
+            return icx_instruction, None
+        from icx_engine.verification import build_dod_checklist, compute_risk_tier, recommend_layers
+        checklist = build_dod_checklist(analysis)
+        tier = compute_risk_tier(analysis, graphs)
+        layers = recommend_layers(tier)
+        lines = [
+            "",
+            "==============================================================================",
+            "DEFINITION OF DONE - you MUST verify with evidence before declaring done:",
+            f"  Recommended verification (risk tier: {tier}) - the user chooses which to run: "
+            + ", ".join(layers),
+            "  Checklist (each must be proven, not asserted):",
+        ]
+        for i, it in enumerate(checklist, 1):
+            lines.append(f"    {i}. [{it['method']}] {it['check']}")
+        lines += [
+            "  Flow: reproduce (bug) / set up check (feature) -> implement -> EXECUTE the check ->",
+            "  capture the exact command + output -> adversarial self-review of the diff -> done.",
+            "  Then call record_verification with the evidence. save_memory will refuse a verified",
+            "  success without it (or pass verified_by_human=true if you verified manually).",
+            "==============================================================================",
+        ]
+        block = "\n".join(lines)
+        dod = {"risk_tier": tier, "recommended_layers": layers, "checklist": checklist}
+        return icx_instruction + "\n" + block, dod
+    except Exception:
+        _log.debug("dod layer skipped", exc_info=True)
+        return icx_instruction, None
+
+
 def _write_attachment_files(result, issue_key_val: str) -> dict[str, dict[str, str]]:
     """Write full-text sidecars (<name>.full.md) and raw originals (<name>) for non-image
     attachments to the per-issue temp dir. Returns {filename: {full_text, raw}}. Fully guarded -
@@ -399,6 +435,7 @@ _MEM_BY_FILE_TOOL = "memory_find_by_file"
 _MEM_RELATED_TOOL = "memory_get_related"
 _MEM_PATTERNS_TOOL = "memory_get_patterns"
 _SAVE_TOOL_NAME = "save_memory"
+_RECORD_VERIFICATION_TOOL = "record_verification"
 _GRAPH_BLAST_RADIUS_TOOL = "graph_blast_radius"
 _GRAPH_CYCLES_TOOL = "graph_cycles"
 _GRAPH_DEAD_CODE_TOOL = "graph_dead_code"
@@ -2549,8 +2586,47 @@ async def _list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "One-paragraph summary of what attachments showed. Max 500 chars.",
                     },
+                    "verified_by_human": {
+                        "type": "boolean",
+                        "description": "Manual-verification override: set true when the user personally tested and confirmed the fix (manual path). Lets save_memory record a verified success without an automated record_verification. Still requires outcome_feedback_note.",
+                    },
                 },
                 "required": ["issue_key", "summary", "problem_description", "resolution_note", "files_changed", "tags", "work_item_type"],
+            },
+        ),
+        Tool(
+            name=_RECORD_VERIFICATION_TOOL,
+            description=(
+                "Record Definition-of-Done verification evidence before declaring a ticket done. "
+                "Submit each DoD item with the exact command run and its output; every item must "
+                "have a non-empty command, non-empty output, and passed=true to be accepted. "
+                "Required before save_memory can record a verified success on the automated path "
+                "(or pass verified_by_human=true to save_memory if you verified manually). "
+                "Input: {issue_key, dod_items:[{check, method, passed, command, output}], "
+                "self_review_note, layers_run?}. Returns {accepted, missing, confidence}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string"},
+                    "dod_items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "check": {"type": "string"},
+                                "method": {"type": "string"},
+                                "passed": {"type": "boolean"},
+                                "command": {"type": "string"},
+                                "output": {"type": "string"},
+                            },
+                            "required": ["check", "passed", "command", "output"],
+                        },
+                    },
+                    "self_review_note": {"type": "string"},
+                    "layers_run": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["issue_key", "dod_items"],
             },
         ),
         # ------------------------------------------------------------------ #
@@ -3210,6 +3286,32 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
+    if name == _RECORD_VERIFICATION_TOOL:
+        from icx_engine.verification import validate_evidence, build_confidence_report, compute_risk_tier
+        issue_key = args.get("issue_key", "")
+        if not isinstance(issue_key, str) or not issue_key.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "issue_key must be a non-empty string."}))]
+        items = args.get("dod_items")
+        if not isinstance(items, list) or not items:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "dod_items must be a non-empty list."}))]
+        norm = [{
+            "check": str(it.get("check", "")),
+            "method": str(it.get("method", "")),
+            "passed": bool(it.get("passed", False)),
+            "command": str(it.get("command", "")),
+            "output": str(it.get("output", ""))[:4000],
+        } for it in items if isinstance(it, dict)]
+        result = validate_evidence(norm)
+        layers_run = [str(x) for x in (args.get("layers_run") or [])]
+        tier = compute_risk_tier(_session_get(issue_key.strip(), "analysis", {}) or {})
+        confidence = build_confidence_report(norm, tier, layers_run)
+        if result["accepted"]:
+            _session_set(issue_key.strip(), "verification", {"items": norm, "confidence": confidence})
+        return [TextContent(type="text", text=json.dumps(
+            {"accepted": result["accepted"], "missing": result["missing"], "confidence": confidence}))]
+
     if name == _SAVE_TOOL_NAME:
         issue_key = args.get("issue_key", "")
         if not isinstance(issue_key, str) or not issue_key.strip() or len(issue_key) > 2048:
@@ -3297,6 +3399,20 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                 {"error": "A resolution cannot be simultaneously verified and negated."}
             ))]
 
+        # DoD gate: a verified success needs accepted verification evidence, unless the user
+        # verified manually (verified_by_human=true - the manual override lane).
+        verified_by_human = bool(args.get("verified_by_human", False))
+        if outcome_verified and not verified_by_human:
+            _vrec = _session_get(issue_key.strip(), "verification", None)
+            if not _vrec:
+                return [TextContent(type="text", text=json.dumps({
+                    "error": (
+                        "Cannot record a verified success: no accepted verification evidence for "
+                        "this issue. Call record_verification first (automated path), or pass "
+                        "verified_by_human=true with outcome_feedback_note if you verified manually."
+                    )
+                }))]
+
         extra = {
             "root_cause_pattern": root_cause_pattern,
             "pattern_confidence": pattern_confidence,
@@ -3311,6 +3427,7 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             "diagnosis_steps": int(args.get("diagnosis_steps") or 0),
             "full_ticket_text": (args.get("full_ticket_text") or "")[:2000],
             "attachment_summary": (args.get("attachment_summary") or "")[:500],
+            "verified_by_human": verified_by_human,
         }
 
         text = await _handle_save_memory(
@@ -4558,6 +4675,8 @@ async def _handle_analyze_issue(
             analysis = json.loads(result.model_dump_json(exclude={"images", "attachment_full_texts", "attachment_raw"}))
 
         icx_instruction, _persona_info = _apply_persona(analysis, icx_instruction)
+        icx_instruction, _dod_info = _apply_dod(analysis, icx_instruction, graphs)
+        _session_set(issue_key_val, "analysis", analysis)
 
         _attachment_processing: str | None = None
         if skip_vision:
@@ -4589,6 +4708,8 @@ async def _handle_analyze_issue(
         response["graphs"] = graphs
         if _persona_info:
             response["persona"] = _persona_info
+        if _dod_info:
+            response["dod"] = _dod_info
 
         # Phase 10: intelligence layer - quick internal memory search when ready
         _mem_state_now = _get_memory_state()

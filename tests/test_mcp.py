@@ -800,10 +800,10 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 37
+    assert len(tools) == 38
     names = {t.name for t in tools}
     assert names == {
-        "analyze_issue_fast", "analyze_issue", "save_memory",
+        "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
         "graph_find_context", "graph_call_chain", "graph_impact", "graph_subsystem",
         "graph_cross_links", "graph_important_nodes", "graph_blast_radius",
         "graph_cycles", "graph_dead_code", "graph_ownership",
@@ -3327,3 +3327,95 @@ def test_write_attachment_files_sanitizes_exotic_filename(tmp_path, monkeypatch)
     assert all(ord(c) < 128 for c in raw_path)      # returned path is ASCII -> round-trips
     assert _P(raw_path).exists()                    # file actually written and openable
     assert _P(raw_path).read_bytes() == b"IMGBYTES"
+
+
+# -- v0.4.1 Phase 1: Definition-of-Done gate -----------------------------------
+
+def _make_ok():
+    async def _ok(*a, **k):
+        import json
+        return json.dumps({"ok": True})
+    return _ok
+
+
+def test_record_verification_accepts_and_stores():
+    import asyncio, json
+    import icx_engine.mcp_server as mcp
+    args = {
+        "issue_key": "PROJ-1",
+        "dod_items": [{"check": "repro fixed", "method": "reproduce",
+                       "passed": True, "command": "pytest -k login", "output": "1 passed"}],
+        "self_review_note": "checked edge cases",
+        "layers_run": ["unit"],
+    }
+    out = asyncio.run(mcp._call_tool("record_verification", args))
+    data = json.loads(out[0].text)
+    assert data["accepted"] is True
+    assert "confidence" in data
+    assert mcp._session_get("PROJ-1", "verification") is not None
+
+
+def test_record_verification_rejects_incomplete():
+    import asyncio, json
+    import icx_engine.mcp_server as mcp
+    args = {
+        "issue_key": "PROJ-2",
+        "dod_items": [{"check": "x", "method": "unit", "passed": True,
+                       "command": "", "output": ""}],
+        "self_review_note": "",
+    }
+    out = asyncio.run(mcp._call_tool("record_verification", args))
+    data = json.loads(out[0].text)
+    assert data["accepted"] is False
+    assert data["missing"]
+
+
+def test_save_memory_rejects_unverified_success():
+    import asyncio, json
+    import icx_engine.mcp_server as mcp
+    args = {
+        "issue_key": "GUARD-1", "summary": "s", "problem_description": "p",
+        "resolution_note": "r", "files_changed": ["a.py"], "tags": ["t"],
+        "work_item_type": "Bug", "root_cause_pattern": "uncategorized",
+        "pattern_confidence": 0.5, "outcome_verified": True,
+        "outcome_feedback_note": "worked",
+    }
+    out = asyncio.run(mcp._call_tool("save_memory", args))
+    data = json.loads(out[0].text)
+    assert "error" in data and "verification" in data["error"].lower()
+
+
+def test_save_memory_allows_human_override(monkeypatch):
+    import asyncio, json
+    import icx_engine.mcp_server as mcp
+    monkeypatch.setattr(mcp, "_handle_save_memory", _make_ok())
+    args = {
+        "issue_key": "GUARD-2", "summary": "s", "problem_description": "p",
+        "resolution_note": "r", "files_changed": ["a.py"], "tags": ["t"],
+        "work_item_type": "Bug", "root_cause_pattern": "uncategorized",
+        "pattern_confidence": 0.5, "outcome_verified": True,
+        "outcome_feedback_note": "I tested it manually", "verified_by_human": True,
+    }
+    out = asyncio.run(mcp._call_tool("save_memory", args))
+    data = json.loads(out[0].text)
+    assert "error" not in data
+
+
+def test_apply_dod_appends_verify_block_and_reports():
+    from icx_engine.mcp_server import _apply_dod
+    analysis = {"issue_type": "Bug", "problem_summary": "login 500",
+                "reproduction_steps": ["POST /login empty"], "expected_behavior": "400",
+                "actual_behavior": "500", "acceptance_criteria": []}
+    body = "STEP 1: do thing\n"
+    out, dod = _apply_dod(analysis, body, [])
+    assert body in out
+    assert "DEFINITION OF DONE" in out.upper()
+    assert dod is not None and dod["risk_tier"] in {"low", "medium", "high", "critical"}
+    assert isinstance(dod["checklist"], list) and dod["checklist"]
+
+
+def test_apply_dod_guarded_on_bad_analysis():
+    from icx_engine.mcp_server import _apply_dod
+    out, dod = _apply_dod(None, "BODY", [])
+    assert out == "BODY"
+    assert dod is None
