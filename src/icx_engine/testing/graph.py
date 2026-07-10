@@ -21,6 +21,8 @@ from icx_engine.testing.nodes import (
     node_auth_gate,
     node_profile_push,
     node_submit,
+    node_local_run,
+    route_before_submit,
     node_poll,
     node_error_gate,
     node_parse_report,
@@ -95,6 +97,7 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
     builder.add_node("auth_gate",       node_auth_gate)
     builder.add_node("profile_push",    node_profile_push)
     builder.add_node("submit",          node_submit)
+    builder.add_node("local_run",       node_local_run)
     builder.add_node("poll",            node_poll)
     builder.add_node("error_gate",      node_error_gate)
     builder.add_node("parse_report",    node_parse_report)
@@ -132,8 +135,12 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
     builder.add_edge("generate_context", "config_gate")
     builder.add_edge("config_gate",      "auth_gate")
     builder.add_edge("auth_gate",        "profile_push")
-    builder.add_edge("profile_push",     "submit")
+    builder.add_conditional_edges("profile_push", route_before_submit, {
+        "submit":    "submit",
+        "local_run": "local_run",
+    })
     builder.add_edge("submit",           "poll")
+    builder.add_edge("local_run",        "review")
     builder.add_conditional_edges("poll", route_after_poll, {
         "error_gate":   "error_gate",
         "parse_report": "parse_report",

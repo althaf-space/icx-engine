@@ -973,6 +973,51 @@ async def node_profile_push(state: TestingState) -> dict:
 
 # -- node_submit ------------------------------------------------------------
 
+def _local_repo_root(state: TestingState) -> str:
+    """Derive the repo root for local verification from the confirmed/seed file paths."""
+    import os
+    fps = state.get("file_paths") or []
+    if not fps:
+        return os.getcwd()
+    dirs = [os.path.dirname(p) for p in fps if p]
+    try:
+        return os.path.commonpath(dirs) if len(dirs) > 1 else (dirs[0] or os.getcwd())
+    except ValueError:
+        return dirs[0] or os.getcwd()
+
+
+def route_before_submit(state: TestingState) -> str:
+    """Route to the in-process local runner when engine='local', else the legacy Magik submit."""
+    return "local_run" if state.get("engine") == "local" else "submit"
+
+
+async def node_local_run(state: TestingState) -> dict:
+    """Run the local (in-process, async) verification suite and feed the result to the review gate.
+
+    Replaces the Magik submit->poll->parse_report chain for engine='local'. Fully async; never
+    blocks the event loop. Maps a failed suite to a single issue so the existing review gate handles
+    it uniformly with the Magik path.
+    """
+    from icx_engine.testing.local_executor import run_local_verification
+    test_type = state.get("test_type") or "unit"
+    try:
+        res = await run_local_verification(
+            _local_repo_root(state), test_type, target_url=state.get("url"),
+        )
+    except Exception as exc:
+        return {"status": "error", "last_error": f"local verification failed: {exc}",
+                "run_id": "local", "issues": []}
+    if res.get("ok"):
+        return {"status": "parsed", "issues": [], "full_report": res, "run_id": "local"}
+    issues = [{
+        "name": "verification_failed",
+        "description": res.get("reason", "local verification did not pass"),
+        "severity": "high",
+        "detail": res.get("summary", {}),
+    }]
+    return {"status": "parsed", "issues": issues, "full_report": res, "run_id": "local"}
+
+
 async def node_submit(state: TestingState) -> dict:
     from icx_engine.testing.handlers import get_handler
     client = _make_client()

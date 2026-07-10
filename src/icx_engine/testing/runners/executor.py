@@ -1,15 +1,14 @@
-"""Test executor - runs a RunSpec (subprocess, resolved runtime env) and normalizes the JUnit XML
-result into a TestReport. Runs independent specs in parallel (the DAG's leaves).
+"""Test executor - runs a RunSpec (async subprocess, resolved runtime env) and normalizes the JUnit
+XML result into a TestReport. Runs independent specs CONCURRENTLY via asyncio (the DAG's leaves).
 
-This is the engine that actually executes what the adapters describe. It is guarded: any failure to
-run or parse yields an empty (not-ok) TestReport rather than raising. The LangGraph node swap that
-calls this in the live flow lands with Phase 8 (Magik removal).
+Fully async: subprocess execution uses asyncio.create_subprocess_exec and never blocks the event
+loop, so one test run cannot stall another. Guarded: any failure to run or parse yields an empty
+(not-ok) TestReport rather than raising.
 """
 from __future__ import annotations
 
+import asyncio
 import os
-import subprocess
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from icx_engine.testing.runners.base import RunSpec, TestReport
@@ -43,33 +42,43 @@ def _parse_report_path(report_path: str) -> TestReport:
     return TestReport(raw_path=report_path)
 
 
-def run_spec(spec: RunSpec, timeout: float = 600.0) -> TestReport:
-    """Execute a RunSpec and return the normalized TestReport. Guarded - never raises.
+async def run_spec(spec: RunSpec, timeout: float = 600.0) -> TestReport:
+    """Execute a RunSpec asynchronously and return the normalized TestReport. Guarded - never raises.
 
-    The subprocess exit code is not trusted for pass/fail; the JUnit XML the runner emits is the
-    source of truth (a runner can exit non-zero yet still have written a full report, and vice versa).
+    Uses an async subprocess so it never blocks the event loop. The exit code is not trusted for
+    pass/fail; the JUnit XML the runner emits is the source of truth (a runner can exit non-zero yet
+    still have written a full report, and vice versa). On timeout the process is killed.
     """
     env = {**os.environ, **(spec.env or {})}
     try:
-        subprocess.run(
-            spec.command, cwd=spec.cwd, env=env,
-            capture_output=True, text=True, timeout=timeout,
+        proc = await asyncio.create_subprocess_exec(
+            *spec.command, cwd=spec.cwd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-    except (OSError, subprocess.SubprocessError):
-        # Runner missing or crashed before writing a report -> parse whatever exists (likely none).
+    except (OSError, ValueError):
+        # Runner missing / bad command -> parse whatever exists (likely nothing).
+        return _parse_report_path(spec.report_path)
+    try:
+        await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+    except (OSError, asyncio.CancelledError):
         pass
     return _parse_report_path(spec.report_path)
 
 
-def run_plan(specs: list[RunSpec], parallel: bool = True, max_workers: int = 4,
-             timeout: float = 600.0) -> list[tuple[RunSpec, TestReport]]:
-    """Run several RunSpecs (independent DAG leaves). Parallel by default; falls back to sequential.
-    Returns [(spec, report)] in input order."""
+async def run_plan(specs: list[RunSpec], parallel: bool = True,
+                   timeout: float = 600.0) -> list[tuple[RunSpec, TestReport]]:
+    """Run several RunSpecs (independent DAG leaves) CONCURRENTLY via asyncio. Parallel by default;
+    sequential when parallel=False. Returns [(spec, report)] in input order."""
     if not specs:
         return []
     if parallel and len(specs) > 1:
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            reports = list(ex.map(lambda s: run_spec(s, timeout), specs))
+        reports = await asyncio.gather(*[run_spec(s, timeout) for s in specs])
     else:
-        reports = [run_spec(s, timeout) for s in specs]
+        reports = [await run_spec(s, timeout) for s in specs]
     return list(zip(specs, reports))

@@ -63,6 +63,7 @@ class TestingState(TypedDict):
     # Mode selection (Gate "mode")
     test_mode: str | None              # "automated" | "manual"
     manual_result: dict[str, Any] | None  # manual path: user-reported result
+    engine: str                        # "magik" (legacy) | "local" (in-process runner suite)
 
     # Runtime
     run_id: str | None
@@ -80,6 +81,7 @@ def make_initial_state(
     context: str | None = None,
     max_iterations: int | None = None,
     test_mode: str | None = None,
+    engine: str = "magik",
 ) -> TestingState:
     return TestingState(
         file_paths=list(file_paths),
@@ -120,6 +122,7 @@ def make_initial_state(
         full_report=None,
         test_mode=test_mode,
         manual_result=None,
+        engine=engine,
         run_id=None,
         iteration=0,
         max_iterations=max_iterations if max_iterations is not None else _DEFAULT_MAX_ITERATIONS,

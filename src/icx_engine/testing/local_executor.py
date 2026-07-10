@@ -24,7 +24,7 @@ def _default_runtime_resolver(lang: str) -> str | None:
     return None
 
 
-def run_local_verification(
+async def run_local_verification(
     repo,
     test_type: str,
     target_url: str | None = None,
@@ -57,10 +57,13 @@ def run_local_verification(
                 "reason": f"no {cat} runner detected for this repo", "runners": [],
                 "summary": {}, "reports": []}
 
+    import inspect
     specs = []
     for r in runners:
         try:
             rt = resolver(getattr(r, "lang", ""))
+            if inspect.isawaitable(rt):
+                rt = await rt
         except Exception:
             rt = None
         spec = r.build_command(Path(repo), rt)
@@ -69,7 +72,7 @@ def run_local_verification(
         specs.append(spec)
 
     try:
-        results = run_plan(specs, parallel=parallel, timeout=timeout)
+        results = await run_plan(specs, parallel=parallel, timeout=timeout)
     except Exception as exc:
         return {"ok": False, "test_type": test_type, "reason": f"execution failed: {exc}",
                 "runners": [r.name for r in runners], "summary": {}, "reports": []}

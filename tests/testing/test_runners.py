@@ -271,42 +271,40 @@ from icx_engine.testing.runners import run_spec, run_plan
 from icx_engine.testing.runners.base import RunSpec as _RunSpec
 
 
-def test_executor_runs_real_pytest_pass(tmp_path):
+async def test_executor_runs_real_pytest_pass(tmp_path):
     (tmp_path / "test_ok.py").write_text("def test_ok():\n    assert 1 + 1 == 2\n", encoding="utf-8")
     report = str(tmp_path / "out.xml")
     spec = _RunSpec(command=[_sys.executable, "-m", "pytest", f"--junitxml={report}", "-q"],
                     cwd=str(tmp_path), report_path=report)
-    r = run_spec(spec, timeout=120)
+    r = await run_spec(spec, timeout=120)
     assert r.total >= 1 and r.ok is True
 
 
-def test_executor_runs_real_pytest_fail(tmp_path):
+async def test_executor_runs_real_pytest_fail(tmp_path):
     (tmp_path / "test_bad.py").write_text("def test_bad():\n    assert 1 == 2\n", encoding="utf-8")
     report = str(tmp_path / "out.xml")
     spec = _RunSpec(command=[_sys.executable, "-m", "pytest", f"--junitxml={report}", "-q"],
                     cwd=str(tmp_path), report_path=report)
-    r = run_spec(spec, timeout=120)
+    r = await run_spec(spec, timeout=120)
     assert r.failures >= 1 and r.ok is False
 
 
-def test_executor_missing_runner_returns_not_ok(tmp_path):
+async def test_executor_missing_runner_returns_not_ok(tmp_path):
     spec = _RunSpec(command=["this-binary-does-not-exist-xyz"], cwd=str(tmp_path),
                     report_path=str(tmp_path / "none.xml"))
-    r = run_spec(spec, timeout=10)
+    r = await run_spec(spec, timeout=10)
     assert r.ok is False and r.total == 0
 
 
-def test_run_plan_parallel(monkeypatch, tmp_path):
+async def test_run_plan_parallel_concurrent(monkeypatch, tmp_path):
     from icx_engine.testing.runners import base as _base
-    calls = []
-    def _fake(spec, timeout=600.0):
-        calls.append(spec.report_path)
+    async def _fake(spec, timeout=600.0):
         rep = _base.TestReport(total=1, passed=1)
         rep.cases = [_base.TestCase(name="x", status="passed")]
         return rep
     import icx_engine.testing.runners.executor as _ex
     monkeypatch.setattr(_ex, "run_spec", _fake)
     specs = [_RunSpec(command=["a"], cwd=str(tmp_path), report_path=f"r{i}") for i in range(3)]
-    out = _ex.run_plan(specs, parallel=True)
+    out = await _ex.run_plan(specs, parallel=True)
     assert len(out) == 3
     assert all(rep.ok for _s, rep in out)
