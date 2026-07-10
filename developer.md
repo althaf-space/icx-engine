@@ -36,7 +36,7 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.),
-  exposing 37 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 10 graph query tools, 4 historical memory tools, 3 memory-save-family tools (`save_memory`, `reinforce_memory_usage`, `get_memory_audit`), 10 testing tools (`magik_health_check`, `start_testing_session`, `resume_testing_session`, `magik_test_status`, `magik_test_results`, `magik_login_start`, `magik_login_capture`, `magik_login_cancel`, `magik_login_inline`, `magik_logout`), and 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`)
+  exposing 30 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 10 graph query tools, 4 historical memory tools, 4 memory/verification tools (`save_memory`, `record_verification`, `reinforce_memory_usage`, `get_memory_audit`), 2 testing tools (`start_testing_session`, `resume_testing_session`), and 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`)
 
 The architecture is deliberately split along two axes:
 
@@ -115,20 +115,24 @@ ICX/
 |   |       \-- resolvers/      # semantic edge resolvers (Spring, React, Django, FastAPI, etc.)
 |   +-- services/
 |   |   \-- connection_service.py  # platform auth flows (_connect_jira_token, _connect_jira_oauth)
-|   +-- testing/                # Testing orchestration module
+|   +-- testing/                # Testing orchestration module (local engine)
 |   |   +-- __init__.py
-|   |   +-- client.py           # Async httpx client for all Magik-AI HTTP calls
 |   |   +-- state.py            # LangGraph TypedDict state + make_initial_state factory
 |   |   +-- nodes.py            # LangGraph node functions + conditional routing
 |   |   +-- graph.py            # StateGraph wiring, SqliteSaver factory, session cleanup
-|   |   +-- session_store.py    # Background poll task registry + session list/cancel
+|   |   +-- local_executor.py   # run_local_verification: detect runners -> run -> normalized result
+|   |   +-- perf.py             # performance-regression comparison (before/after metrics)
+|   |   +-- regression.py       # graph-driven regression test selection
+|   |   +-- mutation.py         # mutation-test filter for AI-drafted unit tests
+|   |   +-- runners/            # polyglot runner plugins: base registry, junit parse, unit/api/ui adapters, ephemeral repro, async DAG executor
+|   |   +-- session_store.py    # session list/cancel/purge over the LangGraph checkpoint DB
 |   |   +-- classify.py         # per-file layer/testability classifier (path patterns + content signals)
 |   |   +-- compat.py           # per-mode compatibility verdicts + required changes
-|   |   +-- handlers.py         # pluggable TestModeHandler registry (ui/api/agent)
+|   |   +-- handlers.py         # TestModeHandler registry: per-type relevant_layers + compat
 |   |   +-- expand.py           # grep expander + graph/grep union ranking
-|   |   +-- auth.py             # per-(project,host) Magik session store + TTL/relogin
+|   |   +-- auth.py             # per-(project,host) session-intent store + TTL
 |   |   +-- apispec.py          # endpoint extraction + request-spec builder (api mode)
-|   |   +-- profile_gen.py      # Magik Project Profile markdown generator
+|   |   +-- profile_gen.py      # project profile markdown generator (agent-authored)
 |   |   +-- rules.py            # durable per-gate rulebook (~/.icx/testing_rules) loader + section enforcement
 |   |   +-- rules_defaults/     # bundled default rule .md seeded into ~/.icx/testing_rules on first use
 |   |   \-- validate.py         # MCP input validators
@@ -510,11 +514,9 @@ ICX exposes 36 tools over MCP (workflow order):
 | 17 | `save_memory` | Save resolution after developer confirms fix is tested |
 | 18 | `reinforce_memory_usage` | Reinforce a memory entry that influenced the fix (call before `save_memory` when a `memory_search` result was used) |
 | 19 | `get_memory_audit` | Diagnostic - explain why a memory result ranks as it does |
-| 20 | `magik_health_check` | Verify Magik-AI is running before an automated testing session |
-| 21 | `start_testing_session` | Begin a Magik-AI testing session for confirmed UI files |
-| 22 | `resume_testing_session` | Advance the testing session at each gate |
-| 23 | `magik_test_status` | Poll the status of a running test |
-| 24 | `magik_test_results` | Fetch the report for a completed test |
+| 20 | `record_verification` | Record Definition-of-Done evidence (command + output per check) before done |
+| 21 | `start_testing_session` | Begin the local testing session for confirmed files |
+| 22 | `resume_testing_session` | Advance the testing session at each human gate |
 
 `analyze_issue_fast` and `analyze_issue` both call `_handle_analyze_issue()` internally - the only difference is `skip_vision=True` vs `skip_vision=False`. The `_call_tool()` dispatcher sets this based on which tool name was called.
 
@@ -765,15 +767,14 @@ min_score=DEFAULT_MIN_MUTATION_SCORE=0.6)`. Hard floor: killed==0 -> rejected (v
 plus a configurable score minimum. Only mutation-killing drafts count as DoD evidence; drafts still
 pass through the human gate.
 
-**Local verification backend (v0.4.1 Phase 8 - Magik replacement):** `local_executor.py`
-`run_local_verification(repo, test_type, target_url, runtime_resolver)` is the in-process replacement
-for `MagikClient` submit/poll: it detects the runner plugins for the layer (unit/api/ui; `agent`
-maps to ui), builds their commands with the repo-correct runtime (Runtime Manager), runs them via the
-DAG executor (`run_plan`), and returns one normalized suite result (`ok`, per-runner reports,
-aggregate summary). Fully local - no HTTP to any Magik app - and guarded (never raises). The
-remaining Phase 8 wiring (repointing the LangGraph `submit`/`poll` nodes at this backend and deleting
-the Magik `client.py` / Magik-specific nodes + tools) is a controlled follow-up done incrementally to
-preserve zero regression; this backend is the piece that makes that deletion safe.
+**Local verification backend (v0.4.1):** `local_executor.py`
+`run_local_verification(repo, test_type, target_url, runtime_resolver)` is the sole execution path -
+the LangGraph `local_run` node awaits it. It detects the runner plugins for the layer (unit/api/ui;
+`agent` maps to ui), builds their commands with the repo-correct runtime (Runtime Manager), runs them
+via the async DAG executor (`run_plan`), and returns one normalized suite result (`ok`, per-runner
+reports, aggregate summary). Fully local and async - no external tester, no blocking - and guarded
+(never raises). The prior Magik path (client, submit/poll/report nodes, and the `magik_*` MCP/CLI
+surface) has been removed entirely; `local_run` is the only executor.
 
 ### Service layer (`services/`)
 
@@ -781,9 +782,9 @@ Platform-specific authentication flows live in `services/connection_service.py`,
 
 ### Testing module
 
-The module integrates with Magik-AI Tester via a LangGraph state machine. The editor agent provides changed `file_paths`; ICX classifies and expands them, runs a compatibility remediation loop, then orchestrates submit-poll-report with human confirmation at each gate. ICX makes zero LLM calls of its own - the editor agent reasons at gate interrupts. ICX is a funnel - it decides what is next and orchestrates the loop; the agent reads source, detects compatibility, and generates the spec/profile; classify.py/compat.py/profile_gen.py remain as fallbacks for headless/no-agent runs.
+The module runs verification with a fully in-process, async, local engine (v0.4.1) - there is no external tester. A LangGraph state machine drives human-in-the-loop gates; the editor agent provides changed `file_paths`; ICX classifies and expands them, runs a compatibility remediation loop, then executes the local runner suite (`testing/runners` + `local_executor.py`) on the repo-correct runtime, with human confirmation at each gate. ICX makes zero LLM calls of its own - the editor agent reasons at gate interrupts. ICX is a funnel - it decides what is next and orchestrates the loop; the agent reads source and detects compatibility; classify.py/compat.py remain as headless fallbacks. Execution is `node_local_run`, which awaits `run_local_verification` (see the Local verification backend note).
 
-State persists in `~/.icx/testing_sessions.db` (SQLite, WAL, `0o600`). Secrets and the Magik `sessionId` are NEVER written to this checkpoint.
+State persists in `~/.icx/testing_sessions.db` (SQLite, WAL, `0o600`). Secrets are NEVER written to this checkpoint.
 
 Architecture:
 - Pluggable mode handlers (`handlers.py`): `TestModeHandler` ABC + registry; `UiHandler`/`AgentHandler`/`ApiHandler`. Graph nodes never branch on the mode string - they call `get_handler(test_type)`. A new mode is a new handler.
@@ -808,7 +809,7 @@ Gate flow (v2, in order):
 | 3 | User | agent_provider, headless, url, profile_screen (test_type is NOT chosen here - it was picked at pick_type) |
 | auth_gate | User | public / capture / reuse / inline (ui/agent only) |
 | profile_push | User | choose how to push a Project Profile: agent (generate) / file (provide a .md) / no |
-| profile_gen | AI editor | reads source + Magik profile-creation prompt, generates the Project Profile markdown (only when profile_push = agent) |
+| profile_gen | AI editor | reads source + the profile-creation prompt, generates the Project Profile markdown (only when profile_push = agent) |
 | 4 | AI editor | review the full report |
 | 5 | User | approve THIS fix iteration (per-iteration approval) or stop |
 | error | User | retry / skip / end |
@@ -824,19 +825,13 @@ Compat gate mandate: ICX is a pure router here - it does NOT judge compatibility
 
 Compat-check remediation loop: every finding goes to the user, who decides each one. The agent applies the edits and resumes with `{"decision":"approve"}` to re-check; or the user rejects with `{"decision":"reject","resolution":{path:"drop"|"manual"|"accept"}}` - `drop` removes the file, `manual` keeps it for hand-testing, `accept` keeps it in the automated run unchanged (the user knowingly accepts the finding). Loops until clean or `max_compat_iterations`.
 
-Auth isolation: Magik sessions are in-memory in Magik (opaque `sessionId`, 1-hour TTL). ICX keys auth by (project, host) in `~/.icx/testing_auth.json` (`0o600`), storing only `{session_id, captured_at, expires_at}` - never a credential. The `project` part of the key is the graph `project_id` (a path hash, collision-proof), not the human name, so two projects with the same name never share a session; when no graph project matches, ICX falls back to a hash of the resolved project root so the key is still unique and stable. `host` is the netloc of the run URL. `node_submit` resolves the sessionId transiently and never returns it into checkpointed state; if an authenticated run (capture/reuse/inline) finds its stored session expired or missing at submit time, it routes to relogin (auth_error -> auth_gate) rather than silently running unauthenticated. Relogin also fires on a mid-run login-redirect or the Magik `auth_required` SSE event, re-entering `auth_gate` and resuming from the checkpoint. The four `magik_login_*`/`magik_logout` MCP tools drive capture/inline login.
+Auth (local): for the UI layer, login is authored INTO the Stagehand flow itself (the authored+cached login steps replay deterministically), so there is no separate session-capture service. `auth_gate` records intent only - `public` vs `authenticated` (ui/agent). ICX keeps a per-(project, host) intent record in `~/.icx/testing_auth.json` (`0o600`), storing only `{session_id, captured_at, expires_at}` - never a credential. The `project` part of the key is the graph `project_id` (a path hash, collision-proof), not the human name, so two projects with the same name never collide; when no graph project matches, ICX falls back to a hash of the resolved project root. `host` is the netloc of the run URL.
 
-Live streaming: `node_poll` consumes the Magik SSE stream when `magik_use_streaming` is set (default true), returning on `done` or routing to relogin on `auth_required`; it falls back to the interval poll otherwise.
+Config fields on `AppConfig`: `magik_max_iterations`, `magik_agent_max_steps` (default 50, agent step budget), `magik_agent_step_cap` (default 60, the clamp ceiling enforced at the config gate), `sonar_project_key`, `sonar_token` (`exclude=True`, keyring). Set via `icx test configure` or by editing `~/.icx/config.json`; absent fields fall back to model defaults (50/60) at load - no migration needed. (`magik_base_url`/`magik_api_key`/`magik_use_streaming` are retained in the model for config backward-compat but no longer drive execution after the local cutover.)
 
-Config fields on `AppConfig`: `magik_base_url`, `magik_api_key` (`exclude=True`, keyring), `magik_max_iterations`, `magik_use_streaming` (default true), `magik_agent_max_steps` (default 50, agent-run step budget), `magik_agent_step_cap` (default 60, the clamp ceiling enforced at the config gate), `sonar_project_key`, `sonar_token` (`exclude=True`, keyring). These step fields are set via `icx test configure` or by editing `~/.icx/config.json`; fields absent from an existing config fall back to the model defaults (50/60) at load - no migration needed.
+Gate posture (single source of truth in the `resume_testing_session` description): AGENT-GENERATE gates are `2b`, `compat_scan`, `profile_gen`, `expand_scan`; all others are USER-DECISION. The agent reads code and generates at those four; ICX orchestrates the rest. Every AGENT-GENERATE gate carries a mandatory full re-read instruction (earlier reads/memory are stale) and requires a per-file read_receipt ({path, line_count, last_line}) recorded in TestingState.read_receipts for audit; ICX records but does not re-read to validate.
 
-Gate posture (single source of truth in `_MAGIK_RESUME_DESCRIPTION`): AGENT-GENERATE gates are `2b`, `compat_scan`, `profile_gen`, `expand_scan`; all others are USER-DECISION. The agent reads code and generates at those four; ICX orchestrates the rest. Every AGENT-GENERATE gate (2b, compat_scan, profile_gen, expand_scan) carries a mandatory full re-read instruction (earlier reads/memory are stale) and requires a per-file read_receipt ({path, line_count, last_line}) recorded in TestingState.read_receipts for audit; ICX records but does not re-read to validate.
-
-**Port auto-discovery:** Magik writes its active port to `%APPDATA%\Magik-AI Tester\magik.port` on startup (tries 7646-7650 in order, OS-assigned fallback). ICX reads this file to resolve the actual port. `magik_base_url` in config is the override when the file is absent.
-
-**Report parser (`parse_report` in `nodes.py`):** Handles two shapes - UI/API test reports extract `results[]` where `status` in `("fail","error")`; agent run reports extract `verdict.success=False` as a goal-not-met issue plus any `history[]` steps with errors. Returns a flat list of issue dicts.
-
-**Error handling:** `health_check()` converts `httpx.HTTPStatusError` (e.g. 404 on wrong port) to `MagikUnreachable` so CLI commands always show a clean error message rather than a raw traceback. Loop after review routes to `submit` directly, not back to `expand_files` (file list stays fixed for the session).
+**Error handling:** `node_local_run` is guarded - a runner crash or missing runner yields a not-ok result, never an unhandled exception. The review loop routes back to `local_run` directly, not to `expand_files` (the file list stays fixed for the session).
 
 ### Sonar module (code quality)
 
@@ -1353,10 +1348,11 @@ field is stored in the OS keyring under `integration_secret:<name>:<field>`
 (with D-Lock/env-var fallbacks), exactly like connector and LLM secrets - no
 per-integration code in `config_manager`.
 
-The existing **Magik-AI (`magik_*`) and Sonar (`sonar_*`) settings remain inline
-on `AppConfig`** for backward compatibility with existing config files and
-stored secrets. New integrations must use the registry, not new `AppConfig`
-fields.
+The existing **testing (`magik_*`-named, legacy) and Sonar (`sonar_*`) settings
+remain inline on `AppConfig`** for backward compatibility with existing config
+files and stored secrets (the `magik_*` names are retained as the testing step/
+iteration knobs; the connectivity ones are inert after the local cutover). New
+integrations must use the registry, not new `AppConfig` fields.
 
 ---
 
@@ -2114,11 +2110,14 @@ texts, images = await process_attachments(raw, downloader, llm_config)
 
 #### Testing module tests
 
-- `tests/testing/test_client.py` - MagikClient HTTP calls, use respx for all mocks
+- `tests/testing/test_runners.py` - runner registry, JUnit parse, unit/api/ui adapters, ephemeral repro, async executor
+- `tests/testing/test_local_executor.py` - run_local_verification + node_local_run
+- `tests/testing/test_intelligence.py` - perf-regression comparison + regression selection
+- `tests/testing/test_mutation.py` - mutation-filter tool selection, parsers, gate
 - `tests/testing/test_state.py` - TypedDict field assertions, make_initial_state factory
-- `tests/testing/test_nodes.py` - node functions with mocked client and GraphQuerier
-- `tests/testing/test_session_store.py` - bg task registry and session store operations
-- `tests/testing/test_graph.py` - graph compilation and node membership
+- `tests/testing/test_nodes.py` - node functions with mocked GraphQuerier
+- `tests/testing/test_session_store.py` - session list/cancel/purge operations
+- `tests/testing/test_graph.py` - graph compilation and node membership (local-only path)
 
 ### Fixtures available in `conftest.py`
 
@@ -2177,7 +2176,7 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 - **D-Lock threshold:** Never raise `_DLOCK_THRESHOLD` above 512. Windows Credential Manager rejects credential blobs above this size, causing silent plaintext fallback. D-Lock exists precisely to handle values that exceed this limit.
 - **Master Key:** `"icx_master_key"` lives in the OS keyring like any other secret. Never write it to `config.json` or log it.
 
-**Testing credential isolation:** Testing credentials and the Magik `sessionId` are never written to the LangGraph checkpoint DB; `sessionId` lives only in `~/.icx/testing_auth.json` (`0o600`) keyed by (project_id, host) and is injected transiently at submit. `sonar_token` uses `Field(exclude=True)`.
+**Testing credential isolation:** No credential is ever written to the LangGraph checkpoint DB. UI login is authored into the local Stagehand flow (replayed deterministically); `~/.icx/testing_auth.json` (`0o600`, keyed by project_id+host) holds only non-secret session intent `{session_id, captured_at, expires_at}`. `sonar_token` uses `Field(exclude=True)`.
 
 ---
 

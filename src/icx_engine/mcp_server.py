@@ -443,19 +443,9 @@ _GRAPH_OWNERSHIP_TOOL = "graph_ownership"
 _REINFORCE_TOOL_NAME = "reinforce_memory_usage"
 _AUDIT_TOOL_NAME = "get_memory_audit"
 
-# Magik-AI testing tools
-_MAGIK_HEALTH_TOOL = "magik_health_check"
+# Testing session tools (LangGraph entry - local engine)
 _MAGIK_START_TOOL = "start_testing_session"
 _MAGIK_RESUME_TOOL = "resume_testing_session"
-_MAGIK_STATUS_TOOL = "magik_test_status"
-_MAGIK_RESULTS_TOOL = "magik_test_results"
-
-# Magik-AI auth tools
-_MAGIK_LOGIN_START_TOOL = "magik_login_start"
-_MAGIK_LOGIN_CAPTURE_TOOL = "magik_login_capture"
-_MAGIK_LOGIN_CANCEL_TOOL = "magik_login_cancel"
-_MAGIK_LOGIN_INLINE_TOOL = "magik_login_inline"
-_MAGIK_LOGOUT_TOOL = "magik_logout"
 
 # Sonar code-quality tools (direct SonarQube reader, gated by sonar_enabled)
 _SONAR_STATUS_TOOL = "sonar_status"
@@ -2439,11 +2429,6 @@ async def _list_tools() -> list[Tool]:
         #         [19] resume_testing_session (all gates)                   #
         # ------------------------------------------------------------------ #
         Tool(
-            name=_MAGIK_HEALTH_TOOL,
-            description=_MAGIK_HEALTH_DESCRIPTION,
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-        Tool(
             name=_MAGIK_START_TOOL,
             description=_MAGIK_START_DESCRIPTION,
             inputSchema={
@@ -2651,48 +2636,6 @@ async def _list_tools() -> list[Tool]:
                 "required": ["issue_key"],
             },
         ),
-        # ------------------------------------------------------------------ #
-        # [23-24] Magik-AI fallback - stateless, when session disconnected   #
-        # ------------------------------------------------------------------ #
-        Tool(
-            name=_MAGIK_STATUS_TOOL,
-            description=_MAGIK_STATUS_DESCRIPTION,
-            inputSchema={
-                "type": "object",
-                "properties": {"run_id": {"type": "string"}},
-                "required": ["run_id"],
-            },
-        ),
-        Tool(
-            name=_MAGIK_RESULTS_TOOL,
-            description=_MAGIK_RESULTS_DESCRIPTION,
-            inputSchema={
-                "type": "object",
-                "properties": {"run_id": {"type": "string"}},
-                "required": ["run_id"],
-            },
-        ),
-        # ------------------------------------------------------------------ #
-        # [25-29] Magik-AI auth - drive login during auth_gate               #
-        # ------------------------------------------------------------------ #
-        Tool(name=_MAGIK_LOGIN_START_TOOL, description=_MAGIK_LOGIN_START_DESCRIPTION,
-             inputSchema={"type": "object", "properties": {"loginUrl": {"type": "string"}},
-                          "required": ["loginUrl"]}),
-        Tool(name=_MAGIK_LOGIN_CAPTURE_TOOL, description=_MAGIK_LOGIN_CAPTURE_DESCRIPTION,
-             inputSchema={"type": "object",
-                          "properties": {"interactiveId": {"type": "string"}, "label": {"type": "string"}},
-                          "required": ["interactiveId"]}),
-        Tool(name=_MAGIK_LOGIN_CANCEL_TOOL, description=_MAGIK_LOGIN_CANCEL_DESCRIPTION,
-             inputSchema={"type": "object", "properties": {"interactiveId": {"type": "string"}},
-                          "required": ["interactiveId"]}),
-        Tool(name=_MAGIK_LOGIN_INLINE_TOOL, description=_MAGIK_LOGIN_INLINE_DESCRIPTION,
-             inputSchema={"type": "object",
-                          "properties": {"loginUrl": {"type": "string"}, "username": {"type": "string"},
-                                         "password": {"type": "string"}},
-                          "required": ["loginUrl", "username", "password"]}),
-        Tool(name=_MAGIK_LOGOUT_TOOL, description=_MAGIK_LOGOUT_DESCRIPTION,
-             inputSchema={"type": "object", "properties": {"sessionId": {"type": "string"}},
-                          "required": ["sessionId"]}),
         # ------------------------------------------------------------------ #
         # Sonar code-quality tools - direct SonarQube reader, read-only      #
         # ------------------------------------------------------------------ #
@@ -3495,19 +3438,6 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
-    if name == _MAGIK_HEALTH_TOOL:
-        from icx_engine.testing.client import MagikClient, MagikUnreachable
-        from icx_engine.config_manager import ConfigManager as _CM
-        cfg = _CM.load()
-        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
-        try:
-            data = await client.health_check()
-            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
-        except MagikUnreachable as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        finally:
-            await client.aclose()
-
     if name == _MAGIK_START_TOOL:
         from icx_engine.testing.graph import get_testing_graph
         from icx_engine.testing.state import make_initial_state
@@ -3593,82 +3523,6 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             "gate": gate_data,
         }))]
 
-    if name == _MAGIK_STATUS_TOOL:
-        from icx_engine.testing.client import MagikClient, MagikUnreachable, MagikRunLost
-        from icx_engine.config_manager import ConfigManager as _CM
-        run_id = args["run_id"]
-        cfg = _CM.load()
-        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
-        try:
-            data = await client.get_run_status(run_id)
-            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
-        except MagikRunLost:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "run not found - Magik may have restarted"}))]
-        except MagikUnreachable as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        finally:
-            await client.aclose()
-
-    if name == _MAGIK_RESULTS_TOOL:
-        from icx_engine.testing.client import MagikClient, MagikUnreachable, MagikRunLost, MagikReportNotReady
-        from icx_engine.testing.nodes import parse_report_placeholder
-        from icx_engine.config_manager import ConfigManager as _CM
-        run_id = args["run_id"]
-        cfg = _CM.load()
-        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
-        try:
-            raw = await client.get_run_report(run_id)
-            issues = parse_report_placeholder(raw)
-            return [TextContent(type="text", text=json.dumps({"ok": True, "issues": issues, "raw": raw}))]
-        except MagikReportNotReady:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "run not complete yet - check magik_test_status first"}))]
-        except MagikRunLost:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "run not found"}))]
-        except MagikUnreachable as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        finally:
-            await client.aclose()
-
-    if name in (_MAGIK_LOGIN_START_TOOL, _MAGIK_LOGIN_CAPTURE_TOOL, _MAGIK_LOGIN_CANCEL_TOOL,
-                _MAGIK_LOGIN_INLINE_TOOL, _MAGIK_LOGOUT_TOOL):
-        from icx_engine.testing.client import MagikClient, MagikError
-        from icx_engine.testing.validate import validate_login_args
-        from icx_engine.config_manager import ConfigManager as _CM
-        cfg = _CM.load()
-        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
-        try:
-            if name == _MAGIK_LOGIN_START_TOOL:
-                ok, msg = validate_login_args(args, ["loginUrl"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.interactive_login_start(args["loginUrl"])
-            elif name == _MAGIK_LOGIN_CAPTURE_TOOL:
-                ok, msg = validate_login_args(args, ["interactiveId"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.interactive_login_capture(args["interactiveId"], args.get("label"))
-            elif name == _MAGIK_LOGIN_CANCEL_TOOL:
-                ok, msg = validate_login_args(args, ["interactiveId"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.interactive_login_cancel(args["interactiveId"])
-            elif name == _MAGIK_LOGIN_INLINE_TOOL:
-                ok, msg = validate_login_args(args, ["loginUrl", "username", "password"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.inline_login(args["loginUrl"], args["username"], args["password"])
-            else:
-                ok, msg = validate_login_args(args, ["sessionId"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.logout(args["sessionId"])
-            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
-        except MagikError as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        except Exception as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        finally:
-            await client.aclose()
 
     if name == _SONAR_STATUS_TOOL:
         from icx_engine.sonar import service as _sonar_svc

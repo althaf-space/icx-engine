@@ -800,7 +800,7 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 38
+    assert len(tools) == 30
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
@@ -810,10 +810,7 @@ async def test_list_tools_returns_all_tools():
         "memory_find_by_file", "memory_get_hotspots", "memory_get_related",
         "memory_get_patterns", "memory_search",
         "reinforce_memory_usage", "get_memory_audit",
-        "magik_health_check", "start_testing_session", "resume_testing_session",
-        "magik_test_status", "magik_test_results",
-        "magik_login_start", "magik_login_capture", "magik_login_cancel",
-        "magik_login_inline", "magik_logout",
+        "start_testing_session", "resume_testing_session",
         "sonar_status", "sonar_projects", "sonar_branches",
         "sonar_measures", "sonar_quality_gate", "sonar_findings", "sonar_report",
     }
@@ -2770,22 +2767,10 @@ async def test_magik_tools_registered():
         tools = await _list_tools()
     names = {t.name for t in tools}
     expected = {
-        "magik_health_check",
         "start_testing_session",
         "resume_testing_session",
-        "magik_test_status",
-        "magik_test_results",
     }
     assert expected.issubset(names)
-
-
-async def test_magik_health_tool_schema_has_no_required_fields():
-    from icx_engine.mcp_server import _list_tools
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-    tool = next(t for t in tools if t.name == "magik_health_check")
-    assert tool.inputSchema.get("required", []) == []
 
 
 async def test_magik_start_tool_requires_file_paths():
@@ -2807,114 +2792,6 @@ async def test_magik_resume_tool_requires_session_id_and_response():
     tool = next(t for t in tools if t.name == "resume_testing_session")
     assert "session_id" in tool.inputSchema["required"]
     assert "response" in tool.inputSchema["required"]
-
-
-async def test_magik_status_tool_requires_run_id():
-    from icx_engine.mcp_server import _list_tools
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-    tool = next(t for t in tools if t.name == "magik_test_status")
-    assert "run_id" in tool.inputSchema["required"]
-
-
-async def test_magik_results_tool_requires_run_id():
-    from icx_engine.mcp_server import _list_tools
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-    tool = next(t for t in tools if t.name == "magik_test_results")
-    assert "run_id" in tool.inputSchema["required"]
-
-
-async def test_magik_health_check_returns_ok_on_success():
-    from icx_engine.mcp_server import _call_tool
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.health_check", new=AsyncMock(return_value={"status": "ok"})):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_health_check", {})
-    data = json.loads(result[0].text)
-    assert data["ok"] is True
-    assert "data" in data
-
-
-async def test_magik_health_check_returns_not_ok_when_unreachable():
-    from icx_engine.mcp_server import _call_tool
-    from icx_engine.testing.client import MagikUnreachable
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.health_check", new=AsyncMock(side_effect=MagikUnreachable("unreachable"))):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_health_check", {})
-    data = json.loads(result[0].text)
-    assert data["ok"] is False
-    assert "error" in data
-
-
-async def test_magik_status_returns_ok_on_success():
-    from icx_engine.mcp_server import _call_tool
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.get_run_status", new=AsyncMock(return_value={"state": "running"})):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_test_status", {"run_id": "ui-123"})
-    data = json.loads(result[0].text)
-    assert data["ok"] is True
-    assert data["data"]["state"] == "running"
-
-
-async def test_magik_status_returns_not_ok_when_run_lost():
-    from icx_engine.mcp_server import _call_tool
-    from icx_engine.testing.client import MagikRunLost
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.get_run_status", new=AsyncMock(side_effect=MagikRunLost("not found"))):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_test_status", {"run_id": "ui-999"})
-    data = json.loads(result[0].text)
-    assert data["ok"] is False
-    assert "not found" in data["error"]
-
-
-async def test_magik_results_returns_not_ok_when_report_not_ready():
-    from icx_engine.mcp_server import _call_tool
-    from icx_engine.testing.client import MagikReportNotReady
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.get_run_report", new=AsyncMock(side_effect=MagikReportNotReady("not ready"))):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_test_results", {"run_id": "ui-123"})
-    data = json.loads(result[0].text)
-    assert data["ok"] is False
-    assert "not complete yet" in data["error"]
-
-
-async def test_auth_tools_registered():
-    from icx_engine.mcp_server import _list_tools
-    from icx_engine.models.config import AppConfig
-    from unittest.mock import patch
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-    names = {t.name for t in tools}
-    for n in ("magik_login_start", "magik_login_capture", "magik_login_cancel",
-              "magik_login_inline", "magik_logout"):
-        assert n in names
-
-
-async def test_login_inline_validates():
-    import json
-    from icx_engine.mcp_server import _call_tool
-    result = await _call_tool("magik_login_inline", {"loginUrl": "http://x"})
-    payload = json.loads(result[0].text)
-    assert payload["ok"] is False
-    assert "username" in payload["error"] or "password" in payload["error"]
 
 
 async def test_start_session_validates_bad_input():

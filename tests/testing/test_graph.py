@@ -26,8 +26,8 @@ async def test_graph_has_expected_nodes():
     graph = await get_testing_graph(checkpointer=saver)
     node_names = set(graph.nodes.keys())
     expected = {
-        "expand_files", "mode_select", "pick_type", "compat_check", "generate_context",
-        "config_gate", "submit", "poll", "error_gate", "parse_report", "review",
+        "expand_files", "mode_select", "pick_type", "compat_check",
+        "config_gate", "auth_gate", "local_run", "review",
         "limit_gate", "manual_wait", "manual_result", "ui_check", "memory_save",
     }
     assert expected.issubset(node_names)
@@ -51,11 +51,13 @@ async def test_graph_has_auth_gate():
 
 
 @pytest.mark.asyncio
-async def test_graph_has_profile_push_and_testing_is_sonar_free():
+async def test_graph_local_run_and_testing_is_sonar_free():
     from langgraph.checkpoint.memory import MemorySaver
     graph = await get_testing_graph(checkpointer=MemorySaver())
     nodes_set = set(graph.get_graph().nodes)
-    assert "profile_push" in nodes_set
+    assert "local_run" in nodes_set
+    # Magik execution nodes are gone
+    assert "submit" not in nodes_set and "poll" not in nodes_set
     # Sonar is a distinct feature - it must NOT be part of the testing graph
     assert "sonar_enrich" not in nodes_set
 

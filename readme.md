@@ -29,7 +29,7 @@ ICX is an early-stage product. The core pipeline (fetch -> process -> analyse ->
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
 | Attachments | PDF (incl. scanned/OCR), DOCX, XLSX, XLS, PPTX, CSV, ZIP, code/text/config files, images via OCR + vision, audio (MP3/WAV/M4A/OGG/FLAC/AAC/Opus) + video (MP4/MOV/AVI/MKV/WebM, full-duration frame sampling) via local Whisper or LLM-native transcription | Speaker diarisation, language hints |
 | Memory | Local LanceDB + ONNX embeddings (BAAI/bge-base-en-v1.5, 768-dim, no PyTorch) | Team-shared memory, conflict resolution |
-| MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `reinforce_memory_usage`, `get_memory_audit`, 10 testing tools (`magik_health_check`, `start_testing_session`, `resume_testing_session`, `magik_test_status`, `magik_test_results`, `magik_login_start`, `magik_login_capture`, `magik_login_cancel`, `magik_login_inline`, `magik_logout`), 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`) (37 total) | Batch analysis, project-level summary |
+| MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `record_verification`, `reinforce_memory_usage`, `get_memory_audit`, 2 testing tools (`start_testing_session`, `resume_testing_session`), 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`) (30 total) | Batch analysis, project-level summary |
 | Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), JSP/Servlet, Go, C#, PHP, Rust, C++, Swift, Elixir, Scala, Rails, Angular, gRPC/Protobuf, Terraform/HCL, event broker detection (Kafka, RabbitMQ, Redis, SQS, SNS, NATS), co-change history, gopls/kotlin-language-server/rust-analyzer/OmniSharp/intelephense/clangd compiler-grade edges, incremental rebuild (SHA-256 hashing), multi-source edge fusion, PageRank + betweenness centrality, blast radius, cycle detection, dead code, CODEOWNERS integration, staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, team-shared graph cache |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
@@ -259,11 +259,8 @@ Graph data (including build cache) is stored in `~/.icx/graphs/` - nothing is wr
 ### Testing
 
 ```sh
-icx test configure                            # set Magik-AI base URL, API key, agent step limits
+icx test configure                            # set testing defaults (iteration/agent step limits)
 icx test rules                                # show the per-gate rulebook (~/.icx/testing_rules); --reset re-seeds
-icx test health                               # check Magik-AI Tester is reachable
-icx test run <URL> --type ui|agent|api       # direct test run, polls until done
-icx test status <ID>                          # check a run or session status
 icx test sessions                             # list all active testing sessions
 icx test cancel <SESSION_ID>                  # cancel an active testing session
 ```
@@ -380,16 +377,8 @@ For Claude Code, `icx mcp setup --host claude` also installs ICX-first ticket ro
 | `memory_find_by_file` | Before editing a file - surface all past work items that touched it. Input: `file_path`. |
 | `memory_get_related` | Find work items that touched the same files. Primary: pass `files` from `graph_find_context` (works for new tickets, computes overlap on-the-fly). Secondary: pass `issue_key` for reopened tickets with prior history (uses pre-stored edges). |
 | `memory_get_patterns` | Return auto-detected statistical patterns: `frequent_file`, `dominant_tag`, `top_work_item_type`, `citation_hub`, `semantic_signal`. Recomputed every 5 saves. |
-| `magik_health_check` | Check Magik-AI Tester connectivity |
-| `start_testing_session` | Begin AI testing loop for changed files |
-| `resume_testing_session` | Continue at any human gate. At the `compat_scan` gate the agent assesses testability from first principles (leave nothing, and never pass a problem off as something the test tool will "work around"); every concern it finds is shown to the user at `compat_check`, who decides each one (apply change / drop / manual / accept-as-is). ICX routes only - it does not judge or verify |
-| `magik_test_status` | Poll a run's state and counters |
-| `magik_test_results` | Fetch completed run results as clean JSON |
-| `magik_login_start` | Open a visible browser for manual login (capture mode) |
-| `magik_login_capture` | Capture the session after manual login -> sessionId |
-| `magik_login_cancel` | Cancel an interactive login |
-| `magik_login_inline` | Credential login -> sessionId (never stored by ICX) |
-| `magik_logout` | Delete a captured session |
+| `start_testing_session` | Begin the local AI testing loop for changed files (in-process polyglot runner suite - no external tester). |
+| `resume_testing_session` | Continue at any human gate. At the `compat_scan` gate the agent assesses testability from first principles; every concern it finds is shown to the user at `compat_check`, who decides each one (apply change / drop / manual / accept-as-is). Verification runs locally via the runner plugins (unit/api/ui) on the repo-correct runtime. UI login is authored into the flow. |
 | `sonar_status` | Show Sonar config and live connection health - always works, even when Sonar is disabled |
 | `sonar_projects` | Discover projects the token can access; input: `{query?}` - large lists are withheld with a mandatory `instructions` block guiding the agent to ask the user to paste a key or filter by `query` (requires `sonar_enabled`) |
 | `sonar_branches` | Discover branches for a project; input: `{project, query?}` - same guarded selection protocol (requires `sonar_enabled`) |

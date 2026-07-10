@@ -92,15 +92,9 @@ async def test_agent_type_maps_to_ui(monkeypatch, tmp_path):
     assert got["category"] == "ui"
 
 
-# -- Step 1b: local_run node + routing -----------------------------------------
+# -- Step 1b: local_run node ---------------------------------------------------
 
-from icx_engine.testing.nodes import node_local_run, route_before_submit
-
-
-def test_route_before_submit_local_vs_magik():
-    assert route_before_submit({"engine": "local"}) == "local_run"
-    assert route_before_submit({"engine": "magik"}) == "submit"
-    assert route_before_submit({}) == "submit"  # default = magik
+from icx_engine.testing.nodes import node_local_run
 
 
 async def test_node_local_run_pass(monkeypatch, tmp_path):

@@ -6,10 +6,6 @@ from icx_engine.testing.nodes import (
     node_expand_files,
     node_mode_select,
     node_manual_result,
-    node_submit,
-    node_parse_report,
-    parse_report,
-    parse_report_placeholder,
     route_after_check_issues,
     route_after_mode_select,
     _expand_files_via_graph,
@@ -59,129 +55,22 @@ async def test_expand_files_via_graph_deduplicates():
     assert "src/views/login_view.py" in result
 
 
-async def test_node_submit_ui_calls_submit_ui_test():
-    mock_client = AsyncMock()
-    mock_client.submit_ui_test.return_value = {"runId": "ui-test-123", "streamUrl": "", "reportUrl": "", "startedAt": ""}
-    state = _base_state(
-        test_type="ui",
-        url="http://localhost:3000/login",
-        profile_screen=None,
-        agent_provider="openai",
-        headless=True,
-    )
-    with patch("icx_engine.testing.nodes._make_client", return_value=mock_client):
-        result = await node_submit(state)
-    assert result["run_id"] == "ui-test-123"
-    assert result["status"] == "polling"
-    mock_client.submit_ui_test.assert_awaited_once_with(
-        url="http://localhost:3000/login",
-        profile_screen=None,
-        headless=True,
-        agent="openai",
-        session_id=None,
-        auto_auth_recover=True,
-    )
 
 
-async def test_node_submit_agent_calls_submit_agent_run():
-    mock_client = AsyncMock()
-    mock_client.submit_agent_run.return_value = {"runId": "agent-xyz", "streamUrl": "", "reportUrl": "", "startedAt": ""}
-    state = _base_state(
-        test_type="agent",
-        url="http://localhost:3000/login",
-        json_spec='{"functionalities": []}',
-        agent_provider="openai",
-    )
-    with patch("icx_engine.testing.nodes._make_client", return_value=mock_client):
-        result = await node_submit(state)
-    assert result["run_id"] == "agent-xyz"
-    mock_client.submit_agent_run.assert_awaited_once()
 
 
-async def test_node_submit_magik_error_returns_error_status():
-    from icx_engine.testing.client import MagikError
-    mock_client = AsyncMock()
-    mock_client.submit_agent_run.side_effect = MagikError("Magik-AI rejected request: invalid goal")
-    state = _base_state(test_type="agent", url="http://localhost:3000/login")
-    with patch("icx_engine.testing.nodes._make_client", return_value=mock_client):
-        result = await node_submit(state)
-    assert result["status"] == "error"
-    assert "invalid goal" in result["last_error"]
 
 
-async def test_node_submit_api_calls_submit_api_test():
-    mock_client = AsyncMock()
-    mock_client.submit_api_test.return_value = {"runId": "api-abc", "streamUrl": "", "reportUrl": "", "startedAt": ""}
-    state = _base_state(
-        test_type="api",
-        url=None,
-        json_spec=None,
-    )
-    state["api_endpoint"] = "http://localhost:8080/users"
-    state["api_method"] = "POST"
-    state["api_payload"] = '{"name":"test"}'
-    state["api_payload_type"] = "json"
-    with patch("icx_engine.testing.nodes._make_client", return_value=mock_client):
-        result = await node_submit(state)
-    assert result["run_id"] == "api-abc"
 
 
-def test_parse_report_ui_extracts_failures():
-    raw = {
-        "meta": {"url": "http://app/login", "title": "Login"},
-        "summary": {"total": 3, "pass": 1, "fail": 1, "error": 1},
-        "results": [
-            {"id": "t1", "testName": "valid login", "status": "pass", "priority": "high"},
-            {"id": "t2", "testName": "empty username", "status": "fail",
-             "fieldName": "username", "expectedBehavior": "error shown",
-             "actualBehavior": "form submitted", "priority": "high"},
-            {"id": "t3", "testName": "sql injection", "status": "error",
-             "fieldName": "password", "priority": "critical"},
-        ],
-    }
-    issues = parse_report(raw)
-    assert len(issues) == 2
-    assert all(i["type"] == "test_failure" for i in issues)
-    assert issues[0]["id"] == "t2"
-    assert issues[1]["id"] == "t3"
 
 
-def test_parse_report_agent_goal_not_met():
-    raw = {
-        "runId": "agent-123",
-        "kind": "agent",
-        "state": "completed",
-        "url": "http://app/login",
-        "goal": "Sign in as admin",
-        "verdict": {"success": False, "summary": "Login button not found"},
-        "counters": {"steps": 5, "successes": 3, "errors": 2},
-        "history": [
-            {"step": 4, "action": {"type": "click"}, "ok": False, "error": "Element not found"},
-        ],
-    }
-    issues = parse_report(raw)
-    assert len(issues) == 2
-    assert issues[0]["type"] == "agent_goal_not_met"
-    assert issues[1]["type"] == "agent_step_error"
-    assert issues[1]["step"] == 4
 
 
-def test_parse_report_agent_success_no_issues():
-    raw = {
-        "runId": "agent-456",
-        "verdict": {"success": True, "summary": "Goal met"},
-        "history": [{"step": 1, "ok": True}],
-    }
-    assert parse_report(raw) == []
 
 
-def test_parse_report_handles_empty():
-    assert parse_report({}) == []
 
 
-def test_parse_report_placeholder_delegates():
-    raw = {"results": [{"id": "t1", "status": "fail", "testName": "x"}]}
-    assert parse_report_placeholder(raw) == parse_report(raw)
 
 
 def test_route_after_check_issues_zero_issues_returns_ui_check():
@@ -199,10 +88,6 @@ def test_route_after_check_issues_at_max_returns_limit_gate():
     assert route_after_check_issues(state) == "limit_gate"
 
 
-async def test_node_parse_report_double_processing_guard():
-    state = _base_state(status="test_complete", issues=[{"name": "existing"}])
-    result = await node_parse_report(state)
-    assert result == {}  # guard - no-op update dict when already processed
 
 
 # -- _load_querier path fix tests -------------------------------------------
@@ -395,29 +280,14 @@ async def test_node_manual_result_passed_true():
 # route_after_poll / route_after_error_gate - status-driven routing.
 # ---------------------------------------------------------------------------
 
-def test_route_after_poll_error_goes_to_error_gate():
-    from icx_engine.testing.nodes import route_after_poll
-    assert route_after_poll(_base_state(status="error")) == "error_gate"
 
 
-def test_route_after_poll_non_error_goes_to_parse_report():
-    from icx_engine.testing.nodes import route_after_poll
-    assert route_after_poll(_base_state(status="test_complete")) == "parse_report"
 
 
-def test_route_after_error_gate_cancelled_goes_to_ui_check():
-    from icx_engine.testing.nodes import route_after_error_gate
-    assert route_after_error_gate(_base_state(status="cancelled")) == "ui_check"
 
 
-def test_route_after_error_gate_test_complete_goes_to_parse_report():
-    from icx_engine.testing.nodes import route_after_error_gate
-    assert route_after_error_gate(_base_state(status="test_complete")) == "parse_report"
 
 
-def test_route_after_error_gate_retry_goes_to_submit():
-    from icx_engine.testing.nodes import route_after_error_gate
-    assert route_after_error_gate(_base_state(status="retrying")) == "submit"
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +456,7 @@ async def test_compat_check_clean_proceeds(monkeypatch, tmp_path):
     out = await nodes.node_compat_check(s)
     assert called["interrupt"] is False           # no issues -> no gate
     assert out["status"] == "compat_ok"
-    assert nodes.route_after_compat({**s, **out}) == "generate_context"
+    assert nodes.route_after_compat({**s, **out}) == "config_gate"
 
 
 @pytest.mark.asyncio
@@ -645,17 +515,6 @@ async def test_compat_check_max_iterations_forces_resolution(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_submit_uses_handler(monkeypatch):
-    class FakeClient:
-        async def submit_ui_test(self, **kw): return {"runId": "ui-9"}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: FakeClient())
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
-    s["url"] = "http://host-x/app"
-    out = await nodes.node_submit(s)
-    assert out["run_id"] == "ui-9"
-    assert out["status"] == "polling"
 
 
 @pytest.mark.asyncio
@@ -711,89 +570,20 @@ async def test_auth_gate_capture_saves_session(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_submit_injects_session_from_store(monkeypatch, tmp_path):
-    store = tmp_path / "auth.json"
-    monkeypatch.setattr(_auth, "store_path", lambda: store)
-    _auth.save_session("proj-a", "host-x", "sess-x", store=store)
-    captured = {}
-    class C:
-        async def submit_ui_test(self, **kw): captured.update(kw); return {"runId": "ui-1"}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s.update({"test_type": "ui", "url": "http://host-x/app", "project": "proj-a",
-              "host": "host-x", "auth_mode": "reuse"})
-    out = await nodes.node_submit(s)
-    assert captured["session_id"] == "sess-x"
-    assert out["run_id"] == "ui-1"
 
 
-def test_route_after_error_gate_auth_to_auth_gate():
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["status"] = "auth_error"
-    assert nodes.route_after_error_gate(s) == "auth_gate"
 
 
 @pytest.mark.asyncio
-async def test_generate_context_api_autobuilds_spec(monkeypatch, tmp_path):
-    f = tmp_path / "items.py"
-    f.write_text('@router.post("/items")\ndef create_item(item: Item):\n    return item\n', encoding="utf-8")
-
-    class C:
-        _base = "http://m"
-        async def parse_spec(self, payload, payload_type):
-            return {"method": "POST", "fields": [{"name": "item"}]}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-
-    s = make_initial_state(file_paths=[str(f)], test_mode="automated")
-    s["test_type"] = "api"
-    s["api_endpoint"] = "http://host-x"
-    out = await nodes.node_generate_context(s)
-    assert out["api_method"] == "POST"
-    assert "/items" in out["api_endpoint"]
-    assert out["api_payload_type"] in ("json", "swagger")
 
 
 @pytest.mark.asyncio
-async def test_profile_push_when_approved(monkeypatch):
-    pushed = {}
-    class C:
-        async def submit_profile(self, md): pushed["md"] = md; return {"screens": 1}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    monkeypatch.setattr(nodes, "interrupt", lambda p: {"push": "yes"})
-    s = make_initial_state(file_paths=["src/pages/CreateUser.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
-    s["url"] = "http://host-x"
-    s["classified"] = [{"path": "src/pages/CreateUser.tsx", "layer": "frontend",
-                        "role": "container", "artifacts": ["component"], "testability": {}}]
-    out = await nodes.node_profile_push(s)
-    assert out["profile_pushed"] is True
-    assert "CreateUser" in pushed["md"]
 
 
 @pytest.mark.asyncio
-async def test_profile_push_skipped(monkeypatch):
-    monkeypatch.setattr(nodes, "interrupt", lambda p: {"push": "no"})
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
-    out = await nodes.node_profile_push(s)
-    assert out["profile_pushed"] is False
 
 
 @pytest.mark.asyncio
-async def test_parse_report_stores_full_report(monkeypatch):
-    class C:
-        async def get_run_report(self, run_id, fmt="json"):
-            return {"results": [{"status": "fail", "testName": "t1"}]}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["run_id"] = "ui-1"; s["status"] = "polling"
-    out = await nodes.node_parse_report(s)
-    assert out["full_report"] == {"results": [{"status": "fail", "testName": "t1"}]}
-    assert len(out["issues"]) == 1
 
 
 @pytest.mark.asyncio
@@ -814,55 +604,11 @@ async def test_review_passes_full_report_and_requires_approval(monkeypatch):
     assert out.get("approve_iteration") is True
 
 
-@pytest.mark.asyncio
-async def test_poll_stream_done_completes(monkeypatch):
-    async def fake_stream(run_id):
-        yield "meta", {"state": "running"}
-        yield "done", {"state": "completed", "counters": {"pass": 3}}
-    class C:
-        def stream_run(self, run_id): return fake_stream(run_id)
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    monkeypatch.setattr(nodes, "_stream_supported", lambda: True)
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["run_id"] = "ui-1"
-    out = await nodes.node_poll(s)
-    assert out["status"] == "test_complete"
-    assert out["run_state"] == "completed"
-
-
-@pytest.mark.asyncio
-async def test_poll_stream_auth_required_sets_auth_error(monkeypatch):
-    async def fake_stream(run_id):
-        yield "auth_required", {"loginUrl": "http://host-x/login"}
-    class C:
-        def stream_run(self, run_id): return fake_stream(run_id)
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    monkeypatch.setattr(nodes, "_stream_supported", lambda: True)
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["run_id"] = "ui-1"
-    out = await nodes.node_poll(s)
-    assert out["status"] == "auth_error"
-
-
 def test_sonar_detached_from_testing_nodes():
     # Sonar is a distinct feature - the testing nodes module must not carry it
     assert not hasattr(nodes, "node_sonar_enrich")
 
 
-@pytest.mark.asyncio
-async def test_submit_clears_stale_issues(monkeypatch):
-    class FakeClient:
-        async def submit_ui_test(self, **kw): return {"runId": "ui-7"}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: FakeClient())
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://host-x/app"
-    s["issues"] = [{"name": "stale"}]          # leftover from a prior iteration
-    out = await nodes.node_submit(s)
-    assert out["issues"] == []                  # fresh run starts clean
-    assert out["run_id"] == "ui-7"
 
 
 # ---------------------------------------------------------------------------
@@ -879,7 +625,7 @@ async def test_compat_scan_agent_clean(monkeypatch):
     s["test_type"] = "ui"
     out = await nodes.node_compat_scan(s)
     assert out["compat_findings"][0]["compatible"] is True
-    assert nodes.route_after_scan({**s, **out}) == "generate_context"
+    assert nodes.route_after_scan({**s, **out}) == "config_gate"
 
 
 @pytest.mark.asyncio
@@ -974,114 +720,14 @@ async def test_compat_check_accept_keeps_file_in_set(monkeypatch):
 # node_profile_push -> agent-generate (2-interrupt flow)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_profile_push_agent_generates(monkeypatch):
-    pushed = {}
-    class C:
-        async def get_profile_creation_prompt(self): return "PROMPT"
-        async def submit_profile(self, md): pushed["md"] = md; return {"screens": 3}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    calls = []
-    def fake_interrupt(p):
-        calls.append(p["gate"])
-        if p["gate"] == "profile_push":
-            return {"push": "yes"}
-        return {"profile_markdown": "# Project: Real\n## Screens\n### Screen: X"}
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://host-x"
-    out = await nodes.node_profile_push(s)
-    assert out["profile_pushed"] is True
-    assert pushed["md"] == "# Project: Real\n## Screens\n### Screen: X"
-    assert "profile_gen" in calls
 
 
-@pytest.mark.asyncio
-async def test_profile_push_skipped_no_agent_call(monkeypatch):
-    def fake_interrupt(p):
-        return {"push": "no"}
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
-    out = await nodes.node_profile_push(s)
-    assert out["profile_pushed"] is False
 
 
-@pytest.mark.asyncio
-async def test_profile_push_fallback_when_agent_blank(monkeypatch):
-    pushed = {}
-    class C:
-        async def get_profile_creation_prompt(self): return "PROMPT"
-        async def submit_profile(self, md): pushed["md"] = md; return {"screens": 1}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    def fake_interrupt(p):
-        if p["gate"] == "profile_push":
-            return {"push": "yes"}
-        return {}   # agent returned no markdown -> fallback
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-    s = make_initial_state(file_paths=["src/pages/CreateUser.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://host-x"
-    s["classified"] = [{"path": "src/pages/CreateUser.tsx", "layer": "frontend",
-                        "role": "container", "artifacts": ["component"], "testability": {}}]
-    out = await nodes.node_profile_push(s)
-    assert out["profile_pushed"] is True
-    assert "CreateUser" in pushed["md"]   # fallback markdown used
 
 
-@pytest.mark.asyncio
-async def test_profile_gen_interrupt_propagates(monkeypatch):
-    from langgraph.errors import GraphInterrupt
-    class C:
-        async def get_profile_creation_prompt(self): return "P"
-        async def submit_profile(self, md): return {"screens": 1}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    def fake_interrupt(p):
-        if p["gate"] == "profile_push":
-            return {"push": "yes"}
-        raise GraphInterrupt(())
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://host-x"
-    import pytest as _pytest
-    with _pytest.raises(GraphInterrupt):
-        await nodes.node_profile_push(s)
 
 
-@pytest.mark.asyncio
-async def test_generate_context_auto_detect_2a_interrupt_propagates(monkeypatch):
-    from langgraph.errors import GraphInterrupt
-
-    class _Resp:
-        status_code = 200
-        def json(self): return {"ok": True, "data": {"prompt": "P", "groups": [], "page_title": "T"}}
-
-    class _Inner:
-        async def post(self, *a, **k): return _Resp()
-        async def get(self, *a, **k): return _Resp()
-
-    class C:
-        _base = "http://m"
-        _client = _Inner()
-        async def aclose(self): pass
-
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-
-    def fake_interrupt(p):
-        if p["gate"] == "2a":
-            raise GraphInterrupt(())
-        return {"json_spec": "{}"}
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
-    s["detection_mode"] = "auto_detect"
-    s["url"] = "http://host-x/app"
-    import pytest as _pytest
-    with _pytest.raises(GraphInterrupt):
-        await nodes.node_generate_context(s)
 
 
 # ---------------------------------------------------------------------------
@@ -1185,24 +831,6 @@ async def test_compat_scan_carries_mandate_and_records_receipts(monkeypatch):
     assert any(r.get("gate") == "compat_scan" and r["receipts"][0]["path"] == "a.tsx" for r in recs)
 
 
-@pytest.mark.asyncio
-async def test_profile_gen_records_receipts(monkeypatch):
-    class C:
-        async def get_profile_creation_prompt(self): return "P"
-        async def submit_profile(self, md): return {"screens": 1}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    def fake_interrupt(p):
-        if p["gate"] == "profile_push":
-            return {"push": "yes"}
-        assert "read_receipts" in p.get("instruction", "")
-        return {"profile_markdown": "# Project: X",
-                "read_receipts": [{"path": "a.tsx", "line_count": 5, "last_line": "x"}]}
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://h"
-    out = await nodes.node_profile_push(s)
-    assert any(r.get("gate") == "profile_gen" for r in out.get("read_receipts", []))
 
 
 # -- project_id auth key + reuse robustness + profile file option --
@@ -1243,49 +871,7 @@ async def test_auth_gate_keys_on_project_id(monkeypatch, tmp_path):
     assert _auth.load_session("pid-xyz", "host-z", store=store).session_id == "cap-9"
 
 
-@pytest.mark.asyncio
-async def test_submit_reuse_expired_routes_to_auth_error(monkeypatch, tmp_path):
-    from icx_engine.testing import auth as _auth
-    store = tmp_path / "auth.json"
-    monkeypatch.setattr(_auth, "store_path", lambda: store)   # empty store -> no session
-    class C:
-        async def submit_ui_test(self, **kw):
-            raise AssertionError("must not submit when the required session is missing")
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s.update({"test_type": "ui", "url": "http://host-z/app", "project": "pid-xyz",
-              "host": "host-z", "auth_mode": "reuse"})
-    out = await nodes.node_submit(s)
-    assert out["status"] == "auth_error"
-    assert nodes.route_after_error_gate({**s, **out}) == "auth_gate"
 
 
-@pytest.mark.asyncio
-async def test_profile_push_file_option_reads_and_submits(monkeypatch, tmp_path):
-    prof = tmp_path / "profile.md"
-    prof.write_text("# Project: Mine\n## Screens\n### Screen: Home", encoding="utf-8")
-    pushed = {}
-    class C:
-        async def submit_profile(self, md): pushed["md"] = md; return {"screens": 1}
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    monkeypatch.setattr(nodes, "interrupt", lambda p: {"push": "file", "profile_path": str(prof)})
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://h"
-    out = await nodes.node_profile_push(s)
-    assert out["profile_pushed"] is True
-    assert "Screen: Home" in pushed["md"]
 
 
-@pytest.mark.asyncio
-async def test_profile_push_file_missing_is_non_fatal(monkeypatch):
-    class C:
-        async def submit_profile(self, md): raise AssertionError("should not submit a missing profile")
-        async def aclose(self): pass
-    monkeypatch.setattr(nodes, "_make_client", lambda config=None: C())
-    monkeypatch.setattr(nodes, "interrupt", lambda p: {"push": "file", "profile_path": "/no/such/file.md"})
-    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://h"
-    out = await nodes.node_profile_push(s)
-    assert out["profile_pushed"] is False

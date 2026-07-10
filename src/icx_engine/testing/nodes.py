@@ -8,7 +8,6 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
 from icx_engine.testing.state import TestingState
-from icx_engine.testing.client import MagikClient, MagikError, MagikUnreachable, MagikRunLost, MagikReportNotReady, MagikAuthError
 from icx_engine.testing.classify import classify_file
 from icx_engine.testing.compat import build_report
 from icx_engine.testing.handlers import get_handler
@@ -48,16 +47,6 @@ def _resolve_choice(response: dict[str, Any], key: str, numbered_map: dict[str, 
     return numbered_map.get(value, value)
 
 
-def _stream_supported() -> bool:
-    from icx_engine.config_manager import ConfigManager
-    cfg = ConfigManager.load()
-    return bool(getattr(cfg, "magik_use_streaming", True))
-
-
-def _make_client(config: Any | None = None) -> MagikClient:
-    from icx_engine.config_manager import ConfigManager
-    cfg = config or ConfigManager.load()
-    return MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
 
 
 def _load_querier(project_paths: list[str]):
@@ -328,7 +317,7 @@ def route_after_scan(state: TestingState) -> str:
     findings = state.get("compat_findings", [])
     if any(not f.get("compatible", True) for f in findings):
         return "compat_check"
-    return "generate_context"
+    return "config_gate"
 
 
 # -- node_compat_check: compatibility gate with human-in-the-loop remediation --
@@ -513,179 +502,6 @@ def _run_gate_2b(base_payload: dict) -> tuple[dict, list[str]]:
             return resp, missing   # bounded - caller records spec_warnings, never silently hides
 
 
-async def node_generate_context(state: TestingState) -> dict:
-    if state.get("test_type") == "api":
-        import json as _json
-        client = _make_client()
-        base = state.get("api_endpoint") or ""
-        ep = None
-        for path in state["file_paths"]:
-            try:
-                content = Path(path).read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            ep = _apispec.extract_endpoint(path, content)
-            if ep is not None:
-                break
-        try:
-            if ep is None or not base:
-                raise ValueError("no endpoint derivable")
-            spec = _apispec.build_request_spec(base, ep, headers=state.get("api_headers"))
-            payload = _json.dumps(spec)
-            await client.parse_spec(payload, "json")
-            return {
-                "api_endpoint": spec["url"],
-                "api_method": ep.method,
-                "api_payload": payload,
-                "api_payload_type": "json",
-            }
-        except Exception as exc:
-            _log.warning("api auto-spec failed (%s) - falling back to manual entry", exc)
-            response = interrupt({
-                "gate": "api_manual",
-                "message": "Could not auto-build the API spec. Provide endpoint details.",
-                "needed": ["api_endpoint", "api_method", "api_payload", "api_payload_type"],
-            })
-            return {
-                "api_endpoint": response.get("api_endpoint") or base,
-                "api_method": response.get("api_method") or "POST",
-                "api_payload": response.get("api_payload") or "{}",
-                "api_payload_type": response.get("api_payload_type") or "json",
-            }
-        finally:
-            await client.aclose()
-
-    mode = state.get("detection_mode") or "json_spec"
-    scope = state.get("scope", "ticket")
-    client = _make_client()
-
-    try:
-        if mode == "auto_detect":
-            url = state.get("url")
-            if not url:
-                _log.warning("auto_detect requested but no URL - falling back to json_spec")
-                mode = "json_spec"
-            else:
-                try:
-                    r = await client._client.post(
-                        f"{client._base}/api/v1/generate-prompt",
-                        json={
-                            "file_paths": state["file_paths"],
-                            "mode": "auto_detect",
-                            "url": url,
-                            "headless": True,
-                        },
-                        timeout=60.0,
-                    )
-                    if r.status_code == 200 and r.json().get("ok"):
-                        data = r.json()["data"]
-                        raw_prompt = data.get("prompt")
-                        groups = data.get("groups", [])
-                        page_title = data.get("page_title")
-
-                        # Gate 2a: confirm URL and detected fields before AI spec generation
-                        confirmation = interrupt({
-                            "gate": "2a",
-                            "message": (
-                                "Magik scanned the page. Confirm the URL is correct "
-                                "and review detected fields before AI generates the test spec."
-                            ),
-                            "url": url,
-                            "page_title": page_title,
-                            "detected_groups": groups,
-                            "group_count": len(groups),
-                        })
-                        final_url = confirmation.get("url", url)
-                        scoped_prompt = _apply_scope(raw_prompt, state["file_paths"], scope)
-
-                        # Gate 2b (AI editor): generate JSON spec from detected fields
-                        spec_response, spec_missing = _run_gate_2b({
-                            "message": "Generate a JSON test spec from the detected page structure.",
-                            "magik_prompt": scoped_prompt,
-                            "file_paths": state["file_paths"],
-                            "context": state.get("context"),
-                            "merge_files": state.get("merge_files", False),
-                            "instruction": (
-                                "Analyze the magik_prompt (which contains detected page fields) "
-                                "and the source files. Return a structured JSON test spec as json_spec."
-                                + _REREAD_MANDATE
-                            ),
-                        })
-                        out = {
-                            "detection_mode": "auto_detect",
-                            "url": final_url,
-                            "json_spec": spec_response.get("json_spec"),
-                            "read_receipts": _record_receipts(state, "2b", spec_response),
-                        }
-                        if spec_missing:
-                            out["spec_warnings"] = spec_missing
-                        return out
-                    else:
-                        _log.warning("generate-prompt returned %s, falling back to json_spec", r.status_code)
-                        mode = "json_spec"
-                except GraphBubbleUp:
-                    raise
-                except Exception as exc:
-                    _log.warning("auto_detect failed (%s), falling back to json_spec", exc)
-                    mode = "json_spec"
-
-        if mode == "json_spec":
-            json_creation_prompt: str | None = None
-            try:
-                r = await client._client.get(
-                    f"{client._base}/prompt/json-creation",
-                    timeout=15.0,
-                )
-                if r.status_code == 200:
-                    json_creation_prompt = r.text
-            except Exception as exc:
-                _log.warning("could not fetch json-creation prompt: %s", exc)
-
-            merge = state.get("merge_files", len(state["file_paths"]) > 1)
-            file_list = "\n".join(f"- {f}" for f in state["file_paths"])
-            merge_instruction = (
-                "\n\nMULTI-FILE MERGE REQUEST\n"
-                "Analyze these files together. Generate the combined JSON spec.\n"
-                "The root file is the listing/parent page. Other files are modal/child components.\n"
-                "Produce ONE JSON whose functionalities[] array covers every user-facing action.\n"
-            ) if merge and len(state["file_paths"]) > 1 else ""
-
-            full_prompt = (
-                (json_creation_prompt or "Analyze the provided source files and generate a JSON test spec.")
-                + f"\n\nFiles:\n{file_list}"
-                + merge_instruction
-            )
-            full_prompt = _apply_scope(full_prompt, state["file_paths"], scope) or full_prompt
-
-            # Gate 2b (AI editor): AI reads JSX files and generates JSON spec
-            spec_response, spec_missing = _run_gate_2b({
-                "message": (
-                    "Analyze the source files using the prompt below and generate a JSON test spec."
-                ),
-                "magik_prompt": full_prompt,
-                "file_paths": state["file_paths"],
-                "context": state.get("context"),
-                "merge_files": merge,
-                "instruction": (
-                    "Read each file listed in file_paths, apply the magik_prompt instructions, "
-                    "and return the resulting JSON spec as json_spec in your response."
-                    + _REREAD_MANDATE
-                ),
-            })
-            out = {
-                "detection_mode": "json_spec",
-                "json_creation_prompt": json_creation_prompt,
-                "json_spec": spec_response.get("json_spec"),
-                "merge_files": merge,
-                "read_receipts": _record_receipts(state, "2b", spec_response),
-            }
-            if spec_missing:
-                out["spec_warnings"] = spec_missing
-            return out
-    finally:
-        await client.aclose()
-
-    return {"detection_mode": mode, "json_spec": None}
 
 
 # -- Gate 3: submission config ----------------------------------------------
@@ -897,78 +713,6 @@ def _read_profile_file(path_str: str) -> str | None:
         return None
 
 
-async def node_profile_push(state: TestingState) -> dict:
-    if state.get("test_type") == "api":
-        return {"profile_pushed": False}
-    decision = interrupt({
-        "gate": "profile_push",
-        "message": (
-            "Push a Magik Project Profile? It enriches the run and enables functional "
-            "cross-field cases.\n"
-            "  agent - the agent reads your source and generates the profile markdown.\n"
-            "  file  - use an existing Project Profile markdown file you provide.\n"
-            "  no    - skip."
-        ),
-        "options": ["agent", "file", "no"],
-        "default": "agent",
-        "instruction": (
-            "Resume with {\"push\": \"agent\"} to have the agent generate it, "
-            "{\"push\": \"file\", \"profile_path\": \"<path to a .md profile>\"} "
-            "(or {\"push\": \"file\", \"profile_markdown\": \"<raw markdown>\"}) to use an "
-            "existing profile, or {\"push\": \"no\"} to skip."
-        ),
-    })
-    choice = str(decision.get("push", "no")).strip().lower()
-    if choice in ("no", "0", "false"):
-        return {"profile_pushed": False}
-
-    client = _make_client()
-    try:
-        # Option: use a profile file the user provides (raw markdown or a path).
-        if choice == "file":
-            md = decision.get("profile_markdown")
-            if not (isinstance(md, str) and md.strip()):
-                path_str = decision.get("profile_path") or ""
-                md = _read_profile_file(str(path_str)) if path_str else None
-            if not (isinstance(md, str) and md.strip()):
-                _log.warning("profile file missing/unreadable/empty: %r", decision.get("profile_path"))
-                return {"profile_pushed": False}
-            await client.submit_profile(md)
-            return {"profile_pushed": True, "profile_markdown": md}
-
-        # Default: agent-generate (choice == "agent" or the legacy "yes").
-        try:
-            prompt = await client.get_profile_creation_prompt()
-        except Exception as exc:
-            _log.warning("could not fetch profile-creation prompt: %s", exc)
-            prompt = ""
-
-        gen = interrupt({
-            "gate": "profile_gen",
-            "magik_prompt": prompt,
-            "file_paths": state["file_paths"],
-            "base_url": state.get("url") or "",
-            "rules": _rules.load_gate_rules("profile_gen"),
-            "rules_path": _rules.gate_rules_path("profile_gen"),
-            "instruction": (
-                "Read the source files in file_paths and apply magik_prompt to produce the Project "
-                "Profile as Markdown. Return {\"profile_markdown\": \"<full markdown>\"}."
-                + _REREAD_MANDATE
-            ),
-        })
-        md = gen.get("profile_markdown")
-        if not md:
-            display = _resolve_project_name(state["file_paths"]) or "project"
-            md = _profile_gen.build_profile_markdown(state.get("classified", []), display, state.get("url") or "")
-        await client.submit_profile(md)
-        return {"profile_pushed": True, "profile_markdown": md, "read_receipts": _record_receipts(state, "profile_gen", gen)}
-    except GraphBubbleUp:
-        raise
-    except Exception as exc:
-        _log.warning("profile push failed: %s", exc)
-        return {"profile_pushed": False}
-    finally:
-        await client.aclose()
 
 
 # -- node_submit ------------------------------------------------------------
@@ -986,23 +730,40 @@ def _local_repo_root(state: TestingState) -> str:
         return dirs[0] or os.getcwd()
 
 
-def route_before_submit(state: TestingState) -> str:
-    """Route to the in-process local runner when engine='local', else the legacy Magik submit."""
-    return "local_run" if state.get("engine") == "local" else "submit"
+
+
+# lang aliases: runner.lang -> Runtime Manager language key
+_RUNTIME_LANG_ALIAS = {"js-ts": "node", "javascript": "node", "typescript": "node"}
+
+
+async def _runtime_resolver(repo: str):
+    """Return an async resolver(lang)->path that uses the Runtime Manager to pick the repo-correct
+    runtime, non-blocking. Falls back to None (runner uses PATH) when not resolvable."""
+    async def _resolve(lang: str):
+        from icx_engine.runtime_manager import resolve_runtime
+        key = _RUNTIME_LANG_ALIAS.get(lang, lang)
+        try:
+            res = await asyncio.to_thread(resolve_runtime, key, repo)
+            return res.path if getattr(res, "status", "") == "resolved" else None
+        except Exception:
+            return None
+    return _resolve
 
 
 async def node_local_run(state: TestingState) -> dict:
     """Run the local (in-process, async) verification suite and feed the result to the review gate.
 
-    Replaces the Magik submit->poll->parse_report chain for engine='local'. Fully async; never
-    blocks the event loop. Maps a failed suite to a single issue so the existing review gate handles
-    it uniformly with the Magik path.
+    Executes engine='local'. Fully async; never blocks the event loop. Uses the Runtime Manager to
+    run each layer on the repo-correct runtime. Maps a failed suite to a single issue so the review
+    gate handles it uniformly.
     """
     from icx_engine.testing.local_executor import run_local_verification
     test_type = state.get("test_type") or "unit"
+    repo = _local_repo_root(state)
     try:
+        resolver = await _runtime_resolver(repo)
         res = await run_local_verification(
-            _local_repo_root(state), test_type, target_url=state.get("url"),
+            repo, test_type, target_url=state.get("url"), runtime_resolver=resolver,
         )
     except Exception as exc:
         return {"status": "error", "last_error": f"local verification failed: {exc}",
@@ -1018,219 +779,23 @@ async def node_local_run(state: TestingState) -> dict:
     return {"status": "parsed", "issues": issues, "full_report": res, "run_id": "local"}
 
 
-async def node_submit(state: TestingState) -> dict:
-    from icx_engine.testing.handlers import get_handler
-    client = _make_client()
-    test_type = state.get("test_type") or "agent"
-
-    sid = None
-    needs_session = test_type in ("ui", "agent") and state.get("auth_mode") in ("capture", "reuse", "inline")
-    if needs_session:
-        project, host = state.get("project"), state.get("host")
-        rec = _auth.load_session(project, host) if project and host else None
-        sid = rec.session_id if rec else None
-        if sid is None:
-            # The run asked for an authenticated session but the stored one is
-            # expired or missing. Route to relogin instead of silently running
-            # unauthenticated.
-            await client.aclose()
-            return {"status": "auth_error",
-                    "last_error": "saved session expired or unavailable - re-authenticate"}
-    submit_state = {**state, "_auth_session_id": sid,
-                    "auto_auth_recover": state.get("auto_auth_recover", True)}
-
-    try:
-        data = await get_handler(test_type).submit(client, submit_state)
-    except MagikAuthError as exc:
-        return {"status": "auth_error", "last_error": str(exc)}
-    except ValueError as exc:
-        return {"status": "error", "last_error": str(exc)}
-    except MagikError as exc:
-        return {"status": "error", "last_error": str(exc)}
-    except Exception as exc:
-        return {"status": "error", "last_error": f"unexpected error submitting test: {exc}"}
-    finally:
-        await client.aclose()
-    return {"run_id": data["runId"], "status": "polling", "issues": []}
 
 
 # -- node_poll --------------------------------------------------------------
 
-async def node_poll(state: TestingState) -> dict:
-    from icx_engine.testing.session_store import spawn_bg_poll, get_bg_result, mark_bg_done
-
-    run_id = state["run_id"]
-    if not run_id:
-        return {"status": "error", "last_error": "run_id missing before polling"}
-
-    if _stream_supported():
-        client = _make_client()
-        try:
-            async for event, data in client.stream_run(run_id):
-                if event == "auth_required":
-                    return {"status": "auth_error",
-                            "last_error": f"auth required at {data.get('loginUrl', 'login')}"}
-                if event == "done":
-                    state_val = data.get("state", "completed")
-                    return {"status": "test_complete", "run_state": state_val,
-                            "run_counters": data.get("counters", {})}
-        except Exception as exc:
-            _log.warning("stream failed (%s) - falling back to interval poll", exc)
-        finally:
-            await client.aclose()
-
-    spawn_bg_poll(run_id)
-
-    client = _make_client()
-    retries = 0
-
-    try:
-        while True:
-            bg_result = get_bg_result(run_id)
-            if bg_result:
-                mark_bg_done(run_id)
-                return {"status": "test_complete", **bg_result}
-
-            await asyncio.sleep(_POLL_INTERVAL)
-            try:
-                snap = await client.get_run_status(run_id)
-                retries = 0
-            except MagikRunLost:
-                return {"status": "error", "last_error": f"run {run_id} not found - Magik may have restarted"}
-            except MagikUnreachable as exc:
-                retries += 1
-                if retries > _MAX_RETRIES:
-                    return {"status": "error", "last_error": str(exc)}
-                await asyncio.sleep(_RETRY_BACKOFF[min(retries - 1, len(_RETRY_BACKOFF) - 1)])
-                continue
-            except Exception as exc:
-                retries += 1
-                if retries > _MAX_RETRIES:
-                    return {"status": "error", "last_error": str(exc)}
-                continue
-
-            if snap["state"] in _TERMINAL_STATES:
-                mark_bg_done(run_id)
-                return {
-                    "status": "test_complete",
-                    "run_state": snap["state"],
-                    "run_counters": snap.get("counters", {}),
-                }
-    finally:
-        await client.aclose()
 
 
 # -- node_error_gate --------------------------------------------------------
 
-async def node_error_gate(state: TestingState) -> dict:
-    _ERROR_MAP = {"1": "retry", "2": "skip_iteration", "3": "end_session"}
-    response = interrupt({
-        "gate": "error",
-        "message": f"Test stopped: {state.get('last_error', 'unknown error')}",
-        "options": ["1. retry", "2. skip_iteration", "3. end_session"],
-    })
-    choice = _resolve_choice(response, "choice", _ERROR_MAP)
-    if choice == "retry":
-        return {"status": "running", "last_error": None}
-    elif choice == "skip_iteration":
-        return {"status": "test_complete", "issues": [], "run_state": "skipped"}
-    else:
-        return {"status": "cancelled"}
 
 
 # -- node_parse_report ------------------------------------------------------
 
-def parse_report(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract actionable failures from Magik report JSON.
-
-    Handles two report shapes:
-      UI/API test - top-level keys: meta, summary, analysis, fields, results[]
-      Agent run   - top-level keys: runId, kind, verdict{}, counters{}, history[]
-    Returns a flat list of issue dicts, one per failure.
-    """
-    if not raw:
-        return []
-
-    issues: list[dict[str, Any]] = []
-
-    # -- UI / API test report ----------------------------------------------
-    results = raw.get("results")
-    if isinstance(results, list):
-        for r in results:
-            if r.get("status") in ("fail", "error"):
-                issues.append({
-                    "type": "test_failure",
-                    "id": r.get("id"),
-                    "name": r.get("testName") or r.get("name"),
-                    "category": r.get("category"),
-                    "field": r.get("fieldName"),
-                    "input": r.get("inputValue"),
-                    "expected": r.get("expectedBehavior"),
-                    "actual": r.get("actualBehavior"),
-                    "status": r.get("status"),
-                    "priority": r.get("priority", "medium"),
-                    "note": r.get("aiNote"),
-                    "duration_ms": r.get("duration"),
-                })
-        return issues
-
-    # -- Agent run report --------------------------------------------------
-    verdict = raw.get("verdict") or {}
-    if not verdict.get("success", True):
-        issues.append({
-            "type": "agent_goal_not_met",
-            "summary": verdict.get("summary"),
-            "run_id": raw.get("runId"),
-            "state": raw.get("state"),
-            "url": raw.get("url"),
-            "goal": raw.get("goal"),
-            "counters": raw.get("counters", {}),
-        })
-
-    history = raw.get("history") or []
-    for step in history:
-        if step.get("error") or step.get("ok") is False:
-            issues.append({
-                "type": "agent_step_error",
-                "step": step.get("step"),
-                "action": step.get("action"),
-                "error": step.get("error"),
-                "observation": step.get("observation"),
-            })
-
-    return issues
 
 
 # kept for test compatibility - delegates to real parser
-def parse_report_placeholder(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    return parse_report(raw)
 
 
-async def node_parse_report(state: TestingState) -> dict:
-    if state["status"] == "test_complete" and state.get("issues"):
-        return {}
-
-    run_id = state["run_id"]
-    if not run_id:
-        return {"issues": [], "status": "test_complete"}
-
-    client = _make_client()
-    try:
-        raw = await client.get_run_report(run_id)
-    except MagikReportNotReady:
-        await asyncio.sleep(10)
-        try:
-            raw = await client.get_run_report(run_id)
-        except Exception:
-            raw = {}
-    except Exception as exc:
-        _log.warning("report fetch failed for %s: %s", run_id, exc)
-        raw = {}
-    finally:
-        await client.aclose()
-
-    issues = parse_report(raw)
-    return {"issues": issues, "status": "test_complete", "full_report": raw}
 
 
 # -- node_review ------------------------------------------------------------
@@ -1466,7 +1031,7 @@ def route_after_compat(state: TestingState) -> str:
         return "compat_scan"
     if state.get("status") == "compat_empty":
         return "ui_check"
-    return "generate_context"
+    return "config_gate"
 
 
 def route_after_mode_select(state: TestingState) -> str:
@@ -1491,17 +1056,5 @@ def route_after_check_issues(state: TestingState) -> str:
     return "loop"
 
 
-def route_after_poll(state: TestingState) -> str:
-    if state["status"] in ("error", "auth_error"):
-        return "error_gate"
-    return "parse_report"
 
 
-def route_after_error_gate(state: TestingState) -> str:
-    if state.get("status") == "auth_error":
-        return "auth_gate"
-    if state["status"] == "cancelled":
-        return "ui_check"
-    if state["status"] == "test_complete":
-        return "parse_report"
-    return "submit"

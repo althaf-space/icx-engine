@@ -2,88 +2,21 @@ from __future__ import annotations
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
-from icx_engine.testing.session_store import (
-    spawn_bg_poll,
-    get_bg_result,
-    mark_bg_done,
-    cancel_bg_poll,
-    _BG_TASKS,
-    _BG_RESULTS,
-)
+from icx_engine.testing.session_store import list_active_sessions
 
 
-def setup_function():
-    _BG_TASKS.clear()
-    _BG_RESULTS.clear()
 
 
-def test_spawn_bg_poll_registers_task():
-    with patch("icx_engine.testing.session_store._poll_worker", new_callable=AsyncMock):
-        spawn_bg_poll("ui-test-123")
-    assert "ui-test-123" in _BG_TASKS
 
 
-def test_get_bg_result_returns_none_before_done():
-    result = get_bg_result("nonexistent-run-id")
-    assert result is None
 
 
-def test_mark_bg_done_removes_task():
-    _BG_TASKS["run-x"] = MagicMock()
-    _BG_RESULTS["run-x"] = {"run_state": "completed"}
-    mark_bg_done("run-x")
-    assert "run-x" not in _BG_TASKS
 
 
-def test_cancel_bg_poll_cancels_task():
-    mock_task = MagicMock()
-    _BG_TASKS["run-y"] = mock_task
-    cancel_bg_poll("run-y")
-    mock_task.cancel.assert_called_once()
-    assert "run-y" not in _BG_TASKS
 
 
-async def test_poll_worker_stores_result_on_completion():
-    from icx_engine.testing.session_store import _poll_worker
-
-    mock_client = AsyncMock()
-    mock_client.get_run_status = AsyncMock(side_effect=[
-        {"state": "running", "counters": {"pass": 2, "fail": 0}},
-        {"state": "completed", "counters": {"pass": 5, "fail": 0}},
-    ])
-
-    with patch("icx_engine.testing.session_store._make_client", return_value=mock_client):
-        with patch("icx_engine.testing.session_store._POLL_INTERVAL", 0):
-            await _poll_worker("ui-test-done")
-
-    assert "ui-test-done" in _BG_RESULTS
-    assert _BG_RESULTS["ui-test-done"]["run_state"] == "completed"
 
 
-def test_bg_results_capped_at_max():
-    """_set_bg_result evicts oldest entries past _BG_RESULTS_MAX (finding R3)."""
-    from icx_engine.testing.session_store import _set_bg_result, _BG_RESULTS_MAX
-    for i in range(_BG_RESULTS_MAX + 50):
-        _set_bg_result(f"run-{i}", {"run_state": "completed"})
-    assert len(_BG_RESULTS) == _BG_RESULTS_MAX
-    # Newest retained, oldest evicted.
-    assert get_bg_result(f"run-{_BG_RESULTS_MAX + 49}") is not None
-    assert get_bg_result("run-0") is None
-
-
-async def test_poll_worker_stores_error_on_run_lost():
-    from icx_engine.testing.session_store import _poll_worker
-    from icx_engine.testing.client import MagikRunLost
-
-    mock_client = AsyncMock()
-    mock_client.get_run_status = AsyncMock(side_effect=MagikRunLost("gone"))
-
-    with patch("icx_engine.testing.session_store._make_client", return_value=mock_client):
-        with patch("icx_engine.testing.session_store._POLL_INTERVAL", 0):
-            await _poll_worker("ui-lost")
-
-    assert "ui-lost" in _BG_RESULTS
-    assert _BG_RESULTS["ui-lost"].get("error")
 
 
 # ---------------------------------------------------------------------------

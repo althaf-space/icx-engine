@@ -396,26 +396,17 @@ def test_test_help_shows_subcommands(cli_runner):
     result = cli_runner.invoke(app, ["test", "--help"])
     assert result.exit_code == 0
     output = click.unstyle(result.output)
-    for cmd in ("health", "run", "status", "sessions", "cancel"):
+    for cmd in ("sessions", "cancel"):
         assert cmd in output
 
 
-def test_test_health_requires_magik_running(cli_runner):
-    result = cli_runner.invoke(app, ["test", "health"])
-    # Either succeeds (Magik running) or exits with non-zero (unreachable).
-    # We just check it doesn't crash with an unhandled exception.
-    # typer.Exit raises SystemExit - that is the controlled exit path, not a crash.
-    assert result.exit_code in (0, 1)
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-
-
 def test_test_module_importable():
-    from icx_engine.testing.client import MagikClient
     from icx_engine.testing.state import TestingState, make_initial_state
     from icx_engine.testing.graph import get_db_path
-    assert callable(MagikClient)
+    from icx_engine.testing.local_executor import run_local_verification
     assert callable(make_initial_state)
     assert callable(get_db_path)
+    assert callable(run_local_verification)
 
 
 def test_v2_testing_modules_importable():

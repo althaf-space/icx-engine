@@ -2,10 +2,11 @@
 
 Given a repo, a test type (unit/api/ui), and (for api/ui) a user-confirmed target URL, this detects
 the right runner plugins, builds their commands with the repo-correct runtime (from the Runtime
-Manager), runs them via the DAG executor, and returns one normalized suite result. This is what the
-LangGraph submit/poll nodes call INSTEAD of MagikClient once the node swap lands (Phase 8 wiring).
+Manager), runs them via the async DAG executor, and returns one normalized suite result. The
+LangGraph `local_run` node calls this; there is no external test service.
 
-Fully local: no HTTP to any Magik app. Guarded - returns a structured result, never raises.
+Fully local and async: no HTTP to any external tester. Guarded - returns a structured result,
+never raises.
 """
 from __future__ import annotations
 
