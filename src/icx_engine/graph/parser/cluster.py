@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import inspect
 import io
+import os
 import sys
 import threading
 import networkx as nx
@@ -122,52 +123,71 @@ def _apply_confidence_weights(G: nx.Graph) -> nx.Graph:
     return H
 
 
-_PARTITION_TIMEOUT = 90  # seconds before injecting SystemExit into stuck louvain thread
+_PARTITION_TIMEOUT = 90  # unbounded louvain (no max_level): can loop forever, guard tightly
+
+# Default wall-clock cap for BOUNDED louvain (max_level present). A healthy graph
+# partitions in seconds regardless of size (measured: 27k-node UI graphs finish
+# well under 10s), so this cap NEVER fires on a legitimately-working run - it is a
+# pure safety net. It trips only when one giant, weakly-separable dense component
+# (e.g. a heavily cross-coupled UI graph whose 2-core spans ~half the nodes) makes
+# the inner `while nb_moves > 0` move loop grind for minutes even though max_level
+# caps the outer levels; on trip we degrade to label-propagation (then connected-
+# components). 120s gives >12x headroom over any real healthy partition while
+# catching pathology in 2 minutes instead of 5. A very large (100k+ node) but
+# cleanly-structured graph that legitimately needs longer can raise the cap via
+# the ICX_LOUVAIN_TIMEOUT env var (seconds); <=0 or unset uses the default.
+_PARTITION_TIMEOUT_BOUNDED_DEFAULT = 120.0
 
 
 def _louvain_is_bounded() -> bool:
     """True when networkx louvain accepts `max_level` (>=3.x), which caps its
-    iteration count so it CANNOT loop forever. When bounded, we skip the
-    background-thread timeout guard entirely - that guard exists only for the
-    pathological unbounded loop, and monitoring a CPU-bound pure-Python louvain
-    thread can spuriously fire (report a timeout the partition never actually
-    hit) under CPU pressure, wrongly dropping the result to a much poorer
-    connected-components fallback."""
+    outer aggregation levels. This bounds the number of levels but NOT the inner
+    per-level `while nb_moves > 0` move loop, so a bounded louvain can still grind
+    for minutes on a large weakly-separable dense component. It cannot loop
+    forever, so it gets a generous timeout; unbounded louvain (old networkx) can
+    genuinely loop forever and gets the tight one."""
     try:
         return "max_level" in inspect.signature(nx.community.louvain_communities).parameters
     except Exception:
         return False
 
 
-def _partition_safe(G: nx.Graph, resolution: float = 1.0) -> dict[str, int] | None:
-    """Run _partition with a timeout. Returns None on timeout (caller falls back).
+def _bounded_timeout() -> float:
+    """Wall-clock cap for bounded louvain, overridable via ICX_LOUVAIN_TIMEOUT."""
+    raw = os.environ.get("ICX_LOUVAIN_TIMEOUT", "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return _PARTITION_TIMEOUT_BOUNDED_DEFAULT
 
-    networkx louvain has an unbounded inner `while nb_moves > 0:` loop that can
-    run forever on graphs with oscillating community assignments (high-degree barrel
-    files cycling between communities). PyThreadState_SetAsyncExc injects SystemExit
-    between Python bytecodes to interrupt pure-Python code reliably.
+
+_COARSE_TIMEOUT = 60  # cap for the single-level coarse fallback partition
+
+
+def _run_partition_with_timeout(fn, timeout: float) -> dict[str, int] | None:
+    """Run a partition callable under a wall-clock cap. Returns None on timeout so
+    the caller degrades gracefully instead of hanging.
+
+    networkx louvain's inner `while nb_moves > 0:` move loop is unbounded even
+    when `max_level` caps the outer levels, so it can run for minutes (bounded
+    build) or forever (old networkx) on oscillating / weakly-separable dense
+    components. The watchdog thread + PyThreadState_SetAsyncExc injects SystemExit
+    between Python bytecodes to interrupt the CPU-bound pure-Python code reliably.
 
     Python 3.14 note: threading.Event.wait() may raise KeyboardInterrupt during
     interpreter shutdown in subprocess contexts. All wait() calls are guarded.
     """
-    # When louvain is bounded (max_level caps iterations) it completes in
-    # seconds and cannot hang, so run it inline - no background thread, no
-    # spurious-timeout fallback. The thread+timeout guard below is kept only for
-    # old networkx without max_level, where the inner loop can genuinely run
-    # forever on oscillating high-degree hubs.
-    if _louvain_is_bounded():
-        try:
-            return _partition(G, resolution)
-        except SystemExit:
-            return None
-
     result: list[dict[str, int] | None] = [None]
     error: list[BaseException | None] = [None]
     finished = threading.Event()
 
     def _run() -> None:
         try:
-            result[0] = _partition(G, resolution)
+            result[0] = fn()
         except BaseException as exc:
             error[0] = exc
         finally:
@@ -176,7 +196,7 @@ def _partition_safe(G: nx.Graph, resolution: float = 1.0) -> dict[str, int] | No
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     try:
-        finished.wait(_PARTITION_TIMEOUT)
+        finished.wait(timeout)
     except (KeyboardInterrupt, SystemExit):
         return None
 
@@ -195,7 +215,51 @@ def _partition_safe(G: nx.Graph, resolution: float = 1.0) -> dict[str, int] | No
         finished.wait(5)  # Give thread 5 s to acknowledge
     except (KeyboardInterrupt, SystemExit):
         pass
-    return None  # Caller will use connected-components fallback
+    return None  # Caller degrades to coarse / connected-components fallback
+
+
+def _partition_safe(G: nx.Graph, resolution: float = 1.0) -> dict[str, int] | None:
+    """Run the full _partition under a wall-clock cap. Returns None on timeout.
+
+    The timeout is generous for bounded louvain (see _PARTITION_TIMEOUT_BOUNDED_
+    DEFAULT) so it never fires on a legitimately-working partition - only on a
+    genuine grind - which keeps community quality identical for every repo that
+    completes normally.
+    """
+    timeout = _bounded_timeout() if _louvain_is_bounded() else _PARTITION_TIMEOUT
+    return _run_partition_with_timeout(lambda: _partition(G, resolution), timeout)
+
+
+def _coarse_partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
+    """Fast label-propagation partition. Used ONLY when the full louvain exceeded
+    its cap, to split a giant weakly-separable dense component into real (if
+    coarser) communities instead of dumping it into one connected-components lump.
+
+    Label propagation is near-linear and has no oscillating inner move loop, so it
+    finishes in seconds on the exact dense meshes where even single-level louvain
+    grinds (louvain's `max_level`/`threshold` bound only its outer levels, not the
+    inner `while nb_moves > 0` loop). Weighted + seeded for determinism. Never runs
+    on a healthy build, so it cannot affect normal community quality.
+
+    `resolution` is accepted for signature parity; label propagation does not use
+    it.
+    """
+    from networkx.algorithms.community import asyn_lpa_communities
+    stable = nx.Graph()
+    stable.add_nodes_from(sorted(G.nodes(), key=str))
+    for src, tgt, attrs in sorted(G.edges(data=True), key=lambda r: (str(r[0]), str(r[1]))):
+        stable.add_edge(src, tgt, **attrs)
+    if stable.number_of_edges() == 0:
+        return {n: i for i, n in enumerate(stable.nodes())}
+    stable = _apply_confidence_weights(stable)  # guarantee a 'weight' on every edge
+    communities = asyn_lpa_communities(stable, weight="weight", seed=42)
+    return {node: cid for cid, nodes in enumerate(communities) for node in nodes}
+
+
+def _coarse_partition_safe(G: nx.Graph, resolution: float = 1.0) -> dict[str, int] | None:
+    """Run _coarse_partition under a short cap. Returns None if even the coarse
+    pass overruns, so the caller falls back to connected-components."""
+    return _run_partition_with_timeout(lambda: _coarse_partition(G, resolution), _COARSE_TIMEOUT)
 
 
 def cluster(
@@ -247,13 +311,31 @@ def cluster(
     if connected.number_of_nodes() > 0:
         partition = _partition_safe(connected, resolution=resolution)
         if partition is None:
-            # Louvain timed out (oscillating assignments): fall back to connected components
+            # Full louvain exceeded its wall-clock cap on a weakly-separable dense
+            # component. Degrade gracefully so the build completes instead of
+            # hanging. Every graph that partitions in time is unaffected.
+            _timeout = _bounded_timeout() if _louvain_is_bounded() else _PARTITION_TIMEOUT
             _log = __import__("logging").getLogger(__name__)
-            _log.warning("community detection timed out after %ds; using connected-components fallback", _PARTITION_TIMEOUT)
-            partition = {}
-            for cid, component in enumerate(nx.connected_components(connected)):
-                for node in component:
-                    partition[node] = cid
+            # First try a fast single-level louvain: gives real (coarse)
+            # communities that split the dense component into meaningful groups.
+            partition = _coarse_partition_safe(connected, resolution=resolution)
+            if partition is not None:
+                _log.warning(
+                    "community detection exceeded %.0fs; used fast label-propagation "
+                    "fallback (set ICX_LOUVAIN_TIMEOUT to raise the cap)",
+                    _timeout,
+                )
+            else:
+                # Even the coarse pass overran: last resort, connected-components.
+                _log.warning(
+                    "community detection exceeded %.0fs and coarse fallback overran "
+                    "%ds; using connected-components (set ICX_LOUVAIN_TIMEOUT to "
+                    "raise the cap)", _timeout, _COARSE_TIMEOUT,
+                )
+                partition = {}
+                for cid, component in enumerate(nx.connected_components(connected)):
+                    for node in component:
+                        partition[node] = cid
         for node, cid in partition.items():
             raw.setdefault(cid, []).append(node)
 
