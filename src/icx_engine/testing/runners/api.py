@@ -40,6 +40,7 @@ class _Schemathesis:
     lang: str = "http"
     name: str = "schemathesis"
     category: str = "api"
+    requires: str = "schemathesis"   # ICX-owned tool
 
     def detect(self, repo: Path) -> bool:
         return _find_schema(repo) is not None
@@ -59,6 +60,7 @@ class _Hurl:
     lang: str = "http"
     name: str = "hurl"
     category: str = "api"
+    requires: str = "hurl"   # ICX-owned binary
 
     def _files(self, repo: Path) -> list[str]:
         return [str(p) for p in sorted(repo.rglob("*.hurl"))]

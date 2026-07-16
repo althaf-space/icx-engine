@@ -1,6 +1,6 @@
 """SonarQube code-quality service (direct, read-only).
 
-Assembles structured reports from a SonarQube server via its Web API. No Magik,
+Assembles structured reports from a SonarQube server via its Web API. No proxy,
 no LLM: every value comes straight from SonarQube GET endpoints and is returned
 as typed, JSON-serializable data for an MCP agent or the CLI to consume.
 

@@ -59,7 +59,16 @@ async function main() {
   let stagehand;
   try {
     const { Stagehand } = await import("@browserbasehq/stagehand");
-    stagehand = new Stagehand({ env: "LOCAL", headless: true });
+    // Load a previously captured authenticated session (cookies + localStorage) when present, so the
+    // replay runs already logged in. Path comes from --storage-state or ICX_STORAGE_STATE.
+    const storageState = arg("--storage-state", process.env.ICX_STORAGE_STATE || "");
+    // Headless by default (fast/CI); set ICX_UI_HEADED=1 to watch the test drive a real browser.
+    const headed = process.env.ICX_UI_HEADED === "1";
+    // Deterministic replay drives the page with plain Playwright selectors and never calls the LLM,
+    // so Stagehand is initialised without any model/key.
+    const opts = { env: "LOCAL", headless: !headed };
+    if (storageState) opts.browserContextOptions = { storageState };
+    stagehand = new Stagehand(opts);
     await stagehand.init();
   } catch (e) {
     cases.push({ name: "init stagehand", status: "error", message: `stagehand init failed: ${e}` });
@@ -67,30 +76,43 @@ async function main() {
     process.exit(1);
   }
 
+  // Every action is BOUNDED by a timeout so a missing/slow selector fails the step fast and loud
+  // (a JUnit failure) instead of hanging the whole run. Tunable via ICX_UI_STEP_TIMEOUT (ms).
+  const STEP_TIMEOUT = Math.max(1000, parseInt(process.env.ICX_UI_STEP_TIMEOUT || "15000", 10));
+  // Global budget: the harness stops on its own and STILL writes the report, so the ICX executor
+  // never has to kill it mid-write (which would leave no report -> "no test ran"). Tunable.
+  const TOTAL_BUDGET = Math.max(10000, parseInt(process.env.ICX_UI_TOTAL_TIMEOUT || "240000", 10));
+  const deadline = started + TOTAL_BUDGET;
   const page = stagehand.page;
   try {
     for (const step of flow.steps || []) {
       const label = step.description || `${step.action} ${step.target || ""}`.trim();
+      if (Date.now() > deadline) {
+        cases.push({ name: label, status: "failed", message: "run budget exceeded before this step", time: 0 });
+        continue;
+      }
       const t0 = Date.now();
       try {
         if (step.action === "goto") {
-          await page.goto(step.target || baseUrl);
+          await page.goto(step.target || baseUrl, { timeout: STEP_TIMEOUT, waitUntil: "domcontentloaded" });
         } else if (step.action === "click") {
-          await page.locator(step.target).click();
+          await page.locator(step.target).click({ timeout: STEP_TIMEOUT });
         } else if (step.action === "fill") {
-          await page.locator(step.target).fill(step.value || "");
+          await page.locator(step.target).fill(step.value || "", { timeout: STEP_TIMEOUT });
         } else if (step.action === "assert") {
-          const text = await page.locator(step.target).innerText();
+          const text = await page.locator(step.target).innerText({ timeout: STEP_TIMEOUT });
           if (step.value && !String(text).includes(step.value)) {
             throw new Error(`expected "${step.value}" in "${text}"`);
           }
           cases.push({ name: label, status: "passed", time: (Date.now() - t0) / 1000 });
+        } else {
+          throw new Error(`unknown action "${step.action}"`);
         }
         if (step.action !== "assert") {
           cases.push({ name: label, status: "passed", time: (Date.now() - t0) / 1000 });
         }
       } catch (e) {
-        cases.push({ name: label, status: "failed", message: String(e), time: (Date.now() - t0) / 1000 });
+        cases.push({ name: label, status: "failed", message: String(e && e.message ? e.message : e), time: (Date.now() - t0) / 1000 });
       }
     }
   } finally {

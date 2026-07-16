@@ -104,29 +104,20 @@ def plan_ui_run(flow: UiFlow | None) -> str:
 
 # -- Adapter -------------------------------------------------------------------
 
-_UI_FRAMEWORK_DEPS = ("react", "react-dom", "vue", "next", "svelte", "@angular/core",
-                      "@sveltejs/kit", "solid-js", "preact")
-
-
-def _pkg(repo: Path) -> dict:
-    try:
-        return json.loads((repo / "package.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
 @dataclass
 class _StagehandUi:
     lang: str = "ui"
     name: str = "stagehand"
     category: str = "ui"
+    requires: str = "stagehand"   # ICX-owned Stagehand+Playwright tooling
 
     def detect(self, repo: Path) -> bool:
-        pkg = _pkg(repo)
-        deps = {}
-        deps.update(pkg.get("dependencies") or {})
-        deps.update(pkg.get("devDependencies") or {})
-        return any(d in deps for d in _UI_FRAMEWORK_DEPS)
+        # UI testing is URL-driven and repo-AGNOSTIC: ICX brings its own Playwright/Stagehand
+        # (installed under ~/.icx/testing via ensure_runner) and drives a browser against the
+        # running app at the confirmed URL. It never needs the user's repo to contain Playwright
+        # or a frontend framework - so whenever the UI layer is requested, this runner is available.
+        # The real gates are: the ICX tooling being installed (ensure_runner) and a confirmed URL.
+        return True
 
     def build_command(self, repo: Path, runtime_path: str | None) -> RunSpec:
         report = str(repo / ".icx-ui-junit.xml")
@@ -134,20 +125,27 @@ class _StagehandUi:
         # Packaged ICX harness runs Stagehand in REPLAY mode against a cached flow and emits JUnit XML
         # via Playwright. Stagehand+Playwright are installed by the runner-install manager; the
         # harness .mjs itself ships with ICX. The executor injects --flow <cache> and --url <target>.
-        harness = str(Path(__file__).parent / "assets" / "icx-replay.mjs")
+        from icx_engine.testing.runners.install import (
+            installed_path, browsers_dir, harness_path, runtime_harness_path,
+        )
+        # Run the harness FROM the install dir (next to node_modules) so ESM `import "playwright"`
+        # resolves - NODE_PATH does not work for ESM imports.
+        harness = runtime_harness_path("icx-replay.mjs", harness_path())
         env = {}
         try:
-            from icx_engine.testing.runners.install import installed_path
             sh = installed_path("stagehand")
             if sh:
                 env["NODE_PATH"] = str(Path(sh) / "node_modules")
+                # Point Playwright at the Chromium ICX downloaded into the pinned home.
+                env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir(Path(sh)))
         except Exception:
             pass
         return RunSpec(
             command=[node, harness, "--mode", "replay", "--junit", report],
             cwd=str(repo), report_path=report, env=env,
             note=("AI authors the flow once (human-gated) then deterministic cached replay - no LLM "
-                  "on rerun; a stale selector fails loud. Executor appends --flow <cache> --url <target>."),
+                  "on rerun; a stale selector fails loud. Executor appends --flow <cache>, --url "
+                  "<target>, and --storage-state <session> when an authenticated session exists."),
         )
 
 

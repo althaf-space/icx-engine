@@ -12,7 +12,7 @@ def test_ensure_seeded_copies_defaults():
     d = _rules.rules_dir()
     names = {f.name for f in d.glob("*.md")}
     assert {"_common.md", "2b.md", "compat_scan.md", "compat_check.md",
-            "profile_gen.md", "expand_scan.md"} <= names
+            "expand_scan.md"} <= names
 
 
 def test_ensure_seeded_never_overwrites_user_edits():

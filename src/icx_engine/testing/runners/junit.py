@@ -1,8 +1,21 @@
-"""JUnit XML -> normalized TestReport. The universal report spine (stdlib xml only)."""
+"""JUnit XML -> normalized TestReport. The universal report spine.
+
+Report XML is UNTRUSTED - it is produced by a runner in the user's repo. Parse it with defusedxml
+so a malicious/broken report cannot mount an XXE, external-entity, or billion-laughs attack against
+ICX. Falls back to stdlib only if defusedxml is unavailable (declared dependency; fallback keeps the
+module importable in a partial env)."""
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from pathlib import Path
+from xml.etree.ElementTree import ParseError
+
+try:
+    from defusedxml.ElementTree import fromstring as _xml_fromstring
+    from defusedxml.common import DefusedXmlException
+    _XML_ERRORS: tuple[type[Exception], ...] = (ParseError, DefusedXmlException)
+except ImportError:  # pragma: no cover - defusedxml is a declared dependency
+    from xml.etree.ElementTree import fromstring as _xml_fromstring
+    _XML_ERRORS = (ParseError,)
 
 from icx_engine.testing.runners.base import TestCase, TestReport
 
@@ -31,8 +44,8 @@ def parse_junit_xml(source: str) -> TestReport:
 
     report = TestReport()
     try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+        root = _xml_fromstring(text)
+    except _XML_ERRORS:
         return report
 
     suites = [root] if root.tag == "testsuite" else root.iter("testsuite")

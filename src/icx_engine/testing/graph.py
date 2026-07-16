@@ -39,7 +39,11 @@ def get_db_path() -> Path:
     return Path.home() / ".icx" / "testing_sessions.db"
 
 
+_CHECKPOINT_CONN = None  # aiosqlite conn backing the cached graph, closed on graceful shutdown
+
+
 async def _make_checkpointer() -> AsyncSqliteSaver:
+    global _CHECKPOINT_CONN
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
     conn = await aiosqlite.connect(str(db_path))
@@ -49,7 +53,21 @@ async def _make_checkpointer() -> AsyncSqliteSaver:
         db_path.chmod(0o600)
     saver = AsyncSqliteSaver(conn)
     await saver.setup()
+    _CHECKPOINT_CONN = conn
     return saver
+
+
+async def close_testing_graph() -> None:
+    """Release the cached graph's SQLite connection. Called on MCP server shutdown so the WAL
+    connection + its aiosqlite thread do not linger. Idempotent and guarded - safe to call when
+    no graph was ever built."""
+    global _GRAPH_INSTANCE, _CHECKPOINT_CONN
+    conn, _CHECKPOINT_CONN, _GRAPH_INSTANCE = _CHECKPOINT_CONN, None, None
+    if conn is not None:
+        try:
+            await conn.close()
+        except Exception:
+            pass
 
 
 def _purge_old_sessions(db_path: Path) -> None:

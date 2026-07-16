@@ -67,3 +67,35 @@ async def test_graph_has_compat_scan():
     from langgraph.checkpoint.memory import MemorySaver
     graph = await get_testing_graph(checkpointer=MemorySaver())
     assert "compat_scan" in set(graph.get_graph().nodes)
+
+
+# -- graceful shutdown: checkpoint connection is released, idempotently -------------
+
+async def test_close_testing_graph_closes_and_is_idempotent():
+    import icx_engine.testing.graph as g
+    closed = {"n": 0}
+
+    class _Conn:
+        async def close(self):
+            closed["n"] += 1
+
+    g._CHECKPOINT_CONN = _Conn()
+    g._GRAPH_INSTANCE = object()
+    await g.close_testing_graph()
+    assert closed["n"] == 1
+    assert g._CHECKPOINT_CONN is None and g._GRAPH_INSTANCE is None
+    await g.close_testing_graph()          # no conn now -> no crash, no double close
+    assert closed["n"] == 1
+
+
+async def test_close_testing_graph_guards_close_error():
+    import icx_engine.testing.graph as g
+
+    class _BadConn:
+        async def close(self):
+            raise RuntimeError("boom")
+
+    g._CHECKPOINT_CONN = _BadConn()
+    g._GRAPH_INSTANCE = object()
+    await g.close_testing_graph()          # swallowed, state still reset
+    assert g._CHECKPOINT_CONN is None and g._GRAPH_INSTANCE is None

@@ -275,19 +275,78 @@ _VERSION_MANAGER_MARKERS = {
 }
 
 
+# Version-manager install layouts (globs under the home dir) so ICX can enumerate EVERY installed
+# version, not only the one currently on PATH. Best-effort; missing dirs simply yield nothing.
+_VM_EXE_GLOBS: dict[str, list[str]] = {
+    "node": [
+        ".nvm/versions/node/*/bin/node",
+        ".volta/tools/image/node/*/bin/node",
+        ".fnm/node-versions/*/installation/bin/node",
+        ".asdf/installs/nodejs/*/bin/node",
+        ".config/nvm/versions/node/*/bin/node",
+        # nvm-windows / Volta on Windows
+        "AppData/Roaming/nvm/*/node.exe",
+        "AppData/Local/Volta/tools/image/node/*/node.exe",
+    ],
+    "java": [
+        ".sdkman/candidates/java/*/bin/java",
+        ".jabba/jdk/*/bin/java",
+        ".asdf/installs/java/*/bin/java",
+    ],
+    "python": [
+        ".pyenv/versions/*/bin/python",
+        ".asdf/installs/python/*/bin/python",
+    ],
+    "ruby": [
+        ".rbenv/versions/*/bin/ruby",
+        ".rvm/rubies/*/bin/ruby",
+        ".asdf/installs/ruby/*/bin/ruby",
+    ],
+    "go": [".goenv/versions/*/bin/go", ".asdf/installs/golang/*/go/bin/go"],
+}
+
+
+def _vm_candidate_paths(lang: str) -> list[str]:
+    """Every version-manager-installed executable path for lang under the home dir (all versions)."""
+    home = _home()
+    out: list[str] = []
+    for pattern in _VM_EXE_GLOBS.get(lang.lower(), []):
+        try:
+            for p in home.glob(pattern):
+                if p.is_file():
+                    out.append(str(p))
+        except OSError:
+            pass
+    return out
+
+
 def discover_runtimes(lang: str) -> list[RuntimeCandidate]:
-    """Discover installed runtimes for lang on PATH. Best-effort + monkeypatchable in tests.
-    Never installs; only inspects what already exists."""
+    """Discover ALL installed runtimes for lang: the PATH one PLUS every version-manager install
+    (nvm/volta/fnm/pyenv/sdkman/rbenv/asdf...). Best-effort + monkeypatchable in tests. Never
+    installs; only inspects what already exists. De-duplicated by real path."""
     exe = (_VERSION_CMD.get(lang.lower()) or (None, None))[0]
     if not exe:
         return []
+    paths: list[str] = []
     found = shutil.which(exe)
-    if not found:
-        return []
-    ver = validate_runtime(lang, found)
-    if not ver:
-        return []
-    return [RuntimeCandidate(path=found, version=ver, source="discovered")]
+    if found:
+        paths.append(found)
+    paths.extend(_vm_candidate_paths(lang))
+
+    out: list[RuntimeCandidate] = []
+    seen: set[str] = set()
+    for p in paths:
+        try:
+            real = os.path.realpath(p)
+        except OSError:
+            real = p
+        if real in seen:
+            continue
+        seen.add(real)
+        ver = validate_runtime(lang, p)
+        if ver:
+            out.append(RuntimeCandidate(path=p, version=ver, source="discovered"))
+    return out
 
 
 _VER_RE = re.compile(r"([0-9]+(?:\.[0-9]+){0,2})")
@@ -383,3 +442,85 @@ def resolve_runtime(lang: str, repo_path) -> Resolution:
                           candidates=matches, version_manager=vm)
     return Resolution(status="ask", lang=lang, required_version=required,
                       candidates=found, version_manager=vm)
+
+
+# Registry key for the UI-harness node - deliberately NOT a real version so it never collides with a
+# project's node entry. The harness node is decoupled from the app's node (see resolve_harness_node).
+_HARNESS_NODE_KEY = "harness"
+_HARNESS_MIN_MAJOR = 18
+# Explicit override: point ICX at a specific node for the UI harness (e.g. a node-20 you distribute
+# to your team). Takes precedence over discovery; the app's node is never touched.
+_HARNESS_NODE_ENV = "ICX_HARNESS_NODE"
+
+
+def _major(version: str) -> int:
+    m = _VER_RE.search(version or "")
+    try:
+        return int(m.group(1).split(".")[0]) if m else 0
+    except (ValueError, AttributeError):
+        return 0
+
+
+def normalize_node_exe(path: str | None) -> str | None:
+    """Resolve a user-given node path to the actual executable.
+
+    Accepts the node executable itself OR a directory (e.g. an nvm version dir like
+    ``.../nvm/v22.23.1`` or a ``.../bin`` dir) and finds ``node`` / ``node.exe`` inside. Returns the
+    executable path, or None if none is found.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if p.is_file():
+        return str(p)
+    if p.is_dir():
+        for cand in (p / "node.exe", p / "node", p / "bin" / "node.exe", p / "bin" / "node"):
+            if cand.is_file():
+                return str(cand)
+        return None
+    # Bare command name (e.g. "node") -> resolve on PATH.
+    return shutil.which(path)
+
+
+def resolve_harness_node(min_major: int = _HARNESS_MIN_MAJOR) -> str | None:
+    """Return a path to a node runtime new enough to run the ICX UI harness (Playwright/Stagehand),
+    INDEPENDENT of any project's node version.
+
+    Rationale: ICX does not run the app under test - the app is already serving at the confirmed URL
+    on its own node. The harness is a separate process that only drives a browser, so it just needs a
+    modern node (>= min_major). A node-14/16 project still gets UI testing because the harness runs on
+    a discovered node-18+. Discover -> Remember -> Reuse, never installs. Returns None when no modern
+    node exists (caller falls back to PATH ``node`` or reports the UI layer unavailable).
+
+    Override: set ``ICX_HARNESS_NODE`` to a node executable path to force it (for pre-provisioned /
+    air-gapped setups). It wins over discovery and is used as-is when the path exists.
+    """
+    # Precedence: env override -> configured path (config.json) -> registry -> discovery.
+    # Both may be given as a node executable OR a directory (nvm version dir) - normalize to the exe.
+    override = normalize_node_exe(os.environ.get(_HARNESS_NODE_ENV))
+    if override:
+        return override
+
+    try:
+        from icx_engine.config_manager import ConfigManager
+        configured = normalize_node_exe(ConfigManager.load().harness_node_path)
+        if configured:
+            return configured
+    except Exception:
+        pass
+
+    cached = lookup_runtime("node", _HARNESS_NODE_KEY)
+    if cached:
+        return cached
+    try:
+        candidates = discover_runtimes("node")
+    except Exception:
+        candidates = []
+    best: RuntimeCandidate | None = None
+    for c in candidates:
+        if _major(c.version) >= min_major and (best is None or _major(c.version) > _major(best.version)):
+            best = c
+    if best is not None:
+        remember_runtime("node", _HARNESS_NODE_KEY, best.path)
+        return best.path
+    return None

@@ -95,7 +95,7 @@ AI-native intelligence layer for development teams. Connect your work tracker to
 
 [bold]First-time Setup[/bold]
   [cyan]icx setup[/cyan]                                              Download AI model files (run once after install)
-  [cyan]icx update[/cyan]                                             Apply config migrations after a package upgrade
+  [cyan]icx update[/cyan]                                             Apply config migrations + remove stale files after a package upgrade
 
 [bold]Analysis[/bold]
   [cyan]icx analyze <KEY>[/cyan]                                      Fetch and analyze a work item (bug, story, task, feature)
@@ -159,9 +159,9 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx graph remove <NAME> --keep-cache[/cyan]                   Delete registration only, keep cache on disk
 
 [bold]Testing[/bold]
-  [cyan]icx test health[/cyan]                                          Check Magik-AI Tester is reachable
-  [cyan]icx test run <URL> --type ui|agent|api[/cyan]                   Direct test run (polls until done)
-  [cyan]icx test status <ID>[/cyan]                                     Check run or session status
+  [cyan]icx test setup[/cyan]                                           Download UI/API tooling (Playwright+Chromium, Schemathesis, Hurl) into ~/.icx
+  [cyan]icx test configure[/cyan]                                       Configure testing fix-iteration limit
+  [cyan]icx test rules[/cyan]                                           Manage the local testing rulebooks
   [cyan]icx test sessions[/cyan]                                        List all active testing sessions
   [cyan]icx test cancel <SESSION_ID>[/cyan]                             Cancel an active testing session
 
@@ -264,11 +264,11 @@ app.add_typer(graph_app, name="graph", rich_help_panel="Codebase Graph")
 
 test_app = typer.Typer(
     help=(
-        "Manage AI-driven testing sessions with Magik-AI Tester.\n\n"
+        "Manage AI-driven local testing sessions.\n\n"
         "[bold]Subcommands:[/bold]\n\n"
-        "  [bold]health[/bold]    Check Magik-AI Tester is reachable\n"
-        "  [bold]run[/bold]       Direct test run (no LangGraph, no gates)\n"
-        "  [bold]status[/bold]    Check a run or session status\n"
+        "  [bold]setup[/bold]     Download ICX's UI/API testing tooling into ~/.icx\n"
+        "  [bold]configure[/bold] Set the testing fix-iteration limit\n"
+        "  [bold]rules[/bold]     Manage the local testing rulebooks\n"
         "  [bold]sessions[/bold]  List all active testing sessions\n"
         "  [bold]cancel[/bold]    Cancel an active testing session"
     ),
@@ -891,7 +891,7 @@ def update(
 
     con = Console()
     any_failed = False
-    total_steps = 3
+    total_steps = 4
 
     # Step 1: Config migration - write any new default fields introduced in this version.
     con.print(f"\n[bold]Step 1/{total_steps}[/bold] Config migration [dim](apply new defaults to ~/.icx/config.json)[/dim]")
@@ -909,9 +909,13 @@ def update(
                 pass
 
         new_fields: list[str] = []
-        for field in ("magik_base_url", "magik_max_iterations"):
+        for field in ("test_max_iterations",):
             if field not in raw_on_disk:
                 new_fields.append(field)
+
+        # Retired keys present on disk (dropped by the save below - save rebuilds JSON from the model).
+        from icx_engine.config_manager import stale_config_keys_on_disk
+        stale_keys = stale_config_keys_on_disk()
 
         ConfigManager.save(cfg)
 
@@ -919,6 +923,8 @@ def update(
             con.print(f"[green]OK[/green] Wrote new defaults: {', '.join(new_fields)}")
         else:
             con.print("[green]OK[/green] Config already current.")
+        if stale_keys:
+            con.print(f"[green]OK[/green] Removed stale config keys: {', '.join(stale_keys)}")
     except Exception as exc:
         any_failed = True
         con.print(f"[red]X[/red] Config migration failed: {exc}")
@@ -928,10 +934,15 @@ def update(
     # Step 2: Testing sessions database - create and verify WAL mode.
     con.print(f"\n[bold]Step 2/{total_steps}[/bold] Testing sessions DB [dim](~/.icx/testing_sessions.db)[/dim]")
     try:
-        from icx_engine.testing.graph import get_db_path, _make_checkpointer
+        import asyncio as _asyncio
+        from icx_engine.testing.graph import get_db_path, _make_checkpointer, close_testing_graph
         db_path = get_db_path()
         existed = db_path.exists()
-        _make_checkpointer()
+
+        async def _check_db():
+            await _make_checkpointer()   # actually create/open the DB (it is async)
+            await close_testing_graph()  # release the connection we just opened
+        _asyncio.run(_check_db())
         if existed:
             con.print("[green]OK[/green] Testing sessions DB accessible.")
         else:
@@ -956,12 +967,29 @@ def update(
         if debug or traceback:
             _tb_mod.print_exc()
 
+    # Step 4: Remove stale runtime artifacts left by older ICX versions (zero-regression cleanup).
+    con.print(f"\n[bold]Step 4/{total_steps}[/bold] Stale cleanup [dim](remove files older versions left in ~/.icx)[/dim]")
+    try:
+        from pathlib import Path as _Path
+        from icx_engine.config_manager import clean_stale_artifacts
+        removed = clean_stale_artifacts()
+        if removed:
+            con.print(f"[green]OK[/green] Removed {len(removed)} stale file(s): "
+                      + ", ".join(_Path(r).name for r in removed))
+        else:
+            con.print("[green]OK[/green] No stale files.")
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]X[/red] Stale cleanup failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
     if any_failed:
         con.print("\n[yellow]Update completed with errors.[/yellow] Check output above.\n")
     else:
         con.print(
             "\n[bold green]Update complete.[/bold green] All components current.\n"
-            "  Run [cyan]icx test configure[/cyan] to set up Magik-AI Tester (if not done).\n"
+            "  Run [cyan]icx test configure[/cyan] to set the testing fix-iteration limit (if not done).\n"
         )
 
 
@@ -2602,71 +2630,188 @@ def test_cancel(
         raise typer.Exit(code=1)
 
 
+@test_app.command("setup")
+def test_setup(
+    ui: Annotated[bool, typer.Option(help="Install UI tooling (Playwright + Stagehand + Chromium).")] = True,
+    api: Annotated[bool, typer.Option(help="Install API tooling (Schemathesis, Hurl).")] = True,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Approve all installs without prompting.")] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Wipe and reinstall (fixes a broken/partial install).")] = False,
+    node: Annotated[str, typer.Option("--node", help="Node >= 18 path (executable or folder) to use/override for the UI harness.")] = "",
+) -> None:
+    """Download ICX's own testing tooling into ~/.icx/testing (never global, never your repo).
+
+    \b
+    Runs in stages:
+      Step 1 - API tooling via pip/binary: Schemathesis, Hurl.
+      Step 2 - UI tooling: asks for a Node >= 18 path (saved to config.json), then installs
+               Stagehand + Playwright + the Chromium browser using that Node.
+    Unit tests use your project's own frameworks (mvn/gradle/pytest/...) - nothing to install here.
+    The Node you give is used ONLY for the UI harness; your app keeps its own Node. Change it later
+    by editing 'harness_node_path' in ~/.icx/config.json (or re-run this command).
+
+    \b
+    Example:
+      icx test setup            # staged, interactive
+      icx test setup -y         # no prompts (uses a discovered Node >= 18 if present)
+      icx test setup --no-ui    # API tooling only
+    """
+    from pathlib import Path as _Path
+    from icx_engine.testing.runners.install import ensure_runner, is_installed, remove_runner, RUNNER_SPECS
+    from icx_engine.config_manager import ConfigManager
+
+    if not ui and not api:
+        console.print("[yellow]Nothing selected. Use --ui and/or --api.[/yellow]")
+        return
+
+    if force:
+        for _n in (["schemathesis", "hurl"] if api else []) + (["stagehand"] if ui else []):
+            remove_runner(_n)
+        console.print("[dim]--force: cleared existing installs, reinstalling.[/dim]")
+
+    # Surface install-tool warnings (e.g. npm/playwright stderr) so a failure shows WHY.
+    import logging as _logging
+    _ilog = _logging.getLogger("icx.testing.install")
+    if not any(isinstance(h, _logging.StreamHandler) for h in _ilog.handlers):
+        _h = _logging.StreamHandler()
+        _h.setFormatter(_logging.Formatter("  [dim]%(message)s[/dim]".replace("[dim]", "").replace("[/dim]", "")))
+        _ilog.addHandler(_h)
+        _ilog.setLevel(_logging.WARNING)
+
+    def _approve(name: str) -> bool:
+        return yes or typer.confirm(f"Download and install '{name}' into ~/.icx/testing?", default=True)
+
+    any_fail = False
+
+    # -- Step 1: API tooling (pip + binary) --------------------------------------
+    if api:
+        console.print("[bold]Step 1 - API tooling (Schemathesis, Hurl)[/bold]")
+        for name in ("schemathesis", "hurl"):
+            spec = RUNNER_SPECS.get(name)
+            label = f"{name} ({spec.version})" if spec else name
+            if is_installed(name):
+                console.print(f"  [green]OK[/green] {label} already installed.")
+                continue
+            console.print(f"  Installing {label} ...")
+            path = ensure_runner(name, approve=_approve)
+            if path:
+                console.print(f"  [green]OK[/green] {label}")
+            else:
+                any_fail = True
+                console.print(f"  [yellow]skipped/failed[/yellow] {label}")
+
+    # -- Step 2: UI tooling (Node -> Stagehand + Playwright + Chromium) ----------
+    if ui:
+        console.print("\n[bold]Step 2 - UI tooling (needs Node >= 18)[/bold]")
+        if is_installed("stagehand"):
+            console.print("  [green]OK[/green] UI tooling already installed.")
+        else:
+            node_exe = _resolve_or_prompt_harness_node(yes, node)
+            if not node_exe:
+                any_fail = True
+                console.print("  [yellow]No usable Node >= 18 provided - UI tooling skipped.[/yellow]\n"
+                              "  Download Node from https://nodejs.org, then re-run 'icx test setup'.")
+            else:
+                cfg = ConfigManager.load()
+                cfg.harness_node_path = node_exe
+                ConfigManager.save(cfg)
+                console.print(f"  Using harness Node: {node_exe}")
+                node_dir = str(_Path(node_exe).parent)
+                console.print("  Installing Stagehand + Playwright + Chromium "
+                              "(downloads a browser, please wait) ...")
+                path = ensure_runner("stagehand", approve=_approve, node_dir=node_dir)
+                if path:
+                    console.print(f"  [green]OK[/green] UI tooling -> {path}")
+                else:
+                    any_fail = True
+                    console.print("  [yellow]UI tooling install failed.[/yellow]")
+
+    if any_fail:
+        console.print("\n[yellow]Some tools were not installed.[/yellow] Re-run 'icx test setup' to retry.")
+    else:
+        console.print("\n[bold green]Testing tooling ready.[/bold green]")
+
+
+def _resolve_or_prompt_harness_node(yes: bool, node_opt: str = "") -> str | None:
+    """Return a validated Node >= 18 executable for the UI harness, or None.
+
+    Order: explicit --node -> a already-known-good Node (config/env/discovered, used WITHOUT a prompt)
+    -> otherwise prompt for a path. Accepts an executable or a folder (e.g. an nvm version dir).
+    """
+    import os as _os
+    from icx_engine import runtime_manager as _rm
+    from icx_engine.config_manager import ConfigManager
+
+    def _ok(path: str | None) -> str | None:
+        exe = _rm.normalize_node_exe(path)
+        if not exe:
+            return None
+        ver = _rm.validate_runtime("node", exe)
+        return exe if (ver and _rm._major(ver) >= 18) else None
+
+    # 1) explicit override.
+    if node_opt:
+        exe = _ok(node_opt)
+        if not exe:
+            console.print(f"  [red]--node '{node_opt}' is not a Node >= 18.[/red]")
+        return exe
+
+    # 2) already-known-good Node -> reuse silently, no prompt.
+    cfg = ConfigManager.load()
+    for cand in (cfg.harness_node_path, _os.environ.get("ICX_HARNESS_NODE")):
+        exe = _ok(cand)
+        if exe:
+            return exe
+    try:
+        modern = [c for c in _rm.discover_runtimes("node") if _rm._major(c.version) >= 18]
+        modern.sort(key=lambda c: _rm._major(c.version), reverse=True)
+        if modern:
+            exe = _ok(modern[0].path)
+            if exe:
+                return exe
+    except Exception:
+        pass
+
+    # 3) nothing valid known -> ask (or give up under -y).
+    if yes:
+        return None
+    console.print("  No usable Node >= 18 is known. Enter its path - the node executable OR the "
+                  "folder that contains it (e.g. C:\\...\\nvm\\v22.23.1). Press Ctrl+C to abort.")
+    entered = typer.prompt("Path to Node >= 18")
+    exe = _ok(entered)
+    if not exe:
+        got = _rm.validate_runtime("node", _rm.normalize_node_exe(entered) or entered)
+        console.print(f"  [red]Not a Node >= 18 (detected: {got or 'nothing runnable at that path'}).[/red]")
+        return None
+    return exe
+
+
 @test_app.command("configure")
 def test_configure() -> None:
-    """Configure Magik-AI Tester settings: base URL, optional API key, and agent step limits.
+    """Configure the local testing engine.
 
     \b
     Prompts for:
-      - Magik-AI base URL
-      - Magik-AI API key (optional)
       - Max fix iterations (re-test loops before the limit gate)
-      - Agent max steps   (default per-run step budget for agent test runs)
-      - Agent step cap     (hard ceiling enforced at the config gate)
 
     \b
     Example:
       icx test configure
-      icx test health
     """
     from icx_engine.config_manager import ConfigManager
 
     cfg = ConfigManager.load()
 
-    base_url = typer.prompt(
-        "Magik-AI base URL",
-        default=cfg.magik_base_url,
-    )
-    api_key_input = typer.prompt(
-        "Magik-AI API key (leave blank if not configured)",
-        default="",
-        hide_input=True,
-        show_default=False,
-    )
     max_iterations = typer.prompt(
         "Max fix iterations (re-test loops before the limit gate)",
-        default=cfg.magik_max_iterations,
-        type=int,
-    )
-    agent_max_steps = typer.prompt(
-        "Agent max steps (default step budget for agent runs)",
-        default=cfg.magik_agent_max_steps,
-        type=int,
-    )
-    agent_step_cap = typer.prompt(
-        "Agent step cap (hard ceiling)",
-        default=cfg.magik_agent_step_cap,
+        default=cfg.test_max_iterations,
         type=int,
     )
 
-    cfg.magik_base_url = base_url.strip()
-    cfg.magik_api_key = api_key_input.strip() or None
-    cfg.magik_max_iterations = max(1, int(max_iterations))
-    cfg.magik_agent_max_steps = max(1, int(agent_max_steps))
-    cfg.magik_agent_step_cap = max(1, int(agent_step_cap))
-    if cfg.magik_agent_step_cap < cfg.magik_agent_max_steps:
-        console.print(
-            f"[yellow]Note: step cap ({cfg.magik_agent_step_cap}) is below max steps "
-            f"({cfg.magik_agent_max_steps}); runs will be clamped to the cap.[/yellow]"
-        )
+    cfg.test_max_iterations = max(1, int(max_iterations))
     ConfigManager.save(cfg)
 
-    console.print("[green]Magik-AI settings saved.[/green]")
-    console.print(f"  base_url:        {cfg.magik_base_url}")
-    console.print(f"  api_key:         {'[set]' if cfg.magik_api_key else '[not configured]'}")
-    console.print(f"  max_iters:       {cfg.magik_max_iterations}")
-    console.print(f"  agent_max_steps: {cfg.magik_agent_max_steps}")
-    console.print(f"  agent_step_cap:  {cfg.magik_agent_step_cap}")
+    console.print("[green]Testing settings saved.[/green]")
+    console.print(f"  max_iters:       {cfg.test_max_iterations}")
 
 
 @test_app.command("rules")

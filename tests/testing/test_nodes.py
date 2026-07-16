@@ -291,7 +291,7 @@ async def test_node_manual_result_passed_true():
 
 
 # ---------------------------------------------------------------------------
-# node_config_gate (Gate 3) - URL-required validation, agent_max_steps
+# node_config_gate (Gate 3) - URL-required validation
 # clamping, and headless parsing.
 # ---------------------------------------------------------------------------
 
@@ -356,12 +356,30 @@ async def test_pick_type_sets_test_type(monkeypatch):
 
     def fake_interrupt(payload):
         captured["payload"] = payload
-        return {"test_type": "2"}   # numbered -> ui
+        return {"test_type": "1"}   # numbered -> ui (order: ui, api, agent, unit)
 
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     out = await nodes.node_pick_type(make_initial_state(file_paths=["a.tsx"], test_mode="automated"))
     assert out["test_type"] == "ui"
     assert captured["payload"]["gate"] == "pick_type"
+
+
+@pytest.mark.asyncio
+async def test_pick_type_supports_unit(monkeypatch):
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"test_type": "4"})
+    out = await nodes.node_pick_type(make_initial_state(file_paths=["a.py"], test_mode="automated"))
+    assert out["test_type"] == "unit"
+
+
+@pytest.mark.asyncio
+async def test_config_gate_anchors_layer_on_picked_type(monkeypatch):
+    # gate 3 must default to the type picked at pick_type (ui), NOT re-recommend a contradictory set.
+    s = make_initial_state(file_paths=["a.jsx"], test_mode="automated")
+    s["test_type"] = "ui"
+    s["url"] = "http://x/login"
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {})   # user accepts
+    out = await nodes.node_config_gate(s)
+    assert out["selected_layers"] == ["ui"]
 
 
 def test_route_after_mode_select_automated_to_pick_type():
@@ -817,7 +835,36 @@ async def test_auth_gate_keys_on_project_id(monkeypatch, tmp_path):
     assert _auth.load_session("pid-xyz", "host-z", store=store).session_id == "cap-9"
 
 
+# -- runtime resolver memoization: one resolution per (lang) per run -----------------
 
+async def test_runtime_resolver_memoizes_per_lang(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake_resolve(key, repo):
+        calls["n"] += 1
+        return type("R", (), {"status": "resolved", "path": "/opt/py"})()
+
+    monkeypatch.setattr("icx_engine.runtime_manager.resolve_runtime", _fake_resolve)
+    resolver = await nodes._runtime_resolver("/repo")
+    a = await resolver("python")
+    b = await resolver("python")          # same lang -> cached, no second probe
+    c = await resolver("typescript")      # different lang -> one more probe
+    assert a == b == "/opt/py"
+    assert c == "/opt/py"
+    assert calls["n"] == 2                # python(1) + node-alias(1), python reused
+
+
+async def test_runtime_resolver_ui_uses_harness_node(monkeypatch):
+    # ui/agent must resolve the modern HARNESS node, never the project's node.
+    monkeypatch.setattr("icx_engine.runtime_manager.resolve_harness_node", lambda: "/opt/node20")
+
+    def _no_project(key, repo):
+        raise AssertionError("ui/agent must not use the project runtime resolver")
+
+    monkeypatch.setattr("icx_engine.runtime_manager.resolve_runtime", _no_project)
+    resolver = await nodes._runtime_resolver("/repo")
+    assert await resolver("ui") == "/opt/node20"
+    assert await resolver("agent") == "/opt/node20"
 
 
 

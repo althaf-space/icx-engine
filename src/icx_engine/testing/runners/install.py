@@ -30,7 +30,9 @@ class RunnerSpec:
 # Pinned runner tooling. Versions are deliberate; bump intentionally, never "latest".
 RUNNER_SPECS: dict[str, RunnerSpec] = {
     "playwright":   RunnerSpec("playwright", "npm", "playwright", "1.48.0"),
-    "stagehand":    RunnerSpec("stagehand", "npm", "@browserbasehq/stagehand", "1.9.0"),
+    # UI bundle: installs Stagehand + Playwright AND downloads the Chromium browser into the pinned
+    # home (never global, never the user's repo) - so approving "stagehand" makes UI fully runnable.
+    "stagehand":    RunnerSpec("stagehand", "ui-bundle", "@browserbasehq/stagehand", "1.9.0"),
     "jest-junit":   RunnerSpec("jest-junit", "npm", "jest-junit", "16.0.0"),
     "stryker":      RunnerSpec("stryker", "npm", "@stryker-mutator/core", "8.6.0"),
     "schemathesis": RunnerSpec("schemathesis", "pip", "schemathesis", "3.36.0"),
@@ -52,12 +54,41 @@ def runner_home(name: str, version: str) -> Path:
 
 
 def is_installed(name: str) -> bool:
-    """A runner is installed if its version-pinned home dir exists and is non-empty."""
+    """True only for a COMPLETE install - not merely a non-empty dir. A prior run that failed
+    partway (e.g. npm succeeded but the Chromium download did not) must NOT count as installed, or
+    setup would skip it and leave the UI layer broken.
+    """
     spec = RUNNER_SPECS.get(name)
     if spec is None:
         return False
     home = runner_home(name, spec.version)
-    return home.is_dir() and any(home.iterdir())
+    if not home.is_dir():
+        return False
+
+    if spec.kind == "ui-bundle":
+        # Need Stagehand + Playwright installed AND the Chromium browser downloaded.
+        nm = home / "node_modules"
+        browsers = browsers_dir(home)
+        return (
+            (nm / "@browserbasehq" / "stagehand").is_dir()
+            and (nm / "playwright").is_dir()
+            and browsers.is_dir() and any(browsers.iterdir())
+        )
+    if spec.kind == "binary":
+        # The extracted binary file must be present.
+        return (home / spec.package).is_file() or (home / f"{spec.package}.exe").is_file()
+    # npm / pip / go / cargo: a non-empty home is sufficient.
+    return any(home.iterdir())
+
+
+def remove_runner(name: str) -> None:
+    """Delete a runner's pinned install dir (for --force reinstall / cleaning a broken partial)."""
+    spec = RUNNER_SPECS.get(name)
+    if spec is None:
+        return
+    home = runner_home(name, spec.version)
+    if home.exists():
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def installed_path(name: str) -> str | None:
@@ -67,32 +98,218 @@ def installed_path(name: str) -> str | None:
     return str(runner_home(name, spec.version))
 
 
-def _do_install(spec: RunnerSpec, dest: Path) -> bool:
+def _do_install(spec: RunnerSpec, dest: Path, node_dir: str | None = None) -> bool:
     """Perform the actual install into dest. Returns True on success. Mockable in tests; real network
-    only runs here. Never raises - returns False on any failure."""
+    only runs here. Never raises - returns False on any failure.
+
+    node_dir: when set (UI bundle), prepend it to PATH so npm/npx/playwright resolve to that exact
+    Node toolchain (the one the user chose for the harness), not whatever is on the global PATH."""
     dest.mkdir(parents=True, exist_ok=True)
+    run_env = None
     try:
+        if spec.kind == "ui-bundle":
+            return _install_ui_bundle(spec, dest, node_dir)
         if spec.kind == "npm":
             cmd = ["npm", "install", "--prefix", str(dest), f"{spec.package}@{spec.version}"]
         elif spec.kind == "pip":
             cmd = ["pip", "install", "--target", str(dest), f"{spec.package}=={spec.version}"]
         elif spec.kind == "go":
+            # `go install` writes the binary to GOBIN; point GOBIN at dest so the pinned home is
+            # non-empty afterward (else is_installed stays False and we reinstall every run).
             cmd = ["go", "install", f"{spec.package}@v{spec.version}"]
+            run_env = {**os.environ, "GOBIN": str(dest)}
         elif spec.kind == "cargo":
             cmd = ["cargo", "install", spec.package, "--version", spec.version, "--root", str(dest)]
         elif spec.kind == "binary":
-            # Binary downloads are platform-specific; the concrete URL/extract is handled by a
-            # per-binary helper (not shelled generically). Left for the binary installer wiring.
-            return False
+            return _install_binary(spec, dest)
         else:
             return False
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        from icx_engine._proc import win_argv
+        proc = subprocess.run(win_argv(cmd), capture_output=True, text=True, timeout=600, env=run_env)
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
 
-def ensure_runner(name: str, approve: Callable[[str], bool] | None = None) -> str | None:
+def browsers_dir(dest: Path) -> Path:
+    """Where Playwright's Chromium is cached for this install (inside the pinned home, never global)."""
+    return dest / "browsers"
+
+
+# Per-binary download descriptors. Each maps (system, arch) -> release asset. Cross-platform.
+_HURL_RELEASE = "https://github.com/Orange-OpenSource/hurl/releases/download"
+
+
+def _plat_arch() -> str:
+    import platform
+    m = platform.machine().lower()
+    return "aarch64" if m in ("arm64", "aarch64") else "x86_64"
+
+
+def _hurl_asset(version: str) -> tuple[str, str, str] | None:
+    """(download url, archive kind 'zip'|'tar', binary name) for this OS/arch, or None if unsupported."""
+    import platform
+    arch = _plat_arch()
+    system = platform.system()
+    if system == "Windows":
+        target, kind, binname = f"{arch}-pc-windows-msvc", "zip", "hurl.exe"
+    elif system == "Linux":
+        target, kind, binname = f"{arch}-unknown-linux-gnu", "tar", "hurl"
+    elif system == "Darwin":
+        target, kind, binname = f"{arch}-apple-darwin", "tar", "hurl"
+    else:
+        return None
+    url = f"{_HURL_RELEASE}/{version}/hurl-{version}-{target}.{kind == 'zip' and 'zip' or 'tar.gz'}"
+    return url, kind, binname
+
+
+_BINARY_ASSETS = {"hurl": _hurl_asset}
+
+
+def _install_binary(spec: RunnerSpec, dest: Path) -> bool:
+    """Download + extract a standalone binary (e.g. hurl) into dest for THIS OS/arch. Uses only the
+    stdlib (urllib + zip/tar). Guarded - returns False on any failure, never raises.
+
+    Security: downloads over HTTPS from the tool's official release host. If spec.checksum is set it
+    is verified (sha256); when ICX_REQUIRE_RUNNER_CHECKSUM=1 a missing checksum already fails closed
+    upstream in ensure_runner.
+    """
+    import hashlib
+    import tarfile
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    asset_fn = _BINARY_ASSETS.get(spec.name)
+    if asset_fn is None:
+        return False
+    info = asset_fn(spec.version)
+    if info is None:
+        return False
+    url, kind, binname = info
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="icx-bin-"))
+    try:
+        archive = tmpdir / f"download.{'zip' if kind == 'zip' else 'tar.gz'}"
+        try:
+            urllib.request.urlretrieve(url, archive)     # noqa: S310 - official HTTPS release host
+        except (OSError, ValueError):
+            return False
+
+        if spec.checksum:
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            if digest.lower() != spec.checksum.lower():
+                return False
+
+        extract_dir = tmpdir / "x"
+        extract_dir.mkdir()
+        try:
+            if kind == "zip":
+                with zipfile.ZipFile(archive) as z:
+                    z.extractall(extract_dir)
+            else:
+                with tarfile.open(archive) as t:
+                    t.extractall(extract_dir)          # noqa: S202 - trusted release archive
+        except (OSError, zipfile.BadZipFile, tarfile.TarError):
+            return False
+
+        found = next((p for p in extract_dir.rglob(binname) if p.is_file()), None)
+        if found is None:
+            return False
+        dest.mkdir(parents=True, exist_ok=True)
+        target = dest / binname
+        shutil.copy2(found, target)
+        if os.name != "nt":
+            target.chmod(0o755)
+        return True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _node_path_env(node_dir: str | None) -> dict:
+    """Env with the chosen Node's dir prepended to PATH so npm/npx/playwright come from it."""
+    env = {**os.environ}
+    if node_dir:
+        env["PATH"] = str(node_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _node_exe(node_dir: str | None) -> str:
+    """The node executable for the given Node dir (or bare 'node')."""
+    if node_dir:
+        d = Path(node_dir)
+        for c in (d / "node.exe", d / "node", d / "bin" / "node.exe", d / "bin" / "node"):
+            if c.is_file():
+                return str(c)
+    return "node"
+
+
+def _npm_for(node_dir: str | None) -> str:
+    """Locate the npm launcher that belongs to the given Node (nvm/install dirs put npm.cmd/npm next
+    to node or in bin/). Falls back to a bare 'npm' (PATH) only if none is found."""
+    if node_dir:
+        d = Path(node_dir)
+        for c in (d / "npm.cmd", d / "npm", d / "bin" / "npm.cmd", d / "bin" / "npm"):
+            if c.is_file():
+                return str(c)
+    return "npm"
+
+
+def _install_ui_bundle(spec: RunnerSpec, dest: Path, node_dir: str | None = None) -> bool:
+    """Install Stagehand + Playwright into dest, then download Chromium into dest/browsers.
+
+    Everything lands under ~/.icx/testing (never global, never the user's repo). Returns True only
+    when BOTH the npm install and the browser download succeed. Never raises. npm is taken from the
+    chosen Node (not the parent shell's PATH, where nvm may be inactive), and that Node's dir is on
+    PATH so the npm/playwright shims find node.
+    """
+    import logging
+    from icx_engine._proc import win_argv
+    _log = logging.getLogger("icx.testing.install")
+    pw_version = RUNNER_SPECS["playwright"].version
+    base_env = _node_path_env(node_dir)
+    npm_exe = _npm_for(node_dir)
+    try:
+        npm = [npm_exe, "install", "--prefix", str(dest),
+               f"{spec.package}@{spec.version}", f"playwright@{pw_version}"]
+        r1 = subprocess.run(win_argv(npm), capture_output=True, text=True, timeout=600, env=base_env)
+        if r1.returncode != 0:
+            _log.warning("UI npm install failed (rc=%s): %s", r1.returncode,
+                         (getattr(r1, "stderr", "") or getattr(r1, "stdout", "") or "")[-800:])
+            return False
+        browsers = browsers_dir(dest)
+        browsers.mkdir(parents=True, exist_ok=True)
+        env = {**base_env, "PLAYWRIGHT_BROWSERS_PATH": str(browsers)}
+        # CRITICAL: download Chromium with the SAME Playwright that gets imported at runtime -
+        # `node node_modules/playwright/cli.js install chromium`. The `.bin/playwright` shim can
+        # resolve a different Playwright and fetch a mismatched browser build (e.g. runtime wants
+        # chromium-1140 but the shim downloads 1228 -> "Executable doesn't exist").
+        cli_js = None
+        for rel in ("node_modules/playwright/cli.js", "node_modules/playwright-core/cli.js"):
+            cand = dest / rel
+            if cand.is_file():
+                cli_js = str(cand)
+                break
+        if cli_js:
+            browser_cmd = [_node_exe(node_dir), cli_js, "install", "chromium"]
+        else:
+            pw_bin = dest / "node_modules" / ".bin" / ("playwright.cmd" if os.name == "nt" else "playwright")
+            browser_cmd = [str(pw_bin), "install", "chromium"]
+        # Browser download is large; allow it more time than a package install.
+        r2 = subprocess.run(win_argv(browser_cmd),
+                            capture_output=True, text=True, timeout=1800, env=env)
+        if r2.returncode != 0:
+            _log.warning("playwright install chromium failed (rc=%s): %s", r2.returncode,
+                         (getattr(r2, "stderr", "") or getattr(r2, "stdout", "") or "")[-800:])
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.warning("UI bundle install error: %s", exc)
+        return False
+
+
+def ensure_runner(name: str, approve: Callable[[str], bool] | None = None,
+                  node_dir: str | None = None) -> str | None:
     """Return the install path for a runner, installing it (USER-APPROVED) if missing.
 
     - Already installed -> return path (reuse; no network).
@@ -101,6 +318,7 @@ def ensure_runner(name: str, approve: Callable[[str], bool] | None = None) -> st
     Approval: `approve(name) -> bool`. When None, auto-approve only if ICX_AUTO_INSTALL_RUNNERS=1
     (default off) - so nothing installs silently.
     Checksum: when ICX_REQUIRE_RUNNER_CHECKSUM=1 and a binary spec has no checksum, fail closed.
+    node_dir: for the UI bundle, the chosen Node's dir to put on PATH for npm/playwright.
     """
     spec = RUNNER_SPECS.get(name)
     if spec is None:
@@ -117,7 +335,7 @@ def ensure_runner(name: str, approve: Callable[[str], bool] | None = None) -> st
         return None  # fail closed: required checksum missing
 
     dest = runner_home(name, spec.version)
-    if _do_install(spec, dest):
+    if _do_install(spec, dest, node_dir=node_dir):
         return str(dest)
     return None
 
@@ -125,6 +343,32 @@ def ensure_runner(name: str, approve: Callable[[str], bool] | None = None) -> st
 def harness_path() -> str:
     """Path to the packaged Stagehand replay harness (.mjs ships with ICX)."""
     return str(Path(__file__).parent / "assets" / "icx-replay.mjs")
+
+
+def auth_harness_path() -> str:
+    """Path to the packaged Playwright session-capture harness (.mjs ships with ICX)."""
+    return str(Path(__file__).parent / "assets" / "icx-auth.mjs")
+
+
+def runtime_harness_path(basename: str, packaged: str) -> str:
+    """Path to run a harness .mjs FROM. ESM `import "playwright"` resolves relative to the file's
+    own location (NODE_PATH is ignored for ESM), so the harness must sit next to the installed
+    node_modules. Copies the packaged .mjs into the UI install dir on first use and returns that
+    copy; falls back to the packaged path when the UI bundle is not installed (e.g. in ICX's own
+    tests)."""
+    sh = installed_path("stagehand")
+    if not sh:
+        return packaged
+    dst = Path(sh) / basename
+    # Always refresh from the packaged copy so an ICX upgrade's newer harness reaches EXISTING
+    # installs (copy-if-missing would leave old users running a stale .mjs). Cheap - tiny file.
+    try:
+        src_p = Path(packaged)
+        if src_p.is_file() and (not dst.is_file() or dst.read_bytes() != src_p.read_bytes()):
+            shutil.copy2(src_p, dst)
+    except OSError:
+        return packaged if Path(packaged).is_file() else str(dst)
+    return str(dst)
 
 
 def which(cmd: str) -> str | None:

@@ -15,6 +15,15 @@ def fake_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _neutral_harness_env(monkeypatch):
+    """Isolate harness-node resolution from this machine's real env/config so tests are deterministic.
+    Tests that exercise the env/config paths override these explicitly."""
+    monkeypatch.delenv("ICX_HARNESS_NODE", raising=False)
+    monkeypatch.setattr("icx_engine.config_manager.ConfigManager.load",
+                        staticmethod(lambda: type("C", (), {"harness_node_path": None})()))
+
+
 # -- Task 1: per-language detection --------------------------------------------
 
 def test_detect_java_java_version_file(tmp_path):
@@ -164,3 +173,116 @@ def test_version_matches():
     assert rm._version_matches("3.11", "3.11.4") is True
     assert rm._version_matches("17", "1.8.0") is False
     assert rm._version_matches("stable", "1.75.0") is True  # non-numeric -> accept
+
+
+# -- version-manager enumeration: discover ALL installed versions, not just PATH ----
+
+def test_discover_enumerates_version_manager_installs(fake_home, monkeypatch):
+    for v in ("v14.21.3", "v18.20.0", "v20.11.0"):
+        p = fake_home / ".nvm" / "versions" / "node" / v / "bin" / "node"
+        p.parent.mkdir(parents=True)
+        p.write_text("", encoding="utf-8")
+    monkeypatch.setattr(rm.shutil, "which", lambda exe: None)  # nothing on PATH
+
+    import re
+
+    def _val(lang, path):
+        m = re.search(r"v(\d+\.\d+\.\d+)", str(path))
+        return m.group(1) if m else None
+
+    monkeypatch.setattr(rm, "validate_runtime", _val)
+    versions = {c.version for c in rm.discover_runtimes("node")}
+    assert {"14.21.3", "18.20.0", "20.11.0"} <= versions
+
+
+# -- UI harness node: modern node, decoupled from the app's node --------------------
+
+def test_resolve_harness_node_picks_highest_modern_and_reuses(fake_home, monkeypatch):
+    n18 = fake_home / "n18" / "node"; n18.parent.mkdir(parents=True); n18.write_text("", encoding="utf-8")
+    n20 = fake_home / "n20" / "node"; n20.parent.mkdir(parents=True); n20.write_text("", encoding="utf-8")
+    monkeypatch.setattr(rm, "discover_runtimes", lambda lang: [
+        rm.RuntimeCandidate("/n14/node", "14.21.3", "discovered"),
+        rm.RuntimeCandidate(str(n18), "18.20.0", "discovered"),
+        rm.RuntimeCandidate(str(n20), "20.11.0", "discovered"),
+    ])
+    assert rm.resolve_harness_node() == str(n20)          # highest >= 18
+
+    def _boom(lang):
+        raise AssertionError("should reuse the remembered harness node, not rediscover")
+    monkeypatch.setattr(rm, "discover_runtimes", _boom)
+    assert rm.resolve_harness_node() == str(n20)          # registry reuse
+
+
+def test_resolve_harness_node_none_when_only_old_node(fake_home, monkeypatch):
+    monkeypatch.setattr(rm, "discover_runtimes", lambda lang: [
+        rm.RuntimeCandidate("/n14/node", "14.21.3", "discovered"),
+        rm.RuntimeCandidate("/n16/node", "16.20.0", "discovered"),
+    ])
+    assert rm.resolve_harness_node() is None              # no modern node -> caller falls back
+
+
+def test_resolve_harness_node_env_override(fake_home, monkeypatch, tmp_path):
+    node = tmp_path / "node20" / "node"
+    node.parent.mkdir(parents=True)
+    node.write_text("", encoding="utf-8")
+    monkeypatch.setenv("ICX_HARNESS_NODE", str(node))
+
+    def _boom(lang):
+        raise AssertionError("override must win; discovery should not run")
+    monkeypatch.setattr(rm, "discover_runtimes", _boom)
+    assert rm.resolve_harness_node() == str(node)
+
+
+def test_resolve_harness_node_env_override_ignored_if_missing(fake_home, monkeypatch):
+    monkeypatch.setenv("ICX_HARNESS_NODE", "/no/such/node")
+    monkeypatch.setattr(rm, "discover_runtimes", lambda lang: [
+        rm.RuntimeCandidate("/n20/node", "20.11.0", "discovered"),
+    ])
+    # missing override path -> falls back to discovery (path won't persist since /n20 is fake)
+    assert rm.resolve_harness_node() == "/n20/node"
+
+
+# -- node path normalization: accept an exe OR a directory (nvm version dir) --------
+
+def test_normalize_node_exe_file(tmp_path):
+    f = tmp_path / "node.exe"
+    f.write_text("", encoding="utf-8")
+    assert rm.normalize_node_exe(str(f)) == str(f)
+
+
+def test_normalize_node_exe_dir_with_node(tmp_path):
+    (tmp_path / "node.exe").write_text("", encoding="utf-8")
+    assert rm.normalize_node_exe(str(tmp_path)) == str(tmp_path / "node.exe")
+
+
+def test_normalize_node_exe_bin_subdir(tmp_path):
+    b = tmp_path / "bin"
+    b.mkdir()
+    (b / "node").write_text("", encoding="utf-8")
+    assert rm.normalize_node_exe(str(tmp_path)) == str(b / "node")
+
+
+def test_normalize_node_exe_none(tmp_path):
+    assert rm.normalize_node_exe(str(tmp_path)) is None      # empty dir
+    assert rm.normalize_node_exe(None) is None
+    assert rm.normalize_node_exe("/no/such/path") is None
+
+
+def test_resolve_harness_node_config_dir_is_normalized(fake_home, monkeypatch, tmp_path):
+    d = tmp_path / "nvm" / "v22.23.1"
+    d.mkdir(parents=True)
+    (d / "node.exe").write_text("", encoding="utf-8")
+    monkeypatch.delenv("ICX_HARNESS_NODE", raising=False)
+    monkeypatch.setattr("icx_engine.config_manager.ConfigManager.load",
+                        staticmethod(lambda: type("C", (), {"harness_node_path": str(d)})()))
+
+    def _boom(lang):
+        raise AssertionError("config dir should resolve; discovery must not run")
+    monkeypatch.setattr(rm, "discover_runtimes", _boom)
+    assert rm.resolve_harness_node() == str(d / "node.exe")
+
+
+def test_normalize_node_exe_bare_command_on_path(monkeypatch):
+    monkeypatch.setattr(rm.shutil, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+    assert rm.normalize_node_exe("node") == "/usr/bin/node"
+    assert rm.normalize_node_exe("nope-xyz") is None

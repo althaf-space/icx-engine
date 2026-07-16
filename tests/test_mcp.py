@@ -800,10 +800,12 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 30
+    assert len(tools) == 34
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
+        "get_methodology", "lock_plan",
+        "ui_auth_capture", "ui_auth_inline",
         "graph_find_context", "graph_call_chain", "graph_impact", "graph_subsystem",
         "graph_cross_links", "graph_important_nodes", "graph_blast_radius",
         "graph_cycles", "graph_dead_code", "graph_ownership",
@@ -2311,13 +2313,13 @@ def test_tool_descriptions_forbid_external_tracker_mcp():
 
 def test_resume_desc_has_gate_posture_classification():
     """resume description must carry the gate-posture classification with agent-generate
-    gates enumerated (2b, compat_scan, profile_gen) and user-decision gates listed."""
-    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    gates enumerated (2b, compat_scan, author_flow) and user-decision gates listed."""
+    from icx_engine.mcp_server import _TESTING_RESUME_DESCRIPTION as d
     assert "GATE POSTURE CLASSIFICATION" in d
     assert "USER-DECISION" in d
     assert "AGENT-GENERATE" in d
-    # 2b, compat_scan, and profile_gen are all agent-generate gates.
-    assert "2b" in d and "compat_scan" in d and "profile_gen" in d
+    # 2b, compat_scan, and author_flow are all agent-generate gates.
+    assert "2b" in d and "compat_scan" in d and "author_flow" in d
     # user-decision gate list includes the key human gates.
     for g in ("ui_check", "memory_save", "manual", "error", "limit"):
         assert g in d
@@ -2326,7 +2328,7 @@ def test_resume_desc_has_gate_posture_classification():
 def test_resume_desc_no_unscoped_auto_respond_phrase():
     """The contradiction is removed: no rule may say to never auto-respond to ANY gate (which
     fought the agent-generate 2b gate). It must be scoped to USER-DECISION gates."""
-    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    from icx_engine.mcp_server import _TESTING_RESUME_DESCRIPTION as d
     assert "AUTO-RESPOND TO ANY GATE" not in d
     assert "AUTO-RESPOND TO A USER-DECISION GATE" in d
 
@@ -2334,8 +2336,8 @@ def test_resume_desc_no_unscoped_auto_respond_phrase():
 def test_default_posture_line_in_both_testing_descs():
     """Both start and resume descriptions state the default posture: gate data is the user's to
     decide; the agent only self-advances to generate the spec at Gate 2b."""
-    from icx_engine.mcp_server import _MAGIK_START_DESCRIPTION, _MAGIK_RESUME_DESCRIPTION
-    for d in (_MAGIK_START_DESCRIPTION, _MAGIK_RESUME_DESCRIPTION):
+    from icx_engine.mcp_server import _TESTING_START_DESCRIPTION, _TESTING_RESUME_DESCRIPTION
+    for d in (_TESTING_START_DESCRIPTION, _TESTING_RESUME_DESCRIPTION):
         assert "DEFAULT POSTURE" in d
         assert "for the USER to read and decide" in d
         assert "Gate 2b" in d
@@ -2344,7 +2346,7 @@ def test_default_posture_line_in_both_testing_descs():
 def test_start_desc_seed_selection_endpoint_and_backend_bridge():
     """start description must describe Phase A seed selection: the endpoint/route grep option
     and the backend-only API-path -> UI-repo grep bridge."""
-    from icx_engine.mcp_server import _MAGIK_START_DESCRIPTION as d
+    from icx_engine.mcp_server import _TESTING_START_DESCRIPTION as d
     assert "PHASE A" in d
     assert "endpoint/route" in d
     assert "BACKEND-ONLY" in d
@@ -2355,7 +2357,7 @@ def test_start_desc_seed_selection_endpoint_and_backend_bridge():
 def test_gate1_desc_has_grep_import_fallback_when_no_graph():
     """Gate 1 must instruct the agent to grep-expand imports as the fallback when the UI repo
     graph is not built, and still end in a user confirm."""
-    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    from icx_engine.mcp_server import _TESTING_RESUME_DESCRIPTION as d
     assert "graph_available IS FALSE" in d
     assert "grep its own imports" in d
     assert "no-graph fallback" in d
@@ -2617,9 +2619,9 @@ async def test_graph_dead_code_nonexistent_path_returns_error():
     assert "error" in data or data.get("status") == "error"
 
 
-# -- start_testing_session injects configured agent_max_steps ----------
+# -- start_testing_session injects configured test_max_iterations ----------
 
-async def test_start_session_injects_configured_agent_steps(monkeypatch):
+async def test_start_session_injects_configured_max_iterations(monkeypatch):
     from icx_engine import mcp_server
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
@@ -2633,7 +2635,7 @@ async def test_start_session_injects_configured_agent_steps(monkeypatch):
     class _FakeGraph:
         async def ainvoke(self, state, config=None):
             if isinstance(state, dict):
-                captured["agent_max_steps"] = state.get("agent_max_steps")
+                captured["max_iterations"] = state.get("max_iterations")
 
         async def aget_state(self, config):
             return _Snap()
@@ -2645,14 +2647,14 @@ async def test_start_session_injects_configured_agent_steps(monkeypatch):
     monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
 
     cfg = AppConfig()
-    cfg.magik_agent_max_steps = 33
+    cfg.test_max_iterations = 7
     with patch("icx_engine.config_manager.ConfigManager") as mock_cm:
         mock_cm.load.return_value = cfg
         await mcp_server._call_tool(
             "start_testing_session",
             {"file_paths": ["a.tsx"], "test_mode": "automated"},
         )
-    assert captured["agent_max_steps"] == 33
+    assert captured["max_iterations"] == 7
 
 
 # -- memory_get_hotspots -------------------------------------------------------
@@ -2811,7 +2813,7 @@ async def test_resume_description_lists_gate_shapes():
         mock_cm.load.return_value = AppConfig()
         tools = {t.name: t for t in await _list_tools()}
     desc = tools["resume_testing_session"].description
-    for token in ("pick_type", "compat_check", "auth_gate", "profile_push", "approve_iteration", "RULE"):
+    for token in ("pick_type", "compat_check", "auth_gate", "author_flow", "approve_iteration", "RULE"):
         assert token in desc
 
 
@@ -2823,7 +2825,7 @@ async def test_resume_description_lists_agent_gates():
         mock_cm.load.return_value = AppConfig()
         tools = {t.name: t for t in await _list_tools()}
     desc = tools["resume_testing_session"].description
-    for token in ("compat_scan", "profile_gen", "profile_markdown", "all_compatible"):
+    for token in ("compat_scan", "author_flow", "steps", "all_compatible"):
         assert token in desc
 
 
@@ -3296,3 +3298,159 @@ def test_apply_dod_guarded_on_bad_analysis():
     out, dod = _apply_dod(None, "BODY", [])
     assert out == "BODY"
     assert dod is None
+
+
+# -- ui_auth_capture / ui_auth_inline tools ------------------------------------
+
+async def test_ui_auth_capture_validates_input():
+    from icx_engine.mcp_server import _call_tool
+    r = await _call_tool("ui_auth_capture", {"url": "", "file_paths": ["a"]})
+    assert json.loads(r[0].text)["ok"] is False
+    r = await _call_tool("ui_auth_capture", {"url": "http://x", "file_paths": []})
+    assert json.loads(r[0].text)["ok"] is False
+
+
+async def test_ui_auth_capture_success(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    monkeypatch.setattr("icx_engine.testing.nodes._resolve_project_id", lambda fp: "proj")
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: True)
+
+    async def _cap(project, host, url, success_url=""):
+        return "/x/state.json", ""
+    monkeypatch.setattr("icx_engine.testing.ui_auth.capture_session", _cap)
+    r = await _call_tool("ui_auth_capture", {"url": "http://x/login", "file_paths": ["a.jsx"]})
+    payload = json.loads(r[0].text)
+    assert payload["ok"] is True and payload["storage_state"] == "/x/state.json"
+
+
+async def test_ui_auth_inline_requires_credentials(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    monkeypatch.setattr("icx_engine.testing.nodes._resolve_project_id", lambda fp: "proj")
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: True)
+    r = await _call_tool("ui_auth_inline",
+                         {"url": "http://x", "file_paths": ["a"], "username": "", "password": "p"})
+    assert json.loads(r[0].text)["ok"] is False
+
+
+async def test_ui_auth_inline_success(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    monkeypatch.setattr("icx_engine.testing.nodes._resolve_project_id", lambda fp: "proj")
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: True)
+
+    async def _inline(project, host, url, username, password, **kw):
+        assert username == "admin" and password == "pw"
+        return "/x/state.json", ""
+    monkeypatch.setattr("icx_engine.testing.ui_auth.inline_session", _inline)
+    r = await _call_tool("ui_auth_inline", {"url": "http://x/login", "file_paths": ["a.jsx"],
+                                            "username": "admin", "password": "pw"})
+    assert json.loads(r[0].text)["ok"] is True
+
+
+async def test_ui_auth_capture_broken_tooling_steers_to_setup(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    monkeypatch.setattr("icx_engine.testing.nodes._resolve_project_id", lambda fp: "proj")
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: True)
+
+    async def _cap(project, host, url, success_url=""):
+        return None, r"Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'playwright' imported from F:\icx-engine"
+    monkeypatch.setattr("icx_engine.testing.ui_auth.capture_session", _cap)
+    r = await _call_tool("ui_auth_capture", {"url": "http://x/login", "file_paths": ["a.jsx"]})
+    p = json.loads(r[0].text)
+    assert p["ok"] is False
+    assert "icx test setup --force" in p["error"]
+    assert "DO NOT install" in p["error"]
+    assert "repo" in p["error"].lower()
+
+
+# -- lock_plan spec-lock tool ---------------------------------------------------
+
+async def test_lock_plan_validates_input():
+    from icx_engine.mcp_server import _call_tool
+    r = await _call_tool("lock_plan", {"issue_ref": "", "chosen_files": ["a.py"]})
+    assert json.loads(r[0].text)["ok"] is False
+    r = await _call_tool("lock_plan", {"issue_ref": "T-1", "chosen_files": []})
+    assert json.loads(r[0].text)["ok"] is False
+
+
+async def test_lock_plan_blocks_on_missed_high_signal(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    import icx_engine.mcp_server as m
+    # graph signal reports a direct dependent the plan omitted -> high-tier miss -> blocks.
+    def _sigs(project_path, seeds, keywords):
+        return (lambda: [("src/caller.py", "direct graph dependent of a planned file")],
+                lambda: [], lambda: [], lambda: [])
+    monkeypatch.setattr(m, "_context_signals", _sigs)
+    monkeypatch.setattr(m, "_lock_plan_prior_fix", lambda chosen: set())
+    r = await _call_tool("lock_plan", {"issue_ref": "T-1", "chosen_files": ["src/svc.py"]})
+    p = json.loads(r[0].text)
+    assert p["ok"] is False
+    assert [x["path"] for x in p["blocking_missed"]] == ["src/caller.py"]
+    assert p["coverage"] == 0.0
+
+
+async def test_lock_plan_ok_when_included_or_justified(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    import icx_engine.mcp_server as m
+    def _sigs(project_path, seeds, keywords):
+        return (lambda: [("src/caller.py", "direct graph dependent")], lambda: [], lambda: [], lambda: [])
+    monkeypatch.setattr(m, "_context_signals", _sigs)
+    monkeypatch.setattr(m, "_lock_plan_prior_fix", lambda chosen: set())
+    # include it
+    r = await _call_tool("lock_plan", {"issue_ref": "T-2", "chosen_files": ["src/svc.py", "src/caller.py"]})
+    assert json.loads(r[0].text)["ok"] is True
+    # or justify it
+    r = await _call_tool("lock_plan", {"issue_ref": "T-3", "chosen_files": ["src/svc.py"],
+                                       "justifications": {"src/caller.py": "unrelated same-name"}})
+    p = json.loads(r[0].text)
+    assert p["ok"] is True and p["coverage"] == 1.0
+
+
+async def test_lock_plan_stores_locked_plan(monkeypatch):
+    from icx_engine.mcp_server import _call_tool, _session_get
+    import icx_engine.mcp_server as m
+    monkeypatch.setattr(m, "_context_signals", lambda p, s, k: (lambda: [], lambda: [], lambda: [], lambda: []))
+    monkeypatch.setattr(m, "_lock_plan_prior_fix", lambda chosen: set())
+    await _call_tool("lock_plan", {"issue_ref": "T-9", "chosen_files": ["a.py"]})
+    stored = _session_get("T-9", "locked_plan", None)
+    assert stored is not None and stored["chosen"] == ["a.py"] and stored["ok"] is True
+
+
+async def test_lock_plan_in_tool_order_before_testing():
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        names = [t.name for t in await _list_tools()]
+    assert "lock_plan" in names
+    assert names.index("lock_plan") < names.index("start_testing_session")   # spec-lock before testing
+
+
+def test_context_signals_emit_from_graph_semantic_memory(monkeypatch):
+    # Regression guard: the real signal providers must actually produce candidates (not silently
+    # no-op due to a wrong return shape / field name).
+    import icx_engine.mcp_server as m
+
+    class _Ctx:
+        def __init__(self, f): self.file = f; self.reason = "related"
+    class _Q:
+        def get_blast_radius(self, seeds, **k):
+            return {"direct_dependents": ["dep.py"], "missing_changes": ["co.py"]}
+        def find_context(self, query):
+            return [_Ctx("sem.py")]
+
+    monkeypatch.setattr(m, "_load_querier_simple", lambda p: (_Q(), "/repo"))
+    monkeypatch.setattr(m, "_find_by_file_sync",
+                        lambda f, k: [{"issue_key": "T-1", "files_changed": ["mem.py"]}])
+    graph_sig, grep_sig, semantic_sig, memory_sig = m._context_signals("/repo", ["svc.py"], ["kw"])
+    graph_paths = dict(graph_sig())
+    assert "dep.py" in graph_paths and "co.py" in graph_paths
+    assert "sem.py" in dict(semantic_sig())
+    assert "mem.py" in dict(memory_sig())
+
+
+def test_lock_plan_prior_fix_reads_files_changed(monkeypatch):
+    import icx_engine.mcp_server as m
+    monkeypatch.setattr(m, "_find_by_file_sync",
+                        lambda f, k: [{"issue_key": "T-2", "files_changed": ["old_fix.py"]}])
+    assert m._lock_plan_prior_fix(["svc.py"]) == {"old_fix.py"}

@@ -8,7 +8,7 @@ secrets, under the account name `integration_secret:<name>:<field>`.
 
 This mirrors the connector registry pattern (`connectors/base.register_connector`).
 
-Note: the existing Magik-AI and Sonar settings remain inline on `AppConfig` for
+Note: the existing testing and Sonar settings remain inline on `AppConfig` for
 backward compatibility (existing config files + stored secrets). New integrations
 should use this registry instead of extending `AppConfig`.
 """

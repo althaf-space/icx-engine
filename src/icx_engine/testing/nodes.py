@@ -14,7 +14,6 @@ from icx_engine.testing.handlers import get_handler
 from icx_engine.testing.expand import expand_via_grep, union_rank
 from icx_engine.testing import auth as _auth
 from icx_engine.testing import apispec as _apispec
-from icx_engine.testing import profile_gen as _profile_gen
 from icx_engine.testing import rules as _rules
 
 _log = logging.getLogger(__name__)
@@ -167,20 +166,24 @@ def _apply_scope(prompt: str | None, file_paths: list[str], scope: str) -> str |
 # -- node_pick_type: test type selection -----------------------------------
 
 async def node_pick_type(state: TestingState) -> dict:
-    _TYPE_MAP = {"1": "agent", "2": "ui", "3": "api"}
+    # The ONE place the test type is chosen. Gate 3 later only confirms the URL - it never re-asks
+    # the type. Order: ui, api, agent, unit (per the primary verification layer).
+    _TYPE_MAP = {"1": "ui", "2": "api", "3": "agent", "4": "unit"}
     response = interrupt({
         "gate": "pick_type",
         "message": (
-            "Pick the test type. ICX selects files based on your choice.\n\n"
-            "  1. agent - adaptive AI browser-use (frontend).\n"
-            "  2. ui    - strict Playwright field validation (frontend).\n"
-            "  3. api   - REST endpoint test (backend)."
+            "Pick the test type (chosen ONCE - gate 3 will only confirm the URL, not ask this again).\n\n"
+            "  1. ui    - strict Playwright field validation (frontend, needs a URL).\n"
+            "  2. api   - REST endpoint test (backend, needs a URL).\n"
+            "  3. agent - the agent authors a BROAD exploratory flow (edge cases + rich assertions);\n"
+            "             deterministic replay, no runtime LLM (frontend, needs a URL).\n"
+            "  4. unit  - run the repo's unit tests (no URL, no running app)."
         ),
-        "options": ["1. agent", "2. ui", "3. api"],
+        "options": ["1. ui", "2. api", "3. agent", "4. unit"],
     })
     test_type = _resolve_choice(response, "test_type", _TYPE_MAP)
-    if test_type not in ("agent", "ui", "api"):
-        test_type = "agent"
+    if test_type not in ("agent", "ui", "api", "unit"):
+        test_type = "ui"
     return {"test_type": test_type}
 
 
@@ -406,8 +409,8 @@ async def node_mode_gate(state: TestingState) -> dict:
         "gate": 2,
         "message": (
             "Answer all questions below. Press Enter after each.\n\n"
-            "DETECTION MODE (how Magik generates the test spec):\n"
-            "  1. auto_detect - Magik opens the URL live with Playwright, scans page fields.\n"
+            "DETECTION MODE (how the UI layer generates the test spec):\n"
+            "  1. auto_detect - the UI layer opens the URL live with Playwright, scans page fields.\n"
             "                   Requires the app to be running and URL accessible.\n"
             "  2. json_spec   - AI reads your JSX/TSX source files directly. No browser needed.\n"
             "                   Use this when URL requires VPN or auth.\n"
@@ -460,7 +463,7 @@ async def node_mode_gate(state: TestingState) -> dict:
     return update
 
 
-# -- node_generate_context: Magik prompt fetch + AI editor spec ------------
+# -- gate 2b: rulebook-injected JSON spec generation -----------------------
 
 _SPEC_MAX_REASK = 2
 
@@ -507,31 +510,45 @@ def _run_gate_2b(base_payload: dict) -> tuple[dict, list[str]]:
 # -- Gate 3: submission config ----------------------------------------------
 
 async def node_config_gate(state: TestingState) -> dict:
-    """Gate 3 (local engine): present the RISK-BASED recommended verification layers + the target
-    URL; the USER selects which layers run and confirms the URL. Recommendation only - human decides.
+    """Gate 3 (local engine): CONFIRM the URL and lock in the layer to run. The layer is ANCHORED on
+    the test type already picked at pick_type (no re-asking the type). Risk-tier extras are offered as
+    OPTIONAL add-ons only; the default is exactly the picked type.
     """
     from icx_engine.verification import compute_risk_tier, recommend_layers
+    test_type = state.get("test_type") or "unit"
     analysis = {"problem_summary": state.get("context") or ""}
     tier = compute_risk_tier(analysis)
-    recommended = recommend_layers(tier)
+    # Anchor: the picked type IS the layer. Extras are only suggestions, never the default.
+    recommended = [test_type]
+    optional_extra = [l for l in recommend_layers(tier) if l != test_type]
     cur_url = state.get("url")
+    needs_url = test_type in ("ui", "agent", "api")
+
+    extra_line = (f"  Optional extra layers you could add: {', '.join(optional_extra)}\n"
+                  if optional_extra else "")
+    url_line = (f"TARGET URL: {cur_url or 'NOT SET - required for this type'}\n  Confirm this URL or provide a new one.\n"
+                if needs_url else "TARGET URL: not needed for unit tests.\n")
+    is_browser = test_type in ("ui", "agent")
+    visible_line = ("BROWSER: headless (hidden, faster) by default. Reply visible:true to WATCH the "
+                    "test drive a real browser.\n" if is_browser else "")
 
     response = interrupt({
         "gate": 3,
         "message": (
-            "Confirm the verification configuration.\n\n"
-            f"RECOMMENDED verification layers (risk tier: {tier}):\n"
-            f"  {', '.join(recommended)}\n"
-            "  This is a recommendation - choose which layers to run (reply with a subset or accept).\n\n"
-            f"TARGET URL: {cur_url or 'NOT SET - required for api and ui/agent types'}\n"
-            "  Confirm this URL or provide a new one."
+            f"You chose the '{test_type}' test - that layer will run. This gate only confirms the URL "
+            f"(it does NOT re-ask the type).\n\n"
+            f"{extra_line}"
+            f"{url_line}"
+            f"{visible_line}"
+            "Reply 'accept' to run just your chosen type, or list layers to override."
         ),
+        "test_type": test_type,
         "risk_tier": tier,
         "recommended_layers": recommended,
-        "current": {"url": cur_url},
+        "optional_layers": optional_extra,
+        "current": {"url": cur_url, "visible": not state.get("headless", True)},
     })
 
-    test_type = state.get("test_type") or "unit"
     layers = response.get("layers") if isinstance(response, dict) else None
     selected = [str(l) for l in layers] if isinstance(layers, list) and layers else recommended
     final_url = (response.get("url") if isinstance(response, dict) else None) or state.get("url")
@@ -546,6 +563,11 @@ async def node_config_gate(state: TestingState) -> dict:
         "risk_tier": tier,
         "status": "running",
     }
+    # Visible browser option (ui/agent): visible:true -> headed replay so the user can watch.
+    if isinstance(response, dict) and "visible" in response:
+        update["headless"] = not bool(response.get("visible"))
+    elif isinstance(response, dict) and "headless" in response:
+        update["headless"] = bool(response.get("headless"))
     if final_url:
         update["url"] = final_url
     for k in ("api_endpoint", "api_method", "api_payload", "api_payload_type", "api_headers"):
@@ -611,16 +633,19 @@ async def node_auth_gate(state: TestingState) -> dict:
         "session_expires_at": existing.expires_at if existing else None,
         "message": (
             "Choose how to authenticate this run.\n"
-            "  public  - no login; Magik will not attempt auth (fixes wandering).\n"
-            "  capture - log in once in a visible browser, reuse the session.\n"
+            "  public  - no login; the run does not attempt auth.\n"
+            "  capture - ICX opens a REAL browser; the user logs in BY HAND; ICX saves the session.\n"
+            "            (Do NOT ask the user for username/password in chat for this.)\n"
             "  reuse   - reuse the stored session for this project + host.\n"
-            "  inline  - provide credentials; ICX logs in and stores the session."
+            "  inline  - the user provides the APP credentials; ICX drives the login form + saves it."
         ),
         "options": ["public", "capture", "reuse", "inline"],
         "instruction": (
-            "For capture/inline, perform the login via the magik_login_* MCP tools first, "
-            "then resume with {\"auth_mode\": \"capture\"|\"inline\", \"session_id\": \"<id>\"}. "
-            "For reuse, resume with {\"auth_mode\": \"reuse\"}. "
+            "For capture: call the ui_auth_capture tool (url + file_paths) - it opens a browser for "
+            "manual login and saves the session. For inline: call ui_auth_inline (url + file_paths + "
+            "username + password) - only inline collects credentials, and they go to ICX's browser "
+            "process, never into chat history. After either tool returns ok, resume with "
+            "{\"auth_mode\": \"capture\"|\"inline\"}. For reuse, resume with {\"auth_mode\": \"reuse\"}. "
             "For public, resume with {\"auth_mode\": \"public\"}."
         ),
     })
@@ -645,27 +670,6 @@ async def node_auth_gate(state: TestingState) -> dict:
         update["auth_mode"] = "public"
         update["auto_auth_recover"] = False
     return update
-
-
-# -- node_profile_push: profile_push gate (user yes/no) then profile_gen ------
-# First interrupt: user decides whether to push a profile.
-# On yes: fetch the profile-creation prompt from Magik, then second interrupt
-# (AGENT-GENERATE) so the agent reads the source files and returns the markdown.
-# If the agent returns no markdown, fall back to the ICX heuristic generator.
-
-def _read_profile_file(path_str: str) -> str | None:
-    # Read a user-provided Project Profile markdown file. Returns the text, or
-    # None if it is missing/unreadable/empty.
-    try:
-        p = Path(path_str)
-        if not p.is_file():
-            return None
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        return text if text.strip() else None
-    except OSError:
-        return None
-
-
 
 
 # -- node_submit ------------------------------------------------------------
@@ -701,17 +705,38 @@ def route_after_auth(state: TestingState) -> str:
 
 
 async def node_author_flow(state: TestingState) -> dict:
-    """AGENT-GENERATE gate: the agent authors the UI test flow (goto/fill/click/assert steps,
-    including login), which ICX caches for deterministic replay. Equivalent to the old spec-gen
-    gate, but for the local Stagehand engine. UI/agent only."""
+    """AGENT-GENERATE gate: the connected agent authors the UI test flow (goto/fill/click/assert
+    steps, including login), which ICX caches for DETERMINISTIC replay (no LLM on rerun). The depth
+    of the flow depends on test_type: 'ui' = a tight, scripted flow over the fields under test;
+    'agent' = a broad, EXPLORATORY flow authored by the agent (more paths, edge cases, richer
+    assertions). Both replay identically and deterministically - the difference is authoring depth,
+    not runtime behavior. UI/agent only."""
     from icx_engine.testing.runners.ui import UiFlow, UiStep, save_flow
+    test_type = state.get("test_type") or "ui"
+    if test_type == "agent":
+        scope_line = (
+            "MODE 'agent' - EXPLORATORY authoring: you are the agent. Read the screen source fully, "
+            "then reason from first principles about EVERYTHING a thorough tester would exercise on "
+            "this screen - happy paths AND edge cases (empty/invalid input, validation messages, "
+            "boundary values, each interactive control, error and success states, notifications). "
+            "Author a BROAD ordered flow that covers them, with rich assertions. Go wider than a "
+            "minimal script - this is where your judgement adds coverage."
+        )
+    else:
+        scope_line = (
+            "MODE 'ui' - SCRIPTED authoring: produce a TIGHT, precise flow over exactly the fields and "
+            "behaviours under test for this screen. Minimal, deterministic, no exploration - just the "
+            "exact steps and assertions a user performs for the change being verified."
+        )
     response = interrupt({
         "gate": "author_flow",
+        "test_type": test_type,
         "message": (
-            "Author the UI test flow for this screen. Read the screen source fully, then produce the "
-            "ordered steps a real user takes - including any login steps. Each step: "
-            "{action: goto|fill|click|assert, target: <selector or url>, value?: <text/expected>, "
-            "description?: <intent>}. This is cached and replayed DETERMINISTICALLY (no LLM on rerun)."
+            f"{scope_line}\n\n"
+            "Read the screen source fully, then produce the ordered steps - INCLUDING any login "
+            "steps. Each step: {action: goto|fill|click|assert, target: <selector or url>, "
+            "value?: <text/expected>, description?: <intent>}. This is cached and replayed "
+            "DETERMINISTICALLY (no LLM on rerun); a stale selector fails loud."
         ),
         "url": state.get("url"),
         "file_paths": state.get("file_paths"),
@@ -734,15 +759,31 @@ _RUNTIME_LANG_ALIAS = {"js-ts": "node", "javascript": "node", "typescript": "nod
 
 async def _runtime_resolver(repo: str):
     """Return an async resolver(lang)->path that uses the Runtime Manager to pick the repo-correct
-    runtime, non-blocking. Falls back to None (runner uses PATH) when not resolvable."""
+    runtime, non-blocking. Falls back to None (runner uses PATH) when not resolvable.
+
+    Memoized per (lang, repo) for the resolver's lifetime: resolving spawns a version-probe
+    subprocess on a registry miss, and one run may query several same-language runners - the cache
+    collapses those to a single resolution.
+    """
+    cache: dict[str, str | None] = {}
+
     async def _resolve(lang: str):
-        from icx_engine.runtime_manager import resolve_runtime
+        from icx_engine.runtime_manager import resolve_runtime, resolve_harness_node
         key = _RUNTIME_LANG_ALIAS.get(lang, lang)
+        if key in cache:
+            return cache[key]
         try:
-            res = await asyncio.to_thread(resolve_runtime, key, repo)
-            return res.path if getattr(res, "status", "") == "resolved" else None
+            if key in ("ui", "agent"):
+                # The UI harness (Playwright/Stagehand) needs a MODERN node, decoupled from the
+                # app's node - a node-14/16 project still gets UI testing on a discovered node-18+.
+                path = await asyncio.to_thread(resolve_harness_node)
+            else:
+                res = await asyncio.to_thread(resolve_runtime, key, repo)
+                path = res.path if getattr(res, "status", "") == "resolved" else None
         except Exception:
-            return None
+            path = None
+        cache[key] = path
+        return path
     return _resolve
 
 
@@ -757,14 +798,25 @@ async def node_local_run(state: TestingState) -> dict:
     test_type = state.get("test_type") or "unit"
     repo = _local_repo_root(state)
     ui_flow_path = None
+    storage_state = None
     if test_type in ("ui", "agent"):
         from icx_engine.testing.runners.ui import flow_path
         ui_flow_path = flow_path(_flow_key(state))
+        # Load an authenticated session (captured/inline) so the replay runs already logged in.
+        try:
+            host = _auth.host_of(state.get("url") or "")
+            project = state.get("project")
+            rec = _auth.load_session(project, host) if project and host else None
+            if rec and rec.storage_state and Path(rec.storage_state).exists():
+                storage_state = rec.storage_state
+        except Exception:
+            storage_state = None
     try:
         resolver = await _runtime_resolver(repo)
         res = await run_local_verification(
             repo, test_type, target_url=state.get("url"), runtime_resolver=resolver,
-            ui_flow_path=ui_flow_path,
+            ui_flow_path=ui_flow_path, storage_state=storage_state,
+            ui_headed=not state.get("headless", True),
         )
     except Exception as exc:
         return {"status": "error", "last_error": f"local verification failed: {exc}",
@@ -883,8 +935,8 @@ async def node_mode_select(state: TestingState) -> dict:
         "gate": "mode",
         "message": (
             "Choose how to run this test.\n\n"
-            "  1. automated - ICX submits to Magik-AI, polls for results,\n"
-            "                 shows issues found, loops until clean, then asks\n"
+            "  1. automated - ICX runs the local verification suite, shows issues\n"
+            "                 found, loops until clean, then asks\n"
             "                 you to verify the UI.\n"
             "  2. manual    - You run the test yourself. ICX waits, then asks\n"
             "                 you to report the result before saving the record."

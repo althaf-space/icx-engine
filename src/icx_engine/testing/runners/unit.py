@@ -74,6 +74,7 @@ class _Vitest:
 class _Jest:
     lang: str = "js-ts"
     name: str = "jest"
+    requires: str = "jest-junit"   # ICX-owned JUnit reporter
 
     def detect(self, repo: Path) -> bool:
         pkg = _pkg_json(repo)
@@ -118,10 +119,13 @@ class _GradleJUnit:
         return (repo / "build.gradle").exists() or (repo / "build.gradle.kts").exists()
 
     def build_command(self, repo: Path, runtime_path: str | None) -> RunSpec:
+        import os as _os
         env = {"JAVA_HOME": runtime_path} if runtime_path else {}
-        wrapper = "./gradlew"
-        if not (repo / "gradlew").exists():
-            wrapper = "gradle"
+        # Windows uses the gradlew.bat wrapper; POSIX uses ./gradlew. Fall back to a PATH gradle.
+        if _os.name == "nt":
+            wrapper = str(repo / "gradlew.bat") if (repo / "gradlew.bat").exists() else "gradle"
+        else:
+            wrapper = "./gradlew" if (repo / "gradlew").exists() else "gradle"
         return RunSpec(
             command=[wrapper, "test"],
             cwd=str(repo),
@@ -135,6 +139,7 @@ class _GradleJUnit:
 class _Go:
     lang: str = "go"
     name: str = "go"
+    requires: str = "gotestsum"   # ICX-owned JUnit bridge
 
     def detect(self, repo: Path) -> bool:
         return (repo / "go.mod").exists()
@@ -152,6 +157,7 @@ class _Go:
 class _Cargo:
     lang: str = "rust"
     name: str = "cargo"
+    requires: str = "nextest"   # ICX-owned JUnit bridge
 
     def detect(self, repo: Path) -> bool:
         return (repo / "Cargo.toml").exists()

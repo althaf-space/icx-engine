@@ -32,6 +32,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      # Node gives the suite a real .cmd launcher (npm) on Windows, so the cross-platform
+      # command normalizer (win_argv) is exercised against genuine tooling on every OS.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install dependencies
         run: pip install ".[dev]"
 

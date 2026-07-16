@@ -18,6 +18,58 @@ _log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path.home() / ".icx" / "config.json"
 _SERVICE = "icx"
+
+
+def _icx_dir() -> Path:
+    return Path.home() / ".icx"
+
+
+# Runtime files that OLDER ICX versions created but the current version no longer uses. Cleaned on
+# `icx update` and MCP startup so every upgrading user ends up without stale artifacts - guarded, so
+# a missing file or a permission error is never fatal. Add a relative path here when a feature that
+# wrote a user-side file is removed.
+_STALE_ARTIFACTS: tuple[str, ...] = (
+    "testing_rules/profile_gen.md",   # the profile_gen gate was removed with the Magik retirement
+)
+
+# Config keys OLDER versions wrote that the current model no longer defines. They are dropped from
+# disk automatically the next time config is saved (save() rebuilds JSON from the model), but we
+# detect + report them on `icx update` so removal is explicit. Add a key here when a config field
+# is retired.
+_STALE_CONFIG_KEYS: tuple[str, ...] = (
+    "agent_max_steps",          # retired: deterministic replay has no browser-step budget
+    "magik_base_url", "magik_api_key", "magik_max_iterations",
+    "magik_use_streaming", "magik_agent_max_steps", "magik_agent_step_cap",
+)
+
+
+def stale_config_keys_on_disk() -> list[str]:
+    """Return the retired config keys currently present in ~/.icx/config.json (before a save strips
+    them). Guarded - empty list when the file is absent or unreadable."""
+    try:
+        import json as _json
+        raw = _json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [k for k in _STALE_CONFIG_KEYS if isinstance(raw, dict) and k in raw]
+
+
+def clean_stale_artifacts() -> list[str]:
+    """Delete known-stale runtime files under ~/.icx. Idempotent + guarded. Returns the paths removed.
+
+    Only touches ICX-owned files that a prior version created and the current version does not use -
+    never user data (config, memory, sessions, captured logins). Safe to call repeatedly."""
+    removed: list[str] = []
+    base = _icx_dir()
+    for rel in _STALE_ARTIFACTS:
+        p = base / rel
+        try:
+            if p.is_file():
+                p.unlink()
+                removed.append(str(p))
+        except OSError:
+            pass
+    return removed
 _SENTINEL = "__keychain__"
 _HEALTH_KEY = "_icx_healthcheck_"
 
@@ -594,18 +646,6 @@ class ConfigManager:
                                     "Re-authenticate with `icx model --add` or set the credential via environment variable."
                                 ) from _exc
 
-        # Resolve magik_api_key sentinel
-        magik_raw = raw.get("magik_api_key", "")
-        if magik_raw == _SENTINEL:
-            raw["magik_api_key"] = _resolve("magik_api_key") or None
-        elif magik_raw and isinstance(magik_raw, str) and magik_raw.startswith(_DLOCK_PREFIX):
-            try:
-                raw["magik_api_key"] = _dlock_decrypt(magik_raw)
-            except Exception:
-                raw["magik_api_key"] = _env_get("magik_api_key") or None
-        elif magik_raw:
-            needs_secret_migration = True
-
         # Resolve sonar_token sentinel
         sonar_raw = raw.get("sonar_token", "")
         if sonar_raw == _SENTINEL:
@@ -757,15 +797,6 @@ class ConfigManager:
                         _channel_label = "text model" if channel_attr == "text_config" else "image model"
                         _warn_plaintext(acct, f"LLM API key for profile '{profile_name}' ({_channel_label})")
 
-        # Store magik_api_key via keyring (excluded from Pydantic serialization)
-        api_key = config.magik_api_key
-        if api_key:
-            if _check_keychain() and _kset("magik_api_key", api_key):
-                raw["magik_api_key"] = _SENTINEL
-            else:
-                raw["magik_api_key"] = api_key
-                _warn_plaintext("magik_api_key", "Magik-AI API key")
-
         # Store sonar_token via keyring (excluded from Pydantic serialization).
         # New code never sets the legacy field (it is migrated into a connection
         # on load), so the else-branch clears any stale legacy keyring entry so no
@@ -879,7 +910,6 @@ class ConfigManager:
         for profile_name in config.llm_profiles:
             _kdel(_llm_text_account(profile_name))
             _kdel(_llm_image_account(profile_name))
-        _kdel("magik_api_key")
         _kdel("sonar_token")
         for _sc_name in (config.sonar_connections or {}):
             _kdel(f"sonar_conn_token:{_sc_name}")
