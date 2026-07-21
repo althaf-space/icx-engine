@@ -24,10 +24,15 @@ from icx_engine.testing.runners.base import RunSpec, register_runner
 
 @dataclass
 class UiStep:
-    action: str                 # goto | click | fill | assert
-    target: str = ""            # resolved selector (or URL for goto)
-    value: str = ""             # e.g. text to type, or expected text for assert
+    # goto|fill|fillunique|smartfill|select|multiselect|check|uncheck|click|dblclick|hover|press|
+    # upload|draganddrop|scroll|type|setvalue|pickoption|waitfor|waithidden|assert|assertjs|assertgone|
+    # a11y|perf|route|unroute|offline|download|confirmdialog|screenshot
+    action: str = ""
+    target: str = ""            # selector (URL for goto; JS expr for assertjs; source selector for draganddrop)
+    value: str = ""             # text / option label(s) / key / file path / dest selector / expected text
     description: str = ""        # human-readable intent
+    soft: bool = False           # a step that SKIPS (not fails) when it cannot run - graceful checks
+                                 # (constraint probes on gated fields, dashboard data that may be empty)
 
 
 @dataclass
@@ -47,7 +52,9 @@ class UiFlow:
             name=str(d.get("name", "")),
             url=str(d.get("url", "")),
             authored=bool(d.get("authored", False)),
-            steps=[UiStep(**{k: s.get(k, "") for k in ("action", "target", "value", "description")})
+            steps=[UiStep(action=str(s.get("action", "")), target=str(s.get("target", "")),
+                          value=str(s.get("value", "")), description=str(s.get("description", "")),
+                          soft=bool(s.get("soft", False)))
                    for s in (d.get("steps") or [])],
         )
 
@@ -119,8 +126,9 @@ class _StagehandUi:
         # The real gates are: the ICX tooling being installed (ensure_runner) and a confirmed URL.
         return True
 
-    def build_command(self, repo: Path, runtime_path: str | None) -> RunSpec:
-        report = str(repo / ".icx-ui-junit.xml")
+    def build_command(self, repo: Path, runtime_path: str | None,
+                      mode: str = "replay", report: str | None = None) -> RunSpec:
+        report = report or str(repo / ".icx-ui-junit.xml")
         node = runtime_path or "node"
         # Packaged ICX harness runs Stagehand in REPLAY mode against a cached flow and emits JUnit XML
         # via Playwright. Stagehand+Playwright are installed by the runner-install manager; the
@@ -140,12 +148,14 @@ class _StagehandUi:
                 env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir(Path(sh)))
         except Exception:
             pass
+        run_mode = "verify" if mode == "verify" else "replay"
         return RunSpec(
-            command=[node, harness, "--mode", "replay", "--junit", report],
+            command=[node, harness, "--mode", run_mode, "--junit", report],
             cwd=str(repo), report_path=report, env=env,
             note=("AI authors the flow once (human-gated) then deterministic cached replay - no LLM "
                   "on rerun; a stale selector fails loud. Executor appends --flow <cache>, --url "
-                  "<target>, and --storage-state <session> when an authenticated session exists."),
+                  "<target>, and --storage-state <session> when an authenticated session exists. "
+                  "mode=verify probes every selector against the live DOM (heal report, no scoring)."),
         )
 
 

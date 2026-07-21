@@ -11,6 +11,8 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from icx_engine.testing.state import TestingState
 from icx_engine.testing.nodes import (
     node_expand_files,
+    node_analyze_screen,
+    node_unit_author,
     node_mode_select,
     node_mode_gate,
     node_pick_type,
@@ -99,6 +101,7 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
 
     # -- nodes ------------------------------------------------------------
     builder.add_node("expand_files",    node_expand_files)
+    builder.add_node("analyze_screen",  node_analyze_screen)
     builder.add_node("mode_select",     node_mode_select)
     builder.add_node("pick_type",       node_pick_type)
     builder.add_node("compat_scan",     node_compat_scan)
@@ -106,6 +109,7 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
     builder.add_node("config_gate",     node_config_gate)
     builder.add_node("auth_gate",       node_auth_gate)
     builder.add_node("author_flow",     node_author_flow)
+    builder.add_node("unit_author",     node_unit_author)
     builder.add_node("local_run",       node_local_run)
     builder.add_node("review",          node_review)
     builder.add_node("limit_gate",      node_limit_gate)
@@ -123,10 +127,12 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
         "expand_files": "expand_files",
     })
     builder.add_edge("pick_type", "expand_files")
+    # automated path runs the Element Census (analyze_screen) BEFORE compatibility; manual skips it.
     builder.add_conditional_edges("expand_files", route_after_expand, {
-        "compat_scan": "compat_scan",
+        "compat_scan": "analyze_screen",
         "manual_wait": "manual_wait",
     })
+    builder.add_edge("analyze_screen", "compat_scan")
     builder.add_conditional_edges("compat_scan", route_after_scan, {
         "compat_check": "compat_check",
         "config_gate":  "config_gate",
@@ -141,9 +147,11 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
     builder.add_edge("config_gate", "auth_gate")
     builder.add_conditional_edges("auth_gate", route_after_auth, {
         "author_flow": "author_flow",
+        "unit_author": "unit_author",
         "local_run":   "local_run",
     })
     builder.add_edge("author_flow", "local_run")
+    builder.add_edge("unit_author", "local_run")
     builder.add_edge("local_run",   "review")
     builder.add_conditional_edges("review", route_after_check_issues, {
         "ui_check":   "ui_check",

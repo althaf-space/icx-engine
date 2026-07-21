@@ -345,9 +345,123 @@ async def test_node_config_gate_confirms_url():
     assert result["url"] == "http://svc/api"
 
 
+async def test_node_config_gate_slowmo_headless_is_zero():
+    # ui, default (no visible) -> headless -> slowmo 0
+    from icx_engine.testing.nodes import node_config_gate
+    state = _base_state(url="http://x/#/home")
+    state["test_type"] = "ui"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={"url": "http://x/#/home"}):
+        result = await node_config_gate(state)
+    assert result["headless"] is True
+    assert result["slowmo"] == 0
+
+
+async def test_node_config_gate_slowmo_visible_defaults_to_1000():
+    # ui + visible, no explicit slowmo -> headed -> default 1000
+    from icx_engine.testing.nodes import node_config_gate
+    state = _base_state(url="http://x/#/home")
+    state["test_type"] = "ui"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={"visible": True}):
+        result = await node_config_gate(state)
+    assert result["headless"] is False
+    assert result["slowmo"] == 1000
+
+
+async def test_node_config_gate_slowmo_user_override():
+    # ui + visible + explicit slowmo -> that value
+    from icx_engine.testing.nodes import node_config_gate
+    state = _base_state(url="http://x/#/home")
+    state["test_type"] = "ui"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={"visible": True, "slowmo": 2500}):
+        result = await node_config_gate(state)
+    assert result["headless"] is False and result["slowmo"] == 2500
+
+
+async def test_node_config_gate_no_slowmo_for_non_browser():
+    # unit/api never get a slowmo key
+    from icx_engine.testing.nodes import node_config_gate
+    state = _base_state()
+    state["test_type"] = "unit"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={}):
+        result = await node_config_gate(state)
+    assert "slowmo" not in result
+
+
+async def test_node_config_gate_reasks_missing_url_instead_of_raising():
+    # ui with no URL: the gate must RE-ASK (fresh interrupt) and accept the URL, NOT raise (a raise
+    # escapes the unguarded graph.ainvoke and permanently strands the session).
+    from icx_engine.testing.nodes import node_config_gate
+    state = _base_state(url=None)
+    state["test_type"] = "ui"
+    # 1st interrupt (main gate) has no url; re-ask supplies it.
+    with patch("icx_engine.testing.nodes.interrupt",
+               side_effect=[{"visible": False}, {"url": "http://x/#/home"}]) as m:
+        result = await node_config_gate(state)
+    assert result["url"] == "http://x/#/home"
+    assert m.call_count == 2  # main + one re-ask
+
+
+async def test_node_config_gate_raises_only_after_bounded_reasks():
+    # if the URL is never supplied, the gate errors after the bounded re-asks (never loops forever).
+    import pytest as _pytest
+    from icx_engine.testing.nodes import node_config_gate, _URL_GATE_MAX_REASK
+    state = _base_state(url=None)
+    state["test_type"] = "agent"
+    with patch("icx_engine.testing.nodes.interrupt", return_value={}) as m:
+        with _pytest.raises(ValueError):
+            await node_config_gate(state)
+    assert m.call_count == 1 + _URL_GATE_MAX_REASK  # main + bounded re-asks
+
+
+async def test_node_local_run_execution_error_reported_as_issue(monkeypatch):
+    # An exception in run_local_verification must surface as a FAILURE issue, not an empty-issues
+    # "all tests passed" (which would make memory_save record a false green).
+    import icx_engine.testing.local_executor as _le
+    from icx_engine.testing.nodes import node_local_run
+
+    async def _boom(*a, **k):
+        raise RuntimeError("runner blew up")
+    monkeypatch.setattr(_le, "run_local_verification", _boom)
+    out = await node_local_run({"engine": "local", "test_type": "unit",
+                                "file_paths": ["a.py"], "url": None})
+    assert out["status"] == "error"
+    assert out["issues"] and out["issues"][0]["severity"] == "high"
+
+
 import pytest
 from icx_engine.testing.state import make_initial_state
 from icx_engine.testing import nodes
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_appends_exploratory_steps(monkeypatch):
+    # agent mode = deterministic census flow + an appended agent-authored exploratory pass.
+    import icx_engine.testing.runners.ui as _uimod
+    saved = {}
+    monkeypatch.setattr(_uimod, "save_flow", lambda key, flow: saved.__setitem__("flow", flow))
+
+    def fake_interrupt(payload):
+        if payload.get("gate") == "author_flow_explore":
+            return {"steps": [{"action": "click", "target": "#extra", "description": "edge case"}]}
+        return {}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+
+    async def _no_verify(*a, **k):
+        return None
+    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", _no_verify)
+
+    async def _res(repo):
+        return lambda lang: None
+    monkeypatch.setattr(nodes, "_runtime_resolver", _res)
+
+    s = make_initial_state(file_paths=["Team.jsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://x/#/t"; s["auth_mode"] = "reuse"
+    s["screen_model"] = {"functionalities": [{"id": "C", "functionality": "Create",
+        "modalDetails": {"triggerSelector": "#c", "modalSelector": "#m"},
+        "submitButton": {"selectors": ["#save"]}, "fields": [{"label": "N", "domSelectors": ["#n"]}]}]}
+    await nodes.node_author_flow(s)
+    # the appended exploratory step is present and tagged
+    assert any(st.target == "#extra" and st.description.startswith("EXPLORATORY:") for st in saved["flow"].steps)
 
 
 @pytest.mark.asyncio
@@ -380,6 +494,329 @@ async def test_config_gate_anchors_layer_on_picked_type(monkeypatch):
     monkeypatch.setattr(nodes, "interrupt", lambda p: {})   # user accepts
     out = await nodes.node_config_gate(s)
     assert out["selected_layers"] == ["ui"]
+
+
+@pytest.mark.asyncio
+async def test_author_flow_advertises_select_and_waitfor(monkeypatch):
+    # The authoring gate must tell the agent every replayable action, incl select (dropdowns
+    # like a tenant picker) and waitfor (post-login redirect) - otherwise a real login form
+    # (text + <select> + non-submit button) is not authorable for a generic app.
+    import icx_engine.testing.runners.ui as _uimod
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured["payload"] = payload
+        return {"steps": [{"action": "select", "target": "#tenant", "value": "SMART"}]}
+
+    async def _no_verify(*a, **k):
+        return None
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+    monkeypatch.setattr(_uimod, "save_flow", lambda *a, **k: None)
+    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", _no_verify)
+    s = make_initial_state(file_paths=["login.tsx"], test_mode="automated")
+    s["test_type"] = "ui"
+    s["url"] = "http://x/login"
+    await nodes.node_author_flow(s)
+    msg = captured["payload"]["message"]
+    for action in ("goto", "fill", "select", "click", "waitfor", "assert"):
+        assert action in msg
+    assert "dropdown" in msg.lower() and "redirect" in msg.lower()
+    assert captured["payload"]["gate"] == "author_flow"
+
+
+@pytest.mark.asyncio
+async def test_author_flow_auth_aware_login_steps(monkeypatch):
+    # With a restored session (capture/inline/reuse), ICX logs the app in automatically - the agent
+    # must NOT re-author login steps (that was the "reopens login, wastes time" bug). Public apps
+    # (no session) still get login steps authored.
+    import icx_engine.testing.runners.ui as _uimod
+    monkeypatch.setattr(_uimod, "save_flow", lambda *a, **k: None)
+
+    for mode in ("capture", "inline", "reuse"):
+        cap = {}
+        monkeypatch.setattr(nodes, "interrupt", lambda p, _c=cap: (_c.__setitem__("p", p), {"steps": []})[1])
+        s = make_initial_state(file_paths=["login.tsx"], test_mode="automated")
+        s["test_type"] = "ui"; s["url"] = "http://x/#/home"; s["auth_mode"] = mode
+        await nodes.node_author_flow(s)
+        msg = cap["p"]["message"].lower()
+        assert "do not author" in msg and "login" in msg
+        assert cap["p"]["auth_mode"] == mode
+
+    # public -> DO author login steps
+    cap = {}
+    monkeypatch.setattr(nodes, "interrupt", lambda p, _c=cap: (_c.__setitem__("p", p), {"steps": []})[1])
+    s = make_initial_state(file_paths=["login.tsx"], test_mode="automated")
+    s["test_type"] = "ui"; s["url"] = "http://x/#/home"; s["auth_mode"] = "public"
+    await nodes.node_author_flow(s)
+    msg = cap["p"]["message"].lower()
+    assert "author the login steps" in msg
+
+
+@pytest.mark.asyncio
+async def test_author_flow_verify_heal_repairs_broken_selectors(monkeypatch):
+    # After authoring, live-DOM verify reports a broken selector -> the agent is re-asked and its
+    # corrected flow is saved. This is the anti-misfire heal loop.
+    import icx_engine.testing.runners.ui as _uimod
+    saved = {}
+    monkeypatch.setattr(_uimod, "save_flow", lambda key, flow: saved.__setitem__("flow", flow))
+
+    # interrupt: first the author gate (returns a flow with a bad selector), then the heal gate
+    # (returns the corrected flow).
+    calls = {"n": 0}
+
+    def fake_interrupt(payload):
+        calls["n"] += 1
+        if payload.get("gate") == "author_flow":
+            return {"steps": [{"action": "click", "target": '[data-testid="team-table"]'}]}
+        if payload.get("gate") == "author_flow_heal":
+            assert payload["broken_selectors"]           # got the verify findings
+            return {"steps": [{"action": "click", "target": ".react-bs-table"}]}
+        return {}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+
+    # verify: first call reports the bad selector, second call (after repair) is clean.
+    reports = [
+        {"broken": 1, "ambiguous": 0, "steps": [
+            {"index": 0, "action": "click", "target": '[data-testid="team-table"]', "status": "broken"}]},
+        {"broken": 0, "ambiguous": 0, "steps": [
+            {"index": 0, "action": "click", "target": ".react-bs-table", "status": "resolved"}]},
+    ]
+
+    async def fake_verify(*a, **k):
+        return reports.pop(0) if reports else {"broken": 0, "ambiguous": 0, "steps": []}
+    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", fake_verify)
+
+    async def _res(repo):
+        return lambda lang: None
+    monkeypatch.setattr(nodes, "_runtime_resolver", _res)
+
+    s = make_initial_state(file_paths=["src/TeamList.jsx"], test_mode="automated")
+    s["test_type"] = "ui"; s["url"] = "http://x/#/team"; s["auth_mode"] = "public"
+    await nodes.node_author_flow(s)
+    # the healed (corrected) flow is what got saved
+    assert saved["flow"].steps[0].target == ".react-bs-table"
+    assert calls["n"] >= 2                              # author gate + at least one heal gate
+
+
+@pytest.mark.asyncio
+async def test_author_flow_generates_deterministically_from_census(monkeypatch):
+    # With a census, ICX builds the flow ITSELF (to_flow) - it must NOT interrupt the author gate for
+    # agent-written steps. This is the cross-agent consistency guarantee.
+    import icx_engine.testing.runners.ui as _uimod
+    saved = {}
+    monkeypatch.setattr(_uimod, "save_flow", lambda key, flow: saved.__setitem__("flow", flow))
+    interrupts = []
+    monkeypatch.setattr(nodes, "interrupt", lambda p: interrupts.append(p.get("gate")) or {})
+
+    async def _no_verify(*a, **k):
+        return None
+    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", _no_verify)
+
+    async def _res(repo):
+        return lambda lang: None
+    monkeypatch.setattr(nodes, "_runtime_resolver", _res)
+
+    s = make_initial_state(file_paths=["Team.jsx"], test_mode="automated")
+    s["test_type"] = "ui"; s["url"] = "http://x/#/team"; s["auth_mode"] = "reuse"
+    s["screen_model"] = {
+        "screenName": "Team",
+        "functionalities": [
+            {"id": "C", "functionality": "Create Team",
+             "modalDetails": {"triggerSelector": "[data-testid='team-create']",
+                              "modalSelector": "[data-testid='team-modal']", "modalName": "Create Team"},
+             "submitButton": {"selectors": ["[data-testid='team-save']"]},
+             "cancelButton": {"selectors": ["[data-testid='team-cancel']"]},
+             "fields": [{"label": "Name", "domSelectors": ["[data-testid='team-name-EN']"]}]},
+        ],
+        "validationMatrix": [{"errorMessage": "Mandatory."}],
+    }
+    await nodes.node_author_flow(s)
+    # the author gate was NOT shown to the agent (deterministic generation)
+    assert "author_flow" not in interrupts
+    flow = saved["flow"]
+    assert flow.steps and flow.steps[0].action == "goto"
+    # census-derived: opens create + fills the field
+    assert any(st.target == "[data-testid='team-create']" for st in flow.steps)
+    # unclassified text field -> smartfill (dynamic runtime detection), carrying the XSS canary
+    assert any(st.action in ("fill", "smartfill") and st.target == "[data-testid='team-name-EN']" for st in flow.steps)
+
+
+@pytest.mark.asyncio
+async def test_author_flow_heal_interrupt_propagates_not_swallowed(monkeypatch):
+    # REGRESSION: interrupt() pauses by raising GraphInterrupt (a GraphBubbleUp/Exception). The heal
+    # loop's broad `except Exception` MUST NOT swallow it, or the author_flow_heal gate never fires.
+    from langgraph.errors import GraphInterrupt
+    import icx_engine.testing.runners.ui as _uimod
+    monkeypatch.setattr(_uimod, "save_flow", lambda *a, **k: None)
+
+    def fake_interrupt(payload):
+        if payload.get("gate") == "author_flow":
+            return {"steps": [{"action": "click", "target": "#x"}]}
+        if payload.get("gate") == "author_flow_heal":
+            raise GraphInterrupt("pause for heal")     # LangGraph's real pause signal
+        return {}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+
+    async def bad_verify(*a, **k):
+        return {"broken": 1, "ambiguous": 0,
+                "steps": [{"index": 0, "action": "click", "target": "#x", "status": "broken"}]}
+    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", bad_verify)
+
+    async def _res(repo):
+        return lambda lang: None
+    monkeypatch.setattr(nodes, "_runtime_resolver", _res)
+
+    s = make_initial_state(file_paths=["a.jsx"], test_mode="automated")
+    s["test_type"] = "ui"; s["url"] = "http://x/#/h"; s["auth_mode"] = "public"
+    import pytest as _pytest
+    with _pytest.raises(GraphInterrupt):          # the pause must propagate, not be swallowed
+        await nodes.node_author_flow(s)
+
+
+def test_route_after_auth_unit_with_census_goes_to_unit_author():
+    s = make_initial_state(file_paths=["a.py"], test_mode="automated")
+    s["test_type"] = "unit"; s["screen_model"] = {"elementCensus": {}}
+    assert nodes.route_after_auth(s) == "unit_author"
+    # plain unit (no census) -> straight to run
+    s2 = make_initial_state(file_paths=["a.py"], test_mode="automated")
+    s2["test_type"] = "unit"
+    assert nodes.route_after_auth(s2) == "local_run"
+    # ui always authors
+    s3 = make_initial_state(file_paths=["a.jsx"], test_mode="automated")
+    s3["test_type"] = "ui"
+    assert nodes.route_after_auth(s3) == "author_flow"
+
+
+@pytest.mark.asyncio
+async def test_node_unit_author_instructs_writing_tests(monkeypatch):
+    cap = {}
+    monkeypatch.setattr(nodes, "interrupt", lambda p: cap.setdefault("p", p) or {})
+    s = make_initial_state(file_paths=["src/lib.cpp"], test_mode="automated")
+    s["test_type"] = "unit"; s["analyzer_family"] = "cpp"
+    s["screen_model"] = {"elementCensus": {"counts": {}}, "coverageReport": {}}
+    out = await nodes.node_unit_author(s)
+    msg = cap["p"]["message"].lower()
+    assert cap["p"]["gate"] == "unit_author"
+    assert "write comprehensive unit tests" in msg and "googletest" in msg  # cpp hint present
+    assert "read_receipts" in out
+
+
+@pytest.mark.asyncio
+async def test_node_unit_author_noop_without_census(monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(nodes, "interrupt", lambda p: called.__setitem__("n", called["n"] + 1))
+    s = make_initial_state(file_paths=["a.py"], test_mode="automated")
+    s["test_type"] = "unit"
+    out = await nodes.node_unit_author(s)
+    assert out == {} and called["n"] == 0
+
+
+def _valid_react_census():
+    return {
+        "elementCensus": {"counts": {"eventHandlers": 2, "inputSurfaces": 1}},
+        "functionalities": [
+            {"id": "FUNC_000", "functionality": "Search", "modalDetails": {"triggerSelector": "#q"}},
+            {"id": "FUNC_001", "functionality": "Create",
+             "modalDetails": {"triggerSelector": "#create", "modalSelector": "#m"},
+             "submitButton": {"selectors": ["#save"]},
+             "fields": [{"label": "Name", "domSelectors": ["#name"], "validations": {"maxLength": 20}}]}],
+        "coverageReport": {"reconciliation": {
+            "eventHandlers": {"total": 2, "mapped": 2, "unmapped": 0},
+            "inputSurfaces": {"total": 1, "mapped": 1, "unmapped": 0}}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_analyze_screen_runs_census_for_known_framework(monkeypatch):
+    # .jsx -> react analyzer -> agent returns a reconciled census -> stored as screen_model.
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured["payload"] = payload
+        return {"screen_model": _valid_react_census()}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+    out = await nodes.node_analyze_screen(make_initial_state(
+        file_paths=["src/CreateTeam.jsx"], test_mode="automated"))
+    assert out["analyzer_id"] == "react" and out["analyzer_family"] == "ui"
+    assert isinstance(out["screen_model"], dict) and out["census_coverage"] == 1.0
+    assert captured["payload"]["gate"] == "analyze_screen"
+    assert "analyzer_prompt" in captured["payload"] and captured["payload"]["analyzer_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_screen_reasks_on_lint_defect(monkeypatch):
+    # a census where edit REUSES create's submit selector (the copy bug) must be RE-ASKED, not accepted -
+    # this is how census quality is enforced regardless of which agent produced it.
+    bad = {
+        "elementCensus": {"counts": {"eventHandlers": 2, "inputSurfaces": 1}},
+        "functionalities": [
+            {"id": "C", "functionality": "Create", "modalDetails": {"triggerSelector": "#c", "modalSelector": "#m"},
+             "submitButton": {"selectors": ["#save"]}, "fields": [{"label": "N", "domSelectors": ["#n"], "type": "email"}]},
+            {"id": "E", "functionality": "Edit", "modalDetails": {"triggerSelector": "#e", "modalSelector": "#m"},
+             "submitButton": {"selectors": ["#save"]}, "fields": [{"label": "N", "domSelectors": ["#n"], "type": "email"}]}],
+        "coverageReport": {"reconciliation": {
+            "eventHandlers": {"total": 2, "mapped": 2, "unmapped": 0},
+            "inputSurfaces": {"total": 1, "mapped": 1, "unmapped": 0}}},
+    }
+    calls = {"n": 0, "notes": []}
+
+    def fake_interrupt(payload):
+        calls["n"] += 1
+        if "FIX:" in payload.get("message", ""):
+            calls["notes"].append(payload["message"])
+        return {"screen_model": bad}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+    await nodes.node_analyze_screen(make_initial_state(file_paths=["a.jsx"], test_mode="automated"))
+    assert calls["n"] > 1                                   # it re-asked (did not accept the bad census)
+    assert any("share the SAME submit selector" in n for n in calls["notes"])   # with the exact defect
+
+
+@pytest.mark.asyncio
+async def test_analyze_screen_records_soft_warnings(monkeypatch):
+    # a text field with no length constraint is a SOFT warning - recorded, not blocking.
+    census = {
+        "elementCensus": {"counts": {"eventHandlers": 1, "inputSurfaces": 1}},
+        "functionalities": [
+            {"id": "S", "functionality": "Search", "modalDetails": {"triggerSelector": "#q"}},
+            {"id": "C", "functionality": "Create", "modalDetails": {"triggerSelector": "#c", "modalSelector": "#m"},
+             "submitButton": {"selectors": ["#save"]}, "fields": [{"label": "Notes", "domSelectors": ["#n"]}]}],
+        "coverageReport": {"reconciliation": {
+            "eventHandlers": {"total": 1, "mapped": 1, "unmapped": 0},
+            "inputSurfaces": {"total": 1, "mapped": 1, "unmapped": 0}}},
+    }
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"screen_model": census})
+    out = await nodes.node_analyze_screen(make_initial_state(file_paths=["a.jsx"], test_mode="automated"))
+    assert out["screen_model"] is not None                 # accepted (soft, not blocking)
+    assert any("no length/format constraint" in w for w in out["census_warnings"])
+
+
+@pytest.mark.asyncio
+async def test_analyze_screen_degrades_for_unknown_framework(monkeypatch):
+    # unknown extension -> no analyzer -> no interrupt, empty update (free authoring downstream).
+    called = {"n": 0}
+    monkeypatch.setattr(nodes, "interrupt", lambda p: called.__setitem__("n", called["n"] + 1))
+    out = await nodes.node_analyze_screen(make_initial_state(
+        file_paths=["src/thing.cobol"], test_mode="automated"))
+    assert out == {}
+    assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_analyze_screen_reasks_on_bad_reconciliation(monkeypatch):
+    # census whose counts do not add up -> re-ask (bounded), keep best-effort model.
+    from icx_engine.testing.nodes import _CENSUS_MAX_REASK
+    bad = _valid_react_census()
+    bad["coverageReport"]["reconciliation"]["eventHandlers"] = {"total": 5, "mapped": 2, "unmapped": 0}
+    calls = {"n": 0}
+
+    def fake_interrupt(payload):
+        calls["n"] += 1
+        return {"screen_model": bad}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+    out = await nodes.node_analyze_screen(make_initial_state(
+        file_paths=["a.jsx"], test_mode="automated"))
+    assert calls["n"] == 1 + _CENSUS_MAX_REASK      # initial + bounded re-asks
+    assert out["analyzer_id"] == "react"            # still records the attempt
 
 
 def test_route_after_mode_select_automated_to_pick_type():

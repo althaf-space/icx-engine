@@ -2631,6 +2631,7 @@ async def test_start_session_injects_configured_max_iterations(monkeypatch):
     class _Snap:
         tasks = []
         next = ()
+        values = {}
 
     class _FakeGraph:
         async def ainvoke(self, state, config=None):
@@ -2922,6 +2923,10 @@ async def test_resume_strips_session_id_from_payload(monkeypatch, tmp_path):
     import icx_engine.testing.graph as _g
     monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
 
+    # A real authenticated session already exists (written by ui_auth_capture) with a storage_state.
+    _auth.save_session("proj-z", "host-z", "real-sess",
+                       store=store, storage_state="/path/to/state.json")
+
     await mcp_server._call_tool("resume_testing_session", {
         "session_id": "sess-uuid",
         "response": {"auth_mode": "capture", "session_id": "SECRET-123"},
@@ -2929,8 +2934,10 @@ async def test_resume_strips_session_id_from_payload(monkeypatch, tmp_path):
     # session_id stripped from the payload that reaches the graph (and thus the checkpoint writes)
     assert "session_id" not in (captured["resume"] or {})
     assert captured["resume"].get("auth_mode") == "capture"
-    # and it was saved to the out-of-band auth store
-    assert _auth.load_session("proj-z", "host-z", store=store).session_id == "SECRET-123"
+    # the pre-existing session record is NOT overwritten - its storage_state survives, so the replay
+    # still runs authenticated (re-saving with an empty storage_state was the bug).
+    rec = _auth.load_session("proj-z", "host-z", store=store)
+    assert rec.session_id == "real-sess" and rec.storage_state == "/path/to/state.json"
 
 
 # -- Sonar MCP tools -----------------------------------------------------------

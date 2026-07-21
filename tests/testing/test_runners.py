@@ -71,6 +71,22 @@ def test_parse_malformed_returns_empty():
     assert r.total == 0 and r.ok is False
 
 
+def test_parse_report_with_ansi_control_chars_in_failure():
+    # REGRESSION: Playwright (and pytest/jest with colour) embed ANSI escape codes (ESC = 0x1b) and
+    # other C0 controls in failure text. Those bytes are INVALID in XML 1.0 - left raw the whole
+    # document is "not well-formed" and the parse yields ZERO cases: the exact "0 tests ran" bug
+    # seen whenever a UI run had any failure. The parser must strip them and still read every case.
+    esc = "\x1b"
+    xml = ('<testsuite name="icx-ui" tests="2" failures="1">'
+           '<testcase classname="ui-flow" name="opens" time="1.0"/>'
+           f'<testcase classname="ui-flow" name="clicks"><failure message="Timeout.'
+           f'{esc}[2m  - waiting for locator{esc}[22m\x00\x0b bad"/></testcase>'
+           '</testsuite>')
+    r = parse_junit_xml(xml)
+    assert r.total == 2 and r.passed == 1 and r.failures == 1
+    assert "waiting for locator" in {c.name: c.message for c in r.cases}["clicks"]
+
+
 # -- Task 3: per-language detection + command shape ----------------------------
 
 def test_pytest_detect_and_command(tmp_path):
@@ -248,6 +264,29 @@ def test_flow_cache_roundtrip(tmp_path, monkeypatch):
     assert loaded.steps[1].value == "a"
 
 
+def test_flow_cache_roundtrip_select_and_waitfor(tmp_path, monkeypatch):
+    # Real-world login: text fields + a <select> dropdown (e.g. tenant) + a non-submit
+    # button, then wait for the post-login redirect before asserting. select/waitfor must
+    # survive the cache so the agent-authored flow replays deterministically.
+    monkeypatch.setattr(_ui_mod, "_ui_cache_dir", lambda: tmp_path)
+    flow = UiFlow(name="login", url="http://x/login", authored=True, steps=[
+        UiStep(action="goto", target="http://x/login"),
+        UiStep(action="fill", target="#loginUsername", value="admin"),
+        UiStep(action="fill", target="#loginPassword", value="admin"),
+        UiStep(action="select", target="#tenant", value="SMART", description="pick tenant"),
+        UiStep(action="click", target="#loginButton"),
+        UiStep(action="waitfor", target="body", description="post-login redirect"),
+        UiStep(action="assert", target="body", value="app"),
+    ])
+    save_flow("PROJ-SEL", flow)
+    loaded = load_flow("PROJ-SEL")
+    assert loaded is not None
+    assert [s.action for s in loaded.steps] == \
+        ["goto", "fill", "fill", "select", "click", "waitfor", "assert"]
+    sel = next(s for s in loaded.steps if s.action == "select")
+    assert sel.target == "#tenant" and sel.value == "SMART"
+
+
 def test_flow_cache_deterministic_reload(tmp_path, monkeypatch):
     monkeypatch.setattr(_ui_mod, "_ui_cache_dir", lambda: tmp_path)
     flow = UiFlow(name="f", authored=True, steps=[UiStep(action="click", target="#x")])
@@ -302,6 +341,37 @@ async def test_executor_missing_runner_returns_not_ok(tmp_path):
                     report_path=str(tmp_path / "none.xml"))
     r = await run_spec(spec, timeout=10)
     assert r.ok is False and r.total == 0
+
+
+def _writer_cmd(report: str, content: str) -> list:
+    # a subprocess that writes `content` to `report` - stands in for a harness that produces an artifact.
+    code = ("import io,sys;"
+            "open(r%r,'w',encoding='utf-8').write(%r)" % (report, content))
+    return [_sys.executable, "-c", code]
+
+
+async def test_run_spec_deletes_own_report_by_default(tmp_path):
+    # an ICX-owned report (.icx- prefix) the runner wrote is removed after parsing by default - no litter.
+    from pathlib import Path as _P
+    report = str(tmp_path / ".icx-own.xml")
+    spec = _RunSpec(command=_writer_cmd(report, "<testsuite><testcase name='t'/></testsuite>"),
+                    cwd=str(tmp_path), report_path=report)
+    await run_spec(spec, timeout=30)
+    assert not _P(report).exists()
+
+
+async def test_run_spec_keep_report_preserves_own_artifact(tmp_path):
+    # keep_report=True leaves the ICX-owned output on disk so a caller (UI discover/verify/replay) can
+    # read the harness's own census/JSON artifact from that path AFTER run_spec returns. This guards the
+    # bug where run_spec deleted the discover census before the caller read it (-> silent None).
+    from pathlib import Path as _P
+    report = str(tmp_path / ".icx-census.json")
+    spec = _RunSpec(command=_writer_cmd(report, '{"functionalities": [{"functionality": "Create"}]}'),
+                    cwd=str(tmp_path), report_path=report)
+    await run_spec(spec, timeout=30, keep_report=True)
+    assert _P(report).exists()
+    import json as _json
+    assert _json.loads(_P(report).read_text(encoding="utf-8"))["functionalities"][0]["functionality"] == "Create"
 
 
 async def test_run_plan_parallel_concurrent(monkeypatch, tmp_path):
@@ -393,6 +463,49 @@ async def test_run_spec_leaves_non_icx_report(tmp_path):
                     cwd=str(tmp_path), report_path=str(report))
     r = await run_spec(spec, timeout=120)
     assert r.ok is True and report.exists()
+
+
+def test_ui_build_command_verify_mode(tmp_path):
+    # verify mode targets a caller-supplied report path and passes --mode verify to the harness.
+    from icx_engine.testing.runners.ui import _StagehandUi
+    out = str(tmp_path / "verify.json")
+    spec = _StagehandUi().build_command(tmp_path, None, mode="verify", report=out)
+    assert "--mode" in spec.command and spec.command[spec.command.index("--mode") + 1] == "verify"
+    assert spec.report_path == out and out in spec.command
+
+
+def test_ui_build_command_defaults_to_replay(tmp_path):
+    from icx_engine.testing.runners.ui import _StagehandUi
+    spec = _StagehandUi().build_command(tmp_path, None)
+    assert spec.command[spec.command.index("--mode") + 1] == "replay"
+    assert spec.report_path.endswith(".icx-ui-junit.xml")
+
+
+async def test_run_ui_verify_none_when_no_ui_runner(monkeypatch, tmp_path):
+    # best-effort: no stagehand runner detected -> returns None, never raises.
+    import icx_engine.testing.local_executor as le
+    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
+                        lambda repo, category=None: [])
+    r = await le.run_ui_verify(tmp_path, flow_path="/f.json", target_url="http://x")
+    assert r is None
+
+
+def test_parse_report_path_dir_rejects_stale_xml(tmp_path):
+    # A report DIRECTORY (Surefire/Gradle) may hold XML from a PRIOR build. When the runner fails to
+    # regenerate it, min_mtime must reject the stale file so it is not scored as this run's green.
+    import os
+    from icx_engine.testing.runners.executor import _parse_report_path
+    d = tmp_path / "surefire"
+    d.mkdir()
+    old = d / "TEST-old.xml"
+    old.write_text('<testsuite name="s" tests="3"><testcase name="a"/><testcase name="b"/>'
+                   '<testcase name="c"/></testsuite>', encoding="utf-8")
+    old_time = 1_000_000.0                       # far in the past
+    os.utime(old, (old_time, old_time))
+    # no min_mtime -> counts the (stale) file
+    assert _parse_report_path(str(d)).total == 3
+    # min_mtime after the file's mtime -> rejected -> empty
+    assert _parse_report_path(str(d), min_mtime=old_time + 100).total == 0
 
 
 def test_spawn_kwargs_no_rlimit_by_default(monkeypatch):

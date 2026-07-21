@@ -26,10 +26,11 @@ from icx_engine.testing.runners.ui import (
 )
 from icx_engine.testing.runners.executor import run_spec, run_plan
 
-# Import for side effect: registers the built-in adapters (unit + api + ui).
-from icx_engine.testing.runners import unit as _unit  # noqa: F401
-from icx_engine.testing.runners import api as _api    # noqa: F401
-from icx_engine.testing.runners import ui as _ui      # noqa: F401
+# Import for side effect: registers the built-in adapters (unit + api + ui + systems).
+from icx_engine.testing.runners import unit as _unit        # noqa: F401
+from icx_engine.testing.runners import api as _api          # noqa: F401
+from icx_engine.testing.runners import ui as _ui            # noqa: F401
+from icx_engine.testing.runners import systems as _systems  # noqa: F401
 
 __all__ = [
     "TestCase", "TestReport", "RunSpec",

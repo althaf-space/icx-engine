@@ -36,6 +36,8 @@ def _record_receipts(state: TestingState, gate: str, response: dict) -> list[dic
 
 _POLL_INTERVAL = 30
 _MAX_RETRIES = 3
+_URL_GATE_MAX_REASK = 3   # gate 3: re-ask a missing ui/agent URL this many times before erroring
+_VERIFY_MAX_HEAL = 2      # author_flow: live-DOM verify+repair rounds before proceeding to the run
 _RETRY_BACKOFF = [5, 15, 45]
 _TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
@@ -147,8 +149,6 @@ def _expand_files_via_graph(
     return sorted(expanded)
 
 
-def _infer_url_from_files(file_paths: list[str], querier: Any | None) -> str | None:
-    return None
 
 
 def _apply_scope(prompt: str | None, file_paths: list[str], scope: str) -> str | None:
@@ -173,10 +173,12 @@ async def node_pick_type(state: TestingState) -> dict:
         "gate": "pick_type",
         "message": (
             "Pick the test type (chosen ONCE - gate 3 will only confirm the URL, not ask this again).\n\n"
-            "  1. ui    - strict Playwright field validation (frontend, needs a URL).\n"
+            "  1. ui    - the full ICX-generated comprehensive flow for the screen (functional + "
+            "negative + boundary + security + a11y + error + workflow), deterministic, identical on "
+            "every agent (frontend, needs a URL).\n"
             "  2. api   - REST endpoint test (backend, needs a URL).\n"
-            "  3. agent - the agent authors a BROAD exploratory flow (edge cases + rich assertions);\n"
-            "             deterministic replay, no runtime LLM (frontend, needs a URL).\n"
+            "  3. agent - everything 'ui' does, PLUS an extra agent-authored exploratory pass appended "
+            "for screen-specific edge cases (frontend, needs a URL).\n"
             "  4. unit  - run the repo's unit tests (no URL, no running app)."
         ),
         "options": ["1. ui", "2. api", "3. agent", "4. unit"],
@@ -258,6 +260,117 @@ async def node_expand_files(state: TestingState) -> dict:
         "classified": [c for c in classified if c["path"] in set(final)],
         "url": confirmed.get("url") or state.get("url"),
         "read_receipts": _record_receipts(state, "expand_scan", scan),
+    }
+
+
+# -- node_analyze_screen: per-framework Element Census (zero-miss backbone) ----
+
+_CENSUS_MAX_REASK = 2   # re-ask the agent this many times when reconciliation counts do not add up
+
+
+async def node_analyze_screen(state: TestingState) -> dict:
+    """Run the framework-specific Element Census so authoring misses NOTHING.
+
+    Selects the analyzer prompt for the detected framework, injects it + the confirmed files, and
+    the agent returns the census/functionality model (strict JSON). ICX then runs the reconciliation
+    gate (counts must add up) and re-asks (bounded) if the census was cut short. The resulting
+    `screen_model` feeds `author_flow`, which converts it into comprehensive ordered steps.
+
+    Fully guarded: no analyzer match, an unparseable model, or any error degrades cleanly to the
+    existing free-authoring behavior - this node can never break a session.
+    """
+    from icx_engine.testing.analyzers import select_analyzer, prompt_text
+    from icx_engine.testing.analyzers.schema import validate_census
+
+    try:
+        spec = select_analyzer(file_paths=state.get("file_paths") or [])
+    except Exception:
+        spec = None
+    if spec is None:
+        return {}   # unknown framework -> skip census, author freely
+
+    try:
+        prompt = prompt_text(spec)
+    except Exception:
+        prompt = ""
+    if not prompt.strip():
+        return {}
+
+    model: dict | None = None
+    coverage = 0.0
+    last_receipt: dict = {}
+    attempt = 0
+    reask_note = ""
+    census_warnings: list[str] = []
+    while attempt <= _CENSUS_MAX_REASK:
+        attempt += 1
+        payload = {
+            "gate": "analyze_screen",
+            "analyzer_id": spec.id,
+            "analyzer_family": spec.family,
+            "file_paths": state.get("file_paths"),
+            "message": (
+                f"ELEMENT CENSUS ({spec.label}). Apply the analyzer prompt to the listed files and "
+                f"return its STRICT JSON census as {{\"screen_model\": {{...}}}}. The census is the ONLY "
+                f"input to test generation - if it is incomplete, the tests are incomplete. ICX LINTS "
+                f"it structurally and RE-ASKS until it is complete; completeness is MANDATORY, not "
+                f"best-effort. Before returning, CONFIRM every item:\n"
+                f"  [ ] EVERY functionality on the screen (list, search, sort, pagination, refresh, "
+                f"create, view, edit, delete, clone, activate, approve, DOWNLOAD/EXPORT, bulk, ...).\n"
+                f"  [ ] EVERY field on each create/edit form, each with its domSelectors.\n"
+                f"  [ ] Each field's real length/format read FROM THE CODE (maxLength/minLength/min/max/"
+                f"pattern; type email/tel/url/number) - the save uses these.\n"
+                f"  [ ] CREATE and EDIT/MODIFY submit buttons captured SEPARATELY (they differ - e.g. "
+                f"Save vs Update); never copy one onto the other.\n"
+                f"  [ ] If a create/edit form is a MULTI-STEP WIZARD (tabs / NEXT navigation), model it "
+                f"as a `steps` array - each step with its fields + nextButton, last step submits. Do "
+                f"NOT flatten a wizard into one field list; it will not run.\n"
+                f"  [ ] DOWNLOAD/EXPORT controls captured as their own functionality (trigger + "
+                f"type Download).\n"
+                f"  [ ] Any app-level confirm popup (NO/YES / OK dialog) - note its confirm-button "
+                f"selector.\n"
+                f"A miss on ANY of these is a missed or broken test. Read every file FULLY first."
+                + (f"\n\nPREVIOUS ATTEMPT REJECTED - FIX: {reask_note}" if reask_note else "")
+                + _REREAD_MANDATE
+            ),
+        }
+        # Send the (large) prompt text only on the FIRST attempt - the agent already has it on
+        # re-ask, and re-embedding 15-33KB in every reask bloats the durable checkpoint.
+        if attempt == 1:
+            payload["analyzer_prompt"] = prompt
+        resp = interrupt(payload)
+        last_receipt = resp if isinstance(resp, dict) else {}
+        raw = last_receipt.get("screen_model") if isinstance(last_receipt, dict) else None
+        report = validate_census(spec.family, raw)
+        # STRUCTURAL LINT (UI only): reconciliation checks counts add up; the lint checks the census is
+        # actually BUILDABLE + correct - create/edit not sharing a submit, every mutating form has its
+        # own submit + trigger, every field has a selector. This enforces census quality independent of
+        # which agent produced it, so no agent's mistake (wrong edit-submit, missing selector) slips
+        # through. Hard defects re-ask; soft warnings are recorded and proceed.
+        lint = None
+        if spec.family == "ui":
+            from icx_engine.testing.analyzers.census_lint import lint_ui_census
+            lint = lint_ui_census(raw if isinstance(raw, dict) else {})
+        if report.ok and (lint is None or lint.ok):
+            model = raw if isinstance(raw, dict) else None
+            coverage = report.coverage_score
+            census_warnings = list(lint.soft) if lint else []
+            break
+        notes = list(report.errors[:6]) if not report.ok else []
+        if lint and lint.hard:
+            notes = (lint.hard[:6] + notes)[:6]
+        reask_note = "; ".join(notes) or "census did not reconcile"
+        coverage = report.coverage_score
+        model = raw if isinstance(raw, dict) else model  # keep best-effort even if not perfect
+        census_warnings = list(lint.soft) if lint else []
+
+    return {
+        "analyzer_id": spec.id,
+        "analyzer_family": spec.family,
+        "screen_model": model,
+        "census_coverage": coverage,
+        "census_warnings": census_warnings,
+        "read_receipts": _record_receipts(state, "analyze_screen", last_receipt),
     }
 
 
@@ -530,7 +643,10 @@ async def node_config_gate(state: TestingState) -> dict:
                 if needs_url else "TARGET URL: not needed for unit tests.\n")
     is_browser = test_type in ("ui", "agent")
     visible_line = ("BROWSER: headless (hidden, faster) by default. Reply visible:true to WATCH the "
-                    "test drive a real browser.\n" if is_browser else "")
+                    "test drive a real browser.\n"
+                    "SLOWMO: when visible, each step is slowed + paused so you can follow it. Reply "
+                    "slowmo:<ms> to set the pace (default 1000 = 1s when visible; 0 when headless). "
+                    "Ask the user what slowmo they want before accepting.\n" if is_browser else "")
 
     response = interrupt({
         "gate": 3,
@@ -546,16 +662,43 @@ async def node_config_gate(state: TestingState) -> dict:
         "risk_tier": tier,
         "recommended_layers": recommended,
         "optional_layers": optional_extra,
-        "current": {"url": cur_url, "visible": not state.get("headless", True)},
+        "constraint_source_options": {
+            "static": "ICX generates field values from the census constraints read from the code "
+                      "(fast, deterministic; blind to config/country/tenant rules not literal in source)",
+            "runtime": "the harness reads each field's ACTUALLY-APPLIED constraints on the live page "
+                       "(real maxLength/type/min/max) and generates the value in-browser - honors "
+                       "config-driven / per-country rules (e.g. a MSISDN length set at runtime)",
+            "both": "runtime, seeded with the census semantic hint (recommended for config-heavy apps)"},
+        "current": {"url": cur_url, "visible": not state.get("headless", True),
+                    "slowmo_default_when_visible": 1000,
+                    "test_writes": bool(state.get("test_writes", True)),
+                    "constraint_source": state.get("constraint_source", "both")},
     })
 
     layers = response.get("layers") if isinstance(response, dict) else None
     selected = [str(l) for l in layers] if isinstance(layers, list) and layers else recommended
     final_url = (response.get("url") if isinstance(response, dict) else None) or state.get("url")
 
+    # ui/agent need a URL. If none was supplied, RE-ASK (a fresh interrupt) rather than raising -
+    # raising would escape the unguarded graph.ainvoke in the resume handler and, because the
+    # gate-3 resume value is already consumed, every retry would replay the url-less value and
+    # re-raise, permanently stranding the session. A fresh interrupt lets the next resume deliver
+    # the URL. Bounded so a client that never supplies one cannot loop forever.
+    reask = 0
+    while test_type in ("ui", "agent") and not final_url and reask < _URL_GATE_MAX_REASK:
+        reask += 1
+        r2 = interrupt({
+            "gate": 3,
+            "needs_url": True,
+            "test_type": test_type,
+            "message": (f"A TARGET URL is REQUIRED for a '{test_type}' test and none is set. "
+                        f"Reply with the URL to test, e.g. {{\"url\": \"http://...\"}}."),
+        })
+        if isinstance(r2, dict) and r2.get("url"):
+            final_url = r2["url"]
     if test_type in ("ui", "agent") and not final_url:
         raise ValueError(
-            f"test_type '{test_type}' requires a URL. Provide url in your config response."
+            f"test_type '{test_type}' requires a URL but none was provided after {reask} attempts."
         )
 
     update: dict[str, Any] = {
@@ -564,10 +707,34 @@ async def node_config_gate(state: TestingState) -> dict:
         "status": "running",
     }
     # Visible browser option (ui/agent): visible:true -> headed replay so the user can watch.
-    if isinstance(response, dict) and "visible" in response:
-        update["headless"] = not bool(response.get("visible"))
-    elif isinstance(response, dict) and "headless" in response:
-        update["headless"] = bool(response.get("headless"))
+    resp = response if isinstance(response, dict) else {}
+    if "visible" in resp:
+        headless = not bool(resp.get("visible"))
+    elif "headless" in resp:
+        headless = bool(resp.get("headless"))
+    else:
+        headless = bool(state.get("headless", True))
+    update["headless"] = headless
+    # slowmo (ui/agent only): 0 when headless; when visible, the user-chosen ms or 1s default so a
+    # human can follow each step. Ignored for api/unit.
+    if is_browser:
+        if headless:
+            slowmo = 0
+        else:
+            raw = resp.get("slowmo")
+            try:
+                slowmo = max(0, int(raw)) if raw is not None else 1000
+            except (TypeError, ValueError):
+                slowmo = 1000
+        update["slowmo"] = slowmo
+    # test_writes override (ui/agent/api): the user can turn real Create/Update/Delete writes off at
+    # this gate for a read-only environment, without restarting the session.
+    if "test_writes" in resp:
+        update["test_writes"] = bool(resp.get("test_writes"))
+    # constraint_source: user picks how field values honor constraints (static census vs live-DOM runtime).
+    cs = str(resp.get("constraint_source", "")).strip().lower()
+    if cs in ("static", "runtime", "both"):
+        update["constraint_source"] = cs
     if final_url:
         update["url"] = final_url
     for k in ("api_endpoint", "api_method", "api_payload", "api_payload_type", "api_headers"):
@@ -687,6 +854,44 @@ def _local_repo_root(state: TestingState) -> str:
         return dirs[0] or os.getcwd()
 
 
+def _session_storage(state: TestingState) -> str | None:
+    """Path to the captured/inline authenticated session (Playwright storageState) for this URL, or
+    None. Shared by discovery, verify/heal, and the scored replay so all three run logged-in."""
+    try:
+        host = _auth.host_of(state.get("url") or "")
+        project = state.get("project")
+        rec = _auth.load_session(project, host) if project and host else None
+        if rec and rec.storage_state and Path(rec.storage_state).exists():
+            return rec.storage_state
+    except Exception:
+        pass
+    return None
+
+
+async def _combined_census(state: TestingState, source_model: dict) -> dict:
+    """The ONE census path for UI/agent: fuse the runtime-DISCOVERED census (live DOM crawl) with the
+    source census the agent produced. Discovery supplies real selectors, real control kinds, and the
+    real wizard-step structure (it can never name a selector that does not exist); source supplies the
+    JS-hidden constraints (maxLength/regex/format) and any fields the crawler could not read. Merged
+    they beat either alone - this is why COMBINED is the only method, not a user-selectable mode.
+
+    Degrades to the source census ONLY when the live app/session is physically unavailable (tooling
+    absent, app down, empty crawl) - a fallback, never a choice. Never raises."""
+    try:
+        from icx_engine.testing.local_executor import run_ui_discovery
+        from icx_engine.testing.analyzers.census_merge import merge_census
+        repo = _local_repo_root(state)
+        resolver = await _runtime_resolver(repo)
+        discovered = await run_ui_discovery(
+            repo, state.get("url") or "", storage_state=_session_storage(state),
+            runtime_resolver=resolver, ui_headed=not state.get("headless", True))
+        if isinstance(discovered, dict) and discovered.get("functionalities"):
+            merged = merge_census(discovered, source_model)
+            if isinstance(merged, dict) and merged.get("functionalities"):
+                return merged
+    except Exception:
+        pass
+    return source_model
 
 
 def _flow_key(state: TestingState) -> str:
@@ -700,8 +905,51 @@ def _flow_key(state: TestingState) -> str:
 
 
 def route_after_auth(state: TestingState) -> str:
-    """UI/agent flows author a Stagehand flow before running; unit/api run directly."""
-    return "author_flow" if state.get("test_type") in ("ui", "agent") else "local_run"
+    """UI/agent author a Stagehand flow; unit WITH a census authors tests first; api/plain-unit run."""
+    tt = state.get("test_type")
+    if tt in ("ui", "agent"):
+        return "author_flow"
+    if tt == "unit" and isinstance(state.get("screen_model"), dict) and state.get("screen_model"):
+        return "unit_author"
+    return "local_run"
+
+
+# per-language test-authoring guidance for the unit_author gate, keyed to the census analyzer family.
+_UNIT_FRAMEWORK_HINT = {
+    "cpp":  "C/C++: GoogleTest (TEST/TEST_F) or Catch2 (TEST_CASE), registered via CMake add_test so ctest runs them.",
+    "sql":  "SQL routines: utPLSQL (--%test), tSQLt (test schema procs), or pgTAP - matching your ICX_SQL_TEST_CMD framework.",
+    "grpc": "gRPC: a client that calls each rpc and asserts the response/status, runnable via your ICX_GRPC_TEST_CMD.",
+    "iac":  "IaC: policy/validation assertions (checkov custom checks / tflint rules / terraform validate) per your ICX_IAC_TEST_CMD.",
+    "backend": "the repo's unit framework (pytest / JUnit / jest / go test / cargo test / rspec / phpunit) - one test per unit/handler.",
+    "ui":   "the repo's unit framework for these components.",
+}
+
+
+async def node_unit_author(state: TestingState) -> dict:
+    """UNIT test authoring from the Element Census: instruct the agent to WRITE comprehensive tests
+    covering EVERY unit/routine/function the census enumerated, using its own editor, so the language
+    runner (pytest/ctest/utPLSQL/...) discovers and executes them on the next step. This is what makes
+    the unit family comprehensive - without it the census would be informational only. Guarded: no
+    census -> no-op (plain run of whatever tests already exist)."""
+    model = state.get("screen_model")
+    if not (isinstance(model, dict) and model):
+        return {}
+    fam = str(state.get("analyzer_family") or "backend")
+    hint = _UNIT_FRAMEWORK_HINT.get(fam, _UNIT_FRAMEWORK_HINT["backend"])
+    resp = interrupt({
+        "gate": "unit_author",
+        "analyzer_family": fam,
+        "analyzer_id": state.get("analyzer_id"),
+        "screen_model": model,
+        "message": (
+            "WRITE COMPREHENSIVE UNIT TESTS from the Element Census in gate.screen_model. Cover EVERY "
+            "testable unit / routine / function / endpoint it lists - happy path AND edge/invalid/error "
+            "cases and every validation. Use YOUR EDITOR to create the test files IN THE REPO so the "
+            f"runner discovers them. Framework: {hint} Do not skip any censused unit - a missed unit is "
+            "a missed test. When the files are written, confirm to proceed to the run."
+        ),
+    })
+    return {"read_receipts": _record_receipts(state, "unit_author", resp if isinstance(resp, dict) else {})}
 
 
 async def node_author_flow(state: TestingState) -> dict:
@@ -711,7 +959,7 @@ async def node_author_flow(state: TestingState) -> dict:
     'agent' = a broad, EXPLORATORY flow authored by the agent (more paths, edge cases, richer
     assertions). Both replay identically and deterministically - the difference is authoring depth,
     not runtime behavior. UI/agent only."""
-    from icx_engine.testing.runners.ui import UiFlow, UiStep, save_flow
+    from icx_engine.testing.runners.ui import UiFlow, UiStep, save_flow, flow_path
     test_type = state.get("test_type") or "ui"
     if test_type == "agent":
         scope_line = (
@@ -728,29 +976,206 @@ async def node_author_flow(state: TestingState) -> dict:
             "behaviours under test for this screen. Minimal, deterministic, no exploration - just the "
             "exact steps and assertions a user performs for the change being verified."
         )
-    response = interrupt({
-        "gate": "author_flow",
-        "test_type": test_type,
-        "message": (
-            f"{scope_line}\n\n"
-            "Read the screen source fully, then produce the ordered steps - INCLUDING any login "
-            "steps. Each step: {action: goto|fill|click|assert, target: <selector or url>, "
-            "value?: <text/expected>, description?: <intent>}. This is cached and replayed "
-            "DETERMINISTICALLY (no LLM on rerun); a stale selector fails loud."
-        ),
-        "url": state.get("url"),
-        "file_paths": state.get("file_paths"),
-    })
-    steps_raw = response.get("steps") if isinstance(response, dict) else None
-    steps = [
-        UiStep(action=str(s.get("action", "")), target=str(s.get("target", "")),
-               value=str(s.get("value", "")), description=str(s.get("description", "")))
-        for s in (steps_raw or []) if isinstance(s, dict)
-    ]
+    auth_mode = str(state.get("auth_mode") or "public")
+    if auth_mode in ("capture", "inline", "reuse"):
+        # A session was captured/reused: ICX restores it (cookies + localStorage + sessionStorage)
+        # BEFORE navigation, so the app boots already logged in. Do NOT re-author login steps.
+        login_line = (
+            "A saved login session WILL be restored automatically before the flow runs, so do NOT "
+            "author any login steps. Step 1 is goto the target URL directly; the app is already "
+            "authenticated. FIRST assert you are past login: waitfor a stable element that only "
+            "exists AFTER login (e.g. a nav/dashboard item), THEN interact - never assert page text "
+            "before that element is visible (the SPA renders after load)."
+        )
+    else:
+        login_line = (
+            "This app has NO saved session, so author the LOGIN steps for THIS app first (do not "
+            "assume a 2-field form): fill each real field, select any dropdown (e.g. tenant), click "
+            "the REAL submit control, then waitfor a post-login element before continuing."
+        )
+    # Model-driven authoring: when the Element Census produced a screen_model, the flow must exercise
+    # EVERY functionality and EVERY validation in it - that is what turns a shallow script into
+    # comprehensive coverage. Otherwise fall back to reading the screen directly.
+    model = state.get("screen_model")
+    if isinstance(model, dict) and model:
+        census_line = (
+            "A full ELEMENT CENSUS model is provided in gate.screen_model (coverage "
+            f"{state.get('census_coverage', 0.0)}). CONVERT IT INTO STEPS - do not improvise scope:\n"
+            " - one scenario per functionality (list render, search, sort, pagination, page-size, "
+            "refresh, create, view, edit, delete, and any others in the model);\n"
+            " - for CREATE/EDIT: waitfor the modal, fill EVERY field in fields[], then submit;\n"
+            " - for EVERY validation in validationMatrix: TRIGGER it (submit empty / invalid / "
+            "over-max-length / duplicate) and ASSERT its inline error or toast text;\n"
+            " - open VIEW and EDIT modals and assert their headers;\n"
+            " - use each field's domSelectors ladder; prefer the FIRST candidate that resolves.\n"
+            "Nothing in the census may be left unexercised - a missed element is a missed test."
+        )
+    else:
+        census_line = (
+            "No census model was produced (unknown framework). Read the screen source fully and "
+            "cover every interactive element, field, validation, and message yourself."
+        )
+    writes_line = (
+        "DATA WRITES ARE ENABLED: actually submit Create/Update and perform Delete against the live "
+        "app. Use clearly-tagged test data (prefix names with 'ICX_TEST_') so created records are "
+        "identifiable, and where a delete exists, delete what you created at the end to clean up."
+        if state.get("test_writes", True) else
+        "DATA WRITES ARE DISABLED: exercise the forms (open/fill/reset/validate/cancel) and open "
+        "view/edit, but do NOT click the final Save/Update or confirm a Delete."
+    )
+    if isinstance(model, dict) and model:
+        # COMBINED CENSUS (the ONLY UI census path): fuse the live-DOM crawl with the agent's source
+        # census before converting to steps. Discovery gives real selectors/kinds/wizard-nav; source
+        # gives JS-hidden constraints + fields the crawler cannot see. Always attempted for ui/agent;
+        # degrades to the source census only when the live app/session is physically unavailable.
+        if test_type in ("ui", "agent") and state.get("url"):
+            model = await _combined_census(state, model)
+        # DETERMINISTIC CONVERSION: ICX builds the comprehensive flow from the census ITSELF - so the
+        # steps are IDENTICAL and complete on every agent (Claude/Cursor/Windsurf/...). The agent's
+        # job was the census (structured + reconciliation-verified), NOT authoring browser steps -
+        # that is where cross-agent accuracy used to vary. This is the UI analogue of to_api_spec.
+        # verify/heal (below) repairs any census selector that does not resolve on the live DOM.
+        from icx_engine.testing.analyzers.to_flow import census_to_flow
+        gen = census_to_flow(model, state.get("url") or "", bool(state.get("test_writes", True)),
+                             str(state.get("constraint_source", "both")))
+        steps = [
+            UiStep(action=str(s.get("action", "")), target=str(s.get("target", "")),
+                   value=str(s.get("value", "")), description=str(s.get("description", "")),
+                   soft=bool(s.get("soft", False)))
+            for s in gen if isinstance(s, dict)
+        ]
+        response = {"generated_from_census": True, "step_count": len(steps)}
+        # AGENT mode = the deterministic census flow PLUS an agent-authored EXPLORATORY augmentation.
+        # 'ui' is the exact deterministic flow (identical on every agent); 'agent' additionally lets
+        # the connected agent append extra edge-case scenarios the census-driven base did not cover,
+        # so the advertised "broader" distinction is real. The base is unchanged (still consistent);
+        # only appended steps vary by agent.
+        if test_type == "agent":
+            from icx_engine.testing.analyzers.scenarios import build_scenario_guidance
+            _guidance = build_scenario_guidance(state.get("nl_intent"), state.get("acceptance_criteria"))
+            extra = interrupt({
+                "gate": "author_flow_explore",
+                "test_type": "agent",
+                "base_step_count": len(steps),
+                "screen_model": model,
+                "message": (
+                    "The comprehensive deterministic flow (functional + negative + boundary + security "
+                    "+ a11y + error + workflow) is ALREADY generated. As the agent, APPEND extra "
+                    "EXPLORATORY steps for edge cases it did not cover - unusual interaction orders, "
+                    "state combinations, business-rule corners specific to THIS screen. Same step "
+                    "schema {action,target,value?,description?}, same actions. Return {\"steps\":[...]} "
+                    "of ONLY your additional steps (they run after the base). Return {\"steps\":[]} if "
+                    "nothing to add." + _guidance),
+                "url": state.get("url"),
+                "file_paths": state.get("file_paths"),
+            })
+            xtra = extra.get("steps") if isinstance(extra, dict) else None
+            for s in (xtra or []):
+                if isinstance(s, dict) and s.get("action"):
+                    steps.append(UiStep(action=str(s.get("action", "")), target=str(s.get("target", "")),
+                                        value=str(s.get("value", "")),
+                                        description="EXPLORATORY: " + str(s.get("description", ""))))
+    else:
+        # No census (unknown framework) -> fall back to agent-authored steps.
+        response = interrupt({
+            "gate": "author_flow",
+            "test_type": test_type,
+            "auth_mode": auth_mode,
+            "analyzer_id": state.get("analyzer_id"),
+            "census_coverage": state.get("census_coverage", 0.0),
+            "test_writes": state.get("test_writes", True),
+            "message": (
+                f"{scope_line}\n\n"
+                f"{login_line}\n\n"
+                f"{census_line}\n\n"
+                f"{writes_line}\n\n"
+                "Produce the ordered steps. Each step: "
+                "{action, target: <CSS selector or url>, value?: <text/option/expected>, description?}.\n"
+                "Actions:\n"
+                "  goto    - navigate (target = url)\n"
+                "  fill    - type into an input (target = selector, value = text)\n"
+                "  select  - choose a <select> dropdown option (target = select selector, value = option "
+                "label; e.g. a tenant/org picker)\n"
+                "  click   - click a control (target = the REAL selector, e.g. #loginButton - do NOT "
+                "assume button[type=submit])\n"
+                "  waitfor - wait until a selector is visible (post-login redirect / async render)\n"
+                "  assert  - check an element's text (target = selector, value = expected substring)\n"
+                "Use the ACTUAL selectors READ FROM the live source (ids/data-testid/text) - never invent "
+                "a data-testid that is not in the DOM. For a SPA (hash/client routing), goto the FULL url "
+                "INCLUDING the # fragment, and waitfor a real element before filling/asserting (the DOM "
+                "renders after load). Cached + replayed DETERMINISTICALLY (no LLM on rerun); a stale "
+                "selector fails loud."
+            ),
+            "url": state.get("url"),
+            "file_paths": state.get("file_paths"),
+        })
+        steps_raw = response.get("steps") if isinstance(response, dict) else None
+        steps = [
+            UiStep(action=str(s.get("action", "")), target=str(s.get("target", "")),
+                   value=str(s.get("value", "")), description=str(s.get("description", "")))
+            for s in (steps_raw or []) if isinstance(s, dict)
+        ]
     flow = UiFlow(name=str(state.get("test_type") or "ui"), url=state.get("url") or "",
                   authored=bool(steps), steps=steps)
-    save_flow(_flow_key(state), flow)
-    return {"read_receipts": _record_receipts(state, "author_flow", response if isinstance(response, dict) else {})}
+    key = _flow_key(state)
+    save_flow(key, flow)
+
+    # VERIFY + HEAL (best-effort, ui/agent only): probe every selector against the LIVE DOM before
+    # the scored run and re-ask the agent to repair any that do not resolve. This is what turns a
+    # comprehensive-but-guessed flow into one that fires cleanly first time. Fully guarded - if the
+    # tooling/app/session is unavailable, verify returns None and we proceed unchanged.
+    receipts = _record_receipts(state, "author_flow", response if isinstance(response, dict) else {})
+    if steps and test_type in ("ui", "agent"):
+        try:
+            from icx_engine.testing.local_executor import run_ui_verify
+            repo = _local_repo_root(state)
+            storage_state = _session_storage(state)
+            resolver = await _runtime_resolver(repo)
+            for _heal in range(_VERIFY_MAX_HEAL):
+                report = await run_ui_verify(
+                    repo, flow_path(key), target_url=state.get("url"), storage_state=storage_state,
+                    runtime_resolver=resolver, ui_headed=not state.get("headless", True))
+                if not report:
+                    break   # tooling/app unavailable -> skip healing
+                bad = [s for s in report.get("steps", [])
+                       if s.get("status") in ("broken", "invalid-selector", "ambiguous")]
+                if not bad:
+                    break   # every selector resolves on the live DOM -> clean
+                fix = interrupt({
+                    "gate": "author_flow_heal",
+                    "message": (
+                        "LIVE-DOM VERIFY found selectors that do not resolve on the real page. Repair "
+                        "ONLY these (re-read the live DOM - a data-testid on a third-party component "
+                        "often never renders; use the real class/label; use .first() for multi-match). "
+                        "Return the COMPLETE corrected flow as {\"steps\": [...]}."),
+                    "broken_selectors": bad,
+                    "verify_summary": {"broken": report.get("broken"), "ambiguous": report.get("ambiguous")},
+                })
+                fsteps = fix.get("steps") if isinstance(fix, dict) else None
+                if not isinstance(fsteps, list) or not fsteps:
+                    break
+                steps = [UiStep(action=str(s.get("action", "")), target=str(s.get("target", "")),
+                                value=str(s.get("value", "")), description=str(s.get("description", "")))
+                         for s in fsteps if isinstance(s, dict)]
+                flow = UiFlow(name=str(test_type), url=state.get("url") or "",
+                              authored=bool(steps), steps=steps)
+                save_flow(key, flow)
+                receipts = _record_receipts({"read_receipts": receipts}, "author_flow_heal",
+                                            fix if isinstance(fix, dict) else {})
+        except GraphBubbleUp:
+            # interrupt() pauses the graph by raising GraphInterrupt (a GraphBubbleUp / Exception).
+            # It MUST propagate - the broad except below would otherwise SWALLOW the pause and the
+            # author_flow_heal gate would never fire (the whole point of verify/heal).
+            raise
+        except Exception:
+            pass   # verify itself is best-effort; never block authoring on a probe error
+
+    # Persist the COMBINED census so downstream (coverage, memory, api-spec) sees the merged model,
+    # not the pre-merge source census.
+    out = {"read_receipts": receipts}
+    if isinstance(model, dict) and model:
+        out["screen_model"] = model
+    return out
 
 
 # lang aliases: runner.lang -> Runtime Manager language key
@@ -803,24 +1228,34 @@ async def node_local_run(state: TestingState) -> dict:
         from icx_engine.testing.runners.ui import flow_path
         ui_flow_path = flow_path(_flow_key(state))
         # Load an authenticated session (captured/inline) so the replay runs already logged in.
-        try:
-            host = _auth.host_of(state.get("url") or "")
-            project = state.get("project")
-            rec = _auth.load_session(project, host) if project and host else None
-            if rec and rec.storage_state and Path(rec.storage_state).exists():
-                storage_state = rec.storage_state
-        except Exception:
-            storage_state = None
+        storage_state = _session_storage(state)
+    elif test_type == "api":
+        # Materialize the backend census into openapi.json + *.hurl so schemathesis (schema fuzz) and
+        # hurl (scripted per-endpoint status asserts) have something to run - the census IS the spec.
+        model = state.get("screen_model")
+        if isinstance(model, dict) and model and str(state.get("analyzer_family")) == "backend":
+            try:
+                from icx_engine.testing.analyzers.to_api_spec import materialize_api_spec
+                materialize_api_spec(model, repo, state.get("url") or "")
+            except Exception:
+                pass
     try:
         resolver = await _runtime_resolver(repo)
         res = await run_local_verification(
             repo, test_type, target_url=state.get("url"), runtime_resolver=resolver,
             ui_flow_path=ui_flow_path, storage_state=storage_state,
             ui_headed=not state.get("headless", True),
+            ui_slowmo=int(state.get("slowmo") or 0),
         )
     except Exception as exc:
+        # An execution error is a FAILURE, not a pass. Emit an issue so route_after_check_issues does
+        # not treat empty issues as "all tests passed" (which would make memory_save record a false
+        # green). The review gate then surfaces it to the user.
         return {"status": "error", "last_error": f"local verification failed: {exc}",
-                "run_id": "local", "issues": []}
+                "run_id": "local",
+                "issues": [{"name": "verification_error",
+                            "description": f"local verification failed to run: {exc}",
+                            "severity": "high", "detail": {}}]}
 
     # DoD integration: derive a confidence report from the suite result so the agent can feed
     # record_verification / save_memory. One DoD item per runner (evidence = its command + summary).
@@ -835,8 +1270,67 @@ async def node_local_run(state: TestingState) -> dict:
             "command": str(rep.get("runner", "")),
             "output": f"total={rep.get('total', 0)}",
         } for rep in res.get("reports", [])]
+        # Census coverage as a DoD dimension: when the Element Census ran, surface how completely the
+        # authored tests cover the screen model (1.0 = every censused element reconciled). This makes
+        # "nothing missed" a visible, scored part of Definition-of-Done, not just an internal check.
+        cov = float(state.get("census_coverage") or 0.0)
+        if state.get("screen_model") is not None:
+            dod_items.append({
+                "check": f"element-census coverage ({state.get('analyzer_id') or 'analyzer'})",
+                "method": "census-reconciliation",
+                "passed": cov >= 0.999,
+                "command": "analyze_screen",
+                "output": f"coverage={cov}",
+            })
+            res["census_coverage"] = cov
         res["confidence"] = build_confidence_report(dod_items, tier, layers)
         res["dod_items"] = dod_items
+    except Exception:
+        pass
+
+    # STATIC SECURITY (always on): native, no-install scan of the repo source - leaked secrets, dangerous
+    # code patterns (SAST-lite), and dependency/SCA - folded onto res['security']. Fully guarded; a scan
+    # failure never affects the node result. Runtime DAST probes run separately inside the UI/API flow.
+    try:
+        from icx_engine.testing.security import fold_into_result
+        fold_into_result(res, repo)
+    except Exception:
+        pass
+
+    # TEST QUALITY (always on, honest): regression selection (relevant tests for the change), performance
+    # regression (when before/after metrics are provided), and mutation scoring (opt-in via a report path).
+    # Each reports real data or an honest 'not run: <reason>'. Fully guarded - never affects the result.
+    try:
+        from icx_engine.testing.quality_advisory import fold_quality
+        fold_quality(res, repo)
+    except Exception:
+        pass
+
+    # ANALYTICS (opt-in, off by default): record this run into the local history store. Fully guarded
+    # - a recording failure never affects the node result.
+    try:
+        from icx_engine.testing.analytics.record import analytics_enabled, record_from_result
+        if analytics_enabled():
+            import time as _t
+            record_from_result(res, app=str(state.get("project") or state.get("url") or "app"),
+                               run_id=f"{state.get('project') or 'run'}-{int(_t.time())}", ts=_t.time())
+    except Exception:
+        pass
+
+    # HUMAN REPORT (always on): write a browser-viewable HTML report of this run to
+    # ~/.icx/testing/reports/ (or ICX_TEST_REPORTS_DIR) + refresh index.html. Fully guarded - a report
+    # write never affects the node result. The MCP agent gets the structured result; this is the mirror
+    # a human can open and read.
+    try:
+        import time as _rt
+        from icx_engine.testing.reporting.session_report import write_session_report
+        write_session_report(res, {
+            "app": str(state.get("project") or state.get("url") or "app"),
+            "url": str(state.get("url") or ""),
+            "test_type": str(state.get("test_type") or res.get("test_type") or ""),
+            "ts": int(_rt.time()),
+            "run_id": f"{state.get('project') or 'run'}-{int(_rt.time())}",
+        })
     except Exception:
         pass
 

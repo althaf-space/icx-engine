@@ -2731,6 +2731,64 @@ def test_setup(
         console.print("\n[bold green]Testing tooling ready.[/bold green]")
 
 
+@test_app.command("benchmark")
+def test_benchmark(
+    repeats: Annotated[int, typer.Option("--repeats", help="Scored repeat runs per app (feeds flakiness).")] = 2,
+    out: Annotated[str, typer.Option("--out", help="Path for the HTML scorecard.")] = "benchmark_scorecard.html",
+    storage_state: Annotated[str, typer.Option("--storage-state", help="Playwright storageState JSON for an authenticated app.")] = "",
+    install_browsers: Annotated[bool, typer.Option("--install-browsers/--no-install-browsers",
+        help="Approve installing a missing ICX_UI_TARGETS engine (firefox/webkit) on demand.")] = False,
+) -> None:
+    """Run the ICX testing benchmark across the corpus and write an HTML scorecard.
+
+    Measures coverage, misfire rate, flakiness, authoring effort, and speed on ground-truth-labeled
+    apps, and places ICX's measured numbers beside competitors' published figures. Apps that are not
+    reachable are skipped. Requires the UI tooling (run 'icx test setup') and the apps to be running.
+    """
+    import asyncio
+    from pathlib import Path as _Path
+    from icx_engine.testing.benchmark.runner import run_benchmark
+    from icx_engine.testing.benchmark.report import render_scorecard
+
+    approve = (lambda _engine: True) if install_browsers else None
+    metrics = asyncio.run(run_benchmark(repeats=repeats, storage_state=storage_state or None, approve=approve))
+    if not metrics:
+        typer.echo("No apps produced a benchmark run (apps unreachable or UI tooling missing).")
+        raise typer.Exit(code=0)
+    for m in metrics:
+        typer.echo(f"{m.app}: recall={round(100 * m.coverage.recall)}% "
+                   f"misfire={round(100 * m.misfire_rate)}% flakiness={round(100 * m.flakiness)}% "
+                   f"authoring_actions={m.authoring_actions} tests={m.total_tests}")
+    path = render_scorecard(metrics, _Path(out))
+    typer.echo(f"Scorecard written to {path}")
+
+
+@test_app.command("analytics")
+def test_analytics(
+    out: Annotated[str, typer.Option("--out", help="Path for the HTML analytics dashboard.")] = "test_analytics.html",
+    last: Annotated[int, typer.Option("--last", help="How many recent runs to analyze.")] = 10,
+) -> None:
+    """Render the local run-history analytics dashboard (flakiness, pass trend, slowest tests, heals).
+
+    Reads the local run history recorded when ICX_TEST_ANALYTICS=1 was set during test runs. Shows an
+    empty dashboard when no runs have been recorded yet.
+    """
+    from pathlib import Path as _Path
+    from icx_engine.testing.analytics.store import AnalyticsStore
+    from icx_engine.testing.analytics.dashboard import render_dashboard
+
+    try:
+        store = AnalyticsStore()
+        try:
+            path = render_dashboard(store, _Path(out), last_n=last)
+        finally:
+            store.close()
+    except Exception as exc:
+        typer.echo(f"Analytics unavailable: {exc}")
+        raise typer.Exit(code=0)
+    typer.echo(f"Analytics dashboard written to {path}")
+
+
 def _resolve_or_prompt_harness_node(yes: bool, node_opt: str = "") -> str | None:
     """Return a validated Node >= 18 executable for the UI harness, or None.
 

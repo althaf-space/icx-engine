@@ -6,8 +6,16 @@ ICX. Falls back to stdlib only if defusedxml is unavailable (declared dependency
 module importable in a partial env)."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
+
+# Characters that are INVALID in XML 1.0 (C0 controls except tab/LF/CR). Runners routinely embed
+# these in failure text - e.g. Playwright colours its call log with ANSI escapes (ESC = 0x1B) and
+# pytest/jest do the same. Left in place they make the whole document "not well-formed" and the
+# parse yields ZERO cases (the "0 tests ran" bug). We strip them before parsing so a report with
+# failures is still readable.
+_INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 try:
     from defusedxml.ElementTree import fromstring as _xml_fromstring
@@ -43,6 +51,7 @@ def parse_junit_xml(source: str) -> TestReport:
         text = source
 
     report = TestReport()
+    text = _INVALID_XML_CHARS.sub("", text)
     try:
         root = _xml_fromstring(text)
     except _XML_ERRORS:

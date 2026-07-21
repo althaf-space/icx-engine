@@ -95,10 +95,24 @@ def _merge(reports: list[TestReport]) -> TestReport:
     return out
 
 
-def _parse_report_path(report_path: str) -> TestReport:
+def _parse_report_path(report_path: str, min_mtime: float | None = None) -> TestReport:
+    """Parse the runner's JUnit output. When report_path is a DIRECTORY (Surefire/Gradle build dirs,
+    which we cannot clean because they are the user's build output), `min_mtime` rejects any *.xml
+    older than the run start - so a runner that failed to launch or exited without regenerating XML
+    scores as "no tests ran" instead of silently reusing a PREVIOUS build's green report."""
     p = Path(report_path)
     if p.is_dir():
-        reports = [parse_junit_xml(str(x)) for x in sorted(p.glob("*.xml"))]
+        xmls = sorted(p.glob("*.xml"))
+        if min_mtime is not None:
+            fresh = []
+            for x in xmls:
+                try:
+                    if x.stat().st_mtime >= min_mtime:
+                        fresh.append(x)
+                except OSError:
+                    pass
+            xmls = fresh
+        reports = [parse_junit_xml(str(x)) for x in xmls]
         merged = _merge(reports) if reports else TestReport()
         merged.raw_path = report_path
         return merged
@@ -109,7 +123,7 @@ def _parse_report_path(report_path: str) -> TestReport:
     return TestReport(raw_path=report_path)
 
 
-async def run_spec(spec: RunSpec, timeout: float = 600.0) -> TestReport:
+async def run_spec(spec: RunSpec, timeout: float = 600.0, keep_report: bool = False) -> TestReport:
     """Execute a RunSpec asynchronously and return the normalized TestReport. Guarded - never raises
     (except a genuine cancellation, which is re-raised after killing the process tree).
 
@@ -119,6 +133,11 @@ async def run_spec(spec: RunSpec, timeout: float = 600.0) -> TestReport:
     so a crashed/absent runner can never be scored against a previous run's XML. On timeout OR
     cancellation the FULL process tree is killed (no orphan browsers/JVMs/workers). stdout/stderr go
     to DEVNULL - the JUnit file, not console output, is the result, so nothing is buffered in memory.
+
+    keep_report=True skips the post-run deletion of an ICX-owned report file so a caller that reads the
+    harness's own output artifact (the UI discover/verify/replay helpers write a census/JSON to that
+    path and read it AFTER this returns) still finds it; those callers own the cleanup themselves. The
+    pre-run freshness delete still happens either way.
     """
     # Freshness: never let a prior run's file masquerade as this run's result.
     _clean_own_report(spec.report_path)
@@ -126,6 +145,9 @@ async def run_spec(spec: RunSpec, timeout: float = 600.0) -> TestReport:
     cmd0 = spec.command[0] if spec.command else "?"
     env = {**os.environ, **(spec.env or {})}
     t0 = time.monotonic()
+    # Wall-clock start (with 1s tolerance for FS/clock jitter) so a directory of pre-existing build
+    # XML from a PRIOR run is never scored as this run's result when the runner fails to regenerate it.
+    start_wall = time.time() - 1.0
     _log.debug("runner start: cmd=%s cwd=%s timeout=%.0fs", cmd0, spec.cwd, timeout)
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -136,7 +158,7 @@ async def run_spec(spec: RunSpec, timeout: float = 600.0) -> TestReport:
     except (OSError, ValueError) as exc:
         # Runner missing / bad command -> parse whatever exists (own file was just cleaned -> none).
         _log.warning("runner not launchable: cmd=%s err=%s", cmd0, exc)
-        return _parse_report_path(spec.report_path)
+        return _parse_report_path(spec.report_path, min_mtime=start_wall)
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -155,9 +177,12 @@ async def run_spec(spec: RunSpec, timeout: float = 600.0) -> TestReport:
         _log.warning("runner wait failed: cmd=%s err=%s", cmd0, exc)
         with contextlib.suppress(Exception):
             await proc.wait()
-    report = _parse_report_path(spec.report_path)
-    # Do not litter the user's repo: remove our own report once parsed (data is in `report`).
-    _clean_own_report(spec.report_path)
+    report = _parse_report_path(spec.report_path, min_mtime=start_wall)
+    # Do not litter the user's repo: remove our own report once parsed (data is in `report`). A caller
+    # that reads the harness's own output artifact from this path afterwards passes keep_report=True and
+    # cleans it up itself.
+    if not keep_report:
+        _clean_own_report(spec.report_path)
     _log.info("runner done: cmd=%s dur=%.2fs total=%d pass=%d fail=%d err=%d",
               cmd0, time.monotonic() - t0, report.total, report.passed, report.failures, report.errors)
     return report

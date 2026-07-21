@@ -271,7 +271,8 @@ def _install_ui_bundle(spec: RunnerSpec, dest: Path, node_dir: str | None = None
     npm_exe = _npm_for(node_dir)
     try:
         npm = [npm_exe, "install", "--prefix", str(dest),
-               f"{spec.package}@{spec.version}", f"playwright@{pw_version}"]
+               f"{spec.package}@{spec.version}", f"playwright@{pw_version}",
+               "pixelmatch@5.3.0", "pngjs@7.0.0", "axe-core@4.10.0"]
         r1 = subprocess.run(win_argv(npm), capture_output=True, text=True, timeout=600, env=base_env)
         if r1.returncode != 0:
             _log.warning("UI npm install failed (rc=%s): %s", r1.returncode,
@@ -340,6 +341,74 @@ def ensure_runner(name: str, approve: Callable[[str], bool] | None = None,
     return None
 
 
+_BROWSER_ENGINES = ("chromium", "firefox", "webkit")
+
+
+def _harness_node_dir() -> str | None:
+    """Resolve the pinned harness Node's dir the same way `_install_ui_bundle` gets its `node_dir` -
+    via `runtime_manager.resolve_harness_node()` (env override -> configured path -> registry ->
+    discovery), same resolution `ui_auth._harness_env()` uses. Best-effort: any failure or an
+    unresolved node falls back to None, so the caller uses bare 'node' from PATH (prior behavior)."""
+    try:
+        from icx_engine.runtime_manager import resolve_harness_node
+        node_exe = resolve_harness_node()
+        return str(Path(node_exe).parent) if node_exe else None
+    except Exception:
+        return None
+
+
+def ensure_browser(engine: str, approve: Callable[[str], bool] | None = None) -> bool:
+    """Ensure the Playwright `engine` browser binary is present in the UI bundle's pinned browsers
+    dir, installing it there (never globally) only when missing AND approved. Returns True when
+    present or successfully installed, False otherwise. Never raises.
+
+    Reuses the same mechanism as the Chromium download in `_install_ui_bundle`: the browsers dir
+    pinned under the Stagehand install, `node node_modules/playwright/cli.js install <engine>` run
+    with PLAYWRIGHT_BROWSERS_PATH pointed at that dir (falling back to the playwright-core cli.js or
+    the .bin/playwright shim, same as the Chromium path). The node used is the pinned harness Node
+    resolved via `_harness_node_dir()` (falls back to bare PATH 'node' if unresolved), never a bare
+    'node' by default - avoids picking up whatever stray/old node happens to be on PATH. Approval:
+    `approve(name)->bool`; when None, auto-approve only if ICX_AUTO_INSTALL_RUNNERS=1 (same gate as
+    ensure_runner).
+    """
+    engine = (engine or "").strip().lower()
+    if engine not in _BROWSER_ENGINES:
+        return False
+    sh = installed_path("stagehand")
+    if not sh:
+        return False
+    dest = Path(sh)
+    root = browsers_dir(dest)
+    if root.is_dir() and any(root.glob(f"{engine}-*")):
+        return True                                     # already installed
+
+    approved = approve(engine) if approve is not None else os.environ.get("ICX_AUTO_INSTALL_RUNNERS") == "1"
+    if not approved:
+        return False
+
+    node_dir = _harness_node_dir()
+    cli_js = None
+    for rel in ("node_modules/playwright/cli.js", "node_modules/playwright-core/cli.js"):
+        cand = dest / rel
+        if cand.is_file():
+            cli_js = str(cand)
+            break
+    if cli_js:
+        cmd = [_node_exe(node_dir), cli_js, "install", engine]
+    else:
+        pw_bin = dest / "node_modules" / ".bin" / ("playwright.cmd" if os.name == "nt" else "playwright")
+        cmd = [str(pw_bin), "install", engine]
+
+    from icx_engine._proc import win_argv
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        env = {**_node_path_env(node_dir), "PLAYWRIGHT_BROWSERS_PATH": str(root)}
+        r = subprocess.run(win_argv(cmd), capture_output=True, text=True, timeout=1800, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and root.is_dir() and any(root.glob(f"{engine}-*"))
+
+
 def harness_path() -> str:
     """Path to the packaged Stagehand replay harness (.mjs ships with ICX)."""
     return str(Path(__file__).parent / "assets" / "icx-replay.mjs")
@@ -348,6 +417,11 @@ def harness_path() -> str:
 def auth_harness_path() -> str:
     """Path to the packaged Playwright session-capture harness (.mjs ships with ICX)."""
     return str(Path(__file__).parent / "assets" / "icx-auth.mjs")
+
+
+def discover_harness_path() -> str:
+    """Path to the packaged runtime census AUTO-DISCOVERY harness (.mjs ships with ICX)."""
+    return str(Path(__file__).parent / "assets" / "icx-discover.mjs")
 
 
 def runtime_harness_path(basename: str, packaged: str) -> str:

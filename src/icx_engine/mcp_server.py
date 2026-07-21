@@ -571,6 +571,7 @@ file_paths: FRONTEND/UI source SEED file(s) for the screen being tested (.js/.js
 context: one-line description of what changed - used for graph expansion and shown at all gates.
 test_mode: REQUIRED - "automated" or "manual". You MUST ask the user before calling this tool.
 max_iterations: max automated fix loops before Limit Gate. Default from config (3).
+nl_intent / acceptance_criteria: optional, seed extra NL/ticket-driven scenarios (agent test_type).
 
 DEFAULT POSTURE - ICX gate data is for the USER to read and decide. You never advance the
 workflow on your own except to GENERATE the test spec at Gate 2b. Everywhere else: present the
@@ -664,8 +665,8 @@ ask, and wait for the user's reply before responding. NEVER auto-fill, default, 
 
 AGENT-GENERATE gates - the answer is YOURS to produce. You generate each fully and submit it
 directly. You MUST NOT delegate these to the user or ask them to write them:
-    2b, compat_scan, author_flow, expand_scan
-    (2b: json_spec generation; compat_scan: file compatibility detection; author_flow: UI flow steps; expand_scan: repo grep for related files)
+    2b, compat_scan, author_flow, expand_scan, analyze_screen, author_flow_heal, author_flow_explore, unit_author
+    (2b: json_spec generation; compat_scan: file compatibility detection; author_flow: UI flow steps; expand_scan: repo grep for related files; analyze_screen: framework Element Census; author_flow_heal: repair selectors verify flagged; author_flow_explore: agent-mode extra exploratory steps appended to the deterministic base; unit_author: write unit tests from the census)
 
 DEFAULT POSTURE - ICX gate data is for the USER to read and decide. You never advance the
 workflow on your own except to generate the spec at Gate 2b. Everywhere else: present the
@@ -819,6 +820,51 @@ Gate "expand" - File confirmation [USER-DECISION]:
   (Seed selection - endpoint/route, changed UI, or backend->UI grep bridge - happened before
   start_testing_session; see that tool. Here you only expand + confirm.)
   Response: {"confirmed_files": ["abs/path/Screen.jsx", ...], "url": "<optional>"}
+
+Gate "analyze_screen" - Element Census [AGENT-GENERATE]:
+  ICX selected the framework-specific analyzer prompt (gate.analyzer_id / gate.analyzer_family) and
+  put its FULL text in gate.analyzer_prompt. APPLY that prompt to the confirmed files and return its
+  STRICT JSON census - EXACTLY the schema the prompt defines - wrapped as {"screen_model": {...}}.
+  The census enumerates EVERY interactive element, field, validation, and message and reconciles the
+  counts (coverageReport.reconciliation). This model is what makes authoring miss NOTHING - a missed
+  census element is a missed test. If the reconciliation counts do not add up, ICX re-asks naming the
+  shortfall; fix it and resubmit. Read every file fully first (RE-READ RULE).
+  ICX ALSO LINTS the census structurally (agent-independent) and RE-ASKS on hard defects, so no agent's
+  mistake slips through: (a) CREATE and EDIT/MODIFY must have DIFFERENT submit selectors - never copy
+  one onto the other; (b) every create/edit form needs its own submit + trigger; (c) every field needs
+  a domSelectors/selector; (d) no duplicate functionality ids. Soft advisories (a text field with no
+  captured length/format constraint) are recorded, not blocking - but capture length/format from the
+  code (maxLength/minLength/min/max/pattern, type email/tel/url/number) because the save uses them.
+  (At authoring time ICX also crawls the LIVE screen and FUSES that discovered census with yours -
+  the COMBINED census - so real rendered selectors/wizard-nav back your JS-hidden constraints. You
+  only produce the source census here; the live crawl and merge are automatic.)
+  Response: {"screen_model": { ...the analyzer prompt's strict JSON... }, "read_receipts": [...]}
+
+Gate "author_flow_heal" - Selector repair [AGENT-GENERATE]:
+  ICX ran a LIVE-DOM verify probe and found selectors in your authored flow that do NOT resolve on
+  the real page (gate.broken_selectors: each with its target + status broken|ambiguous|invalid).
+  A data-testid passed to a third-party component often never renders (verify against the LIVE DOM,
+  not the source); use the real class/label/text, and .first() for a legitimately-multi-match target.
+  Repair ONLY the flagged selectors and return the COMPLETE corrected flow.
+  Response: {"steps": [ {full corrected step}, ... ]}
+
+Gate "author_flow_explore" - Agent exploratory augmentation [AGENT-GENERATE, agent mode only]:
+  ICX already generated the full deterministic flow (functional + negative + boundary + security +
+  a11y + error + workflow). APPEND extra EXPLORATORY steps for screen-specific edge cases the base
+  did not cover (unusual interaction orders, state combinations, business-rule corners). Same step
+  schema + actions. Return {"steps": [...]} of ONLY your additional steps, or {"steps": []} if none.
+  When nl_intent and/or acceptance_criteria were supplied to start_testing_session, the message also
+  carries a REQUESTED scenarios block - author one additional scenario for the NL intent and one for
+  each acceptance criterion, asserting its expected outcome.
+
+Gate "unit_author" - Write unit tests from the census [AGENT-GENERATE]:
+  For a unit test, ICX gives you the Element Census (gate.screen_model) enumerating every testable
+  unit/routine/function of the module. WRITE COMPREHENSIVE tests covering EVERY one of them - happy
+  path + edge/invalid/error cases + every validation - using YOUR editor to create the test files IN
+  THE REPO (framework in gate.message, keyed to gate.analyzer_family: GoogleTest/Catch2 for C/C++,
+  utPLSQL/tSQLt/pgTAP for SQL, pytest/JUnit/jest/go test/cargo/rspec/phpunit for language units). The
+  runner discovers and runs them on the next step. Do not skip any censused unit. Confirm when done.
+  Response: {"read_receipts": [...]}   (acknowledge; the tests you wrote are in the repo)
 
 Gate "compat_scan" - File compatibility detection [AGENT-GENERATE]:
   This gate is YOURS to produce. Do NOT show it to the user or wait for their reply.
@@ -1018,12 +1064,15 @@ Gate "3" - URL confirmation [automated only]:
      TARGET URL: <gate.current.url or 'NOT SET'>
      (unit needs no URL.) Reply 'accept' to run your chosen type, or list layers to override.
      For ui/agent: the test replays HEADLESS (hidden) by default. Ask if the user wants to WATCH it
-     (visible browser); if yes, include visible:true."
+     (visible browser); if yes, include visible:true. If visible, ALSO ask the user the SLOWMO pace
+     in ms (how long to slow + pause on each step so they can follow) - DEFAULT 1000 (1s) when
+     visible, 0 when headless - and pass it as slowmo."
   WAIT for user reply on ALL fields. Responding without all answers is a CRITICAL VIOLATION.
   (RULE 3: URL must be explicitly confirmed by user. Never submit a URL you assumed.)
   Response: {"layers":["unit","api",...],
              "url":"http://...",
-             "visible": true|false}   (ui/agent only - true = watch the browser)
+             "visible": true|false,   (ui/agent only - true = watch the browser)
+             "slowmo": 1000}          (ui/agent + visible only - ms slowed+paused per step; default 1000, headless forces 0)
   --- After this response ICX runs the local verification suite. Do not timeout. Wait for next gate. ---
 
 Gate "auth_gate" - Authentication configuration [USER-DECISION]:
@@ -1055,10 +1104,19 @@ Gate "author_flow" - UI test flow authoring [AGENT-GENERATE, ui/agent test types
   Both replay identically + deterministically - the difference is authoring depth, not runtime.
     gate.file_paths: the UI source file(s) describing the screen and its flow.
     gate.url: the application URL for this screen.
-  Each step: {action: "goto"|"fill"|"click"|"assert", target: "<selector or url>",
-              value?: "<text to type / expected text>", description?: "<intent>"}.
+  Each step: {action, target: "<CSS selector or url>", value?, description?}. Actions:
+    goto (url) | fill (input, text) | select (a <select> dropdown, value=option label, e.g. a
+    tenant/org picker) | click (the REAL selector, e.g. #loginButton - NOT assumed button[type=submit])
+    | waitfor (selector visible, for post-login redirect / async render) | assert (element text
+    contains value). Use REAL selectors READ from the live DOM (ids/data-testid/text) - never invent
+    a data-testid. For a SPA (hash/client routing) goto the FULL url INCLUDING the # fragment, and
+    waitfor a real element before filling/asserting (the DOM renders after load).
+  AUTH: if auth_mode is capture/inline/reuse, a saved session is RESTORED automatically (cookies +
+    localStorage + sessionStorage) before the flow runs - do NOT author login steps; goto the target
+    URL directly and waitfor a post-login element first. Only author login steps for a public app
+    with no saved session (do NOT assume a 2-field form; fill/select/click the app's REAL controls).
   Response: {"steps": [ {step}, ... ], "read_receipts": [{"path": "<p>", "line_count": <n>, "last_line": "<text>"}]}
-  - steps: the complete ordered flow. Login steps come first when auth_mode is capture/inline.
+  - steps: the complete ordered flow.
   - read_receipts: one entry per file you opened and read fully this step (path, total line count, text of the last line).
   - This is your generation - not the user's. Produce it and submit it directly.
 
@@ -2406,6 +2464,14 @@ async def _list_tools() -> list[Tool]:
                     "context": {"type": "string"},
                     "max_iterations": {"type": "integer", "minimum": 1},
                     "test_mode": {"type": "string", "enum": ["automated", "manual"]},
+                    "test_writes": {"type": "boolean",
+                                    "description": "UI/agent: allow real Create/Update/Delete writes against the live app (default true). Set false for a read-only environment - the flow then exercises forms (fill/validate/cancel) without submitting a real write."},
+                    "constraint_source": {"type": "string", "enum": ["static", "runtime", "both"],
+                                          "description": "How field VALUES honor constraints (default static). 'static' = ICX generates values from the census constraints read from code. 'runtime' = the harness reads each field's ACTUALLY-APPLIED constraints on the live page (real maxLength/type/min/max) and generates the value in-browser - honors config/country/tenant rules not literal in source (e.g. a per-country MSISDN length set at runtime). 'both' = runtime seeded with the census semantic hint. Also selectable at config gate 3."},
+                    "nl_intent": {"type": "string",
+                                  "description": "Optional plain-English scenario request (e.g. 'test duplicate email error') to seed extra NL-driven test scenarios."},
+                    "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                                            "description": "Optional ticket acceptance criteria to author extra scenarios from."},
                 },
                 "required": ["file_paths", "test_mode"],
             },
@@ -3566,6 +3632,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         context = args.get("context")
         max_iterations = args.get("max_iterations")
         test_mode = args.get("test_mode")
+        nl_intent = args.get("nl_intent") or None
+        acceptance_criteria = args.get("acceptance_criteria") or []
         cfg = _CM.load()
 
         project = None
@@ -3586,17 +3654,27 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             context=context,
             max_iterations=max_iterations if max_iterations is not None else cfg.test_max_iterations,
             test_mode=test_mode,
+            nl_intent=nl_intent,
+            acceptance_criteria=acceptance_criteria,
         )
         initial_state["project"] = project
+        if "test_writes" in args:
+            initial_state["test_writes"] = bool(args.get("test_writes"))
+        if str(args.get("constraint_source", "")).lower() in ("static", "runtime", "both"):
+            initial_state["constraint_source"] = str(args.get("constraint_source")).lower()
         graph = await get_testing_graph()
         config = {"configurable": {"thread_id": session_id}}
         await graph.ainvoke(initial_state, config=config)
         snapshot = await graph.aget_state(config)
         gate_data = {}
-        if snapshot.tasks and snapshot.tasks[0].interrupts:
+        has_interrupt = bool(snapshot.tasks and snapshot.tasks[0].interrupts)
+        if has_interrupt:
             gate_data = snapshot.tasks[0].interrupts[0].value
+        is_done = (not snapshot.next) and (not has_interrupt)
+        vals = getattr(snapshot, "values", None) or {}
         return [TextContent(type="text", text=json.dumps({
             "ok": True, "session_id": session_id, "gate": gate_data,
+            "done": is_done, "status": vals.get("status"),
         }))]
 
     if name == _TESTING_RESUME_TOOL:
@@ -3606,33 +3684,31 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         response = args["response"]
         graph = await get_testing_graph()
         config = {"configurable": {"thread_id": session_id}}
-        # SECURITY: an auth sessionId in the resume payload would be persisted to the
-        # sessions DB writes table. Save it to the auth store and strip it before resuming,
-        # so the durable checkpoint never holds the credential.
-        if (isinstance(response, dict) and response.get("session_id")
-                and str(response.get("auth_mode", "")).lower() in ("capture", "inline")):
-            try:
-                from icx_engine.testing import auth as _auth
-                from icx_engine.testing.nodes import _resolve_project_name
-                pre = await graph.aget_state(config)
-                st = pre.values or {}
-                project = st.get("project") or _resolve_project_name(st.get("file_paths", []))
-                host = _auth.host_of(st.get("url") or "")
-                if project and host:
-                    _auth.save_session(project, host, str(response["session_id"]))
-                    response = {k: v for k, v in response.items() if k != "session_id"}
-            except Exception:
-                pass
+        # SECURITY: an auth sessionId in the resume payload would be persisted to the durable
+        # checkpoint. STRIP it before resuming so the credential never lands on disk. The real
+        # authenticated session is already persisted (with its storage_state path) by the
+        # ui_auth_capture / ui_auth_inline tools - we must NOT re-save here, which would overwrite
+        # that record with an empty storage_state and make the replay run unauthenticated.
+        if isinstance(response, dict) and "session_id" in response:
+            response = {k: v for k, v in response.items() if k != "session_id"}
         await graph.ainvoke(_Command(resume=response), config=config)
         snapshot = await graph.aget_state(config)
         gate_data = {}
-        if snapshot.tasks and snapshot.tasks[0].interrupts:
+        has_interrupt = bool(snapshot.tasks and snapshot.tasks[0].interrupts)
+        if has_interrupt:
             gate_data = snapshot.tasks[0].interrupts[0].value
-        is_done = not snapshot.next
+        # A session is DONE only when nothing is pending AND no gate is waiting for input. A node
+        # with several interrupt() calls (e.g. expand_files: expand_scan then expand) pauses at its
+        # LATER interrupt with snapshot.next == () while an interrupt is still pending - so `not next`
+        # alone would wrongly report done mid-flow and abandon the run before any test executes.
+        is_done = (not snapshot.next) and (not has_interrupt)
+        vals = getattr(snapshot, "values", None) or {}
         return [TextContent(type="text", text=json.dumps({
             "session_id": session_id,
             "done": is_done,
             "gate": gate_data,
+            "status": vals.get("status"),
+            "error": vals.get("last_error") if is_done else None,
         }))]
 
 

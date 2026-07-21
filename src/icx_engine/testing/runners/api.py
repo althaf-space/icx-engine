@@ -20,6 +20,10 @@ _SCHEMA_NAMES = (
 
 
 def _find_schema(repo: Path) -> str | None:
+    # ICX-generated spec (from the backend census) takes precedence, then the repo's own schema.
+    gen = repo / ".icx-apispec" / "openapi.json"
+    if gen.exists():
+        return str(gen)
     for name in _SCHEMA_NAMES:
         p = repo / name
         if p.exists():

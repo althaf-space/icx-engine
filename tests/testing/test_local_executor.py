@@ -178,6 +178,97 @@ def test_stagehand_harness_asset_exists():
     assert all(ord(c) < 128 for c in txt)  # ASCII
 
 
+def test_discover_harness_asset_exists():
+    from icx_engine.testing.runners.install import discover_harness_path
+    from pathlib import Path
+    p = Path(discover_harness_path())
+    assert p.exists() and p.name == "icx-discover.mjs"
+    txt = p.read_text(encoding="utf-8")
+    assert "discoverTopLevel" in txt and "functionalities" in txt
+    assert all(ord(c) < 128 for c in txt)  # ASCII
+
+
+# -- run_ui_discovery: runtime census auto-discovery (COMBINED census, live half) --
+
+async def test_run_ui_discovery_empty_url_returns_none(tmp_path):
+    from icx_engine.testing.local_executor import run_ui_discovery
+    assert await run_ui_discovery(str(tmp_path), "") is None
+
+
+async def test_run_ui_discovery_no_runner_returns_none(monkeypatch, tmp_path):
+    from icx_engine.testing.local_executor import run_ui_discovery
+    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
+                        lambda repo, category=None: [])
+    assert await run_ui_discovery(str(tmp_path), "http://x/#/users") is None
+
+
+async def test_run_ui_discovery_parses_census(monkeypatch, tmp_path):
+    from icx_engine.testing.local_executor import run_ui_discovery
+    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
+                        lambda repo, category=None: [_FakeRunner("stagehand", "ui", "ui")])
+    async def _fake_run_spec(spec, timeout=0, **kwargs):
+        Path(spec.report_path).write_text(
+            '{"functionalities":[{"functionality":"Create","modalDetails":{"triggerSelector":"#c"}}]}',
+            encoding="utf-8")
+    monkeypatch.setattr("icx_engine.testing.runners.executor.run_spec", _fake_run_spec)
+    out = await run_ui_discovery(str(tmp_path), "http://x/#/users")
+    assert isinstance(out, dict)
+    assert out["functionalities"][0]["functionality"] == "Create"
+
+
+async def test_run_ui_discovery_empty_crawl_returns_none(monkeypatch, tmp_path):
+    from icx_engine.testing.local_executor import run_ui_discovery
+    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
+                        lambda repo, category=None: [_FakeRunner("stagehand", "ui", "ui")])
+    async def _fake_run_spec(spec, timeout=0, **kwargs):
+        Path(spec.report_path).write_text('{"functionalities":[]}', encoding="utf-8")
+    monkeypatch.setattr("icx_engine.testing.runners.executor.run_spec", _fake_run_spec)
+    assert await run_ui_discovery(str(tmp_path), "http://x/#/users") is None
+
+
+# -- COMBINED census wiring: author_flow always fuses discovery + source ------
+
+def _source_model():
+    return {"functionalities": [{"functionality": "Create",
+            "modalDetails": {"triggerSelector": "#c"}, "submitButton": {"selectors": ["#s"]},
+            "fields": [{"label": "Name", "domSelectors": ["#n"], "type": "text"}]}]}
+
+
+async def test_author_flow_merges_discovered_census(monkeypatch, tmp_path):
+    from icx_engine.testing.runners import ui as _ui
+    monkeypatch.setattr(_ui, "_ui_cache_dir", lambda: tmp_path)
+    async def _disc(repo, url, **kw):
+        # discovery surfaces an Export the source census missed
+        return {"functionalities": [{"functionality": "Export CSV",
+                "modalDetails": {"triggerSelector": "#exp"}, "type": "Download"}]}
+    async def _none(*a, **k):
+        return None
+    monkeypatch.setattr(le, "run_ui_discovery", _disc)
+    monkeypatch.setattr(le, "run_ui_verify", _none)   # skip the live-DOM heal probe
+    out = await node_author_flow({"test_type": "ui", "url": "http://x/#/u",
+                                  "file_paths": ["src/U.jsx"], "project": "PC1",
+                                  "screen_model": _source_model()})
+    merged = out["screen_model"]
+    kinds = [f["functionality"] for f in merged["functionalities"]]
+    assert "Create" in kinds and any("Export" in k for k in kinds)   # both halves present
+
+
+async def test_author_flow_degrades_to_source_when_no_discovery(monkeypatch, tmp_path):
+    from icx_engine.testing.runners import ui as _ui
+    monkeypatch.setattr(_ui, "_ui_cache_dir", lambda: tmp_path)
+    async def _disc(repo, url, **kw):
+        return None                                    # app/session unavailable
+    async def _none(*a, **k):
+        return None
+    monkeypatch.setattr(le, "run_ui_discovery", _disc)
+    monkeypatch.setattr(le, "run_ui_verify", _none)
+    out = await node_author_flow({"test_type": "ui", "url": "http://x/#/u",
+                                  "file_paths": ["src/U.jsx"], "project": "PC2",
+                                  "screen_model": _source_model()})
+    kinds = [f["functionality"] for f in out["screen_model"]["functionalities"]]
+    assert kinds == ["Create"]                          # unchanged source census
+
+
 def test_ui_build_command_points_at_packaged_harness(tmp_path):
     from icx_engine.testing.runners import get_runner
     spec = get_runner("stagehand").build_command(tmp_path, runtime_path=None)
@@ -360,8 +451,12 @@ async def test_node_local_run_passes_storage_state(monkeypatch, tmp_path):
     monkeypatch.setattr(_le, "run_local_verification", _fake)
 
     await node_local_run({"engine": "local", "test_type": "ui", "url": "http://x",
-                          "project": "proj", "file_paths": [str(tmp_path / "a.jsx")]})
+                          "project": "proj", "file_paths": [str(tmp_path / "a.jsx")],
+                          "headless": False, "slowmo": 1500})
     assert seen.get("storage_state") == str(state_file)
+    # node_local_run forwards the gate's headed + slowmo choice to the executor
+    assert seen.get("ui_headed") is True
+    assert seen.get("ui_slowmo") == 1500
 
 
 # -- installed ICX tool is put on the runner's PATH --------------------------------
@@ -406,6 +501,23 @@ async def test_ui_headed_env_injected(monkeypatch, tmp_path):
     captured.clear()
     await le.run_local_verification(tmp_path, "ui", target_url="http://x", ui_headed=False)
     assert "ICX_UI_HEADED" not in captured["env"]
+
+
+async def test_ui_slowmo_env_injected(monkeypatch, tmp_path):
+    fake = _FakeRunner("stagehand", "ui", "ui")
+    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
+                        lambda repo, category=None: [fake])
+    captured = {}
+    async def _run_plan(specs, parallel=True, timeout=600.0):
+        captured["env"] = specs[0].env
+        return [(specs[0], _report(passed=1))]
+    monkeypatch.setattr("icx_engine.testing.runners.run_plan", _run_plan)
+    await le.run_local_verification(tmp_path, "ui", target_url="http://x", ui_headed=True, ui_slowmo=1000)
+    assert captured["env"].get("ICX_UI_SLOWMO") == "1000"
+    # slowmo 0 (headless) -> not set
+    captured.clear()
+    await le.run_local_verification(tmp_path, "ui", target_url="http://x", ui_slowmo=0)
+    assert "ICX_UI_SLOWMO" not in captured["env"]
 
 
 async def test_author_flow_agent_is_exploratory_ui_is_scripted(monkeypatch, tmp_path):

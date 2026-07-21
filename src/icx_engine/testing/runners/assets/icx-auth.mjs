@@ -1,8 +1,13 @@
 // ICX session-capture harness (Playwright).
 //
-// Captures an authenticated browser session as a Playwright storageState JSON (cookies +
-// localStorage), which the replay harness then loads so UI tests run already logged in. NO
-// credentials are ever typed into an agent chat - either the user logs in by hand in a real
+// Captures an authenticated browser session so the replay harness runs already logged in. Two
+// artifacts are written:
+//   <out>          - the Playwright storageState JSON (cookies + localStorage).
+//   <out>.session  - a JSON snapshot of sessionStorage. Playwright storageState does NOT capture
+//                    sessionStorage, yet many SPAs gate authenticated routes on it (e.g. a user
+//                    object in sessionStorage). Without this companion, a restored session lands
+//                    back on the login page. The replay harness re-injects it via addInitScript.
+// NO credentials are ever typed into an agent chat - either the user logs in by hand in a real
 // browser (capture), or the app credentials are passed straight to this process (inline).
 //
 // Modes:
@@ -18,6 +23,8 @@
 //
 // Playwright + its Chromium are installed by ICX under ~/.icx/testing (runner-install manager).
 // This file is a packaged ICX asset; it is not run in ICX's own Python test suite.
+
+import { writeFileSync } from "node:fs";
 
 function arg(name, def = "") {
   const i = process.argv.indexOf(name);
@@ -53,6 +60,16 @@ async function main() {
   const browser = await chromium.launch({ headless });
   const context = await browser.newContext();
   const page = await context.newPage();
+
+  // sessionStorage is per-page and NOT part of storageState, so snapshot it on every navigation.
+  // Keep the LAST good snapshot so we still have it even if the user closes the window before we
+  // reach the save block (the capture-without-success-url path).
+  let lastSession = "{}";
+  const snapSession = async () => {
+    try { lastSession = await page.evaluate(() => JSON.stringify(window.sessionStorage)); }
+    catch (_) { /* page navigating/closed - keep the previous snapshot */ }
+  };
+  page.on("framenavigated", snapSession);
 
   let ok = false;
   try {
@@ -96,6 +113,10 @@ async function main() {
     // Save the session while the context is still alive.
     try {
       await context.storageState({ path: out });
+      // Companion sessionStorage snapshot (best-effort, freshest available).
+      await snapSession();
+      try { writeFileSync(`${out}.session`, lastSession || "{}", "utf-8"); }
+      catch (e) { console.error(`icx-auth: could not save sessionStorage companion: ${e}`); }
     } catch (e) {
       console.error(`icx-auth: could not save session: ${e}`);
       ok = false;
