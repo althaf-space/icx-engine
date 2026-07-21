@@ -217,47 +217,57 @@ def _remove_toml(path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# ICX-first ticket-routing enforcement (Claude Code)
+# ICX enforcement (Claude Code) - boost channel + ticket routing
 #
-# On `icx mcp setup --host claude`, ICX installs two layers so a bare ticket
-# reference (ABC-123, a Jira/GitHub/Linear/GitLab issue URL) the user types is
-# always routed through the ICX MCP server before any other tracker or a repo
-# read - the user never has to say "use icx":
+# On `icx mcp setup --host claude`, ICX installs two layers so EVERY request the
+# user types is routed through the ICX boost channel first, and a work-tracker
+# ticket reference (ABC-123, a Jira/GitHub/Linear/GitLab issue URL) additionally
+# routes through the tracker - the user never has to say "use icx":
 #   1. A UserPromptSubmit hook (a standalone detector script written to
-#      ~/.icx/hooks/) that injects a mandatory routing directive when it spots
-#      a ticket reference. The directive is CONDITIONAL - it self-neutralizes
-#      when the match is not really a ticket or when ICX is not connected.
+#      ~/.icx/hooks/) that injects a mandatory boost directive on every prompt,
+#      plus the ticket-routing directive when a ticket is detected. Directives are
+#      CONDITIONAL - they self-neutralize when ICX is not connected.
 #   2. A marker-delimited rule block in ~/.claude/CLAUDE.md.
 # Both are idempotent and merge-safe (existing hooks / memory are preserved),
-# and are removed by `icx mcp remove --host claude`.
+# and are removed by `icx mcp remove --host claude`. Everything MCP-related lives
+# in `icx mcp setup` / `icx mcp remove` - there is no separate hook command.
 # ---------------------------------------------------------------------------
 
-_HOOK_FILENAME = "icx-ticket-gate.py"
+_HOOK_FILENAME = "icx-boost-gate.py"
+# Older installs shipped this name; detected + cleaned up so a re-run of `icx mcp setup`
+# (or `icx mcp remove`) migrates them without leaving a stale hook behind.
+_LEGACY_HOOK_FILENAMES = ("icx-ticket-gate.py",)
 _RULE_START = "<!-- ICX-ROUTING:START (managed by `icx mcp setup`) -->"
 _RULE_END = "<!-- ICX-ROUTING:END -->"
 
 _RULE_BLOCK = f"""{_RULE_START}
-## ICX routing (work-tracker tickets)
+## ICX (thinking channel + work-tracker routing)
 
-When my message references a work-tracker issue - a ticket key like `ABC-123` or a
-Jira / GitHub / Linear / GitLab issue URL - and the ICX MCP server is connected
-(`mcp__icx__*` tools are available), you MUST call `mcp__icx__analyze_issue_fast`
-FIRST, before reading any code, running grep/glob/Read, or using any other
-issue-tracker MCP or integration. ICX is the sole tracker interface when it is
-connected. Only skip this when ICX is not connected or the reference is clearly not a
-work item.
+When the ICX MCP server is connected (`mcp__icx__*` tools are available):
+
+- For ANY request, call `mcp__icx__icx_boost` FIRST - before reading code, running
+  grep/glob/Read, or answering - and then follow the boosted brief it returns (its
+  methodology, gathered context, gate sequence, and boosted_prompt).
+- If my message references a work-tracker issue - a ticket key like `ABC-123` or a
+  Jira / GitHub / Linear / GitLab issue URL - call `mcp__icx__analyze_issue_fast`
+  FIRST for the ticket, before any other issue-tracker MCP or integration. ICX is the
+  sole tracker interface when it is connected.
+
+Only skip this when ICX is not connected.
 {_RULE_END}"""
 
 # Standalone detector. Pure stdlib, no ICX import, so it adds no startup latency
-# on every prompt. Written verbatim to ~/.icx/hooks/icx-ticket-gate.py.
+# on every prompt. Written verbatim to ~/.icx/hooks/icx-boost-gate.py.
 _HOOK_SCRIPT = r'''#!/usr/bin/env python
-"""ICX routing gate - Claude Code UserPromptSubmit hook (installed by `icx mcp setup`).
+"""ICX boost gate - Claude Code UserPromptSubmit hook (installed by `icx mcp setup`).
 
-Detects a work-tracker ticket reference in the user's prompt (bare key like ABC-123, or a
-Jira/GitHub/Linear/GitLab issue URL) and injects a mandatory directive telling Claude to
-route through the ICX MCP server first. Fully guarded: on any error it emits nothing and
-exits 0, so it can never block a turn. The directive is conditional, so a false match or a
-disconnected ICX is harmless.
+On EVERY prompt it injects a mandatory directive telling Claude to run the request through the
+ICX boost channel first (mcp__icx__icx_boost). When the prompt also references a work-tracker
+ticket (bare key like ABC-123, or a Jira/GitHub/Linear/GitLab issue URL) it appends the
+ticket-routing directive (mcp__icx__analyze_issue_fast). Pure stdlib, no ICX import, so it adds
+no startup latency. Fully guarded: on any error it emits nothing and exits 0, so it can never
+block a turn. Both directives are conditional on ICX actually being connected, so they are
+harmless when it is not.
 """
 import sys
 import json
@@ -274,18 +284,31 @@ _URL_RE = re.compile(
 )
 _REPO_ISSUE_RE = re.compile(r"\b[\w.-]+/[\w.-]+#\d+\b")
 
-_DIRECTIVE = (
-    "[ICX ROUTING - MANDATORY WHEN APPLICABLE]\n"
-    "A work-tracker ticket reference was detected in the user's message. "
-    "IF the ICX MCP server is connected (tools named mcp__icx__* are available) AND this "
-    "is genuinely a work-tracker issue (Jira, GitHub, Linear, GitLab, etc.), you MUST call "
-    "mcp__icx__analyze_issue_fast FIRST - before reading any code, running grep/glob/Read, "
-    "or calling any other issue-tracker MCP or integration - passing the ticket key or URL. "
-    "ICX is the sole tracker interface when it is connected; do not fetch the ticket through "
-    "any other connector. "
-    "IF the reference is clearly NOT a work item (e.g. UTF-8, COVID-19, a version string) or "
-    "ICX is not connected, ignore this note and proceed normally."
+_BOOST_DIRECTIVE = (
+    "[ICX BOOST - MANDATORY WHEN CONNECTED]\n"
+    "IF the ICX MCP server is connected (tools named mcp__icx__* are available), you MUST call "
+    "mcp__icx__icx_boost FIRST with the user's request - before reading any code, running "
+    "grep/glob/Read, or answering - and then follow the boosted brief it returns (its "
+    "methodology, the gathered context, the gate sequence, and the boosted_prompt). This applies "
+    "to EVERY request. IF ICX is not connected, ignore this note and proceed normally."
 )
+
+_TICKET_DIRECTIVE = (
+    "[ICX ROUTING - MANDATORY WHEN APPLICABLE]\n"
+    "A work-tracker ticket reference was also detected. IF ICX is connected AND this is genuinely "
+    "a work-tracker issue (Jira, GitHub, Linear, GitLab, etc.), call mcp__icx__analyze_issue_fast "
+    "for the ticket - passing the ticket key or URL - before any other issue-tracker MCP or "
+    "integration. ICX is the sole tracker interface when it is connected. IF the reference is "
+    "clearly NOT a work item (e.g. UTF-8, COVID-19, a version string) or ICX is not connected, "
+    "ignore this note."
+)
+
+
+def _is_ticket(prompt):
+    for m in _TICKET_RE.findall(prompt):
+        if m.upper() not in _DENY:
+            return True
+    return bool(_URL_RE.search(prompt) or _REPO_ISSUE_RE.search(prompt))
 
 
 def main():
@@ -293,21 +316,15 @@ def main():
         raw = sys.stdin.read()
         data = json.loads(raw) if raw.strip() else {}
         prompt = str(data.get("prompt", ""))
-        if not prompt:
+        if not prompt.strip():
             return
-        hit = False
-        for m in _TICKET_RE.findall(prompt):
-            if m.upper() not in _DENY:
-                hit = True
-                break
-        if not hit and (_URL_RE.search(prompt) or _REPO_ISSUE_RE.search(prompt)):
-            hit = True
-        if not hit:
-            return
+        ctx = _BOOST_DIRECTIVE
+        if _is_ticket(prompt):
+            ctx = ctx + "\n\n" + _TICKET_DIRECTIVE
         out = {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": _DIRECTIVE,
+                "additionalContext": ctx,
             }
         }
         sys.stdout.write(json.dumps(out))
@@ -343,8 +360,10 @@ def _hook_command() -> str:
 
 
 def _is_icx_hook_group(group: dict) -> bool:
+    names = (_HOOK_FILENAME,) + _LEGACY_HOOK_FILENAMES
     for h in group.get("hooks", []):
-        if isinstance(h, dict) and _HOOK_FILENAME in str(h.get("command", "")):
+        cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
+        if any(n in cmd for n in names):
             return True
     return False
 
@@ -353,6 +372,14 @@ def _write_hook_script() -> None:
     d = _icx_hooks_dir()
     d.mkdir(parents=True, exist_ok=True)
     _atomic_write(_hook_script_path(), _HOOK_SCRIPT)
+    # Remove any superseded legacy hook script so only the current one remains.
+    for legacy in _LEGACY_HOOK_FILENAMES:
+        lp = d / legacy
+        if lp.exists():
+            try:
+                lp.unlink()
+            except OSError:
+                pass
 
 
 def _install_settings_hook() -> None:
@@ -375,7 +402,7 @@ def _install_settings_hook() -> None:
             "type": "command",
             "command": _hook_command(),
             "timeout": 5,
-            "statusMessage": "ICX: checking for ticket reference...",
+            "statusMessage": "ICX: boosting your request...",
         }]
     })
     hooks["UserPromptSubmit"] = ups
@@ -434,21 +461,21 @@ def _remove_claude_md_rule() -> bool:
 
 
 def install_enforcement(host: MCPHost) -> list[str]:
-    """Install ICX-first ticket-routing enforcement for a host. No-op (returns []) for
-    hosts that do not support it. Returns human-readable messages of what was installed.
-    Guarded per-step so a failure in one layer never aborts MCP registration."""
+    """Install ICX enforcement for a host: the boost channel on every prompt + ticket routing.
+    No-op (returns []) for hosts that do not support it. Returns human-readable messages of what
+    was installed. Guarded per-step so a failure in one layer never aborts MCP registration."""
     if not host.enforces:
         return []
     messages: list[str] = []
     try:
         _write_hook_script()
         _install_settings_hook()
-        messages.append(f"ticket-routing hook installed ({_claude_settings_path()})")
+        messages.append(f"boost + routing hook installed ({_claude_settings_path()})")
     except Exception as exc:
-        messages.append(f"could not install ticket-routing hook: {exc}")
+        messages.append(f"could not install boost hook: {exc}")
     try:
         _install_claude_md_rule()
-        messages.append(f"routing rule written to {_claude_md_path()}")
+        messages.append(f"boost + routing rule written to {_claude_md_path()}")
     except Exception as exc:
         messages.append(f"could not write routing rule: {exc}")
     return messages
@@ -461,12 +488,13 @@ def remove_enforcement(host: MCPHost) -> list[str]:
     messages: list[str] = []
     try:
         if _remove_settings_hook():
-            messages.append("ticket-routing hook removed")
-        script = _hook_script_path()
-        if script.exists():
-            script.unlink()
+            messages.append("boost hook removed")
+        for name in (_HOOK_FILENAME,) + _LEGACY_HOOK_FILENAMES:
+            script = _icx_hooks_dir() / name
+            if script.exists():
+                script.unlink()
     except Exception as exc:
-        messages.append(f"could not remove ticket-routing hook: {exc}")
+        messages.append(f"could not remove boost hook: {exc}")
     try:
         if _remove_claude_md_rule():
             messages.append("routing rule removed from CLAUDE.md")

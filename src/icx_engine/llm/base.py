@@ -250,6 +250,13 @@ class LLMProvider(ABC):
     @abstractmethod
     async def analyze(self, raw: RawIssueData) -> IssueContext: ...
 
+    async def generate(self, prompt: str) -> str:
+        """Optional generic text generation (used by the boost benchmark). Providers that support a
+        plain completion override this; the default signals it is unavailable."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support generic generation; configure a provider that does "
+            f"(e.g. google) as the ICX model for the boost benchmark.")
+
 
 _PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {}
 

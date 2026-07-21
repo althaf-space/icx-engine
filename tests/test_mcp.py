@@ -800,11 +800,11 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 34
+    assert len(tools) == 35
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
-        "get_methodology", "lock_plan",
+        "get_methodology", "lock_plan", "icx_boost",
         "ui_auth_capture", "ui_auth_inline",
         "graph_find_context", "graph_call_chain", "graph_impact", "graph_subsystem",
         "graph_cross_links", "graph_important_nodes", "graph_blast_radius",
@@ -3461,3 +3461,66 @@ def test_lock_plan_prior_fix_reads_files_changed(monkeypatch):
     monkeypatch.setattr(m, "_find_by_file_sync",
                         lambda f, k: [{"issue_key": "T-2", "files_changed": ["old_fix.py"]}])
     assert m._lock_plan_prior_fix(["svc.py"]) == {"old_fix.py"}
+
+
+async def test_icx_boost_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    assert any(t.name == "icx_boost" for t in tools)
+
+
+async def test_icx_boost_returns_brief_for_doubt():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost", {"prompt": "what is a closure?"})
+    data = json.loads(res[0].text)
+    assert data["archetype"] == "doubt"
+    assert data["context"]["files"] == []
+    assert data["mandatory_directive"]
+    assert data["boost_meta"]["llm_used"] is False
+
+
+async def test_icx_boost_validates_prompt():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost", {"prompt": ""})
+    data = json.loads(res[0].text)
+    assert data.get("error")
+
+
+async def test_icx_boost_never_raises_on_bad_repo():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost", {"prompt": "fix the auth crash", "repo_path": "/no/such/dir"})
+    data = json.loads(res[0].text)
+    assert data["archetype"] == "debugging"
+    assert "boosted_prompt" in data
+
+
+async def test_icx_boost_preserves_and_tiers_links():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost", {
+        "prompt": "check this design https://www.figma.com/file/abc and ticket https://x.atlassian.net/browse/AB-1"})
+    data = json.loads(res[0].text)
+    links = data["links"]
+    urls = {l["url"]: l for l in links}
+    assert any("figma" in u for u in urls)
+    assert any(l["target"] == "figma" and l["status"] == "agent_fetch" for l in links)
+    assert any(l["target"] == "jira" for l in links)
+
+
+async def test_every_tool_description_is_strict_and_substantial():
+    """Ironclad contract: EVERY MCP tool description must carry a strict directive keyword (so the
+    agent cannot treat it as optional) and be non-trivial. If this fails, the new/edited tool needs a
+    MANDATORY/MUST/ALWAYS/CALL/USE WHEN-style trigger line."""
+    from icx_engine.mcp_server import _list_tools
+    strict = ("MANDATORY", "MUST", "ALWAYS", "NEVER", "CALL ", "USE WHEN", "USE THIS",
+              "RUN ", "FOLLOW", "FIRST", "BEFORE ", "AFTER ", "REQUIRED", "DO NOT")
+    tools = await _list_tools()
+    weak = []
+    for t in tools:
+        d = (t.description or "").strip()
+        if len(d) < 40 or not any(k in d.upper() for k in strict):
+            weak.append(t.name)
+    assert not weak, f"tool descriptions missing a strict directive: {weak}"

@@ -56,3 +56,16 @@ class GeminiProvider(LLMProvider):
                 " Run with --debug --traceback to see the raw LLM response.",
                 raw_output=content,
             ) from exc
+
+    async def generate(self, prompt: str) -> str:
+        """Generic text completion for the boost benchmark. Uses the same model as analyze() with the
+        raw prompt (no issue-analysis system prompt). Guarded: any SDK error returns '' so the benchmark
+        scores 0 rather than crashing."""
+        try:
+            from google import genai
+            client = genai.Client(api_key=self._api_key)
+            response = await client.aio.models.generate_content(
+                model=self.model_name, contents=prompt)
+            return getattr(response, "text", "") or ""
+        except Exception:
+            return ""

@@ -460,6 +460,7 @@ _SAVE_TOOL_NAME = "save_memory"
 _RECORD_VERIFICATION_TOOL = "record_verification"
 _GET_METHODOLOGY_TOOL = "get_methodology"
 _LOCK_PLAN_TOOL = "lock_plan"
+_BOOST_TOOL = "icx_boost"
 _UI_AUTH_CAPTURE_TOOL = "ui_auth_capture"
 _UI_AUTH_INLINE_TOOL = "ui_auth_inline"
 _GRAPH_BLAST_RADIUS_TOOL = "graph_blast_radius"
@@ -2031,6 +2032,30 @@ async def _list_tools() -> list[Tool]:
             ),
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
+        Tool(
+            name=_BOOST_TOOL,
+            description=(
+                "CALL THIS FIRST for ANY request when ICX is connected - it is the ICX thinking "
+                "channel. Give it the user's raw prompt; it returns a boosted brief: the real intent, "
+                "the task archetype, the MANDATORY ICX methodology for that archetype, only the "
+                "codebase context the problem actually needs (graph/grep/memory - skipped for a plain "
+                "question or when no repo is connected), clarifications, the gate sequence, any links "
+                "(preserved + tagged with how to pull them - via an ICX tool, by connecting ICX, or with "
+                "your own tool), and a boosted_prompt to work from. Follow mandatory_directive. For a "
+                "work-tracker ticket, analyze_issue_fast remains the ticket entrypoint."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "The raw user request."},
+                    "repo_path": {"type": "string", "description": "Project path, if any."},
+                    "current_file": {"type": "string", "description": "File in focus, if any."},
+                    "is_continuation": {"type": "boolean",
+                                        "description": "True if iterating on an ongoing problem."},
+                },
+                "required": ["prompt"],
+            },
+        ),
         # ------------------------------------------------------------------ #
         # [3] Memory search - immediately after analyze, before graph        #
         # ------------------------------------------------------------------ #
@@ -2724,7 +2749,7 @@ async def _list_tools() -> list[Tool]:
         # Sonar code-quality tools - direct SonarQube reader, read-only      #
         # ------------------------------------------------------------------ #
         Tool(name=_SONAR_STATUS_TOOL,
-             description="Show Sonar configuration and live connection health. Works regardless of sonar_enabled.",
+             description="USE WHEN the user asks about code quality and you must first confirm Sonar is reachable: shows Sonar configuration and live connection health. ALWAYS call this before other sonar_* tools if a connection error is possible. Works regardless of sonar_enabled.",
              inputSchema={"type": "object", "properties": {}, "required": []}),
         Tool(name=_SONAR_PROJECTS_TOOL,
              description=("Discover SonarQube projects the token can access. FOLLOW the mandatory protocol in the "
@@ -2743,24 +2768,29 @@ async def _list_tools() -> list[Tool]:
                           "properties": {"project": {"type": "string"}, "query": {"type": "string"}},
                           "required": ["project"]}),
         Tool(name=_SONAR_MEASURES_TOOL,
-             description="Fetch project measures (bugs, vulnerabilities, code smells, security hotspots, coverage, duplication, technical debt, ratings, tests) for a project/branch. Requires sonar_enabled.",
+             description="USE WHEN you need the headline code-quality numbers for a project: MUST fetch project measures (bugs, vulnerabilities, code smells, security hotspots, coverage, duplication, technical debt, ratings, tests) for a project/branch here rather than guessing them. Requires sonar_enabled.",
              inputSchema={"type": "object",
                           "properties": {"project": {"type": "string"}, "branch": {"type": "string"}},
                           "required": ["project"]}),
         Tool(name=_SONAR_QUALITY_GATE_TOOL,
-             description="Fetch the quality gate status and failing conditions for a project/branch. Requires sonar_enabled.",
+             description="USE WHEN deciding if code is releasable or why a build's quality gate failed: MUST fetch the quality gate status and failing conditions for a project/branch here - never assert pass/fail without it. Requires sonar_enabled.",
              inputSchema={"type": "object",
                           "properties": {"project": {"type": "string"}, "branch": {"type": "string"}},
                           "required": ["project"]}),
         Tool(name=_SONAR_FINDINGS_TOOL,
-             description=("Fetch scoped findings (bugs, vulnerabilities, code smells, security hotspots) for a project/branch. "
-                          "Scope to the files the developer is working on by passing `files` (a user-supplied list of paths); "
-                          "omit `files` for the whole project. Filter with types/severities/statuses/author/assignee/new_code_only. Requires sonar_enabled."),
+             description=("USE WHEN the user wants the specific Sonar issues on their code: MUST fetch scoped findings "
+                          "(bugs, vulnerabilities, code smells, security hotspots) for a project/branch here - do not "
+                          "invent findings. Scope to the files the developer is working on by passing `files` (a "
+                          "user-supplied list of paths); omit `files` for the whole project. Filter with "
+                          "types/severities/statuses/author/assignee/new_code_only. Requires sonar_enabled."),
              inputSchema=_SONAR_SCOPE_SCHEMA),
         Tool(name=_SONAR_REPORT_TOOL,
-             description=("Assemble a full structured report for a project/branch: quality gate, project measures, per-file measures, "
-                          "findings (issues + security hotspots), duplication blocks, and test-coverage gaps. Pass `files` (user-supplied paths) "
-                          "to scope everything to the developer's working set; omit for the whole project. Requires sonar_enabled."),
+             description=("USE WHEN you need the complete code-quality picture in one call (prefer this over calling the "
+                          "individual sonar_* tools separately): MUST assemble a full structured report for a "
+                          "project/branch - quality gate, project measures, per-file measures, findings (issues + "
+                          "security hotspots), duplication blocks, and test-coverage gaps. Pass `files` (user-supplied "
+                          "paths) to scope everything to the developer's working set; omit for the whole project. "
+                          "Requires sonar_enabled."),
              inputSchema=_SONAR_SCOPE_SCHEMA),
     ]
 
@@ -3344,6 +3374,34 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps(
             {"version": METHODOLOGY_VERSION, "methodology": full_text()}))]
 
+    if name == _BOOST_TOOL:
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "prompt must be a non-empty string."}))]
+        repo_path = args.get("repo_path") if isinstance(args.get("repo_path"), str) else None
+        current_file = args.get("current_file") if isinstance(args.get("current_file"), str) else None
+        is_continuation = bool(args.get("is_continuation"))
+        try:
+            from icx_engine.boost.service import build_boost_brief
+            provided = args.get("links") if isinstance(args.get("links"), list) else []
+            brief = build_boost_brief(
+                prompt, repo_path=repo_path, current_file=current_file,
+                is_continuation=is_continuation, links_in=provided,
+                env_fn=_boost_env, signals_fn=_context_signals, connected_fn=_icx_connected)
+            return [TextContent(type="text", text=json.dumps(brief))]
+        except Exception as exc:
+            from icx_engine.methodology import build_checklist_for as _bcf
+            m = _bcf(prompt)
+            return [TextContent(type="text", text=json.dumps({
+                "archetype": m["archetype"], "methodology": m,
+                "context": {"activated_signals": [], "files": [], "skipped": str(exc)},
+                "links": [], "clarifications": [], "gates": m["gate_sequence"],
+                "boosted_prompt": prompt, "boost_meta": {"deterministic": True, "llm_used": False},
+                "mandatory_directive": "Follow the ICX methodology; boost degraded to minimal mode.",
+                "intent": prompt,
+            }))]
+
     if name == _LOCK_PLAN_TOOL:
         issue_ref = args.get("issue_ref", "")
         chosen = args.get("chosen_files")
@@ -3858,6 +3916,44 @@ def _lock_plan_prior_fix(chosen: list[str]) -> set:
                 if p:
                     out.add(str(p))
     return out
+
+
+def _icx_connected() -> dict:
+    """Which ICX-native link targets are configured: jira (a connector connection) + sonarqube (an
+    active sonar connection). Guarded - any config error degrades to 'not connected' (a safe tier-2)."""
+    out = {"jira": False, "sonarqube": False}
+    try:
+        cfg = ConfigManager.load()
+        try:
+            out["jira"] = any(getattr(c, "connector_type", "") == "jira"
+                              for c in (getattr(cfg, "connections", None) or []))
+        except Exception:
+            pass
+        try:
+            out["sonarqube"] = cfg.active_sonar_connection() is not None
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return out
+
+
+def _boost_env(repo_path: str | None, is_continuation: bool) -> dict:
+    """Detect the boost environment: is there a usable repo, and is a code graph built for it?
+    Never raises - a detection failure degrades to 'not available'."""
+    from pathlib import Path as _P
+    has_repo = False
+    try:
+        has_repo = bool(repo_path) and _P(repo_path).is_dir()
+    except OSError:
+        has_repo = False
+    has_graph = False
+    if has_repo:
+        try:
+            has_graph = isinstance(_load_querier_simple(repo_path), tuple)
+        except Exception:
+            has_graph = False
+    return {"has_repo": has_repo, "has_graph": has_graph, "is_continuation": bool(is_continuation)}
 
 
 def _context_signals(project_path: str, seeds: list[str], keywords: list[str]):

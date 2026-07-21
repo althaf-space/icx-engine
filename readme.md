@@ -29,7 +29,7 @@ ICX is an early-stage product. The core pipeline (fetch -> process -> analyse ->
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
 | Attachments | PDF (incl. scanned/OCR), DOCX, XLSX, XLS, PPTX, CSV, ZIP, code/text/config files, images via OCR + vision, audio (MP3/WAV/M4A/OGG/FLAC/AAC/Opus) + video (MP4/MOV/AVI/MKV/WebM, full-duration frame sampling) via local Whisper or LLM-native transcription | Speaker diarisation, language hints |
 | Memory | Local LanceDB + ONNX embeddings (BAAI/bge-base-en-v1.5, 768-dim, no PyTorch) | Team-shared memory, conflict resolution |
-| MCP tools | `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `record_verification`, `reinforce_memory_usage`, `get_memory_audit`, 2 testing tools (`start_testing_session`, `resume_testing_session`), 1 methodology tool (`get_methodology`), 1 spec-lock tool (`lock_plan`), 2 UI-auth tools (`ui_auth_capture`, `ui_auth_inline`), 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`) (34 total) | Batch analysis, project-level summary |
+| MCP tools | `icx_boost`, `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `record_verification`, `reinforce_memory_usage`, `get_memory_audit`, 2 testing tools (`start_testing_session`, `resume_testing_session`), 1 methodology tool (`get_methodology`), 1 spec-lock tool (`lock_plan`), 2 UI-auth tools (`ui_auth_capture`, `ui_auth_inline`), 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`) (35 total) | Batch analysis, project-level summary |
 | Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), JSP/Servlet, Go, C#, PHP, Rust, C++, Swift, Elixir, Scala, Rails, Angular, gRPC/Protobuf, Terraform/HCL, event broker detection (Kafka, RabbitMQ, Redis, SQS, SNS, NATS), co-change history, gopls/kotlin-language-server/rust-analyzer/OmniSharp/intelephense/clangd compiler-grade edges, incremental rebuild (SHA-256 hashing), multi-source edge fusion, PageRank + betweenness centrality, blast radius, cycle detection, dead code, CODEOWNERS integration, staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, team-shared graph cache |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
@@ -333,6 +333,8 @@ icx --version
 icx --help
 ```
 
+Every command accepts `--debug` (step-by-step progress to stderr) and `--traceback` (full Python traceback on error) for troubleshooting.
+
 ---
 
 ## Memory - your personal knowledge base
@@ -384,8 +386,17 @@ For Claude Code, `icx mcp setup --host claude` also installs ICX-first ticket ro
 
 ### The MCP tools
 
+**Universal boost channel.** When ICX is connected, the agent calls `icx_boost` first for any request. It classifies the task, applies the mandatory ICX methodology, gathers only the codebase context the problem needs (graph/grep/memory - skipped for a plain question or when no repo is connected), and returns a boosted brief the agent works from - so a vague prompt becomes a strong, well-scaffolded task, consistently across agents. To enforce it globally, add to your agent rules: "When the ICX MCP server is connected, call `icx_boost` first for every request and follow its boosted brief." For a work-tracker ticket, `analyze_issue_fast` remains the ticket entrypoint.
+
+**Links are preserved and routed.** When a prompt (or a Jira ticket) contains a link - a Figma design, a SonarQube dashboard, another ticket - the boost keeps it and tags how to pull it: if ICX has a connector for it and it is connected, the agent is told to use ICX's own tool; if ICX has the connector but it is not connected, you are told to connect it; if ICX has none (e.g. Figma), the agent is told to fetch it with its own tool/MCP. ICX reuses existing connectors instead of building one for everything.
+
+**Auto-boost in your editor (optional hook).** Beyond the global rule, editors that support a pre-agent hook can inject the boost automatically. `icx boost brief "<prompt>" --format hook` produces the boosted brief headlessly; wire it to Claude Code's `UserPromptSubmit` hook and every prompt is boosted before the agent acts. The hook is fully isolated - if it errors it is skipped, never blocking the editor or ICX. Setup for Claude Code / Cursor / Windsurf: [docs/boost-editor-hooks.md](docs/boost-editor-hooks.md).
+
+**Proving the boost.** Run `icx boost benchmark` to measure it: ICX runs a corpus of prompts through your configured ICX model - once raw, once with the ICX boost - and grades how many of each prompt's real requirements the answer covers, averaged over `--repeats` runs so the number is stable, not single-shot noise. The HTML scorecard (`~/.icx/boost/benchmark.html`) breaks the lift down by difficulty, archetype, and per-prompt. The boost's value shows on underspecified prompts (a real user's vague request), where a raw answer misses implicit requirements the boost forces out; on easy prompts a strong model already covers there is little headroom, and that is reported honestly. The figures are measured on your model - not a marketing claim.
+
 | Tool | When the agent calls it |
 |------|------------------------|
+| `icx_boost` | FIRST for any request - returns the boosted brief (intent, archetype, mandatory methodology, adaptive context, gates, boosted_prompt). Input: `prompt`, optional `repo_path`, `current_file`, `is_continuation`. |
 | `analyze_issue_fast` | Always first - runs LLM analysis on text only, no attachment processing. Returns `work_item` (analysis + `image_paths` + `attachment_processing: "text_only"`), `memory`, and `graphs[]`. Timeout 45s. |
 | `analyze_issue` | Only when any of `work_item.analysis.pending_images`, `pending_audio`, or `pending_documents` is non-empty AND that media is relevant to the problem. Pass the same `project_paths` as the fast call. |
 | `memory_search` | Immediately after analysis - agent generates 3-6 tags from the analysis result and calls this for refined tag-filtered retrieval. Skip only when `memory.status != 'ready'`. |

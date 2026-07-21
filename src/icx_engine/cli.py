@@ -164,6 +164,12 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx test rules[/cyan]                                           Manage the local testing rulebooks
   [cyan]icx test sessions[/cyan]                                        List all active testing sessions
   [cyan]icx test cancel <SESSION_ID>[/cyan]                             Cancel an active testing session
+  [cyan]icx test benchmark[/cyan]                                       Run the testing benchmark scorecard (raw numbers vs competitors)
+  [cyan]icx test analytics[/cyan]                                       Build the run-history analytics dashboard
+
+[bold]Boost (thinking channel)[/bold]
+  [cyan]icx boost brief "<prompt>"[/cyan]                               Show the ICX boosted brief for a prompt (for editor hooks/scripts)
+  [cyan]icx boost benchmark[/cyan]                                      Measure the boost: raw vs ICX-boosted quality lift on your model
 
 [bold]Code Quality (SonarQube)[/bold]
   [cyan]icx sonar --add[/cyan]                                          Add a SonarQube server connection (name, URL, token)
@@ -279,7 +285,136 @@ app.add_typer(test_app, name="test", rich_help_panel="Testing")
 sonar_app = typer.Typer(help="SonarQube code-quality integration (distinct from testing).", rich_markup_mode="rich")
 app.add_typer(sonar_app, name="sonar", rich_help_panel="Code Quality")
 
+boost_app = typer.Typer(help="ICX boost channel - measure the prompt-boost quality lift.", rich_markup_mode="rich")
+app.add_typer(boost_app, name="boost", rich_help_panel="Boost")
+
 console = Console(highlight=False)
+
+
+# Shared options + the error-handling guard (defined here so every command below can use them).
+DebugOpt = Annotated[bool, typer.Option("--debug", help="Print step-by-step progress to stderr.")]
+TracebackOpt = Annotated[bool, typer.Option("--traceback", help="Print the full Python traceback on errors.")]
+
+
+def _guarded(fn):
+    """Wrap a CLI command so any unhandled error renders through render_icx_error and honors the
+    shared --debug/--traceback flags (either shows the full stack). Signature-preserving so Typer still
+    builds the command's options. A command that already raises typer.Exit passes through untouched."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        show_tb = bool(kwargs.get("traceback", False) or kwargs.get("debug", False))
+        try:
+            return fn(*args, **kwargs)
+        except typer.Exit:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the terminal boundary; render, do not leak a raw trace
+            render_icx_error(exc, err_console, show_traceback=show_tb)
+            raise typer.Exit(1)
+    return wrapper
+
+
+@boost_app.command("brief")
+@_guarded
+def boost_brief(
+    prompt: str = typer.Argument(..., help="The raw request to boost"),
+    repo: str = typer.Option("", help="Repo path (default: current directory)"),
+    current_file: str = typer.Option("", help="File in focus, if any"),
+    continuation: bool = typer.Option(False, "--continuation", help="Iterating on an ongoing problem"),
+    fmt: str = typer.Option("brief", "--format", help="brief | json | hook"),
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+):
+    """Produce the ICX boosted brief for a prompt headlessly (for editor hooks / scripts). The 'hook'
+    format emits Claude Code UserPromptSubmit additionalContext JSON."""
+    import json
+    import os
+    from icx_engine.boost.service import build_boost_brief
+    from icx_engine.mcp_server import _boost_env, _context_signals, _icx_connected
+
+    repo_path = repo or os.getcwd()
+    try:
+        brief = build_boost_brief(
+            prompt, repo_path=repo_path, current_file=current_file or None,
+            is_continuation=continuation,
+            env_fn=_boost_env, signals_fn=_context_signals, connected_fn=_icx_connected)
+    except Exception:
+        # Never block the editor: degrade to a methodology-only brief.
+        from icx_engine.methodology import build_checklist_for
+        from icx_engine.boost.brief import build_brief
+        from icx_engine.boost.router import ActivationPlan
+        m = build_checklist_for(prompt)
+        brief = build_brief(prompt, m["archetype"], m,
+                            {"activated_signals": [], "files": [], "skipped": "degraded"},
+                            ActivationPlan(), [], [])
+
+    if fmt == "hook":
+        ctx = brief["boosted_prompt"] + "\n\n" + brief.get("mandatory_directive", "")
+        typer.echo(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": ctx}}))
+    elif fmt == "json":
+        typer.echo(json.dumps(brief))
+    else:
+        typer.echo(brief["boosted_prompt"])
+
+
+@boost_app.command("benchmark")
+@_guarded
+def boost_benchmark(out: str = typer.Option("", help="Where to write the HTML scorecard"),
+                    repeats: int = typer.Option(2, "--repeats",
+                        help="Average this many runs per prompt to cut model noise (higher = more trustworthy, slower)."),
+                    debug: DebugOpt = False, traceback: TracebackOpt = False):
+    """Measure the boost: run the corpus raw vs ICX-boosted through the ICX model, grade, report.
+
+    Averages `--repeats` runs per prompt so the numbers are stable, not single-shot noise. The scorecard
+    (`~/.icx/boost/benchmark.html`) breaks the lift down by difficulty, archetype, and per-prompt.
+    """
+    import asyncio
+    import time
+    from pathlib import Path
+    from icx_engine.config_manager import ConfigManager
+    from icx_engine.llm.base import get_provider
+    from icx_engine.boost.benchmark import run_benchmark
+    from icx_engine.boost.benchmark.report import render_scorecard
+    from icx_engine.boost import classify, compose_boosted_prompt
+    from icx_engine.methodology import build_checklist_for
+
+    cfg = ConfigManager.load()
+    llm = cfg.active_llm
+    if llm is None:
+        typer.echo("No ICX model configured. Run 'icx model --add' first.")
+        raise typer.Exit(1)
+    provider = get_provider(llm.text_config)
+
+    def generate(prompt: str) -> str:
+        # Bounded retry with backoff: a free-tier 429 returns empty; retrying stops a rate limit from
+        # scoring a false 0 and corrupting the measurement.
+        for attempt in range(4):
+            try:
+                out_text = asyncio.run(provider.generate(prompt))
+            except NotImplementedError as exc:
+                typer.echo(str(exc))
+                raise typer.Exit(1)
+            except Exception:
+                out_text = ""
+            if out_text:
+                return out_text
+            time.sleep(3 * (attempt + 1))
+        return ""
+
+    def boost(prompt: str) -> str:
+        arch = classify(prompt)
+        meth = build_checklist_for(prompt, arch)
+        return compose_boosted_prompt(prompt, arch, meth, {"files": [], "skipped": "benchmark"})
+
+    report = run_benchmark(generate, boost, repeats=max(1, repeats))
+    html = render_scorecard(report)
+    dest = Path(out) if out else Path.home() / ".icx" / "boost" / "benchmark.html"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(html, encoding="utf-8")
+    typer.echo(f"Boost lift: {report.lift_pct}% (raw {report.raw_avg} -> boosted {report.boosted_avg})")
+    typer.echo(f"Scorecard: {dest}")
 err_console = Console(stderr=True, highlight=False)
 # Ensure UTF-8 output on Windows (cp1252 can't encode [x], ->, etc.)
 if hasattr(sys.stdout, "reconfigure"):
@@ -289,9 +424,6 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-# Shared options
-DebugOpt = Annotated[bool, typer.Option("--debug", help="Print step-by-step progress to stderr.")]
-TracebackOpt = Annotated[bool, typer.Option("--traceback", help="Print the full Python traceback on errors.")]
 
 
 # ---------------------------------------------------------------------------
@@ -299,12 +431,14 @@ TracebackOpt = Annotated[bool, typer.Option("--traceback", help="Print the full 
 # ---------------------------------------------------------------------------
 
 @memory_app.command("save")
+@_guarded
 def memory_save(
     key: Annotated[str, typer.Argument(help="Issue key, e.g. PROJ-456")],
     note: Annotated[Optional[str], typer.Option("--note", help="Resolution note (non-interactive)")] = None,
     files: Annotated[Optional[str], typer.Option("--files", help="Comma-separated file paths changed")] = None,
     tags: Annotated[Optional[str], typer.Option("--tags", help="Comma-separated tags")] = None,
     confirmed: Annotated[bool, typer.Option("--confirmed", help="Skip test confirmation prompt")] = False,
+    traceback: TracebackOpt = False,
     debug: DebugOpt = False,
 ) -> None:
     """Save a resolved issue to local memory after it has been fixed and tested."""
@@ -379,9 +513,12 @@ def memory_save(
 
 
 @memory_app.command("search")
+@_guarded
 def memory_search(
     query: Annotated[str, typer.Argument(help="Search query, e.g. 'OAuth token expires'")],
     top_k: Annotated[int, typer.Option("--top", help="Max results")] = 5,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Search past resolutions using semantic and keyword matching."""
     from icx_engine.memory.manager import MemoryManager
@@ -415,9 +552,12 @@ def memory_search(
 
 
 @memory_app.command("list")
+@_guarded
 def memory_list(
     project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key, e.g. PROJ")] = None,
     source: Annotated[Optional[str], typer.Option("--source", help="Filter by source type, e.g. jira, github")] = None,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """List all saved memory entries, newest first."""
     from icx_engine.memory.manager import MemoryManager
@@ -436,8 +576,11 @@ def memory_list(
 
 
 @memory_app.command("show")
+@_guarded
 def memory_show(
     key: Annotated[str, typer.Argument(help="Issue key, e.g. PROJ-456")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Show full detail for one saved memory entry."""
     from icx_engine.memory.manager import MemoryManager
@@ -464,8 +607,11 @@ def memory_show(
 
 
 @memory_app.command("delete")
+@_guarded
 def memory_delete(
     key: Annotated[str, typer.Argument(help="Issue key to delete, e.g. PROJ-456")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Delete one saved memory entry."""
     from icx_engine.memory.manager import MemoryManager
@@ -483,8 +629,11 @@ def memory_delete(
 
 
 @memory_app.command("clear")
+@_guarded
 def memory_clear(
     confirm: Annotated[bool, typer.Option("--confirm", help="Required to delete all entries.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Delete all memory entries. Requires --confirm."""
     from icx_engine.memory.manager import MemoryManager
@@ -505,7 +654,8 @@ def memory_clear(
 
 
 @memory_app.command("status")
-def memory_status() -> None:
+@_guarded
+def memory_status(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Show memory engine stats: entry count, storage size, model info."""
     from icx_engine.memory.manager import MemoryManager
     from icx_engine.memory.embeddings import EMBEDDING_MODEL, SENTINEL_PATH
@@ -572,9 +722,12 @@ def memory_migrate(
 
 
 @memory_app.command("by-file")
+@_guarded
 def memory_by_file(
     path: Annotated[str, typer.Argument(help="File path to look up (substring match)")],
     project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """List all saved work items that touched a given file path."""
     from icx_engine.memory.manager import MemoryManager
@@ -596,9 +749,12 @@ def memory_by_file(
 
 
 @memory_app.command("hotspots")
+@_guarded
 def memory_hotspots(
     project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
     top: Annotated[int, typer.Option("--top", help="Number of files to show")] = 20,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Show files with the most saved work items (churn hotspots)."""
     from icx_engine.memory.manager import MemoryManager
@@ -620,8 +776,11 @@ def memory_hotspots(
 
 
 @memory_app.command("patterns")
+@_guarded
 def memory_patterns(
     project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Show auto-detected patterns across saved work items."""
     from icx_engine.memory.patterns import PatternManager
@@ -642,9 +801,12 @@ def memory_patterns(
 
 
 @memory_app.command("related")
+@_guarded
 def memory_related(
     key: Annotated[str, typer.Argument(help="Issue key, e.g. PROJ-456")],
     project: Annotated[Optional[str], typer.Option("--project", help="Filter results to a project key")] = None,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Show work items related to the given issue key via shared files."""
     from icx_engine.memory.manager import MemoryManager
@@ -673,8 +835,11 @@ def memory_related(
 
 
 @memory_app.command("export")
+@_guarded
 def memory_export(
     output: Annotated[Optional[str], typer.Option("--output", help="Output file path")] = None,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Export all memory entries to a JSON file for sharing or backup."""
     from icx_engine.memory.manager import MemoryManager
@@ -709,8 +874,11 @@ def memory_export(
 
 
 @memory_app.command("import")
+@_guarded
 def memory_import_cmd(
     file: Annotated[str, typer.Argument(help="Path to a JSON export file")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Import memory entries from a JSON export file."""
     from icx_engine.memory.manager import MemoryManager
@@ -1861,6 +2029,7 @@ def _uninstall_package(console: Console) -> None:
 @app.command(rich_help_panel="Setup")
 def uninstall(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")] = False,
+    debug: DebugOpt = False,
     traceback: TracebackOpt = False,
 ) -> None:
     """Fully remove ICX - wipes all data, credentials, editor configs, then uninstalls the package.
@@ -2030,12 +2199,15 @@ def mcp_config(
 
 @mcp_app.command("setup")
 def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
-    """Wire ICX into your AI editor so it appears as an available MCP tool.
+    """Wire ICX into your AI editor - the one command for all MCP setup.
 
     \b
-    ICX detects which AI editors are installed on your machine and adds itself to
-    each one automatically. After running this, restart your editor and ICX will
-    appear in its list of available tools.
+    ICX detects which AI editors are installed and, for each, does everything MCP-related:
+      - registers the ICX MCP server (so its tools appear in the editor), and
+      - on Claude Code, installs the enforcement so every prompt is boosted through ICX
+        first (the UserPromptSubmit hook + the CLAUDE.md rule; tickets also route to ICX).
+    Nothing else to run - `icx mcp remove` undoes all of it. After running this, restart
+    your editor.
 
     \b
     Examples:
@@ -2082,7 +2254,11 @@ def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: Tracebac
 
 @mcp_app.command("remove")
 def mcp_remove(host: HostOpt = None, debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
-    """Remove ICX from your AI editor's config - undoes what [bold]icx mcp setup[/bold] did.
+    """Remove ICX from your AI editor - undoes everything [bold]icx mcp setup[/bold] did.
+
+    \b
+    Removes the ICX MCP server entry AND, on Claude Code, the boost/routing enforcement
+    (the UserPromptSubmit hook + the CLAUDE.md rule), returning the agent to normal.
 
     \b
     Examples:
@@ -2123,7 +2299,7 @@ def mcp_remove(host: HostOpt = None, debug: DebugOpt = False, traceback: Traceba
 
 
 @mcp_app.command("run")
-def mcp_run(debug: DebugOpt = False) -> None:
+def mcp_run(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Start the ICX MCP server over stdio.
 
     Your AI editor calls this automatically in the background - you do not need to run it yourself.
@@ -2138,10 +2314,13 @@ def mcp_run(debug: DebugOpt = False) -> None:
 # ---------------------------------------------------------------------------
 
 @graph_app.command("add")
+@_guarded
 def graph_add(
     name: Annotated[str, typer.Option("--name", help="Project name (used to reference it later).")],
     path: Annotated[str, typer.Option("--path", help="Absolute or relative path to the project root.")],
     project: Annotated[str, typer.Option("--project", help="Tracker project key (e.g. a Jira project key like PROJ, or your tracker's project identifier). Case-insensitive. Required.")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Register a project for codebase graph indexing.
 
@@ -2311,11 +2490,14 @@ def _run_build_with_progress(mgr, project_id: str, force: bool, skip_llm: bool =
 
 
 @graph_app.command("build")
+@_guarded
 def graph_build(
     name: Annotated[Optional[str], typer.Argument(help="Registered project name.")] = None,
     project: Annotated[Optional[str], typer.Option("--project", help="Tracker project key - builds all graphs tagged with this project (case-insensitive).")] = None,
     force: Annotated[bool, typer.Option("--force", help="Force full rebuild even if graph is current.")] = False,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Skip LLM semantic enrichment. Faster but fewer cross-file edges.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Build the codebase knowledge graph for a project.
 
@@ -2414,7 +2596,8 @@ def graph_build(
 
 
 @graph_app.command("list")
-def graph_list() -> None:
+@_guarded
+def graph_list(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Show all registered projects and their graph status."""
     from icx_engine.graph.manager import GraphManager
     from rich.table import Table
@@ -2472,8 +2655,11 @@ def graph_list() -> None:
 
 
 @graph_app.command("status")
+@_guarded
 def graph_status(
     name: Annotated[str, typer.Argument(help="Registered project name.")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Show detailed status for a project: staleness, changed files, ETA."""
     from icx_engine.graph.manager import GraphManager
@@ -2526,9 +2712,12 @@ def graph_status(
 
 
 @graph_app.command("remove")
+@_guarded
 def graph_remove(
     name: Annotated[str, typer.Argument(help="Registered project name.")],
     keep_cache: Annotated[bool, typer.Option("--keep-cache", help="Keep cache files; remove registration only.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Remove a project registration and delete its graph files.
 
@@ -2581,7 +2770,8 @@ def graph_remove(
 
 
 @test_app.command("sessions")
-def test_sessions() -> None:
+@_guarded
+def test_sessions(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """List all active testing sessions with their status and file counts.
 
     \b
@@ -2610,8 +2800,11 @@ def test_sessions() -> None:
 
 
 @test_app.command("cancel")
+@_guarded
 def test_cancel(
     session_id: Annotated[str, typer.Argument(help="Session UUID to cancel")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Cancel an active testing session and remove it from the session store.
 
@@ -2631,12 +2824,15 @@ def test_cancel(
 
 
 @test_app.command("setup")
+@_guarded
 def test_setup(
     ui: Annotated[bool, typer.Option(help="Install UI tooling (Playwright + Stagehand + Chromium).")] = True,
     api: Annotated[bool, typer.Option(help="Install API tooling (Schemathesis, Hurl).")] = True,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Approve all installs without prompting.")] = False,
     force: Annotated[bool, typer.Option("--force", "-f", help="Wipe and reinstall (fixes a broken/partial install).")] = False,
     node: Annotated[str, typer.Option("--node", help="Node >= 18 path (executable or folder) to use/override for the UI harness.")] = "",
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Download ICX's own testing tooling into ~/.icx/testing (never global, never your repo).
 
@@ -2732,12 +2928,15 @@ def test_setup(
 
 
 @test_app.command("benchmark")
+@_guarded
 def test_benchmark(
     repeats: Annotated[int, typer.Option("--repeats", help="Scored repeat runs per app (feeds flakiness).")] = 2,
     out: Annotated[str, typer.Option("--out", help="Path for the HTML scorecard.")] = "benchmark_scorecard.html",
     storage_state: Annotated[str, typer.Option("--storage-state", help="Playwright storageState JSON for an authenticated app.")] = "",
     install_browsers: Annotated[bool, typer.Option("--install-browsers/--no-install-browsers",
         help="Approve installing a missing ICX_UI_TARGETS engine (firefox/webkit) on demand.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Run the ICX testing benchmark across the corpus and write an HTML scorecard.
 
@@ -2764,9 +2963,12 @@ def test_benchmark(
 
 
 @test_app.command("analytics")
+@_guarded
 def test_analytics(
     out: Annotated[str, typer.Option("--out", help="Path for the HTML analytics dashboard.")] = "test_analytics.html",
     last: Annotated[int, typer.Option("--last", help="How many recent runs to analyze.")] = 10,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Render the local run-history analytics dashboard (flakiness, pass trend, slowest tests, heals).
 
@@ -2844,7 +3046,8 @@ def _resolve_or_prompt_harness_node(yes: bool, node_opt: str = "") -> str | None
 
 
 @test_app.command("configure")
-def test_configure() -> None:
+@_guarded
+def test_configure(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Configure the local testing engine.
 
     \b
@@ -2873,7 +3076,9 @@ def test_configure() -> None:
 
 
 @test_app.command("rules")
-def test_rules(reset: bool = typer.Option(False, "--reset", help="Re-seed any missing default rule files.")) -> None:
+@_guarded
+def test_rules(reset: bool = typer.Option(False, "--reset", help="Re-seed any missing default rule files."),
+               debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Show the testing rulebook - the mandatory per-gate rules the agent must follow.
 
     Rules live as editable Markdown in ~/.icx/testing_rules/ (seeded from bundled
@@ -3000,7 +3205,8 @@ def sonar_main(
 
 
 @sonar_app.command("status")
-def sonar_status_cmd() -> None:
+@_guarded
+def sonar_status_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Show the active Sonar connection status."""
     from icx_engine.sonar import service
     out = asyncio.run(service.status())
@@ -3015,8 +3221,11 @@ def sonar_status_cmd() -> None:
 
 
 @sonar_app.command("projects")
+@_guarded
 def sonar_projects_cmd(
     query: Annotated[Optional[str], typer.Option("--query", "-q", help="Filter projects by key/name substring")] = None,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """List SonarQube projects the token can access (pick a key for `report`)."""
     from icx_engine.sonar import service
@@ -3035,11 +3244,14 @@ def sonar_projects_cmd(
 
 
 @sonar_app.command("report")
+@_guarded
 def sonar_report_cmd(
     project: Annotated[str, typer.Option("--project", "-p", help="SonarQube project key")],
     branch: Annotated[Optional[str], typer.Option("--branch", "-b", help="Branch name")] = None,
     files: Annotated[Optional[list[str]], typer.Option("--file", "-f", help="Restrict to a file path (repeatable)")] = None,
     new_code: Annotated[bool, typer.Option("--new-code", help="Only findings in new code")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
 ) -> None:
     """Print a compact Sonar summary (gate + counts). Use the MCP tools for full detail."""
     from icx_engine.sonar import service

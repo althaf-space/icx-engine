@@ -14,6 +14,28 @@ def test_help_exits_cleanly(cli_runner):
         assert cmd in result.output
 
 
+def test_full_help_lists_every_command():
+    """Drift guard: EVERY registered command must appear in the hand-written `icx --help` text, so a
+    new command can never be silently invisible. If this fails, add the command to _FULL_HELP."""
+    import typer
+    from icx_engine.cli import _FULL_HELP
+
+    cli = typer.main.get_command(app)
+
+    def walk(cmd, prefix=""):
+        out = []
+        if isinstance(cmd, click.Group):
+            for name, sub in cmd.commands.items():
+                out += walk(sub, (prefix + " " + name).strip())
+        else:
+            out.append(prefix)
+        return out
+
+    commands = walk(cli, "icx")
+    missing = [c for c in commands if c not in _FULL_HELP and c[len("icx "):] not in _FULL_HELP]
+    assert not missing, f"commands missing from `icx --help`: {missing}"
+
+
 def test_graph_help(cli_runner):
     result = cli_runner.invoke(app, ["graph", "--help"])
     assert result.exit_code == 0

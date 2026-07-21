@@ -81,7 +81,50 @@ _ARCHETYPES = {
                 "uniform AI-essay voice; bullet-point disease; burying the lede; length as quality"),
     "planning": ("de-risk early; verifiable milestones; sequence by dependency; checkpoints",
                  "uniform granularity; unobservable milestones; no slack; unknowns scheduled last"),
+    "doubt": ("answer the actual question directly; verify facts/APIs before asserting; state uncertainty",
+              "answering from memory when it is checkable; over-answering a simple question; false confidence"),
 }
+
+# Text signals per archetype (first match in this order wins). Deterministic.
+_ARCHETYPE_SIGNALS = (
+    ("debugging", ("error", "crash", "broken", "regression", "fails", "failing", "exception",
+                   "stack trace", "not working", "bug", "500", "npe", "null pointer")),
+    ("security", ("auth", "token", "vulnerab", "injection", "secret", "xss", "csrf", "exploit",
+                  "sql injection", "sanitize", "escape")),
+    ("performance", ("slow", "latency", "performance", "timeout", "optimi", "n+1", "throughput",
+                     "memory leak")),
+    ("database", ("schema", "migration", "query", "sql", "index", "orm", "table", "join")),
+    ("design", ("design", "architect", "structure", "scale", "trade-off", "approach", "should we")),
+    ("planning", ("plan", "roadmap", "milestone", "sequence", "break down", "estimate")),
+    ("research", ("latest", "current", "compare", "which is better", "research", "benchmark",
+                  "what is the best")),
+    ("writing", ("write a doc", "documentation", "readme", "blog", "explain in writing", "draft a")),
+)
+# Short interrogatives that are a plain question ("doubt"), not a build task.
+_DOUBT_STARTS = ("what", "why", "how", "is", "are", "does", "do", "can", "should", "which",
+                 "when", "who")
+
+
+def _token_hit(token: str, text: str, words: list[str]) -> bool:
+    """Match a signal token. Alphanumeric tokens match on a word boundary (prefix of a word, so
+    'optimi' hits 'optimize' but 'orm' does NOT hit 'form'); tokens with spaces/punctuation match as
+    a substring of the full text."""
+    if token.isalnum():
+        return any(w.startswith(token) for w in words)
+    return token in text
+
+
+def classify_text(text: str) -> str:
+    """Best-effort archetype from raw prompt text. Deterministic; recommendation - the agent confirms."""
+    t = (text or "").lower().strip()
+    words = [w.strip(".,;:!?()[]{}\"'") for w in t.split()]
+    for arch, toks in _ARCHETYPE_SIGNALS:
+        if any(_token_hit(tok, t, words) for tok in toks):
+            return arch
+    first = words[0] if words else ""
+    if (t.endswith("?") or first in _DOUBT_STARTS) and len(words) <= 25:
+        return "doubt"
+    return "coding"
 
 # The named failure modes and their mitigation (the traps that produce most first-pass mistakes).
 _FAILURE_MODES = [
@@ -127,10 +170,8 @@ def _classify(analysis: dict) -> str:
     return "coding"
 
 
-def build_checklist(analysis: dict | None) -> dict:
-    """Per-ticket MANDATORY methodology checklist for the analyze response. Pure; guarded."""
-    analysis = analysis if isinstance(analysis, dict) else {}
-    archetype = _classify(analysis)
+def _core(archetype: str) -> dict:
+    """Shared mandatory-checklist body for a given archetype."""
     discipline, pitfalls = _ARCHETYPES.get(archetype, _ARCHETYPES["coding"])
     return {
         "version": METHODOLOGY_VERSION,
@@ -143,15 +184,51 @@ def build_checklist(analysis: dict | None) -> dict:
         "verification_battery": _VERIFICATION_BATTERY,
         "failure_modes_to_avoid": _FAILURE_MODES,
         "hallucination_high_risk_zones": _HIGH_RISK_ZONES,
-        "gate_sequence": [
-            "answer INTAKE + CONTEXT before planning",
-            "produce 2-4 alternatives, COMMIT one with reasons",
-            "call lock_plan with the files you will change (blocks on missed high-signal files)",
-            "implement only after lock_plan ok",
-            "run the VERIFICATION battery; record_verification before declaring done",
-        ],
+        "gate_sequence": list(_GATE_SEQUENCE),
         "note": "This is mandatory. Call get_methodology for the full framework (archetypes, "
                 "decision trees, failure modes, case studies).",
+    }
+
+
+_GATE_SEQUENCE = (
+    "answer INTAKE + CONTEXT before planning",
+    "produce 2-4 alternatives, COMMIT one with reasons",
+    "call lock_plan with the files you will change (blocks on missed high-signal files)",
+    "implement only after lock_plan ok",
+    "run the VERIFICATION battery; record_verification before declaring done",
+)
+
+
+def build_checklist(analysis: dict | None) -> dict:
+    """Per-ticket MANDATORY methodology checklist for the analyze response. Pure; guarded."""
+    analysis = analysis if isinstance(analysis, dict) else {}
+    return _core(_classify(analysis))
+
+
+def build_checklist_for(prompt: str, archetype: str | None = None, env: dict | None = None) -> dict:
+    """Generalized checklist for ANY task (not just a Jira ticket). Classifies from the prompt when
+    archetype is not given. env is accepted for future signal shaping; currently advisory."""
+    arch = archetype or classify_text(prompt or "")
+    return _core(arch)
+
+
+def compact_checklist(prompt: str, archetype: str | None = None, env: dict | None = None) -> dict:
+    """Token-lean methodology for the boost brief (returned on EVERY prompt): the operative spine
+    (one_pager) + this archetype's discipline/pitfalls + gate_sequence + a pointer to get_methodology
+    for the full framework. Drops the full intake/verification/failure-mode/hallucination lists (they
+    live in get_methodology) - saving ~600 tokens per call with no loss (they are one tool call away)."""
+    arch = archetype or classify_text(prompt or "")
+    discipline, pitfalls = _ARCHETYPES.get(arch, _ARCHETYPES["coding"])
+    return {
+        "version": METHODOLOGY_VERSION,
+        "mandatory": True,
+        "one_pager": ONE_PAGER,
+        "archetype": arch,
+        "archetype_discipline": discipline,
+        "archetype_pitfalls": pitfalls,
+        "gate_sequence": list(_GATE_SEQUENCE),
+        "note": "Full framework (intake checklist, verification battery, failure modes, hallucination "
+                "zones, all archetypes) is one call away: get_methodology.",
     }
 
 

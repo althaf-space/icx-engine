@@ -138,16 +138,50 @@ def _run_detector(fake_home, prompt: str) -> str:
     return proc.stdout
 
 
-def test_detector_fires_on_bare_ticket_key(fake_home):
+def test_detector_boosts_every_prompt(fake_home):
+    # A non-ticket request still gets the universal boost directive (icx_boost first).
+    out = _run_detector(fake_home, "refactor the auth module")
+    assert "icx_boost" in out
+    assert "analyze_issue_fast" not in out          # no ticket -> no ticket directive
+
+
+def test_detector_boosts_plain_question(fake_home):
+    out = _run_detector(fake_home, "decode this UTF-8 please")
+    assert "icx_boost" in out
+    assert "analyze_issue_fast" not in out           # UTF-8 is denied as a ticket
+
+
+def test_detector_adds_ticket_routing_on_bare_key(fake_home):
     out = _run_detector(fake_home, "VILMA-2048 login broken")
-    assert "analyze_issue_fast" in out
+    assert "icx_boost" in out                        # boost always
+    assert "analyze_issue_fast" in out               # plus ticket routing
 
 
-def test_detector_fires_on_issue_url(fake_home):
+def test_detector_adds_ticket_routing_on_issue_url(fake_home):
     out = _run_detector(fake_home, "see https://github.com/org/repo/issues/12")
-    assert "analyze_issue_fast" in out
+    assert "icx_boost" in out and "analyze_issue_fast" in out
 
 
-def test_detector_silent_on_non_ticket(fake_home):
-    assert _run_detector(fake_home, "decode this UTF-8 please") == ""
-    assert _run_detector(fake_home, "refactor the auth module") == ""
+def test_detector_silent_on_empty_prompt(fake_home):
+    assert _run_detector(fake_home, "") == ""
+
+
+def test_install_migrates_legacy_hook_file(fake_home):
+    # Simulate an older install: a stale icx-ticket-gate.py present.
+    hooks = fake_home / ".icx" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    legacy = hooks / "icx-ticket-gate.py"
+    legacy.write_text("# old", encoding="utf-8")
+    install_enforcement(get_host("claude"))
+    assert not legacy.exists()                       # legacy removed
+    assert (hooks / _HOOK_FILENAME).exists()          # current present
+
+
+def test_remove_cleans_legacy_hook_file(fake_home):
+    hooks = fake_home / ".icx" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "icx-ticket-gate.py").write_text("# old", encoding="utf-8")
+    install_enforcement(get_host("claude"))
+    remove_enforcement(get_host("claude"))
+    assert not (hooks / "icx-ticket-gate.py").exists()
+    assert not (hooks / _HOOK_FILENAME).exists()
