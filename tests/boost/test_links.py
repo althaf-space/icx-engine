@@ -19,6 +19,24 @@ def test_classify_targets():
     assert classify_target("https://example.com/page") == "web"
 
 
+def test_classify_target_rejects_lookalike_domains():
+    # REGRESSION (CodeQL "incomplete URL substring sanitization"): a substring check against the
+    # whole URL wrongly classified an attacker-controlled lookalike domain as a trusted SaaS target.
+    # Anchored SaaS domains must be checked against the hostname only.
+    assert classify_target("https://evil.com/?x=atlassian.net") != "jira"
+    assert classify_target("https://atlassian.net.evil.com/phish") != "jira"
+    assert classify_target("https://evil.com/figma.com") != "figma"
+    assert classify_target("https://not-github.com/x") != "github"
+    assert classify_target("https://github.com.evil.com/x") != "github"
+    assert classify_target("https://evil.com/githubusercontent.com") != "github"
+
+
+def test_classify_target_still_matches_real_subdomains():
+    assert classify_target("https://raw.githubusercontent.com/o/r/main/f.py") == "github"
+    assert classify_target("https://files.figma.com/f/1") == "figma"
+    assert classify_target("https://my-org.atlassian.net/browse/AB-1") == "jira"
+
+
 def test_tier1_icx_tool_when_connected():
     plan = build_link_plan(["https://acme.atlassian.net/browse/AB-1"], {"jira": True})
     assert plan[0]["status"] == "icx_tool"

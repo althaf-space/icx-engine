@@ -210,6 +210,61 @@ def test_install_binary_checksum_mismatch_fails(tmp_path, monkeypatch):
     assert inst._install_binary(bad, tmp_path / "d") is False
 
 
+# -- safe extraction: reject archives that try to write outside the extract dir (Zip Slip) --------
+
+def test_safe_extract_zip_rejects_path_traversal(tmp_path):
+    import zipfile
+    archive = tmp_path / "evil.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("../../evil.txt", "pwned")
+    dest = tmp_path / "dest"; dest.mkdir()
+    with zipfile.ZipFile(archive) as z:
+        assert inst._safe_extract_zip(z, dest) is False
+    assert not (tmp_path.parent / "evil.txt").exists()
+    assert list(dest.iterdir()) == []            # rejected archive -> nothing extracted at all
+
+
+def test_safe_extract_tar_rejects_path_traversal(tmp_path):
+    import tarfile
+    archive = tmp_path / "evil.tar.gz"
+    with tarfile.open(archive, "w:gz") as t:
+        info = tarfile.TarInfo(name="../../evil.txt")
+        data = b"pwned"
+        info.size = len(data)
+        import io
+        t.addfile(info, io.BytesIO(data))
+    dest = tmp_path / "dest"; dest.mkdir()
+    with tarfile.open(archive) as t:
+        assert inst._safe_extract_tar(t, dest) is False
+    assert not (tmp_path.parent / "evil.txt").exists()
+    assert list(dest.iterdir()) == []
+
+
+def test_safe_extract_tar_rejects_symlink_member(tmp_path):
+    import tarfile
+    archive = tmp_path / "evil.tar.gz"
+    with tarfile.open(archive, "w:gz") as t:
+        info = tarfile.TarInfo(name="link")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        t.addfile(info)
+    dest = tmp_path / "dest"; dest.mkdir()
+    with tarfile.open(archive) as t:
+        assert inst._safe_extract_tar(t, dest) is False
+    assert list(dest.iterdir()) == []
+
+
+def test_safe_extract_zip_allows_normal_archive(tmp_path):
+    import zipfile
+    archive = tmp_path / "ok.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("bin/hurl", "content")
+    dest = tmp_path / "dest"; dest.mkdir()
+    with zipfile.ZipFile(archive) as z:
+        assert inst._safe_extract_zip(z, dest) is True
+    assert (dest / "bin" / "hurl").read_text(encoding="utf-8") == "content"
+
+
 def test_npm_for_finds_next_to_node(tmp_path):
     (tmp_path / "npm.cmd").write_text("", encoding="utf-8")
     assert inst._npm_for(str(tmp_path)).endswith("npm.cmd")

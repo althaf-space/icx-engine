@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -166,6 +166,40 @@ def _hurl_asset(version: str) -> tuple[str, str, str] | None:
 _BINARY_ASSETS = {"hurl": _hurl_asset}
 
 
+def _is_within_directory(directory: Path, target: Path) -> bool:
+    try:
+        directory = directory.resolve()
+        target = target.resolve()
+    except OSError:
+        return False
+    return target == directory or directory in target.parents
+
+
+def _safe_extract_zip(z: Any, dest: Path) -> bool:
+    """Extract a ZipFile into dest, rejecting the WHOLE archive if any member's path would resolve
+    outside dest (Zip Slip / path traversal via '../' or an absolute path in the member name) -
+    never partially extracts an unsafe archive. Returns False (no extraction performed) if unsafe."""
+    for info in z.infolist():
+        if not _is_within_directory(dest, dest / info.filename):
+            return False
+    z.extractall(dest)          # noqa: S202 - every member path validated against dest above
+    return True
+
+
+def _safe_extract_tar(t: Any, dest: Path) -> bool:
+    """Extract a TarFile into dest, rejecting the WHOLE archive if any member's path would resolve
+    outside dest, OR if any member is a symlink/hardlink (a link's TARGET can point outside dest
+    regardless of what the member's own name looks like) - never partially extracts an unsafe
+    archive. Returns False (no extraction performed) if unsafe."""
+    for member in t.getmembers():
+        if member.issym() or member.islnk():
+            return False
+        if not _is_within_directory(dest, dest / member.name):
+            return False
+    t.extractall(dest)          # noqa: S202 - every member path + link type validated against dest above
+    return True
+
+
 def _install_binary(spec: RunnerSpec, dest: Path) -> bool:
     """Download + extract a standalone binary (e.g. hurl) into dest for THIS OS/arch. Uses only the
     stdlib (urllib + zip/tar). Guarded - returns False on any failure, never raises.
@@ -206,10 +240,12 @@ def _install_binary(spec: RunnerSpec, dest: Path) -> bool:
         try:
             if kind == "zip":
                 with zipfile.ZipFile(archive) as z:
-                    z.extractall(extract_dir)
+                    if not _safe_extract_zip(z, extract_dir):
+                        return False
             else:
                 with tarfile.open(archive) as t:
-                    t.extractall(extract_dir)          # noqa: S202 - trusted release archive
+                    if not _safe_extract_tar(t, extract_dir):
+                        return False
         except (OSError, zipfile.BadZipFile, tarfile.TarError):
             return False
 

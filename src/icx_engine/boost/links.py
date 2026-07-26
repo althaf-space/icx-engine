@@ -14,9 +14,24 @@ Tiers (per link):
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 # ICX has its own retrieval tools for these targets (Jira connector + SonarQube reader).
 ICX_TARGETS = ("jira", "sonarqube")
+
+# Exact-hostname-match domains (a substring check on the whole URL would wrongly match a
+# lookalike, e.g. "atlassian.net.evil.com" or "evil.com/?x=github.com") - checked against
+# urlparse(url).hostname only, never the full URL string.
+_HOST_TARGETS = (
+    ("atlassian.net", "jira"),
+    ("figma.com", "figma"),
+    ("github.com", "github"),
+    ("githubusercontent.com", "github"),
+)
+
+
+def _host_matches(hostname: str, domain: str) -> bool:
+    return hostname == domain or hostname.endswith("." + domain)
 
 _URL_RE = re.compile(r"https?://[^\s<>()\"'\]]+")
 
@@ -40,16 +55,25 @@ def extract_links(text: str) -> list[str]:
 
 
 def classify_target(url: str) -> str:
-    """Classify a link's target service. Deterministic; unknown/general -> 'web'."""
+    """Classify a link's target service. Deterministic; unknown/general -> 'web'.
+
+    Known SaaS domains (atlassian.net/figma.com/github.com/githubusercontent.com) are matched
+    against the URL's HOSTNAME only (exact or a proper subdomain) - a substring check against the
+    whole URL would wrongly classify a lookalike like "https://evil.com/?x=atlassian.net" or
+    "https://atlassian.net.evil.com" as trusted. "jira"/"sonar"/"confluence"/"/browse/"/"/wiki/"
+    stay broad substring checks BY DESIGN - those tools are commonly self-hosted at an arbitrary
+    internal domain (there is no fixed hostname to anchor to), so a keyword match is the only way
+    to catch them at all; that tradeoff is intentional, not the same defect.
+    """
     u = (url or "").lower()
-    if "atlassian.net" in u or "/browse/" in u or "jira" in u:
+    hostname = (urlparse(u).hostname or "")
+    for domain, target in _HOST_TARGETS:
+        if _host_matches(hostname, domain):
+            return target
+    if "/browse/" in u or "jira" in u:
         return "jira"
     if "sonar" in u:
         return "sonarqube"
-    if "figma.com" in u:
-        return "figma"
-    if "github.com" in u or "githubusercontent.com" in u:
-        return "github"
     if "confluence" in u or "/wiki/" in u:
         return "confluence"
     return "web"
