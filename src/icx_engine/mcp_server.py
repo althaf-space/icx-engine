@@ -5,6 +5,7 @@ Communicates over: stdin/stdout (MCP JSON-RPC protocol)
 """
 from __future__ import annotations
 import asyncio
+import functools
 import json
 import logging
 import re
@@ -20,7 +21,7 @@ MCP_MEMORY_TIMEOUT_SECONDS = 2.0
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, Prompt, PromptArgument, PromptMessage, GetPromptResult
 
 from icx_engine.config_manager import ConfigManager
 from icx_engine import engine
@@ -32,6 +33,8 @@ from icx_engine.exceptions import (
     RateLimited,
     InvalidInput,
 )
+from icx_engine.skills.router import rank_skills, rank_skills_for_tags
+from icx_engine.skills.storage import SkillStorage
 
 server = Server("icx")
 
@@ -130,6 +133,11 @@ def _save_memory_sync(entry) -> None:
     _ensure_memory_manager().save(entry)
 
 
+def _show_entry_sync(issue_key: str):
+    """Look up a saved MemoryEntry by issue_key. Runs inside the memory thread."""
+    return _ensure_memory_manager().show(issue_key)
+
+
 def _negate_resolution_sync(issue_key: str, reason: str) -> dict:
     """Negate a resolution. Runs inside the memory thread."""
     return _ensure_memory_manager().negate_resolution(issue_key, reason)
@@ -144,67 +152,27 @@ def _verify_resolution_sync(issue_key: str, feedback_note: str) -> dict:
 # Senior-persona planning layer (additive; prepended to _icx_next.instruction).
 # ---------------------------------------------------------------------------
 
-_PERSONA_SLUGS: set[str] = {
-    "cto", "principal-engineer", "solution-architect", "system-architect",
-    "enterprise-architect", "staff-backend-engineer", "staff-frontend-engineer",
-    "principal-ui-ux-architect", "principal-data-architect", "principal-database-architect",
-    "staff-devops-sre", "principal-security-architect", "staff-performance-engineer",
-    "principal-ml-engineer", "staff-mobile-engineer", "principal-integration-architect",
-    "staff-qa-architect",
-}
+# The persona data + selectors live in the shared pure module `personas.py` (reused by the boost refine
+# CTO-grade prompt). Aliased to the historical private names so this module + its tests are unchanged.
+from icx_engine import personas as _personas
 
-_DEFAULT_PERSONA = "system-architect"
-_UI_PERSONAS = {"principal-ui-ux-architect", "staff-frontend-engineer"}
-
-# Ordered: first slug whose keyword set hits the ticket text wins the keyword heuristic.
-_PERSONA_KEYWORDS: list[tuple[str, set[str]]] = [
-    ("principal-security-architect", {"auth", "login", "token", "jwt", "oauth", "password",
-        "credential", "secret", "vulnerab", "injection", "xss", "csrf", "encrypt", "permission"}),
-    ("principal-database-architect", {"index", "query plan", "slow query", "sql", "join",
-        "deadlock", "n+1", "orm query", "table scan"}),
-    ("principal-data-architect", {"schema", "migration", "pipeline", "etl", "data model",
-        "warehouse", "ingest", "dataset"}),
-    ("staff-performance-engineer", {"latency", "throughput", "slow", "timeout", "memory leak",
-        "cpu", "performance", "profil", "bottleneck", "p99", "load"}),
-    ("staff-devops-sre", {"deploy", "ci/cd", "terraform", "kubernetes", "docker",
-        "infra", "cluster", "helm", "reliability", "outage", "rollout"}),
-    ("principal-ml-engineer", {"inference", "training", "embedding", "ml",
-        "prediction", "dataset drift", "fine-tune"}),
-    ("staff-mobile-engineer", {"android", "ios", "react native", "swift", "kotlin app",
-        "mobile", "app store", "play store"}),
-    ("principal-integration-architect", {"webhook", "third-party", "integration", "event bus",
-        "kafka", "message queue", "api contract", "grpc", "proto"}),
-    ("staff-qa-architect", {"test coverage", "flaky", "regression suite", "qa", "test plan",
-        "e2e"}),
-    ("principal-ui-ux-architect", {"button", "layout", "css", "styling", "modal", "form",
-        "screen", "ui", "ux", "responsive", "accessib", "component render"}),
-    ("staff-frontend-engineer", {"react", "vue", "state management", "redux", "hook", "frontend",
-        "client-side", "dom"}),
-    ("staff-backend-engineer", {"api", "endpoint", "service", "controller", "repository",
-        "backend", "server", "handler", "null pointer", "500"}),
-    ("solution-architect", {"integrate systems", "end-to-end", "cross-service", "microservice"}),
-    ("system-architect", {"architecture", "data flow", "scaling", "refactor", "coupling"}),
-]
-
-_UI_VOCAB = {"button", "layout", "css", "styling", "modal", "form", "screen", "ui", "ux",
-    "responsive", "accessib", "render", "component", "page", "click"}
-_BACKEND_VOCAB = {"api", "endpoint", "service", "controller", "repository", "backend",
-    "server", "handler", "database", "query", "schema", "null pointer"}
-
-_KW_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+_PERSONA_SLUGS = _personas.PERSONA_SLUGS
+_DEFAULT_PERSONA = _personas.DEFAULT_PERSONA
+_UI_PERSONAS = _personas.UI_PERSONAS
+_PERSONA_KEYWORDS = _personas.PERSONA_KEYWORDS
+_UI_VOCAB = _personas.UI_VOCAB
+_BACKEND_VOCAB = _personas.BACKEND_VOCAB
+_PERSONA_PROFILE = _personas.PERSONA_PROFILE
+_kw_hit = _personas.kw_hit
 
 
-def _kw_hit(text: str, kw: str) -> bool:
-    """Match kw against lowercased text. Multi-word or non-alnum tokens match as a
-    substring; a single alphanumeric token matches at a word start with any suffix
-    (prefix-word), so 'endpoint' hits 'endpoints' but 'ci' does NOT hit 'decision'."""
-    if " " in kw or not kw.isalnum():
-        return kw in text
-    pat = _KW_RE_CACHE.get(kw)
-    if pat is None:
-        pat = re.compile(r"\b" + re.escape(kw) + r"\w*")
-        _KW_RE_CACHE[kw] = pat
-    return pat.search(text) is not None
+def _persona_text(analysis: dict) -> str:
+    parts = [
+        str(analysis.get("problem_summary") or analysis.get("summary", "")),
+        str(analysis.get("detailed_description") or analysis.get("description", "")),
+        str(analysis.get("impact", "")),
+    ]
+    return " ".join(parts).lower()
 
 
 def _persona_text(analysis: dict) -> str:
@@ -252,28 +220,6 @@ def _select_persona(analysis: dict) -> tuple[str, str]:
 
 _CONFIDENCE_GATE = 0.6
 _COMPLETENESS_GATE = 0.5
-
-# slug -> (spoken role title, one-line domain focus for the rubric)
-_PERSONA_PROFILE: dict[str, tuple[str, str]] = {
-    "cto": ("CTO", "weigh business impact, risk, and long-term maintainability above local convenience"),
-    "principal-engineer": ("principal engineer", "attack the hardest ambiguity first and prove the mechanism, not the symptom"),
-    "solution-architect": ("solution architect", "design the end-to-end flow across every system the change touches"),
-    "system-architect": ("senior system architect", "reason about service boundaries, data flow, scaling, and migration safety"),
-    "enterprise-architect": ("enterprise architect", "keep the change consistent with organization-wide standards and other systems"),
-    "staff-backend-engineer": ("staff backend engineer", "trace the request path, service and data layers, and error handling"),
-    "staff-frontend-engineer": ("staff frontend engineer", "reason about component state, data fetching, and render correctness"),
-    "principal-ui-ux-architect": ("principal UI/UX architect", "reason about layout, interaction, accessibility, and visual states"),
-    "principal-data-architect": ("principal data architect", "reason about the schema, data modeling, and pipeline integrity"),
-    "principal-database-architect": ("principal database architect", "reason about query plans, indexing, and transactional correctness"),
-    "staff-devops-sre": ("staff DevOps/SRE", "reason about deployment, reliability, rollout, and blast radius in production"),
-    "principal-security-architect": ("principal security architect", "reason about the trust boundary, authn/authz, and exploit paths"),
-    "staff-performance-engineer": ("staff performance engineer", "reason about latency, throughput, allocation, and measured bottlenecks"),
-    "principal-ml-engineer": ("principal ML engineer", "reason about the model, data, evaluation, and inference path"),
-    "staff-mobile-engineer": ("staff mobile engineer", "reason about the platform lifecycle, device constraints, and app state"),
-    "principal-integration-architect": ("principal integration architect", "reason about API contracts, events, retries, and third-party failure modes"),
-    "staff-qa-architect": ("staff QA architect", "reason about coverage, edge cases, and how correctness will be proven"),
-}
-
 
 def _persona_preamble(slug: str, confidence: float | None, completeness: float | None) -> str:
     title, focus = _PERSONA_PROFILE.get(slug, _PERSONA_PROFILE[_DEFAULT_PERSONA])
@@ -461,6 +407,11 @@ _RECORD_VERIFICATION_TOOL = "record_verification"
 _GET_METHODOLOGY_TOOL = "get_methodology"
 _LOCK_PLAN_TOOL = "lock_plan"
 _BOOST_TOOL = "icx_boost"
+_BOOST_REFINE_TOOL = "icx_boost_refine"
+_BOOST_PROMPT_NAME = "icx-boost"
+_SKILL_GET_TOOL = "icx_skill_get"
+_SKILLS_INDEX_TOOL = "icx_skills_index"
+_DRAFT_SKILL_TOOL = "draft_skill"
 _UI_AUTH_CAPTURE_TOOL = "ui_auth_capture"
 _UI_AUTH_INLINE_TOOL = "ui_auth_inline"
 _GRAPH_BLAST_RADIUS_TOOL = "graph_blast_radius"
@@ -473,6 +424,71 @@ _AUDIT_TOOL_NAME = "get_memory_audit"
 # Testing session tools (LangGraph entry - local engine)
 _TESTING_START_TOOL = "start_testing_session"
 _TESTING_RESUME_TOOL = "resume_testing_session"
+_TESTING_STATUS_TOOL = "get_testing_session_status"
+
+# Background-task registry for testing-session gates that trigger real browser work (verify/heal,
+# scored execution). A gate that answers within _TESTING_QUICK_TIMEOUT behaves exactly as before
+# (inline result, no contract change). One that runs longer is detached into a tracked asyncio.Task
+# so the MCP call returns immediately with status:"running" instead of blocking - the caller polls
+# get_testing_session_status instead of staring at one opaque call with no way to tell "working"
+# from "stuck". Keyed by session_id; best-effort only (an MCP server restart drops tracking, but
+# get_testing_session_status still falls back to a plain checkpoint read in that case).
+_TESTING_RUNNING: dict[str, "asyncio.Task"] = {}
+_TESTING_ERRORS: dict[str, str] = {}
+_TESTING_QUICK_TIMEOUT = 20.0
+
+
+def _testing_task_done_cb(session_id: str, task) -> None:
+    _TESTING_RUNNING.pop(session_id, None)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        _TESTING_ERRORS[session_id] = str(exc)
+
+
+async def _testing_invoke_tracked(session_id: str, coro) -> bool:
+    """Run a testing-graph coroutine (ainvoke) as a tracked background task. Returns True if it
+    completed within the quick timeout - caller reads the result exactly as before. Returns False if
+    it is still running past the timeout; the task keeps executing in the background (asyncio.shield
+    means the wait_for timeout never cancels it) and get_testing_session_status polls it to done."""
+    task = asyncio.create_task(coro)
+    task.add_done_callback(functools.partial(_testing_task_done_cb, session_id))
+    _TESTING_RUNNING[session_id] = task
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_TESTING_QUICK_TIMEOUT)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+def _testing_gate_snapshot(session_id: str, snapshot) -> dict:
+    """Shared shape for start/resume/status: extract the pending gate (if any) and done-ness from a
+    LangGraph state snapshot. See resume_testing_session for why `not snapshot.next` alone is not a
+    reliable done signal."""
+    gate_data = {}
+    has_interrupt = bool(snapshot.tasks and snapshot.tasks[0].interrupts)
+    if has_interrupt:
+        gate_data = snapshot.tasks[0].interrupts[0].value
+    is_done = (not snapshot.next) and (not has_interrupt)
+    vals = getattr(snapshot, "values", None) or {}
+    return {
+        "session_id": session_id, "done": is_done, "gate": gate_data,
+        "status": vals.get("status"), "error": vals.get("last_error") if is_done else None,
+    }
+
+def _ICX_FALLBACK(kind: str, connect_cmd: str) -> str:
+    """Graceful-fallback instruction when ICX supports an integration but it is not connected. ICX stays
+    the preferred path; the agent reuses its own connector meanwhile, else proceeds normally - and always
+    tells the user it is not enabled. Same 3-tier intelligence as the boost link handling."""
+    return (
+        f"ICX supports the {kind} integration but it is not connected. Do this, in order: "
+        f"(1) TELL the user it is not enabled and to connect ICX (`{connect_cmd}`) - the preferred path; "
+        f"(2) MEANWHILE, if you have your own {kind} tool/MCP connector, use it to get the data and "
+        f"continue; (3) if neither is available, proceed with the normal flow and note that the ICX "
+        f"{kind} integration is off. Do not fabricate the data."
+    )
+
 
 # Sonar code-quality tools (direct SonarQube reader, gated by sonar_enabled)
 _SONAR_STATUS_TOOL = "sonar_status"
@@ -666,8 +682,11 @@ ask, and wait for the user's reply before responding. NEVER auto-fill, default, 
 
 AGENT-GENERATE gates - the answer is YOURS to produce. You generate each fully and submit it
 directly. You MUST NOT delegate these to the user or ask them to write them:
-    2b, compat_scan, author_flow, expand_scan, analyze_screen, author_flow_heal, author_flow_explore, unit_author
-    (2b: json_spec generation; compat_scan: file compatibility detection; author_flow: UI flow steps; expand_scan: repo grep for related files; analyze_screen: framework Element Census; author_flow_heal: repair selectors verify flagged; author_flow_explore: agent-mode extra exploratory steps appended to the deterministic base; unit_author: write unit tests from the census)
+    2b, compat_scan, author_flow, expand_scan, analyze_screen, unit_author
+    (2b: json_spec generation; compat_scan: file compatibility detection; author_flow: write AND RUN a
+    real Playwright test yourself, self-healing until the checklist is covered; expand_scan: repo grep
+    for related files; analyze_screen: framework Element Census; unit_author: write unit tests from
+    the census)
 
 DEFAULT POSTURE - ICX gate data is for the USER to read and decide. You never advance the
 workflow on your own except to generate the spec at Gate 2b. Everywhere else: present the
@@ -708,9 +727,14 @@ RULE 1 - CHECK gate.gate BEFORE RESPONDING:
   Using the wrong format silently drops fields and corrupts the session. That is a VIOLATION.
 
 RULE 2 - NEVER SKIP A GATE:
-  done: false means a gate is waiting. Call resume_testing_session immediately after user input.
+  done: false + gate set means a gate is waiting. Call resume_testing_session immediately after
+  user input.
+  status: "running" (gate is null) means no gate is waiting yet - real browser work is still in
+  progress. Call get_testing_session_status(session_id) to poll instead of calling this tool
+  again; only come back to resume_testing_session once polling returns an actual gate.
   done: true means the session is over. Stop calling this tool.
-  Calling this tool after done: true, or failing to call it when done: false, are both VIOLATIONS.
+  Calling this tool after done: true, calling it again while status is "running", or failing to
+  call it when a real gate is waiting, are all VIOLATIONS.
 
 RULE 3 - GATE 3 URL IS ALWAYS USER-CONFIRMED:
   Display the URL to the user. Wait for explicit confirmation.
@@ -776,13 +800,25 @@ Gate "pick_type" - Test type selection [USER-DECISION]:
   re-ask the type. Do not ask the user to re-pick the type anywhere else.
   YOU MUST SHOW THE USER AND WAIT FOR THEIR REPLY - VIOLATION IF SKIPPED:
     "Select test type:
-       1. ui    - Scripted, tight field-by-field validation of the change (frontend, needs a URL).
+       1. agent - YOU write a real Playwright test covering the screen's Element Census, run it
+                  yourself, and self-heal until it passes (frontend, needs a URL).
        2. api   - REST endpoint test (backend, needs a URL).
-       3. agent - The agent authors a BROAD exploratory flow (edge cases, richer assertions);
-                  deterministic replay, no runtime LLM (frontend, needs a URL).
-       4. unit  - Run the repo's own unit tests (no URL, no running app).
+       3. unit  - Run the repo's own unit tests (no URL, no running app).
      What is your choice?"
-  WAIT for reply. Response: {"test_type": "ui"|"api"|"agent"|"unit"}
+  WAIT for reply. Response: {"test_type": "agent"|"api"|"unit"}
+
+Gate "known_screen" - Known-screen fast path [USER-DECISION, agent-type only, RARE]:
+  This gate ONLY appears when ICX found a PROVABLY FRESH cached clearance of this EXACT screen from
+  a prior session - every cached file byte-identical to then, AND a fresh check found no new related
+  file. If it does not appear, there was no cache, it was stale, or a new file was found - in every
+  one of those cases ICX already moved straight to expand_scan, no action needed from you.
+  When it DOES appear, show the user: "Found a prior cleared run of this screen from gate.cached_at
+  (gate.confirmed_files count files, gate.functionality_count functionalities, coverage
+  gate.census_coverage). Reuse it and skip straight to URL/layer confirmation, or redo file discovery
+  and the census from scratch?"
+  WAIT for reply. Response: {"decision": "fast_path"|"rescan"}. Anything other than "fast_path" is
+  treated as "rescan" - the normal expand_scan/expand/analyze_screen/compat_scan pipeline runs exactly
+  as if there had been no cache.
 
 Gate "expand_scan" - Related file discovery [AGENT-GENERATE]:
   This gate is YOURS to produce. Do NOT show it to the user or wait for their reply.
@@ -821,6 +857,9 @@ Gate "expand" - File confirmation [USER-DECISION]:
   (Seed selection - endpoint/route, changed UI, or backend->UI grep bridge - happened before
   start_testing_session; see that tool. Here you only expand + confirm.)
   Response: {"confirmed_files": ["abs/path/Screen.jsx", ...], "url": "<optional>"}
+  This list IS the file set for the rest of the session - every later gate (analyze_screen,
+  compat_scan, ...) only ever sees what you confirm here. Omit a file you want excluded; it will
+  NOT reappear later. If you resume without confirmed_files, ICX keeps the full candidate list.
 
 Gate "analyze_screen" - Element Census [AGENT-GENERATE]:
   ICX selected the framework-specific analyzer prompt (gate.analyzer_id / gate.analyzer_family) and
@@ -840,23 +879,6 @@ Gate "analyze_screen" - Element Census [AGENT-GENERATE]:
   the COMBINED census - so real rendered selectors/wizard-nav back your JS-hidden constraints. You
   only produce the source census here; the live crawl and merge are automatic.)
   Response: {"screen_model": { ...the analyzer prompt's strict JSON... }, "read_receipts": [...]}
-
-Gate "author_flow_heal" - Selector repair [AGENT-GENERATE]:
-  ICX ran a LIVE-DOM verify probe and found selectors in your authored flow that do NOT resolve on
-  the real page (gate.broken_selectors: each with its target + status broken|ambiguous|invalid).
-  A data-testid passed to a third-party component often never renders (verify against the LIVE DOM,
-  not the source); use the real class/label/text, and .first() for a legitimately-multi-match target.
-  Repair ONLY the flagged selectors and return the COMPLETE corrected flow.
-  Response: {"steps": [ {full corrected step}, ... ]}
-
-Gate "author_flow_explore" - Agent exploratory augmentation [AGENT-GENERATE, agent mode only]:
-  ICX already generated the full deterministic flow (functional + negative + boundary + security +
-  a11y + error + workflow). APPEND extra EXPLORATORY steps for screen-specific edge cases the base
-  did not cover (unusual interaction orders, state combinations, business-rule corners). Same step
-  schema + actions. Return {"steps": [...]} of ONLY your additional steps, or {"steps": []} if none.
-  When nl_intent and/or acceptance_criteria were supplied to start_testing_session, the message also
-  carries a REQUESTED scenarios block - author one additional scenario for the NL intent and one for
-  each acceptance criterion, asserting its expected outcome.
 
 Gate "unit_author" - Write unit tests from the census [AGENT-GENERATE]:
   For a unit test, ICX gives you the Element Census (gate.screen_model) enumerating every testable
@@ -1064,17 +1086,19 @@ Gate "3" - URL confirmation [automated only]:
     "You chose the '<gate.test_type>' test - that layer will run. Confirm the target URL:
      TARGET URL: <gate.current.url or 'NOT SET'>
      (unit needs no URL.) Reply 'accept' to run your chosen type, or list layers to override.
-     For ui/agent: the test replays HEADLESS (hidden) by default. Ask if the user wants to WATCH it
-     (visible browser); if yes, include visible:true. If visible, ALSO ask the user the SLOWMO pace
-     in ms (how long to slow + pause on each step so they can follow) - DEFAULT 1000 (1s) when
+     For agent: you will run your test HEADLESS (hidden) by default. Ask if the user wants to WATCH
+     it (visible browser); if yes, include visible:true. If visible, ALSO ask the user the SLOWMO
+     pace in ms (how long to slow + pause on each step so they can follow) - DEFAULT 1000 (1s) when
      visible, 0 when headless - and pass it as slowmo."
   WAIT for user reply on ALL fields. Responding without all answers is a CRITICAL VIOLATION.
   (RULE 3: URL must be explicitly confirmed by user. Never submit a URL you assumed.)
   Response: {"layers":["unit","api",...],
              "url":"http://...",
-             "visible": true|false,   (ui/agent only - true = watch the browser)
-             "slowmo": 1000}          (ui/agent + visible only - ms slowed+paused per step; default 1000, headless forces 0)
-  --- After this response ICX runs the local verification suite. Do not timeout. Wait for next gate. ---
+             "visible": true|false,   (agent only - true = watch the browser)
+             "slowmo": 1000}          (agent + visible only - ms slowed+paused per step; default 1000, headless forces 0)
+  --- After this response ICX runs the local verification suite. This can take minutes - expect
+  {"status": "running"} back and poll get_testing_session_status(session_id) rather than assuming
+  a hang; see RUNNING in this tool's top-level RETURNS section. ---
 
 Gate "auth_gate" - Authentication configuration [USER-DECISION]:
   YOU MUST SHOW THE USER AND WAIT FOR THEIR REPLY - VIOLATION IF SKIPPED:
@@ -1090,36 +1114,38 @@ Gate "auth_gate" - Authentication configuration [USER-DECISION]:
     credentials, and they go to ICX's browser process, never into chat history.
   reuse: uses the stored session for this project + host. public: no auth.
   Response (any mode, AFTER the capture/inline tool returns ok): {"auth_mode": "public"|"reuse"|"capture"|"inline"}
+  Port drift: if gate.other_host_sessions is non-empty, the exact host has no session but this SAME
+  project has one at a different port (a dev server auto-incrementing past a taken port is the usual
+  cause). Show it to the user; reuse it with {"auth_mode": "reuse", "reuse_host": "<host>"} - cookie
+  auth transfers across a port change, but localStorage/sessionStorage auth (common in SPAs) does NOT
+  (origin-scoped including port), so warn the user and be ready to fall back to capture if the app
+  still looks logged out.
 
-Gate "author_flow" - UI test flow authoring [AGENT-GENERATE, ui/agent test types only]:
+Gate "author_flow" - write AND run a real Playwright test [AGENT-GENERATE, agent test type only]:
   This gate is YOURS to produce. Do NOT show it to the user or wait for their reply.
-  Read every file in gate.file_paths fully, then author the ordered steps a real user takes
-  through the screen - INCLUDING any login steps. ICX caches the flow and replays it
-  DETERMINISTICALLY (no LLM on rerun). The DEPTH depends on gate.test_type:
-    - test_type "ui"    -> SCRIPTED: a tight, minimal flow over exactly the fields/behaviour under
-                           test. No exploration.
-    - test_type "agent" -> EXPLORATORY: reason from first principles and author a BROAD flow that
-                           covers happy paths AND edge cases (empty/invalid input, validation
-                           messages, boundaries, every control, error/success states), with rich
-                           assertions. This is where your judgement adds coverage.
-  Both replay identically + deterministically - the difference is authoring depth, not runtime.
-    gate.file_paths: the UI source file(s) describing the screen and its flow.
-    gate.url: the application URL for this screen.
-  Each step: {action, target: "<CSS selector or url>", value?, description?}. Actions:
-    goto (url) | fill (input, text) | select (a <select> dropdown, value=option label, e.g. a
-    tenant/org picker) | click (the REAL selector, e.g. #loginButton - NOT assumed button[type=submit])
-    | waitfor (selector visible, for post-login redirect / async render) | assert (element text
-    contains value). Use REAL selectors READ from the live DOM (ids/data-testid/text) - never invent
-    a data-testid. For a SPA (hash/client routing) goto the FULL url INCLUDING the # fragment, and
-    waitfor a real element before filling/asserting (the DOM renders after load).
-  AUTH: if auth_mode is capture/inline/reuse, a saved session is RESTORED automatically (cookies +
-    localStorage + sessionStorage) before the flow runs - do NOT author login steps; goto the target
-    URL directly and waitfor a post-login element first. Only author login steps for a public app
-    with no saved session (do NOT assume a 2-field form; fill/select/click the app's REAL controls).
-  Response: {"steps": [ {step}, ... ], "read_receipts": [{"path": "<p>", "line_count": <n>, "last_line": "<text>"}]}
-  - steps: the complete ordered flow.
-  - read_receipts: one entry per file you opened and read fully this step (path, total line count, text of the last line).
-  - This is your generation - not the user's. Produce it and submit it directly.
+  gate.screen_model is the Element Census (COMBINED: live-DOM crawl fused with the source census,
+  so every selector already resolves). gate.rules carries the mandatory checklist (RULEBOOK RULE
+  applies - read it in full, every time) - CRUD lifecycle, validation, security (XSS/SQLi), a11y,
+  error-handling, data safety. Follow it; it is binding.
+  WRITE a real Playwright test file in the repo (your own editor tools) covering the checklist for
+  every functionality in gate.screen_model. RUN it YOURSELF (your Bash tool) against ICX's OWN
+  pinned Playwright install - gate.playwright gives {node, env: {NODE_PATH, PLAYWRIGHT_BROWSERS_PATH}}
+  to use, so you run ICX's install, never a bare npx/global one. Point the run's JUnit reporter at
+  gate.report_path (e.g. `playwright test <file> --reporter=junit --output=<gate.report_path>`).
+  READ Playwright's own failures (real stack traces, real selector mismatches) and FIX YOUR OWN
+  script, then re-run - repeat until the checklist is covered or you have confirmed a genuine
+  application bug (report it as a finding, never force a false pass by weakening an assertion).
+  BROWSER: gate.headless / gate.slowmo carry the user's visible/slowmo choice from gate 3 - launch
+  your own browser context accordingly (headed + slowMo when the user asked to watch).
+  AUTH: if gate.auth_mode is capture/inline/reuse, gate.storage_state is a Playwright storageState
+  path - load it into your browser context and go straight to gate.url; do NOT author login steps.
+  For a public app with no saved session, author real login steps yourself (read the actual form).
+  Response: {"report_path": "<path you actually wrote the JUnit report to>",
+             "test_file": "<path to the Playwright file you wrote>",
+             "covered": ["<functionality names/ids from screen_model you covered>"],
+             "findings": ["<genuine app bugs found, if any>"]}
+  - This is your generation AND your execution - not the user's, not ICX's. Produce it, run it,
+    self-heal it, submit the result directly.
 
 Gate "4" - Issue review [automated only]:
   YOU MUST SHOW THE USER (VIOLATION IF SKIPPED):
@@ -1203,7 +1229,40 @@ RETURNS: {session_id, done: bool, gate: {gate: "...", message: "...", ...} | nul
 done: false -> gate.gate is set -> use that gate's format above for the next call.
 done: true  -> gate is null -> session complete, workflow finished.
 
-RUNTIME: <2s for all gates. Gate 3 response waits while ICX runs the local verification suite.\
+RUNNING (real browser work - verify/heal, scored execution - can take minutes): instead of gate,
+you may get {"session_id", "status": "running", "done": false, "gate": null, "poll": "..."}.
+This means the call returned before the work finished - it is NOT stuck and NOT an error. Do:
+  1. Tell the user ICX is still running (do not go silent - say what is happening).
+  2. Call get_testing_session_status(session_id) to check progress. Space out polls (e.g. every
+     15-30s) rather than hammering the tool - the work is bounded internally and will finish.
+  3. Once status is no longer "running", the response has the normal {done, gate} shape above -
+     resume from there exactly as usual.
+  NEVER call resume_testing_session again while status is "running" - there is no gate waiting
+  for an answer yet, and a stray resume on a still-executing session is rejected.
+
+RUNTIME: <2s for most gates. Gate 3 response and any AGENT-GENERATE gate that follows a live-DOM
+verify/heal pass can run long - expect "status": "running" and poll rather than assuming a hang.\
+"""
+
+_TESTING_STATUS_DESCRIPTION = """\
+Poll a testing session that returned {"status": "running"} from start_testing_session or \
+resume_testing_session. Cheap, read-only, safe to call repeatedly.
+
+session_id: the same UUID from start_testing_session.
+
+RETURNS one of:
+  {"session_id", "status": "running", "done": false, "gate": null}
+    Still executing. Wait and poll again (every 15-30s is enough - do not busy-poll).
+  {"session_id", "done": false, "gate": {...}, "status": "..."}
+    Finished and a new gate is waiting - handle it exactly like any resume_testing_session gate
+    response (see resume_testing_session's GATE POSTURE CLASSIFICATION and per-gate rules).
+  {"session_id", "done": true, "gate": null, "status": "...", "error": null|"..."}
+    Session complete.
+  {"error": "..."}
+    session_id unknown/malformed, or the session's state could not be read.
+
+Never call resume_testing_session while a status poll still returns "running" - only call it again
+once you have a gate to answer.\
 """
 
 # ---------------------------------------------------------------------------
@@ -1235,10 +1294,13 @@ ICX TOOL SEQUENCE - WORKFLOW ORDER (read this first):
        --- ask: "How would you like to test? 1. automated  2. manual" ---
   [18] start_testing_session   [1-5s] begin test session (pass test_mode from user's answer)
   [19] resume_testing_session         respond to every gate in sequence until done: true
+                                       (a "status":"running" reply means poll
+                                        get_testing_session_status instead of resuming again)
        --- after testing confirms fix works ---
   [20] reinforce_memory_usage [<1s]  MANDATORY first if any memory_search result influenced your approach
   [21] save_memory                   MANDATORY - only after testing confirms fix works - always after [20]
-  [22] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
+  [22] draft_skill                   MANDATORY - immediately after [21], every time, even if skill_worthy=false
+  [23] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
 
 Runs AI analysis on issue text only - attachments are not downloaded or processed. \
 Use when the issue description and comments contain sufficient context, or for quick triage.
@@ -1349,8 +1411,9 @@ After testing session reaches done: true:\n\
   If yes:\n\
     call reinforce_memory_usage [20] FIRST (if any memory_search result influenced your approach).\n\
     call save_memory [21] with all required fields.\n\
+    call draft_skill [22] IMMEDIATELY after - mandatory, even if the honest judgment is skill_worthy=false.\n\
   If no: do not call save_memory. Session ends here.\n\
-save_memory [21] is the FINAL step. It is NEVER called before testing completes or without human confirmation.
+draft_skill [22] is the FINAL step, called right after save_memory [21]. Neither is skipped once testing completes and the user confirms.
 
 RULE 6 - MANDATORY TOOL COMPLETENESS:
 Before presenting the confirmation format, you MUST have called every tool whose skip condition is NOT met. \
@@ -1384,6 +1447,7 @@ WORKFLOW (follow in order, no skipping):
    If yes:
      a. call reinforce_memory_usage [20] FIRST if memory_search result was used
      b. call save_memory [21] with resolution_note, files_changed, root_cause_pattern, and all required fields
+     c. call draft_skill [22] immediately after - mandatory, even if skill_worthy=false
    If no: stop. Do not call save_memory.\
 """
 
@@ -1412,10 +1476,13 @@ ICX TOOL SEQUENCE - WORKFLOW ORDER (read this first):
        --- ask: "How would you like to test? 1. automated  2. manual" ---
   [18] start_testing_session   [1-5s] begin test session (pass test_mode from user's answer)
   [19] resume_testing_session         respond to every gate in sequence until done: true
+                                       (a "status":"running" reply means poll
+                                        get_testing_session_status instead of resuming again)
        --- after testing confirms fix works ---
   [20] reinforce_memory_usage [<1s]  MANDATORY first if any memory_search result influenced your approach
   [21] save_memory                   MANDATORY - only after testing confirms fix works - always after [20]
-  [22] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
+  [22] draft_skill                   MANDATORY - immediately after [21], every time, even if skill_worthy=false
+  [23] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
 
 Fetches and analyzes a work item (bug, story, or task) with full vision and OCR processing \
 for image attachments. Identifies relevant codebase files via graph navigation.
@@ -1524,8 +1591,9 @@ After testing session reaches done: true:\n\
   If yes:\n\
     call reinforce_memory_usage [20] FIRST (if any memory_search result influenced your approach).\n\
     call save_memory [21] with all required fields.\n\
+    call draft_skill [22] IMMEDIATELY after - mandatory, even if the honest judgment is skill_worthy=false.\n\
   If no: do not call save_memory. Session ends here.\n\
-save_memory [21] is the FINAL step. It is NEVER called before testing completes or without human confirmation.
+draft_skill [22] is the FINAL step, called right after save_memory [21]. Neither is skipped once testing completes and the user confirms.
 
 RULE 6 - MANDATORY TOOL COMPLETENESS:
 Before presenting the confirmation format, you MUST have called every tool whose skip condition is NOT met. \
@@ -1986,6 +2054,122 @@ _PROFILE_SCHEMA = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Shared boost brief builder - used by both the icx_boost TOOL (_call_tool)
+# and the icx-boost PROMPT (_get_prompt). Kept as one function so the two
+# entry points never drift.
+# ---------------------------------------------------------------------------
+
+def _run_boost_brief(prompt: str, repo_path: str | None = None, current_file: str | None = None,
+                     is_continuation: bool = False, links_in=None) -> dict:
+    """Build the one-pass boost brief. Returns a plain dict - never raises (degrades to a minimal
+    methodology-only brief on internal failure so callers always get a usable response)."""
+    try:
+        from icx_engine.boost.classify import is_trivial
+        if is_trivial(prompt):
+            return {
+                "skip": True,
+                "reason": "conversational/continuation message - no boost needed; answer directly "
+                          "(continue the current task with the context you already have).",
+                "boost_meta": {"deterministic": True, "llm_used": False, "trivial": True},
+            }
+    except Exception:
+        pass   # never let the guard block a real boost
+    try:
+        from icx_engine.boost.service import build_boost_brief
+        provided = [str(u) for u in (links_in or [])]
+        brief = build_boost_brief(
+            prompt, repo_path=repo_path, current_file=current_file,
+            is_continuation=is_continuation, links_in=provided,
+            env_fn=_boost_env, signals_fn=_context_signals, connected_fn=_icx_connected)
+        try:
+            idx = rank_skills(prompt, brief.get("archetype", "coding"), storage=SkillStorage())
+            if idx:
+                brief["skills"] = {"index": idx}
+        except Exception:
+            pass   # a skill-ranking failure must never break the boost response
+        return brief
+    except Exception as exc:
+        from icx_engine.methodology import build_checklist_for as _bcf
+        m = _bcf(prompt)
+        return {
+            "archetype": m["archetype"], "methodology": m,
+            "context": {"activated_signals": [], "files": [], "skipped": str(exc)},
+            "links": [], "clarifications": [], "gates": m["gate_sequence"],
+            "boosted_prompt": prompt, "boost_meta": {"deterministic": True, "llm_used": False},
+            "mandatory_directive": "Follow the ICX methodology; boost degraded to minimal mode.",
+            "intent": prompt,
+        }
+
+
+def _auto_refine_brief(prompt: str, brief: dict) -> dict:
+    """Auto-refine pass: takes a boost brief and deterministically applies compose_cto_prompt with an
+    empty spec (no agent-drafted objective/requirements needed) so a single call produces the full
+    two-pass CTO-grade prompt. The agent may still call icx_boost_refine itself afterwards with a
+    hand-drafted spec for a stronger result - that stays optional, not required."""
+    if brief.get("skip"):
+        return brief
+    from icx_engine.boost.refine import compose_cto_prompt
+    archetype = brief.get("archetype", "coding")
+    context = brief.get("context") or {}
+    brief = dict(brief)
+    brief["boosted_prompt"] = compose_cto_prompt(prompt, archetype, None, context)
+    brief["boost_meta"] = {**(brief.get("boost_meta") or {}), "auto_refined": True}
+    brief["refine_note"] = (
+        "This already ran boost + an auto-refine pass in one call - work from boosted_prompt directly, "
+        "no second call is required. Optionally call icx_boost_refine yourself with a hand-drafted "
+        "objective/requirements/constraints/acceptance/dims for an even stronger spec."
+    )
+    return brief
+
+
+def _boosted(prompt: str, repo_path: str | None = None, current_file: str | None = None,
+            is_continuation: bool = False, links_in=None) -> dict:
+    """One call, two passes: build the boost brief then auto-apply the refine pass. This is what both
+    the icx_boost tool and the icx-boost MCP prompt return, so neither entry point ever needs a second
+    manual call to reach the CTO-grade result."""
+    brief = _run_boost_brief(prompt, repo_path=repo_path, current_file=current_file,
+                             is_continuation=is_continuation, links_in=links_in)
+    return _auto_refine_brief(prompt, brief)
+
+
+@server.list_prompts()
+async def _list_prompts() -> list[Prompt]:
+    return [
+        Prompt(
+            name=_BOOST_PROMPT_NAME,
+            description=(
+                "Boost this request into a CTO-grade working spec in ONE call - boost + an auto-refine "
+                "pass both run deterministically before you see the result, so no second slash command "
+                "or tool call is required. Use this on demand (e.g. /icx-boost <your request>) instead "
+                "of on every message."
+            ),
+            arguments=[
+                PromptArgument(name="prompt", description="The raw user request.", required=True),
+                PromptArgument(name="repo_path", description="Project path, if any.", required=False),
+                PromptArgument(name="current_file", description="File in focus, if any.", required=False),
+            ],
+        ),
+    ]
+
+
+@server.get_prompt()
+async def _get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
+    args = arguments or {}
+    if name != _BOOST_PROMPT_NAME:
+        raise ValueError(f"Unknown prompt: {name}")
+    prompt = str(args.get("prompt", "")).strip()
+    if not prompt:
+        raise ValueError("prompt argument is required")
+    repo_path = args.get("repo_path") or None
+    current_file = args.get("current_file") or None
+    brief = _boosted(prompt, repo_path=repo_path, current_file=current_file)
+    return GetPromptResult(
+        description="ICX boosted + auto-refined CTO-grade working spec",
+        messages=[PromptMessage(role="user", content=TextContent(type="text", text=json.dumps(brief)))],
+    )
+
+
 @server.list_tools()
 async def _list_tools() -> list[Tool]:
     # Do NOT call ConfigManager.load() here - it triggers a keyring health check
@@ -2035,14 +2219,18 @@ async def _list_tools() -> list[Tool]:
         Tool(
             name=_BOOST_TOOL,
             description=(
-                "CALL THIS FIRST for ANY request when ICX is connected - it is the ICX thinking "
-                "channel. Give it the user's raw prompt; it returns a boosted brief: the real intent, "
-                "the task archetype, the MANDATORY ICX methodology for that archetype, only the "
-                "codebase context the problem actually needs (graph/grep/memory - skipped for a plain "
-                "question or when no repo is connected), clarifications, the gate sequence, any links "
-                "(preserved + tagged with how to pull them - via an ICX tool, by connecting ICX, or with "
-                "your own tool), and a boosted_prompt to work from. Follow mandatory_directive. For a "
-                "work-tracker ticket, analyze_issue_fast remains the ticket entrypoint."
+                "The ICX thinking channel - call this ON DEMAND (e.g. the user typed /icx-boost, or an "
+                "MCP-prompt-capable editor invoked the icx-boost prompt) rather than on every message. "
+                "Give it the user's raw prompt; it returns a boosted brief: the real intent, the task "
+                "archetype, the MANDATORY ICX methodology for that archetype, only the codebase context "
+                "the problem actually needs (graph/grep/memory - skipped for a plain question or when no "
+                "repo is connected), clarifications, the gate sequence, any links (preserved + tagged with "
+                "how to pull them - via an ICX tool, by connecting ICX, or with your own tool), and a "
+                "boosted_prompt to work from - this already includes an auto-refine pass (deterministic, "
+                "no second call needed). Follow mandatory_directive. A work-tracker ticket reference "
+                "(ABC-123, a Jira/GitHub/Linear/GitLab URL) or a SonarQube reference is ALWAYS routed "
+                "through ICX (analyze_issue_fast / sonar_* tools) regardless of whether boost was called - "
+                "that routing is independent of this on-demand channel."
             ),
             inputSchema={
                 "type": "object",
@@ -2052,6 +2240,43 @@ async def _list_tools() -> list[Tool]:
                     "current_file": {"type": "string", "description": "File in focus, if any."},
                     "is_continuation": {"type": "boolean",
                                         "description": "True if iterating on an ongoing problem."},
+                },
+                "required": ["prompt"],
+            },
+        ),
+        Tool(
+            name=_BOOST_REFINE_TOOL,
+            description=(
+                "OPTIONAL enrichment on top of icx_boost - not required, since icx_boost already returns "
+                "an auto-refined CTO-grade boosted_prompt in one call. Call this only when YOU (the agent, "
+                "no extra model cost) have your own deeper understanding of the request and want to draft "
+                "a STRUCTURED spec for an even stronger result (measurably stronger - proven +18% "
+                "requirement coverage over the auto-refined default). ICX deterministically assembles the "
+                "final expert prompt: a best-in-class persona chosen per problem, your restated objective, "
+                "the codebase context, the merged requirements, constraints, deliverable, acceptance "
+                "criteria + ICX gates, and the methodology standard. Draft these (all optional; ICX fills "
+                "any gap): objective (restate the ask professionally), requirements[], constraints[], "
+                "deliverable, acceptance[] (definition of done), dims[] (extra completeness items). Supply "
+                "at least one of objective/requirements/dims."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "The original user request (verbatim)."},
+                    "objective": {"type": "string", "description": "Your professional restatement of the real goal."},
+                    "requirements": {"type": "array", "items": {"type": "string"},
+                                     "description": "Explicit + inferred functional requirements."},
+                    "constraints": {"type": "array", "items": {"type": "string"},
+                                    "description": "Tech stack, conventions, and things NOT to do."},
+                    "deliverable": {"type": "string", "description": "What to produce and in what form."},
+                    "acceptance": {"type": "array", "items": {"type": "string"},
+                                   "description": "Definition of done - how the result is judged."},
+                    "dims": {"type": "array", "items": {"type": "string"},
+                             "description": "Extra task-specific completeness items a rushed answer forgets."},
+                    "archetype": {"type": "string",
+                                  "description": "Archetype from icx_boost. Optional; re-classified if omitted."},
+                    "repo_path": {"type": "string", "description": "Project path, if any."},
+                    "current_file": {"type": "string", "description": "File in focus, if any."},
                 },
                 "required": ["prompt"],
             },
@@ -2490,9 +2715,7 @@ async def _list_tools() -> list[Tool]:
                     "max_iterations": {"type": "integer", "minimum": 1},
                     "test_mode": {"type": "string", "enum": ["automated", "manual"]},
                     "test_writes": {"type": "boolean",
-                                    "description": "UI/agent: allow real Create/Update/Delete writes against the live app (default true). Set false for a read-only environment - the flow then exercises forms (fill/validate/cancel) without submitting a real write."},
-                    "constraint_source": {"type": "string", "enum": ["static", "runtime", "both"],
-                                          "description": "How field VALUES honor constraints (default static). 'static' = ICX generates values from the census constraints read from code. 'runtime' = the harness reads each field's ACTUALLY-APPLIED constraints on the live page (real maxLength/type/min/max) and generates the value in-browser - honors config/country/tenant rules not literal in source (e.g. a per-country MSISDN length set at runtime). 'both' = runtime seeded with the census semantic hint. Also selectable at config gate 3."},
+                                    "description": "agent-type: allow real Create/Update/Delete writes against the live app (default true). Set false for a read-only environment - the agent's test then exercises forms (fill/validate/cancel) without submitting a real write."},
                     "nl_intent": {"type": "string",
                                   "description": "Optional plain-English scenario request (e.g. 'test duplicate email error') to seed extra NL-driven test scenarios."},
                     "acceptance_criteria": {"type": "array", "items": {"type": "string"},
@@ -2511,6 +2734,17 @@ async def _list_tools() -> list[Tool]:
                     "response": {"type": "object"},
                 },
                 "required": ["session_id", "response"],
+            },
+        ),
+        Tool(
+            name=_TESTING_STATUS_TOOL,
+            description=_TESTING_STATUS_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                },
+                "required": ["session_id"],
             },
         ),
         # ------------------------------------------------------------------ #
@@ -2639,6 +2873,65 @@ async def _list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name=_DRAFT_SKILL_TOOL,
+            description=(
+                "MANDATORY immediately after every save_memory call where outcome_verified=true - no "
+                "exceptions, even when the honest judgment is skill_worthy=false. YOU decide: is this "
+                "fix non-obvious and likely to recur? If save_memory's response included "
+                "related_skills, check whether one of those names already covers this - reuse that "
+                "skill_name to refine it (your fresh text replaces the stale text) rather than create "
+                "a near-duplicate. Write description in third person, stating both what the skill does "
+                "and when to use it (e.g. 'Fixes N+1 query patterns in SQLAlchemy. Use when a list "
+                "endpoint is slow and profiling shows repeated single-row queries.'). Generalize - do "
+                "not paraphrase the raw ticket. Input: {issue_key, skill_worthy, skill_name?, "
+                "description?, when_to_use?, procedure?, verification?, pitfalls?, tags?} - the five "
+                "content fields are required when skill_worthy=true. Returns {status: skipped} or "
+                "{status: created|updated, name} or {error}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "The issue_key from the save_memory call this follows."},
+                    "skill_worthy": {"type": "boolean", "description": "Your own judgment - false is a valid, expected answer."},
+                    "skill_name": {"type": "string", "description": "Required when skill_worthy=true. Reuse an existing name (from related_skills) to refine it, or pick a new one to create."},
+                    "description": {"type": "string", "description": "Required when skill_worthy=true. Third person - states what it does AND when to use it."},
+                    "when_to_use": {"type": "string", "description": "Required when skill_worthy=true. The trigger condition."},
+                    "procedure": {"type": "string", "description": "Required when skill_worthy=true. The generalized step-by-step fix."},
+                    "verification": {"type": "string", "description": "Required when skill_worthy=true. How to confirm this class of fix worked."},
+                    "pitfalls": {"type": "string", "description": "Optional. Gotchas or wrong turns."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional. Merged with the originating entry's own tags."},
+                },
+                "required": ["issue_key", "skill_worthy"],
+            },
+        ),
+        Tool(
+            name=_SKILL_GET_TOOL,
+            description=(
+                "USE WHEN icx_boost's brief includes a skills.index entry you want full context on - "
+                "fetches one learned skill's complete markdown body (When to Use/Procedure/Pitfalls/"
+                "Verification). Never bulk-fetch every candidate - call this only for the name(s) you "
+                "actually want. Input: {name}. Returns {body} or {error}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill name, from skills.index in the icx_boost brief."},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name=_SKILLS_INDEX_TOOL,
+            description=(
+                "USE WHEN you suspect icx_boost's skills.index or save_memory's related_skills missed "
+                "something relevant - both are ranked/capped hints, not the full picture. Returns EVERY "
+                "learned skill's name and description, unranked, uncapped. Scan it yourself and decide "
+                "what's actually relevant; then call icx_skill_get for full content on the one(s) you "
+                "want. No input."
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        Tool(
             name=_RECORD_VERIFICATION_TOOL,
             description=(
                 "Record Definition-of-Done verification evidence before declaring a ticket done. "
@@ -2724,7 +3017,7 @@ async def _list_tools() -> list[Tool]:
             },
         ),
         # ------------------------------------------------------------------ #
-        # [22] Audit trail - diagnostic only                                 #
+        # [23] Audit trail - diagnostic only                                 #
         # ------------------------------------------------------------------ #
         Tool(
             name=_AUDIT_TOOL_NAME,
@@ -3382,25 +3675,69 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         repo_path = args.get("repo_path") if isinstance(args.get("repo_path"), str) else None
         current_file = args.get("current_file") if isinstance(args.get("current_file"), str) else None
         is_continuation = bool(args.get("is_continuation"))
+        links_in = args.get("links") if isinstance(args.get("links"), list) else []
+        brief = _boosted(prompt, repo_path=repo_path, current_file=current_file,
+                         is_continuation=is_continuation, links_in=links_in)
+        return [TextContent(type="text", text=json.dumps(brief))]
+
+    if name == _BOOST_REFINE_TOOL:
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return [TextContent(type="text", text=json.dumps({"error": "prompt must be a non-empty string."}))]
+        # Structured spec (all optional; ICX fills any gap). `dims` kept for back-compat.
+        def _slist(v):
+            return [str(x) for x in v] if isinstance(v, list) else []
+        spec = {
+            "objective": str(args.get("objective", "")) if isinstance(args.get("objective"), str) else "",
+            "requirements": _slist(args.get("requirements")),
+            "constraints": _slist(args.get("constraints")),
+            "acceptance": _slist(args.get("acceptance")),
+            "deliverable": str(args.get("deliverable", "")) if isinstance(args.get("deliverable"), str) else "",
+            "dims": _slist(args.get("dims")),
+        }
+        if not (spec["objective"] or spec["requirements"] or spec["dims"]):
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "supply at least one of: objective, requirements, dims (your drafted spec)."}))]
+        repo_path = args.get("repo_path") if isinstance(args.get("repo_path"), str) else None
+        current_file = args.get("current_file") if isinstance(args.get("current_file"), str) else None
         try:
-            from icx_engine.boost.service import build_boost_brief
-            provided = args.get("links") if isinstance(args.get("links"), list) else []
-            brief = build_boost_brief(
-                prompt, repo_path=repo_path, current_file=current_file,
-                is_continuation=is_continuation, links_in=provided,
-                env_fn=_boost_env, signals_fn=_context_signals, connected_fn=_icx_connected)
-            return [TextContent(type="text", text=json.dumps(brief))]
-        except Exception as exc:
-            from icx_engine.methodology import build_checklist_for as _bcf
-            m = _bcf(prompt)
+            from icx_engine.boost.classify import classify
+            from icx_engine.boost.refine import compose_cto_prompt, merge_dims
+            from icx_engine.methodology import _GATE_SEQUENCE
+            archetype = args.get("archetype") if isinstance(args.get("archetype"), str) and args.get("archetype") else classify(prompt)
+            # Gather context the same way icx_boost does (adaptive) so the CTO prompt carries it too.
+            context = {"files": []}
+            try:
+                env = _boost_env(repo_path, False)
+                from icx_engine.boost.router import plan_activation
+                from icx_engine.context_completeness import fan_out, fuse_rank
+                plan = plan_activation(prompt, archetype, env)
+                if plan.signals and repo_path:
+                    seeds = [current_file] if current_file else []
+                    kw = [w for w in prompt.lower().split() if len(w) > 3][:8]
+                    g, gr, se, me = _context_signals(repo_path, seeds, kw)
+                    sig = {"graph": g, "grep": gr, "semantic": se, "memory": me}
+                    active = {k: (sig[k] if k in plan.signals else None) for k in sig}
+                    scored = fuse_rank(fan_out(seeds, graph=active["graph"], grep=active["grep"],
+                                               semantic=active["semantic"], memory=active["memory"]))
+                    context["files"] = [s.to_dict() for s in scored if s.tier != "seed"][:20]
+            except Exception:
+                pass
+            cto = compose_cto_prompt(prompt, archetype, spec, context)
             return [TextContent(type="text", text=json.dumps({
-                "archetype": m["archetype"], "methodology": m,
-                "context": {"activated_signals": [], "files": [], "skipped": str(exc)},
-                "links": [], "clarifications": [], "gates": m["gate_sequence"],
-                "boosted_prompt": prompt, "boost_meta": {"deterministic": True, "llm_used": False},
-                "mandatory_directive": "Follow the ICX methodology; boost degraded to minimal mode.",
-                "intent": prompt,
+                "archetype": archetype,
+                "merged_requirements": merge_dims(archetype, spec["requirements"] + spec["dims"]),
+                "boosted_prompt": cto,
+                "gates": list(_GATE_SEQUENCE),
+                "boost_meta": {"deterministic": True, "llm_used": False, "pass": 2},
+                "mandatory_directive": ("This is your CTO-grade working spec - a persona-scoped, "
+                                        "fully-structured version of the request. Answer it completely to "
+                                        "its acceptance criteria; pass the gates (lock_plan before coding, "
+                                        "record_verification before done). Do not fall back to the raw prompt."),
             }))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"refine failed: {exc}", "boosted_prompt": prompt}))]
 
     if name == _LOCK_PLAN_TOOL:
         issue_ref = args.get("issue_ref", "")
@@ -3447,10 +3784,10 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         from icx_engine.testing import auth as _auth, ui_auth as _ui_auth
         from icx_engine.testing.nodes import _resolve_project_id
         from icx_engine.testing.runners.install import is_installed
-        if not is_installed("stagehand"):
+        if not is_installed("playwright"):
             return [TextContent(type="text", text=json.dumps({
                 "ok": False,
-                "error": ("UI tooling (Playwright/Stagehand + Chromium) is not installed. Run "
+                "error": ("UI tooling (Playwright + Chromium) is not installed. Run "
                           "'icx test setup' once to download it into ~/.icx/testing (it does NOT touch "
                           "your repo), then retry."),
             }))]
@@ -3623,6 +3960,75 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         )
         return [TextContent(type="text", text=text)]
 
+    if name == _DRAFT_SKILL_TOOL:
+        issue_key = args.get("issue_key")
+        if not isinstance(issue_key, str) or not issue_key.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "issue_key must be a non-empty string."}))]
+        skill_worthy = bool(args.get("skill_worthy", False))
+        if not skill_worthy:
+            return [TextContent(type="text", text=json.dumps({"status": "skipped"}))]
+
+        skill_name = args.get("skill_name")
+        description = args.get("description")
+        when_to_use = args.get("when_to_use")
+        procedure = args.get("procedure")
+        verification = args.get("verification")
+        missing = [
+            field_name for field_name, value in (
+                ("skill_name", skill_name), ("description", description),
+                ("when_to_use", when_to_use), ("procedure", procedure),
+                ("verification", verification),
+            ) if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"skill_worthy=true requires: {', '.join(missing)}."}))]
+
+        try:
+            loop = asyncio.get_running_loop()
+            entry = await loop.run_in_executor(_get_memory_executor(), _show_entry_sync, issue_key.strip())
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"Failed to look up memory entry for issue_key '{issue_key}': {exc}"}))]
+        if entry is None:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"No memory entry found for issue_key '{issue_key}'. Call save_memory first."}))]
+        if not entry.outcome_verified:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "The entry for this issue_key is not outcome_verified. A skill can only be drafted from a verified fix."}))]
+
+        pitfalls = args.get("pitfalls") if isinstance(args.get("pitfalls"), str) else ""
+        tags = [str(t) for t in (args.get("tags") or [])] if isinstance(args.get("tags"), list) else []
+
+        try:
+            from icx_engine.skills.writer import draft_skill_entry, write_or_update
+            draft = draft_skill_entry(
+                entry, skill_name.strip(), description.strip(), when_to_use.strip(),
+                procedure.strip(), verification.strip(), pitfalls=pitfalls, tags=tags,
+            )
+            status = write_or_update(SkillStorage(), draft)
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"Failed to draft skill: {exc}"}))]
+        return [TextContent(type="text", text=json.dumps({"status": status, "name": draft.name}))]
+
+    if name == _SKILL_GET_TOOL:
+        skill_name = args.get("name")
+        if not isinstance(skill_name, str) or not skill_name.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "name must be a non-empty string."}))]
+        entry = SkillStorage().read(skill_name.strip())
+        if entry is None:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"No skill named '{skill_name}' found."}))]
+        return [TextContent(type="text", text=json.dumps({"body": entry.to_markdown()}))]
+
+    if name == _SKILLS_INDEX_TOOL:
+        skills = SkillStorage().list_all()
+        return [TextContent(type="text", text=json.dumps(
+            {"skills": [{"name": s.name, "description": s.description} for s in skills]}))]
+
     if name == _REINFORCE_TOOL_NAME:
         source_key = args.get("source_key", "")
         new_ticket_key = args.get("new_ticket_key", "")
@@ -3716,30 +4122,37 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             acceptance_criteria=acceptance_criteria,
         )
         initial_state["project"] = project
+        initial_state["session_id"] = session_id
         if "test_writes" in args:
             initial_state["test_writes"] = bool(args.get("test_writes"))
-        if str(args.get("constraint_source", "")).lower() in ("static", "runtime", "both"):
-            initial_state["constraint_source"] = str(args.get("constraint_source")).lower()
         graph = await get_testing_graph()
         config = {"configurable": {"thread_id": session_id}}
-        await graph.ainvoke(initial_state, config=config)
+        finished = await _testing_invoke_tracked(session_id, graph.ainvoke(initial_state, config=config))
+        if not finished:
+            return [TextContent(type="text", text=json.dumps({
+                "ok": True, "session_id": session_id, "status": "running", "done": False, "gate": None,
+                "poll": ("Still running real work (graph expansion/verification). Call "
+                          "get_testing_session_status(session_id) to check progress - do NOT call "
+                          "resume_testing_session again until status is no longer 'running'."),
+            }))]
         snapshot = await graph.aget_state(config)
-        gate_data = {}
-        has_interrupt = bool(snapshot.tasks and snapshot.tasks[0].interrupts)
-        if has_interrupt:
-            gate_data = snapshot.tasks[0].interrupts[0].value
-        is_done = (not snapshot.next) and (not has_interrupt)
-        vals = getattr(snapshot, "values", None) or {}
-        return [TextContent(type="text", text=json.dumps({
-            "ok": True, "session_id": session_id, "gate": gate_data,
-            "done": is_done, "status": vals.get("status"),
-        }))]
+        result = _testing_gate_snapshot(session_id, snapshot)
+        result["ok"] = True
+        del result["error"]
+        return [TextContent(type="text", text=json.dumps(result))]
 
     if name == _TESTING_RESUME_TOOL:
         from icx_engine.testing.graph import get_testing_graph
         from langgraph.types import Command as _Command
         session_id = args["session_id"]
         response = args["response"]
+        running = _TESTING_RUNNING.get(session_id)
+        if running is not None and not running.done():
+            return [TextContent(type="text", text=json.dumps({
+                "session_id": session_id, "status": "running", "done": False, "gate": None,
+                "error": ("This session is still executing the previous gate. Call "
+                          "get_testing_session_status(session_id) instead of resuming again."),
+            }))]
         graph = await get_testing_graph()
         config = {"configurable": {"thread_id": session_id}}
         # SECURITY: an auth sessionId in the resume payload would be persisted to the durable
@@ -3749,25 +4162,45 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         # that record with an empty storage_state and make the replay run unauthenticated.
         if isinstance(response, dict) and "session_id" in response:
             response = {k: v for k, v in response.items() if k != "session_id"}
-        await graph.ainvoke(_Command(resume=response), config=config)
-        snapshot = await graph.aget_state(config)
-        gate_data = {}
-        has_interrupt = bool(snapshot.tasks and snapshot.tasks[0].interrupts)
-        if has_interrupt:
-            gate_data = snapshot.tasks[0].interrupts[0].value
+        finished = await _testing_invoke_tracked(session_id, graph.ainvoke(_Command(resume=response), config=config))
+        if not finished:
+            return [TextContent(type="text", text=json.dumps({
+                "session_id": session_id, "status": "running", "done": False, "gate": None,
+                "poll": ("Still running real work (verify/heal or scored test execution can take "
+                          "several minutes). Call get_testing_session_status(session_id) to check "
+                          "progress - do NOT call resume_testing_session again until status is no "
+                          "longer 'running'."),
+            }))]
         # A session is DONE only when nothing is pending AND no gate is waiting for input. A node
         # with several interrupt() calls (e.g. expand_files: expand_scan then expand) pauses at its
         # LATER interrupt with snapshot.next == () while an interrupt is still pending - so `not next`
         # alone would wrongly report done mid-flow and abandon the run before any test executes.
-        is_done = (not snapshot.next) and (not has_interrupt)
-        vals = getattr(snapshot, "values", None) or {}
-        return [TextContent(type="text", text=json.dumps({
-            "session_id": session_id,
-            "done": is_done,
-            "gate": gate_data,
-            "status": vals.get("status"),
-            "error": vals.get("last_error") if is_done else None,
-        }))]
+        snapshot = await graph.aget_state(config)
+        result = _testing_gate_snapshot(session_id, snapshot)
+        return [TextContent(type="text", text=json.dumps(result))]
+
+    if name == _TESTING_STATUS_TOOL:
+        from icx_engine.testing.graph import get_testing_graph
+        session_id = args.get("session_id", "")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return [TextContent(type="text", text=json.dumps({"error": "session_id is required."}))]
+        session_id = session_id.strip()
+        running = _TESTING_RUNNING.get(session_id)
+        if running is not None and not running.done():
+            return [TextContent(type="text", text=json.dumps({
+                "session_id": session_id, "status": "running", "done": False, "gate": None,
+            }))]
+        graph = await get_testing_graph()
+        config = {"configurable": {"thread_id": session_id}}
+        try:
+            snapshot = await graph.aget_state(config)
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"error": f"cannot read session state: {exc}"}))]
+        result = _testing_gate_snapshot(session_id, snapshot)
+        prior_error = _TESTING_ERRORS.pop(session_id, None)
+        if prior_error and not result.get("error"):
+            result["error"] = prior_error
+        return [TextContent(type="text", text=json.dumps(result))]
 
 
     if name == _SONAR_STATUS_TOOL:
@@ -3784,7 +4217,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             data = await _sonar_svc.projects(query=_sonar_opt_str(args, "query"))
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -3797,7 +4231,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             data = await _sonar_svc.branches(project, query=_sonar_opt_str(args, "query"))
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -3814,7 +4249,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                 data = await _sonar_svc.quality_gate(project, branch)
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -3828,7 +4264,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             data = await fn(**scope)
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -4540,7 +4977,7 @@ async def _handle_analyze_issue(
             "ITERATION RULE - applies for the rest of this task, no exceptions:\n"
             "After EVERY code change you make - including fixes requested during iteration - STOP "
             "and ask the user to test before making any further change or calling "
-            "reinforce_memory_usage/save_memory. This repeats on the 2nd, 3rd, and every "
+            "reinforce_memory_usage/save_memory/draft_skill. This repeats on the 2nd, 3rd, and every "
             "subsequent fix. A prior 'looks good' or 'works' does NOT carry over to a new edit - "
             "each new change requires its own fresh test confirmation."
         )
@@ -4616,7 +5053,7 @@ async def _handle_analyze_issue(
                 "using memory_search results as a pattern reference.\n"
                 "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
                 "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first "
-                "(if memory_search result was used), then save_memory."
+                "(if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                 + _MANDATORY_TAIL
             )
         elif len(graphs) > 1:
@@ -4689,7 +5126,7 @@ async def _handle_analyze_issue(
                     "STEP 4: On explicit approval - implement exactly the stated approach, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 5: Ask the user to test.\n"
-                    "STEP 6: Only after user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 6: Only after user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + (f"\n{stale_warning}" if stale_warning else "")
                     + _MANDATORY_TAIL
                 )
@@ -4708,7 +5145,7 @@ async def _handle_analyze_issue(
                     "STEP 4: Wait for explicit user approval.\n"
                     "STEP 5: On approval - implement exactly the stated approach.\n"
                     "STEP 6: Ask the user to test.\n"
-                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
             else:
@@ -4725,7 +5162,7 @@ async def _handle_analyze_issue(
                     "STEP 4: Wait for explicit user approval.\n"
                     "STEP 5: On approval - implement exactly the stated approach.\n"
                     "STEP 6: Ask the user to test.\n"
-                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
         else:
@@ -4756,7 +5193,7 @@ async def _handle_analyze_issue(
                     "STEP 4: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 5: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 6: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory.\n"
+                    "STEP 6: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false).\n"
                     + _MANDATORY_TAIL
                     + stale_warning
                 )
@@ -4777,7 +5214,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory.\n"
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false).\n"
                     + _MANDATORY_TAIL + "\n"
                     f"Optionally call analyze_issue_fast again with the same project_paths in ~{eta}s "
                     "to cross-check your file selection against the completed graph."
@@ -4801,7 +5238,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
             elif graph_status == "not_registered":
@@ -4826,7 +5263,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
             else:
@@ -4844,7 +5281,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
 
@@ -5025,6 +5462,7 @@ async def _handle_analyze_issue(
             "code": "NO_CONNECTION",
             "message": str(exc),
             "action_required": "tell_user_to_run_icx_connection_add",
+            "fallback": _ICX_FALLBACK("work-tracker", "icx connection --add"),
         })
     except RateLimited as exc:
         return json.dumps({
@@ -5178,12 +5616,19 @@ async def _handle_save_memory(
         except Exception:
             pass
 
-        return json.dumps({
+        response = {
             "saved": True,
             "issue_key": entry.issue_key,
             "summary": summary[:80],
             "root_cause_pattern": entry.root_cause_pattern,
-        })
+        }
+        try:
+            related = rank_skills_for_tags(tags, entry.root_cause_pattern, storage=SkillStorage())
+            if related:
+                response["related_skills"] = related
+        except Exception:
+            pass   # a ranking failure must never block a successful memory save
+        return json.dumps(response)
     except ICXError as exc:
         return json.dumps({"error": str(exc), "type": type(exc).__name__})
     except Exception as exc:

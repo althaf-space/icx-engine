@@ -483,7 +483,7 @@ def normalize_node_exe(path: str | None) -> str | None:
 
 
 def resolve_harness_node(min_major: int = _HARNESS_MIN_MAJOR) -> str | None:
-    """Return a path to a node runtime new enough to run the ICX UI harness (Playwright/Stagehand),
+    """Return a path to a node runtime new enough to run the ICX UI harness (Playwright),
     INDEPENDENT of any project's node version.
 
     Rationale: ICX does not run the app under test - the app is already serving at the confirmed URL

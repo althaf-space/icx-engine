@@ -1,7 +1,7 @@
-"""Build the extra-scenario guidance appended to the author_flow_explore gate. Pure text - it names a
-plain-English intent and/or a ticket's acceptance criteria so the CONNECTED agent authors steps that
-exercise them. Empty when there is nothing to add (so the gate is unchanged by default). No LLM here -
-this only composes the prompt the agent already answers."""
+"""Build the extra-scenario guidance appended to the author_flow gate message. Pure text - it names a
+plain-English intent and/or a ticket's acceptance criteria so the CONNECTED agent writes test cases
+that exercise them. Empty when there is nothing to add (so the gate message is unchanged by default).
+No LLM here - this only composes text the agent already reads."""
 from __future__ import annotations
 
 

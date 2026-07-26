@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from icx_engine.testing.state import make_initial_state, TestingState
@@ -295,15 +296,6 @@ async def test_node_manual_result_passed_true():
 # clamping, and headless parsing.
 # ---------------------------------------------------------------------------
 
-async def test_node_config_gate_ui_without_url_raises():
-    from icx_engine.testing.nodes import node_config_gate
-    state = _base_state(url=None)
-    state["test_type"] = "ui"
-    with patch("icx_engine.testing.nodes.interrupt", return_value={}):
-        with pytest.raises(ValueError, match="requires a URL"):
-            await node_config_gate(state)
-
-
 async def test_node_config_gate_agent_without_url_raises():
     from icx_engine.testing.nodes import node_config_gate
     state = _base_state(url=None)
@@ -346,10 +338,10 @@ async def test_node_config_gate_confirms_url():
 
 
 async def test_node_config_gate_slowmo_headless_is_zero():
-    # ui, default (no visible) -> headless -> slowmo 0
+    # agent, default (no visible) -> headless -> slowmo 0
     from icx_engine.testing.nodes import node_config_gate
     state = _base_state(url="http://x/#/home")
-    state["test_type"] = "ui"
+    state["test_type"] = "agent"
     with patch("icx_engine.testing.nodes.interrupt", return_value={"url": "http://x/#/home"}):
         result = await node_config_gate(state)
     assert result["headless"] is True
@@ -357,10 +349,10 @@ async def test_node_config_gate_slowmo_headless_is_zero():
 
 
 async def test_node_config_gate_slowmo_visible_defaults_to_1000():
-    # ui + visible, no explicit slowmo -> headed -> default 1000
+    # agent + visible, no explicit slowmo -> headed -> default 1000
     from icx_engine.testing.nodes import node_config_gate
     state = _base_state(url="http://x/#/home")
-    state["test_type"] = "ui"
+    state["test_type"] = "agent"
     with patch("icx_engine.testing.nodes.interrupt", return_value={"visible": True}):
         result = await node_config_gate(state)
     assert result["headless"] is False
@@ -368,10 +360,10 @@ async def test_node_config_gate_slowmo_visible_defaults_to_1000():
 
 
 async def test_node_config_gate_slowmo_user_override():
-    # ui + visible + explicit slowmo -> that value
+    # agent + visible + explicit slowmo -> that value
     from icx_engine.testing.nodes import node_config_gate
     state = _base_state(url="http://x/#/home")
-    state["test_type"] = "ui"
+    state["test_type"] = "agent"
     with patch("icx_engine.testing.nodes.interrupt", return_value={"visible": True, "slowmo": 2500}):
         result = await node_config_gate(state)
     assert result["headless"] is False and result["slowmo"] == 2500
@@ -388,11 +380,11 @@ async def test_node_config_gate_no_slowmo_for_non_browser():
 
 
 async def test_node_config_gate_reasks_missing_url_instead_of_raising():
-    # ui with no URL: the gate must RE-ASK (fresh interrupt) and accept the URL, NOT raise (a raise
-    # escapes the unguarded graph.ainvoke and permanently strands the session).
+    # agent with no URL: the gate must RE-ASK (fresh interrupt) and accept the URL, NOT raise (a
+    # raise escapes the unguarded graph.ainvoke and permanently strands the session).
     from icx_engine.testing.nodes import node_config_gate
     state = _base_state(url=None)
-    state["test_type"] = "ui"
+    state["test_type"] = "agent"
     # 1st interrupt (main gate) has no url; re-ask supplies it.
     with patch("icx_engine.testing.nodes.interrupt",
                side_effect=[{"visible": False}, {"url": "http://x/#/home"}]) as m:
@@ -434,243 +426,60 @@ from icx_engine.testing import nodes
 
 
 @pytest.mark.asyncio
-async def test_agent_mode_appends_exploratory_steps(monkeypatch):
-    # agent mode = deterministic census flow + an appended agent-authored exploratory pass.
-    import icx_engine.testing.runners.ui as _uimod
-    saved = {}
-    monkeypatch.setattr(_uimod, "save_flow", lambda key, flow: saved.__setitem__("flow", flow))
-
-    def fake_interrupt(payload):
-        if payload.get("gate") == "author_flow_explore":
-            return {"steps": [{"action": "click", "target": "#extra", "description": "edge case"}]}
-        return {}
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-
-    async def _no_verify(*a, **k):
-        return None
-    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", _no_verify)
-
-    async def _res(repo):
-        return lambda lang: None
-    monkeypatch.setattr(nodes, "_runtime_resolver", _res)
-
-    s = make_initial_state(file_paths=["Team.jsx"], test_mode="automated")
-    s["test_type"] = "agent"; s["url"] = "http://x/#/t"; s["auth_mode"] = "reuse"
-    s["screen_model"] = {"functionalities": [{"id": "C", "functionality": "Create",
-        "modalDetails": {"triggerSelector": "#c", "modalSelector": "#m"},
-        "submitButton": {"selectors": ["#save"]}, "fields": [{"label": "N", "domSelectors": ["#n"]}]}]}
-    await nodes.node_author_flow(s)
-    # the appended exploratory step is present and tagged
-    assert any(st.target == "#extra" and st.description.startswith("EXPLORATORY:") for st in saved["flow"].steps)
-
-
-@pytest.mark.asyncio
 async def test_pick_type_sets_test_type(monkeypatch):
     captured = {}
 
     def fake_interrupt(payload):
         captured["payload"] = payload
-        return {"test_type": "1"}   # numbered -> ui (order: ui, api, agent, unit)
+        return {"test_type": "1"}   # numbered -> agent (order: agent, api, unit)
 
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     out = await nodes.node_pick_type(make_initial_state(file_paths=["a.tsx"], test_mode="automated"))
-    assert out["test_type"] == "ui"
+    assert out["test_type"] == "agent"
     assert captured["payload"]["gate"] == "pick_type"
 
 
 @pytest.mark.asyncio
 async def test_pick_type_supports_unit(monkeypatch):
-    monkeypatch.setattr(nodes, "interrupt", lambda p: {"test_type": "4"})
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"test_type": "3"})
     out = await nodes.node_pick_type(make_initial_state(file_paths=["a.py"], test_mode="automated"))
     assert out["test_type"] == "unit"
 
 
 @pytest.mark.asyncio
 async def test_config_gate_anchors_layer_on_picked_type(monkeypatch):
-    # gate 3 must default to the type picked at pick_type (ui), NOT re-recommend a contradictory set.
+    # gate 3 must default to the type picked at pick_type (agent), NOT re-recommend a contradictory set.
     s = make_initial_state(file_paths=["a.jsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     s["url"] = "http://x/login"
     monkeypatch.setattr(nodes, "interrupt", lambda p: {})   # user accepts
     out = await nodes.node_config_gate(s)
-    assert out["selected_layers"] == ["ui"]
+    assert out["selected_layers"] == ["agent"]
 
 
 @pytest.mark.asyncio
-async def test_author_flow_advertises_select_and_waitfor(monkeypatch):
-    # The authoring gate must tell the agent every replayable action, incl select (dropdowns
-    # like a tenant picker) and waitfor (post-login redirect) - otherwise a real login form
-    # (text + <select> + non-submit button) is not authorable for a generic app.
-    import icx_engine.testing.runners.ui as _uimod
-    captured = {}
-
-    def fake_interrupt(payload):
-        captured["payload"] = payload
-        return {"steps": [{"action": "select", "target": "#tenant", "value": "SMART"}]}
-
-    async def _no_verify(*a, **k):
-        return None
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-    monkeypatch.setattr(_uimod, "save_flow", lambda *a, **k: None)
-    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", _no_verify)
-    s = make_initial_state(file_paths=["login.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
-    s["url"] = "http://x/login"
-    await nodes.node_author_flow(s)
-    msg = captured["payload"]["message"]
-    for action in ("goto", "fill", "select", "click", "waitfor", "assert"):
-        assert action in msg
-    assert "dropdown" in msg.lower() and "redirect" in msg.lower()
-    assert captured["payload"]["gate"] == "author_flow"
-
-
-@pytest.mark.asyncio
-async def test_author_flow_auth_aware_login_steps(monkeypatch):
+async def test_author_flow_gate_auth_aware_login_instruction(monkeypatch):
     # With a restored session (capture/inline/reuse), ICX logs the app in automatically - the agent
-    # must NOT re-author login steps (that was the "reopens login, wastes time" bug). Public apps
-    # (no session) still get login steps authored.
-    import icx_engine.testing.runners.ui as _uimod
-    monkeypatch.setattr(_uimod, "save_flow", lambda *a, **k: None)
-
+    # must be told NOT to author login steps. Public apps (no session) get told to author them.
     for mode in ("capture", "inline", "reuse"):
         cap = {}
-        monkeypatch.setattr(nodes, "interrupt", lambda p, _c=cap: (_c.__setitem__("p", p), {"steps": []})[1])
+        monkeypatch.setattr(nodes, "interrupt", lambda p, _c=cap: _c.setdefault("p", p) or {"report_path": "r.xml"})
         s = make_initial_state(file_paths=["login.tsx"], test_mode="automated")
-        s["test_type"] = "ui"; s["url"] = "http://x/#/home"; s["auth_mode"] = mode
+        s["test_type"] = "agent"; s["url"] = "http://x/#/home"; s["auth_mode"] = mode
         await nodes.node_author_flow(s)
         msg = cap["p"]["message"].lower()
         assert "do not author" in msg and "login" in msg
         assert cap["p"]["auth_mode"] == mode
+        assert cap["p"]["gate"] == "author_flow"
 
     # public -> DO author login steps
     cap = {}
-    monkeypatch.setattr(nodes, "interrupt", lambda p, _c=cap: (_c.__setitem__("p", p), {"steps": []})[1])
+    monkeypatch.setattr(nodes, "interrupt", lambda p, _c=cap: _c.setdefault("p", p) or {"report_path": "r.xml"})
     s = make_initial_state(file_paths=["login.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://x/#/home"; s["auth_mode"] = "public"
+    s["test_type"] = "agent"; s["url"] = "http://x/#/home"; s["auth_mode"] = "public"
     await nodes.node_author_flow(s)
     msg = cap["p"]["message"].lower()
-    assert "author the login steps" in msg
-
-
-@pytest.mark.asyncio
-async def test_author_flow_verify_heal_repairs_broken_selectors(monkeypatch):
-    # After authoring, live-DOM verify reports a broken selector -> the agent is re-asked and its
-    # corrected flow is saved. This is the anti-misfire heal loop.
-    import icx_engine.testing.runners.ui as _uimod
-    saved = {}
-    monkeypatch.setattr(_uimod, "save_flow", lambda key, flow: saved.__setitem__("flow", flow))
-
-    # interrupt: first the author gate (returns a flow with a bad selector), then the heal gate
-    # (returns the corrected flow).
-    calls = {"n": 0}
-
-    def fake_interrupt(payload):
-        calls["n"] += 1
-        if payload.get("gate") == "author_flow":
-            return {"steps": [{"action": "click", "target": '[data-testid="team-table"]'}]}
-        if payload.get("gate") == "author_flow_heal":
-            assert payload["broken_selectors"]           # got the verify findings
-            return {"steps": [{"action": "click", "target": ".react-bs-table"}]}
-        return {}
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-
-    # verify: first call reports the bad selector, second call (after repair) is clean.
-    reports = [
-        {"broken": 1, "ambiguous": 0, "steps": [
-            {"index": 0, "action": "click", "target": '[data-testid="team-table"]', "status": "broken"}]},
-        {"broken": 0, "ambiguous": 0, "steps": [
-            {"index": 0, "action": "click", "target": ".react-bs-table", "status": "resolved"}]},
-    ]
-
-    async def fake_verify(*a, **k):
-        return reports.pop(0) if reports else {"broken": 0, "ambiguous": 0, "steps": []}
-    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", fake_verify)
-
-    async def _res(repo):
-        return lambda lang: None
-    monkeypatch.setattr(nodes, "_runtime_resolver", _res)
-
-    s = make_initial_state(file_paths=["src/TeamList.jsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://x/#/team"; s["auth_mode"] = "public"
-    await nodes.node_author_flow(s)
-    # the healed (corrected) flow is what got saved
-    assert saved["flow"].steps[0].target == ".react-bs-table"
-    assert calls["n"] >= 2                              # author gate + at least one heal gate
-
-
-@pytest.mark.asyncio
-async def test_author_flow_generates_deterministically_from_census(monkeypatch):
-    # With a census, ICX builds the flow ITSELF (to_flow) - it must NOT interrupt the author gate for
-    # agent-written steps. This is the cross-agent consistency guarantee.
-    import icx_engine.testing.runners.ui as _uimod
-    saved = {}
-    monkeypatch.setattr(_uimod, "save_flow", lambda key, flow: saved.__setitem__("flow", flow))
-    interrupts = []
-    monkeypatch.setattr(nodes, "interrupt", lambda p: interrupts.append(p.get("gate")) or {})
-
-    async def _no_verify(*a, **k):
-        return None
-    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", _no_verify)
-
-    async def _res(repo):
-        return lambda lang: None
-    monkeypatch.setattr(nodes, "_runtime_resolver", _res)
-
-    s = make_initial_state(file_paths=["Team.jsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://x/#/team"; s["auth_mode"] = "reuse"
-    s["screen_model"] = {
-        "screenName": "Team",
-        "functionalities": [
-            {"id": "C", "functionality": "Create Team",
-             "modalDetails": {"triggerSelector": "[data-testid='team-create']",
-                              "modalSelector": "[data-testid='team-modal']", "modalName": "Create Team"},
-             "submitButton": {"selectors": ["[data-testid='team-save']"]},
-             "cancelButton": {"selectors": ["[data-testid='team-cancel']"]},
-             "fields": [{"label": "Name", "domSelectors": ["[data-testid='team-name-EN']"]}]},
-        ],
-        "validationMatrix": [{"errorMessage": "Mandatory."}],
-    }
-    await nodes.node_author_flow(s)
-    # the author gate was NOT shown to the agent (deterministic generation)
-    assert "author_flow" not in interrupts
-    flow = saved["flow"]
-    assert flow.steps and flow.steps[0].action == "goto"
-    # census-derived: opens create + fills the field
-    assert any(st.target == "[data-testid='team-create']" for st in flow.steps)
-    # unclassified text field -> smartfill (dynamic runtime detection), carrying the XSS canary
-    assert any(st.action in ("fill", "smartfill") and st.target == "[data-testid='team-name-EN']" for st in flow.steps)
-
-
-@pytest.mark.asyncio
-async def test_author_flow_heal_interrupt_propagates_not_swallowed(monkeypatch):
-    # REGRESSION: interrupt() pauses by raising GraphInterrupt (a GraphBubbleUp/Exception). The heal
-    # loop's broad `except Exception` MUST NOT swallow it, or the author_flow_heal gate never fires.
-    from langgraph.errors import GraphInterrupt
-    import icx_engine.testing.runners.ui as _uimod
-    monkeypatch.setattr(_uimod, "save_flow", lambda *a, **k: None)
-
-    def fake_interrupt(payload):
-        if payload.get("gate") == "author_flow":
-            return {"steps": [{"action": "click", "target": "#x"}]}
-        if payload.get("gate") == "author_flow_heal":
-            raise GraphInterrupt("pause for heal")     # LangGraph's real pause signal
-        return {}
-    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
-
-    async def bad_verify(*a, **k):
-        return {"broken": 1, "ambiguous": 0,
-                "steps": [{"index": 0, "action": "click", "target": "#x", "status": "broken"}]}
-    monkeypatch.setattr("icx_engine.testing.local_executor.run_ui_verify", bad_verify)
-
-    async def _res(repo):
-        return lambda lang: None
-    monkeypatch.setattr(nodes, "_runtime_resolver", _res)
-
-    s = make_initial_state(file_paths=["a.jsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://x/#/h"; s["auth_mode"] = "public"
-    import pytest as _pytest
-    with _pytest.raises(GraphInterrupt):          # the pause must propagate, not be swallowed
-        await nodes.node_author_flow(s)
+    assert "author real login steps" in msg
 
 
 def test_route_after_auth_unit_with_census_goes_to_unit_author():
@@ -681,9 +490,9 @@ def test_route_after_auth_unit_with_census_goes_to_unit_author():
     s2 = make_initial_state(file_paths=["a.py"], test_mode="automated")
     s2["test_type"] = "unit"
     assert nodes.route_after_auth(s2) == "local_run"
-    # ui always authors
+    # agent always authors
     s3 = make_initial_state(file_paths=["a.jsx"], test_mode="automated")
-    s3["test_type"] = "ui"
+    s3["test_type"] = "agent"
     assert nodes.route_after_auth(s3) == "author_flow"
 
 
@@ -856,7 +665,7 @@ async def test_expand_filters_to_relevant_layer(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
 
     s = make_initial_state(file_paths=[str(fe)], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     out = await nodes.node_expand_files(s)
     sel = {p.replace("\\", "/") for p in seen["payload"]["selected_files"]}
     assert any(p.endswith("Page.tsx") for p in sel)
@@ -874,7 +683,7 @@ async def test_compat_check_clean_proceeds(monkeypatch, tmp_path):
         return {}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=[str(f)], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     out = await nodes.node_compat_check(s)
     assert called["interrupt"] is False           # no issues -> no gate
     assert out["status"] == "compat_ok"
@@ -890,7 +699,7 @@ async def test_compat_check_issue_drop(monkeypatch, tmp_path):
         return {"decision": "reject", "resolution": {str(f): "drop"}}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=[str(f)], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     # node_compat_check now consumes compat_findings set by node_compat_scan upstream
     s["compat_findings"] = [{"path": str(f), "compatible": False,
                               "reasons": ["no selector"], "required_changes": ["add data-testid"]}]
@@ -907,7 +716,7 @@ async def test_compat_check_approve_rechecks(monkeypatch, tmp_path):
         return {"decision": "approve"}              # agent will edit + re-scan
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=[str(f)], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     # node_compat_check now consumes compat_findings set by node_compat_scan upstream
     s["compat_findings"] = [{"path": str(f), "compatible": False,
                               "reasons": ["no selector"], "required_changes": ["add data-testid"]}]
@@ -926,7 +735,7 @@ async def test_compat_check_max_iterations_forces_resolution(monkeypatch, tmp_pa
         return {"resolution": {str(f): "manual"}}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=[str(f)], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     s["compat_iteration"] = 3
     s["max_compat_iterations"] = 3
     s["compat_findings"] = [{"path": str(f), "compatible": False, "reasons": ["x"], "required_changes": ["y"]}]
@@ -947,7 +756,7 @@ async def test_config_gate_does_not_ask_test_type(monkeypatch):
         return {}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     s["url"] = "http://host-x/app"
     await nodes.node_config_gate(s)
     assert "test_type" not in captured["payload"].get("options", {})
@@ -970,7 +779,7 @@ async def test_auth_gate_skips_api(monkeypatch):
 @pytest.mark.asyncio
 async def test_auth_gate_public_sets_recover_false(monkeypatch):
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://host-x/app"
+    s["test_type"] = "agent"; s["url"] = "http://host-x/app"
     monkeypatch.setattr(nodes, "interrupt", lambda p: {"auth_mode": "public"})
     out = await nodes.node_auth_gate(s)
     assert out["auth_mode"] == "public"
@@ -983,12 +792,70 @@ async def test_auth_gate_capture_saves_session(monkeypatch, tmp_path):
     store = tmp_path / "auth.json"
     monkeypatch.setattr(_auth, "store_path", lambda: store)
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://host-x/app"; s["project"] = "proj-a"
+    s["test_type"] = "agent"; s["url"] = "http://host-x/app"; s["project"] = "proj-a"
     monkeypatch.setattr(nodes, "interrupt", lambda p: {"auth_mode": "capture", "session_id": "cap-1"})
     out = await nodes.node_auth_gate(s)
     assert out["auth_mode"] == "capture"
     assert _auth.load_session("proj-a", "host-x", store=store).session_id == "cap-1"
     assert "session_id" not in out and "_auth_session_id" not in out
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_reuse_with_missing_storage_state_falls_back_to_public(monkeypatch, tmp_path):
+    # A stored session RECORD can exist (TTL not expired) while its storage_state file was deleted,
+    # never written, or points nowhere. reuse must not silently proceed as if authenticated.
+    store = tmp_path / "auth.json"
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    _auth.save_session("proj-a", "host-x", "sid-1", store=store, storage_state="")
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://host-x/app"; s["project"] = "proj-a"
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"auth_mode": "reuse"})
+    out = await nodes.node_auth_gate(s)
+    assert out["auth_mode"] == "public"
+    assert out["auto_auth_recover"] is False
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_reuse_with_nonexistent_storage_state_file_falls_back_to_public(monkeypatch, tmp_path):
+    store = tmp_path / "auth.json"
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    _auth.save_session("proj-a", "host-x", "sid-1", store=store,
+                       storage_state=str(tmp_path / "does-not-exist.json"))
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://host-x/app"; s["project"] = "proj-a"
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"auth_mode": "reuse"})
+    out = await nodes.node_auth_gate(s)
+    assert out["auth_mode"] == "public"
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_reuse_with_corrupt_storage_state_falls_back_to_public(monkeypatch, tmp_path):
+    store = tmp_path / "auth.json"
+    statefile = tmp_path / "state.json"
+    statefile.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    _auth.save_session("proj-a", "host-x", "sid-1", store=store, storage_state=str(statefile))
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://host-x/app"; s["project"] = "proj-a"
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"auth_mode": "reuse"})
+    out = await nodes.node_auth_gate(s)
+    assert out["auth_mode"] == "public"
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_reuse_with_valid_storage_state_stays_reuse(monkeypatch, tmp_path):
+    # Regression: a genuinely usable session must NOT be downgraded.
+    store = tmp_path / "auth.json"
+    statefile = tmp_path / "state.json"
+    statefile.write_text(json.dumps({"cookies": [{"name": "sid", "value": "x"}], "origins": []}),
+                         encoding="utf-8")
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    _auth.save_session("proj-a", "host-x", "sid-1", store=store, storage_state=str(statefile))
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://host-x/app"; s["project"] = "proj-a"
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"auth_mode": "reuse"})
+    out = await nodes.node_auth_gate(s)
+    assert out["auth_mode"] == "reuse"
 
 
 @pytest.mark.asyncio
@@ -1044,7 +911,7 @@ async def test_compat_scan_agent_clean(monkeypatch):
         return {"all_compatible": True, "findings": [{"path": "a.tsx", "compatible": True, "reasons": [], "required_changes": []}]}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     out = await nodes.node_compat_scan(s)
     assert out["compat_findings"][0]["compatible"] is True
     assert nodes.route_after_scan({**s, **out}) == "config_gate"
@@ -1058,7 +925,7 @@ async def test_compat_scan_agent_finds_issue_routes_to_check(monkeypatch):
              "required_changes": ["add data-testid to submit"]}]}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=["Plain.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     out = await nodes.node_compat_scan(s)
     assert nodes.route_after_scan({**s, **out}) == "compat_check"
 
@@ -1071,7 +938,7 @@ async def test_compat_scan_fallback_when_no_findings(monkeypatch, tmp_path):
         return {}   # agent returned nothing -> ICX fallback
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=[str(f)], test_mode="ui")  # test_mode unused; set test_type
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     out = await nodes.node_compat_scan(s)
     assert isinstance(out["compat_findings"], list) and len(out["compat_findings"]) == 1
 
@@ -1083,7 +950,7 @@ async def test_compat_check_consumes_agent_findings_drop(monkeypatch):
         return {"decision": "reject", "resolution": {"Plain.tsx": "drop"}}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=["Plain.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     s["compat_findings"] = [{"path": "Plain.tsx", "compatible": False, "reasons": ["x"], "required_changes": ["y"]}]
     out = await nodes.node_compat_check(s)
     assert "Plain.tsx" not in out["file_paths"]
@@ -1095,7 +962,7 @@ async def test_compat_check_approve_routes_back_to_scan(monkeypatch):
         return {"decision": "approve"}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=["Plain.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     s["compat_findings"] = [{"path": "Plain.tsx", "compatible": False, "reasons": ["x"], "required_changes": ["y"]}]
     out = await nodes.node_compat_check(s)
     assert out["status"] == "compat_recheck"
@@ -1114,7 +981,7 @@ async def test_compat_scan_mandate_forbids_deferring_to_runner(monkeypatch):
         return {"all_compatible": True, "findings": [{"path": "a.tsx", "compatible": True}]}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     await nodes.node_compat_scan(s)
     ins = captured["instruction"]
     assert "work around it" in ins and "less robust but fine" in ins
@@ -1124,6 +991,22 @@ async def test_compat_scan_mandate_forbids_deferring_to_runner(monkeypatch):
         assert stale not in ins
 
 
+async def test_compat_scan_mandate_requires_repo_wide_undefined_check(monkeypatch):
+    # REGRESSION: compat_scan flagged a classic <script src=...> global (loaded via index.html,
+    # legitimate no-import pattern) as "undefined" because it only checked the file's own imports.
+    captured = {}
+    def fake_interrupt(p):
+        captured["instruction"] = p.get("instruction", "")
+        return {"all_compatible": True, "findings": [{"path": "a.tsx", "compatible": True}]}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"
+    await nodes.node_compat_scan(s)
+    ins = captured["instruction"]
+    assert "index.html" in ins and "script src" in ins
+    assert "grep for it" in ins
+
+
 @pytest.mark.asyncio
 async def test_compat_check_accept_keeps_file_in_set(monkeypatch):
     """User can knowingly accept a finding as-is: the file stays in the run, no change."""
@@ -1131,7 +1014,7 @@ async def test_compat_check_accept_keeps_file_in_set(monkeypatch):
         return {"decision": "reject", "resolution": {"Plain.tsx": "accept"}}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=["Plain.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     s["compat_findings"] = [{"path": "Plain.tsx", "compatible": False, "reasons": ["x"], "required_changes": ["y"]}]
     out = await nodes.node_compat_check(s)
     assert "Plain.tsx" in out["file_paths"]
@@ -1157,6 +1040,188 @@ async def test_compat_check_accept_keeps_file_in_set(monkeypatch):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_expand_gate_message_states_confirmed_files_persist(monkeypatch):
+    # REGRESSION: an agent excluded files at the expand gate via free text (no confirmed_files key)
+    # and they silently reappeared at analyze_screen/compat_scan - the gate message must state the
+    # persistence contract explicitly so the agent knows confirmed_files is what sticks.
+    monkeypatch.setattr(nodes, "_load_querier", lambda paths: None)
+    monkeypatch.setattr(nodes, "_expand_files_via_graph", lambda seeds, q, context=None: list(seeds))
+    captured = {}
+    def fake_interrupt(p):
+        if p["gate"] == "expand":
+            captured["message"] = p["message"]
+        return {"confirmed_files": p.get("selected_files", [])} if p["gate"] == "expand" else {}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+    s = make_initial_state(file_paths=["Button.tsx"], test_mode="automated")
+    await nodes.node_expand_files(s)
+    msg = captured["message"]
+    assert "confirmed_files" in msg
+    assert "excluded for every later gate" in msg or "rest of this session" in msg
+
+
+# ---------------------------------------------------------------------------
+# node_known_screen_check: known-screen fast path
+# ---------------------------------------------------------------------------
+
+def _patch_screen_cache_store(monkeypatch, tmp_path):
+    from icx_engine.testing import screen_cache as sc
+    monkeypatch.setattr(sc, "store_path", lambda: tmp_path / "screens.json")
+    return sc
+
+
+@pytest.mark.asyncio
+async def test_known_screen_check_no_cache_falls_through_silently(monkeypatch, tmp_path):
+    _patch_screen_cache_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+
+    def boom(p):
+        raise AssertionError("must not interrupt on a cache miss")
+    monkeypatch.setattr(nodes, "interrupt", boom)
+
+    s = make_initial_state(file_paths=["Users.jsx"], test_mode="automated")
+    s["test_type"] = "agent"
+    out = await nodes.node_known_screen_check(s)
+    assert out == {"known_screen_available": False}
+    assert nodes.route_after_known_screen_check({**s, **out}) == "expand_files"
+
+
+@pytest.mark.asyncio
+async def test_known_screen_check_stale_file_falls_through_without_asking(monkeypatch, tmp_path):
+    sc = _patch_screen_cache_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    f = tmp_path / "Users.jsx"
+    f.write_text("original", encoding="utf-8")
+    sc.save_screen("proj1", [str(f)], test_type="agent", url="http://x/users",
+                   all_candidates=[str(f)], confirmed_files=[str(f)],
+                   screen_model={"functionalities": []}, census_coverage=1.0,
+                   analyzer_id="react", analyzer_family="ui")
+    f.write_text("edited since caching", encoding="utf-8")   # the cached file changed
+
+    def boom(p):
+        raise AssertionError("a stale cache must never be offered as a choice")
+    monkeypatch.setattr(nodes, "interrupt", boom)
+
+    s = make_initial_state(file_paths=[str(f)], test_mode="automated")
+    s["test_type"] = "agent"
+    out = await nodes.node_known_screen_check(s)
+    assert out == {"known_screen_available": False}
+
+
+@pytest.mark.asyncio
+async def test_known_screen_check_new_candidate_falls_through_without_asking(monkeypatch, tmp_path):
+    # a file that used to not exist/be discoverable now appears in re-discovery -> treat as stale,
+    # even though the cached files themselves are unchanged.
+    sc = _patch_screen_cache_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    f = tmp_path / "Users.jsx"
+    f.write_text("content", encoding="utf-8")
+    sc.save_screen("proj1", [str(f)], test_type="agent", url=None,
+                   all_candidates=[str(f)], confirmed_files=[str(f)],
+                   screen_model={"functionalities": []}, census_coverage=1.0,
+                   analyzer_id="react", analyzer_family="ui")
+    new_file = str(tmp_path / "NewComponent.jsx")
+    monkeypatch.setattr(nodes, "_deterministic_candidates", lambda seeds: {str(f), new_file})
+
+    def boom(p):
+        raise AssertionError("a newly-discovered candidate must force a rescan, no gate shown")
+    monkeypatch.setattr(nodes, "interrupt", boom)
+
+    s = make_initial_state(file_paths=[str(f)], test_mode="automated")
+    s["test_type"] = "agent"
+    out = await nodes.node_known_screen_check(s)
+    assert out == {"known_screen_available": False}
+
+
+@pytest.mark.asyncio
+async def test_known_screen_check_fresh_offers_fast_path(monkeypatch, tmp_path):
+    sc = _patch_screen_cache_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    f = tmp_path / "Users.jsx"
+    f.write_text("content", encoding="utf-8")
+    model = {"functionalities": [{"functionality": "Create"}]}
+    sc.save_screen("proj1", [str(f)], test_type="agent", url="http://x/users",
+                   all_candidates=[str(f)], confirmed_files=[str(f)],
+                   screen_model=model, census_coverage=0.9,
+                   analyzer_id="react", analyzer_family="ui",
+                   compat_resolution={str(f): "accepted"})
+    monkeypatch.setattr(nodes, "_deterministic_candidates", lambda seeds: {str(f)})
+
+    captured = {}
+    def fake_interrupt(p):
+        captured["payload"] = p
+        return {"decision": "fast_path"}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+
+    s = make_initial_state(file_paths=[str(f)], test_mode="automated")
+    s["test_type"] = "agent"
+    out = await nodes.node_known_screen_check(s)
+    assert captured["payload"]["gate"] == "known_screen"
+    assert out["known_screen_available"] is True
+    assert out["file_paths"] == [str(f)]
+    assert out["screen_model"] == model
+    assert out["url"] == "http://x/users"
+    assert out["compat_resolution"] == {str(f): "accepted"}
+    assert nodes.route_after_known_screen_check({**s, **out}) == "config_gate"
+
+
+@pytest.mark.asyncio
+async def test_known_screen_check_fresh_but_user_declines_fast_path(monkeypatch, tmp_path):
+    sc = _patch_screen_cache_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    f = tmp_path / "Users.jsx"
+    f.write_text("content", encoding="utf-8")
+    sc.save_screen("proj1", [str(f)], test_type="agent", url=None,
+                   all_candidates=[str(f)], confirmed_files=[str(f)],
+                   screen_model={"functionalities": []}, census_coverage=1.0,
+                   analyzer_id="react", analyzer_family="ui")
+    monkeypatch.setattr(nodes, "_deterministic_candidates", lambda seeds: {str(f)})
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"decision": "rescan"})
+
+    s = make_initial_state(file_paths=[str(f)], test_mode="automated")
+    s["test_type"] = "agent"
+    out = await nodes.node_known_screen_check(s)
+    assert out == {"known_screen_available": False}
+    assert nodes.route_after_known_screen_check({**s, **out}) == "expand_files"
+
+
+@pytest.mark.asyncio
+async def test_config_gate_saves_known_screen_cache(monkeypatch, tmp_path):
+    sc = _patch_screen_cache_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    f = tmp_path / "Users.jsx"
+    f.write_text("content", encoding="utf-8")
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {})   # user accepts gate 3
+    s = make_initial_state(file_paths=[str(f)], test_mode="automated")
+    s["test_type"] = "agent"
+    s["url"] = "http://x/users"
+    s["original_seeds"] = [str(f)]
+    s["all_candidate_files"] = [str(f)]
+    s["screen_model"] = {"functionalities": [{"functionality": "Create"}]}
+    s["census_coverage"] = 0.85
+    s["analyzer_id"] = "react"
+    s["analyzer_family"] = "ui"
+
+    await nodes.node_config_gate(s)
+
+    entry = sc.load_screen("proj1", [str(f)])
+    assert entry is not None
+    assert entry.confirmed_files == [str(f)]
+    assert entry.screen_model == {"functionalities": [{"functionality": "Create"}]}
+    assert entry.census_coverage == 0.85
+
+
+@pytest.mark.asyncio
+async def test_config_gate_does_not_cache_non_agent_type(monkeypatch, tmp_path):
+    sc = _patch_screen_cache_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {})
+    s = make_initial_state(file_paths=["a.py"], test_mode="automated")
+    s["test_type"] = "unit"
+    await nodes.node_config_gate(s)
+    assert sc.load_screen("proj1", ["a.py"]) is None
+
+
+@pytest.mark.asyncio
 async def test_expand_uses_agent_grep(monkeypatch):
     monkeypatch.setattr(nodes, "_load_querier", lambda paths: None)
     monkeypatch.setattr(nodes, "_expand_files_via_graph", lambda seeds, q, context=None: list(seeds))
@@ -1174,7 +1239,7 @@ async def test_expand_uses_agent_grep(monkeypatch):
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
 
     s = make_initial_state(file_paths=["Button.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     out = await nodes.node_expand_files(s)
     assert "expand_scan" in gates and "expand" in gates
     assert out["file_sources"].get("Form.tsx") in ("grep", "both")  # agent grep result ranked
@@ -1198,7 +1263,7 @@ async def test_expand_falls_back_to_icx_grep(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
 
     s = make_initial_state(file_paths=["Button.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     out = await nodes.node_expand_files(s)
     assert called["icx_grep"] is True
     assert "IcxFound.tsx" in out["file_sources"]
@@ -1224,7 +1289,7 @@ async def test_compat_scan_carries_mandate_and_records_receipts(monkeypatch):
                 "read_receipts": [{"path": "a.tsx", "line_count": 10, "last_line": "}"}]}
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     out = await nodes.node_compat_scan(s)
     assert "read_receipts" in captured["instruction"]
     assert nodes._REREAD_MANDATE.split(".")[0].lower()[:10] in captured["instruction"].lower()
@@ -1265,11 +1330,118 @@ async def test_auth_gate_keys_on_project_id(monkeypatch, tmp_path):
     monkeypatch.setattr(_st, "lookup_for_file", lambda p: _Info())
     monkeypatch.setattr(nodes, "interrupt", lambda p: {"auth_mode": "capture", "session_id": "cap-9"})
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"; s["url"] = "http://host-z/app"
+    s["test_type"] = "agent"; s["url"] = "http://host-z/app"
     out = await nodes.node_auth_gate(s)
     assert out["project"] == "pid-xyz"                 # the id, not "HumanName"
     assert out["auth_ref"] == "pid-xyz::host-z"
     assert _auth.load_session("pid-xyz", "host-z", store=store).session_id == "cap-9"
+
+
+# -- dev-server port-drift: surface + reuse a session from a different port ---------
+
+def _fake_valid_storage_state(tmp_path, name="state.json"):
+    p = tmp_path / name
+    p.write_text('{"cookies": [{"name": "sid", "value": "x"}]}', encoding="utf-8")
+    return str(p)
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_no_hint_when_exact_host_matches(monkeypatch, tmp_path):
+    from icx_engine.testing import auth as _auth
+    store = tmp_path / "auth.json"
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    ss = _fake_valid_storage_state(tmp_path)
+    _auth.save_session("proj1", "localhost:3000", "s1", store=store, storage_state=ss)
+
+    captured = {}
+    def fake_interrupt(p):
+        captured["payload"] = p
+        return {"auth_mode": "reuse"}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://localhost:3000/app"
+    await nodes.node_auth_gate(s)
+    assert captured["payload"]["other_host_sessions"] == []
+    assert "port change" not in captured["payload"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_surfaces_port_drift_session(monkeypatch, tmp_path):
+    from icx_engine.testing import auth as _auth
+    store = tmp_path / "auth.json"
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    ss = _fake_valid_storage_state(tmp_path)
+    _auth.save_session("proj1", "localhost:3000", "s1", store=store, storage_state=ss)
+
+    captured = {}
+    def fake_interrupt(p):
+        captured["payload"] = p
+        return {"auth_mode": "public"}
+    monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
+
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://localhost:3001/app"   # port changed since capture
+    await nodes.node_auth_gate(s)
+    assert captured["payload"]["other_host_sessions"] == [
+        {"host": "localhost:3000", "captured_at": captured["payload"]["other_host_sessions"][0]["captured_at"],
+         "expires_at": captured["payload"]["other_host_sessions"][0]["expires_at"]}]
+    assert "port change" in captured["payload"]["message"]
+    assert "localStorage" in captured["payload"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_does_not_offer_different_hostname(monkeypatch, tmp_path):
+    from icx_engine.testing import auth as _auth
+    store = tmp_path / "auth.json"
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    ss = _fake_valid_storage_state(tmp_path)
+    _auth.save_session("proj1", "otherhost:3000", "s1", store=store, storage_state=ss)
+
+    captured = {}
+    monkeypatch.setattr(nodes, "interrupt", lambda p: captured.update(payload=p) or {"auth_mode": "public"})
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://localhost:3001/app"
+    await nodes.node_auth_gate(s)
+    assert captured["payload"]["other_host_sessions"] == []
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_reuse_host_aliases_session_under_current_host(monkeypatch, tmp_path):
+    from icx_engine.testing import auth as _auth
+    store = tmp_path / "auth.json"
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    ss = _fake_valid_storage_state(tmp_path)
+    _auth.save_session("proj1", "localhost:3000", "s1", store=store, storage_state=ss)
+    monkeypatch.setattr(nodes, "interrupt",
+                        lambda p: {"auth_mode": "reuse", "reuse_host": "localhost:3000"})
+
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://localhost:3001/app"
+    out = await nodes.node_auth_gate(s)
+    assert out["auth_mode"] == "reuse"
+    aliased = _auth.load_session("proj1", "localhost:3001", store=store)
+    assert aliased is not None and aliased.storage_state == ss
+
+
+@pytest.mark.asyncio
+async def test_auth_gate_reuse_host_invalid_falls_back_to_public(monkeypatch, tmp_path):
+    from icx_engine.testing import auth as _auth
+    store = tmp_path / "auth.json"
+    monkeypatch.setattr(_auth, "store_path", lambda: store)
+    monkeypatch.setattr(nodes, "_resolve_project_id", lambda seeds: "proj1")
+    monkeypatch.setattr(nodes, "interrupt",
+                        lambda p: {"auth_mode": "reuse", "reuse_host": "localhost:9999"})
+
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    s["test_type"] = "agent"; s["url"] = "http://localhost:3001/app"
+    out = await nodes.node_auth_gate(s)
+    assert out["auth_mode"] == "public"
+    assert out["auto_auth_recover"] is False
 
 
 # -- runtime resolver memoization: one resolution per (lang) per run -----------------

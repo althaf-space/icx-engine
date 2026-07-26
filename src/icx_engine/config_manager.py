@@ -32,6 +32,13 @@ _STALE_ARTIFACTS: tuple[str, ...] = (
     "testing_rules/profile_gen.md",   # the profile_gen gate was removed with the Magik retirement
 )
 
+# Same idea as _STALE_ARTIFACTS but for a whole directory tree (a version-pinned tool install, not a
+# single file). Add a relative path here when a retired runner's pinned install dir is orphaned.
+_STALE_ARTIFACT_DIRS: tuple[str, ...] = (
+    "testing/stagehand",   # the Stagehand runner was retired - the agent now runs its own Playwright
+                           # test directly; the UI tooling install moved to testing/playwright/<ver>/
+)
+
 # Config keys OLDER versions wrote that the current model no longer defines. They are dropped from
 # disk automatically the next time config is saved (save() rebuilds JSON from the model), but we
 # detect + report them on `icx update` so removal is explicit. Add a key here when a config field
@@ -55,10 +62,12 @@ def stale_config_keys_on_disk() -> list[str]:
 
 
 def clean_stale_artifacts() -> list[str]:
-    """Delete known-stale runtime files under ~/.icx. Idempotent + guarded. Returns the paths removed.
+    """Delete known-stale runtime files/dirs under ~/.icx. Idempotent + guarded. Returns the paths
+    removed - absent (already-clean, or never installed) is not an error, just nothing to remove.
 
-    Only touches ICX-owned files that a prior version created and the current version does not use -
-    never user data (config, memory, sessions, captured logins). Safe to call repeatedly."""
+    Only touches ICX-owned files/dirs that a prior version created and the current version does not
+    use - never user data (config, memory, sessions, captured logins). Safe to call repeatedly."""
+    import shutil
     removed: list[str] = []
     base = _icx_dir()
     for rel in _STALE_ARTIFACTS:
@@ -66,6 +75,14 @@ def clean_stale_artifacts() -> list[str]:
         try:
             if p.is_file():
                 p.unlink()
+                removed.append(str(p))
+        except OSError:
+            pass
+    for rel in _STALE_ARTIFACT_DIRS:
+        p = base / rel
+        try:
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
                 removed.append(str(p))
         except OSError:
             pass

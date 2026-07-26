@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from icx_engine.testing.reporting.session_report import render_session_report
 
-_META = {"app": "demo", "url": "http://x/#/users", "test_type": "ui", "ts": 1784580500}
+_META = {"app": "demo", "url": "http://x/#/users", "test_type": "agent", "ts": 1784580500}
 
 
 def _res_with_security(findings, summary=None):

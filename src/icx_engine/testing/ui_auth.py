@@ -20,16 +20,16 @@ from icx_engine.testing import auth as _auth
 
 def _harness_env() -> tuple[str, dict]:
     """(node executable, env) for the auth harness - the modern harness node + the ICX-installed
-    Stagehand/Playwright + its Chromium (all under ~/.icx/testing, never global)."""
+    Playwright + its Chromium (all under ~/.icx/testing, never global)."""
     from icx_engine.runtime_manager import resolve_harness_node
     from icx_engine.testing.runners.install import installed_path, browsers_dir
 
     node = resolve_harness_node() or "node"
     env = {**os.environ}
-    sh = installed_path("stagehand")
-    if sh:
-        env["NODE_PATH"] = str(Path(sh) / "node_modules")
-        env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir(Path(sh)))
+    pw = installed_path("playwright")
+    if pw:
+        env["NODE_PATH"] = str(Path(pw) / "node_modules")
+        env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir(Path(pw)))
     return node, env
 
 

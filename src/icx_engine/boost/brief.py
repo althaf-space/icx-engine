@@ -25,6 +25,9 @@ _COMPLETENESS_DIMS = {
     "performance": ["measure before optimizing", "algorithmic complexity vs data size",
                     "indexing / caching where it helps", "pagination or streaming for large sets",
                     "avoid N+1 / unbounded memory"],
+    "testing": ["happy path + every declared field/functionality", "negative + validation/constraint cases",
+                "security probes (XSS/injection) on every free-text input", "accessibility + error-handling",
+                "a pass is only real when the runner's own output says so"],
     "database": ["correct types (money as decimal/integer, not float)",
                  "constraints (not null, unique, checks)", "indexes for the access patterns",
                  "safe migrations (no long locks)"],
@@ -102,4 +105,14 @@ def build_brief(prompt: str, archetype: str, methodology: dict, context: dict,
         "boosted_prompt": boosted,
         "boost_meta": {"deterministic": True, "llm_used": False},
         "mandatory_directive": _DIRECTIVE,
+        "refine": {
+            "tool": "icx_boost_refine",
+            "instruction": (
+                "For a CTO-grade spec (proven +18% requirement coverage), understand the request and "
+                "draft a STRUCTURED version, then call icx_boost_refine with: objective (restate the ask "
+                "professionally), requirements[], constraints[], deliverable, acceptance[] (definition of "
+                f"done), dims[] (extra items a rushed answer forgets), archetype='{archetype}'. ICX adds "
+                "the persona, context, gates and standards deterministically and returns the final "
+                "expert prompt. Optional but recommended; skipping it leaves this one-pass brief as the floor."),
+        },
     }

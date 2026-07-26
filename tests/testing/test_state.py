@@ -129,7 +129,7 @@ def test_initial_state_has_funnel_fields():
 def test_config_gate_visible_option_sets_headless(monkeypatch):
     import icx_engine.testing.nodes as nodes
     s = make_initial_state(file_paths=["a.jsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     s["url"] = "http://x/login"
     monkeypatch.setattr(nodes, "interrupt", lambda p: {"visible": True})
     import asyncio as _a
@@ -140,3 +140,15 @@ def test_config_gate_visible_option_sets_headless(monkeypatch):
 def test_initial_state_has_read_receipts():
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
     assert s["read_receipts"] == []
+
+
+def test_initial_state_has_agent_discovered():
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    assert s["agent_discovered"] == []
+
+
+def test_initial_state_has_known_screen_fields():
+    s = make_initial_state(file_paths=["a.tsx", "b.tsx"], test_mode="automated")
+    assert s["original_seeds"] == ["a.tsx", "b.tsx"]
+    assert s["known_screen_available"] is False
+    assert s["all_candidate_files"] == []

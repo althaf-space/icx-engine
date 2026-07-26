@@ -1,9 +1,14 @@
 """Local verification backend - the in-process test execution engine.
 
-Given a repo, a test type (unit/api/ui), and (for api/ui) a user-confirmed target URL, this detects
-the right runner plugins, builds their commands with the repo-correct runtime (from the Runtime
+Given a repo, a test type (unit/api), and (for api) a user-confirmed target URL, this detects the
+right runner plugins, builds their commands with the repo-correct runtime (from the Runtime
 Manager), runs them via the async DAG executor, and returns one normalized suite result. The
-LangGraph `local_run` node calls this; there is no external test service.
+LangGraph `local_run` node calls this for unit/api; there is no external test service.
+
+Agent-type (UI) tests are NOT run here - the connected agent writes and runs its own Playwright test
+directly (see `nodes.py` `node_author_flow`'s checklist gate); ICX only parses the JUnit report the
+agent's own run produces. `run_ui_discovery` below (the live-DOM census crawl) is the one UI-adjacent
+helper that stays - it feeds the census the agent authors against, it does not execute a test.
 
 Fully local and async: no HTTP to any external tester. Guarded - returns a structured result,
 never raises.
@@ -17,7 +22,6 @@ import tempfile
 from pathlib import Path
 
 # How each third-party runner CLI receives the user-confirmed target URL as an argv flag.
-# ICX's own harness (stagehand) reads ICX_TARGET_URL from the env instead, so it is absent here.
 _URL_FLAG = {
     "schemathesis": lambda url: [f"--base-url={url}"],
     "hurl": lambda url: ["--variable", f"base={url}"],
@@ -50,8 +54,6 @@ def _inject_target_url(spec, runner_name: str, target_url: str) -> None:
 _CATEGORY_FOR_TYPE = {
     "unit": "unit",
     "api": "api",
-    "ui": "ui",
-    "agent": "ui",   # AI-driven UI runs are the UI category (Stagehand director + Playwright judge)
 }
 
 
@@ -67,10 +69,6 @@ async def run_local_verification(
     runtime_resolver=None,
     parallel: bool = True,
     timeout: float = 600.0,
-    ui_flow_path: str | None = None,
-    storage_state: str | None = None,
-    ui_headed: bool = False,
-    ui_slowmo: int = 0,
     approve=None,
 ) -> dict:
     """Run the local test suite for one layer and return a normalized result.
@@ -140,14 +138,6 @@ async def run_local_verification(
         if target_url:
             spec.env = {**(spec.env or {}), "ICX_TARGET_URL": target_url}
             _inject_target_url(spec, r.name, target_url)
-        if ui_flow_path and cat == "ui":
-            spec.env = {**(spec.env or {}), "ICX_UI_FLOW": ui_flow_path}
-        if storage_state and cat == "ui":
-            spec.env = {**(spec.env or {}), "ICX_STORAGE_STATE": storage_state}
-        if ui_headed and cat == "ui":
-            spec.env = {**(spec.env or {}), "ICX_UI_HEADED": "1"}
-        if ui_slowmo and cat == "ui":
-            spec.env = {**(spec.env or {}), "ICX_UI_SLOWMO": str(int(ui_slowmo))}
         specs.append(spec)
         ran_runners.append(r)
 
@@ -194,76 +184,6 @@ async def run_local_verification(
     }
 
 
-async def run_ui_verify(
-    repo,
-    flow_path: str,
-    target_url: str | None = None,
-    storage_state: str | None = None,
-    runtime_resolver=None,
-    ui_headed: bool = False,
-    approve=None,
-    timeout: float = 300.0,
-) -> dict | None:
-    """Live-DOM selector heal-probe (harness --mode verify). Runs the authored flow WITHOUT scoring:
-    resolves every selector against the real DOM and returns {broken, ambiguous, steps:[...]} so the
-    caller can repair broken/ambiguous selectors BEFORE the scored run. This is the anti-misfire pass.
-
-    Best-effort: returns None if the UI runner/tooling is unavailable, the app is unreachable, or the
-    probe cannot complete - the caller then proceeds without healing (never blocks the session).
-    """
-    from icx_engine.testing.runners import detect_runners
-    from icx_engine.testing.runners.install import RUNNER_SPECS, ensure_runner
-    from icx_engine.testing.runners.executor import run_spec
-    import inspect
-
-    try:
-        runners = [r for r in detect_runners(Path(repo), category="ui") if r.name == "stagehand"]
-    except Exception:
-        return None
-    if not runners:
-        return None
-    r = runners[0]
-    req = getattr(r, "requires", None)
-    if req and req in RUNNER_SPECS:
-        try:
-            if await asyncio.to_thread(ensure_runner, req, approve) is None:
-                return None
-        except Exception:
-            return None
-
-    out = os.path.join(tempfile.gettempdir(), f".icx-verify-{os.getpid()}-{id(flow_path)}.json")
-    try:
-        rt = runtime_resolver("ui") if runtime_resolver else None
-        if inspect.isawaitable(rt):
-            rt = await rt
-    except Exception:
-        rt = None
-    try:
-        spec = r.build_command(Path(repo), rt, mode="verify", report=out)
-    except Exception:
-        return None
-    env = dict(spec.env or {})
-    env["ICX_UI_FLOW"] = flow_path
-    if target_url:
-        env["ICX_TARGET_URL"] = target_url
-    if storage_state:
-        env["ICX_STORAGE_STATE"] = storage_state
-    if ui_headed:
-        env["ICX_UI_HEADED"] = "1"
-    spec.env = env
-    try:
-        await run_spec(spec, timeout=timeout, keep_report=True)   # writes JSON to `out`; JUnit parse result unused
-        report = json.loads(Path(out).read_text(encoding="utf-8"))
-        return report if isinstance(report, dict) else None
-    except Exception:
-        return None
-    finally:
-        try:
-            os.remove(out)
-        except OSError:
-            pass
-
-
 async def run_ui_discovery(
     repo,
     target_url: str,
@@ -275,37 +195,26 @@ async def run_ui_discovery(
 ) -> dict | None:
     """Runtime census AUTO-DISCOVERY: open the LIVE screen and inspect the rendered DOM to build the
     census itself (search box, toolbar create/export, per-row view/edit/delete, form fields with real
-    control kinds + maxLength, wizard steps). Returns the census dict (the shape census_to_flow /
-    merge_census consume) or None.
+    control kinds + maxLength, wizard steps). Returns the census dict (the shape merge_census /
+    the author_flow checklist consume) or None.
 
     This is the live-verified half of the COMBINED census - it can never name a selector that does not
     exist. Best-effort: returns None if the UI tooling is unavailable, the app is unreachable, or the
     crawl produced nothing, so the caller falls back to the source census (never a user-facing mode)."""
     if not target_url:
         return None
-    from icx_engine.testing.runners import detect_runners
     from icx_engine.testing.runners.install import (
-        RUNNER_SPECS, ensure_runner, installed_path, browsers_dir,
-        harness_path, runtime_harness_path, discover_harness_path,
+        ensure_runner, installed_path, browsers_dir, runtime_harness_path, discover_harness_path,
     )
     from icx_engine.testing.runners.executor import run_spec
     from icx_engine.testing.runners.base import RunSpec
     import inspect
 
     try:
-        runners = [r for r in detect_runners(Path(repo), category="ui") if r.name == "stagehand"]
+        if await asyncio.to_thread(ensure_runner, "playwright", approve) is None:
+            return None
     except Exception:
         return None
-    if not runners:
-        return None
-    r = runners[0]
-    req = getattr(r, "requires", None)
-    if req and req in RUNNER_SPECS:
-        try:
-            if await asyncio.to_thread(ensure_runner, req, approve) is None:
-                return None
-        except Exception:
-            return None
 
     try:
         rt = runtime_resolver("ui") if runtime_resolver else None
@@ -315,14 +224,14 @@ async def run_ui_discovery(
         rt = None
     node = rt or "node"
     # Run the discover harness FROM the install dir (next to node_modules) so ESM `import "playwright"`
-    # resolves - identical constraint to the replay harness.
+    # resolves - identical constraint to the auth-capture harness.
     harness = runtime_harness_path("icx-discover.mjs", discover_harness_path())
     env = {}
     try:
-        sh = installed_path("stagehand")
-        if sh:
-            env["NODE_PATH"] = str(Path(sh) / "node_modules")
-            env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir(Path(sh)))
+        pw = installed_path("playwright")
+        if pw:
+            env["NODE_PATH"] = str(Path(pw) / "node_modules")
+            env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir(Path(pw)))
     except Exception:
         pass
     if ui_headed:
@@ -339,67 +248,6 @@ async def run_ui_discovery(
         if isinstance(census, dict) and census.get("functionalities"):
             return census
         return None
-    except Exception:
-        return None
-    finally:
-        try:
-            os.remove(out)
-        except OSError:
-            pass
-
-
-async def run_ui_replay(
-    repo,
-    flow_path: str,
-    target_url: str | None = None,
-    storage_state: str | None = None,
-    runtime_resolver=None,
-    timeout: float = 300.0,
-):
-    """Run the authored flow in SCORED replay mode and return the parsed JUnit TestReport (or None if
-    the UI tooling/app is unavailable). Additive sibling of run_ui_verify - used by the benchmark
-    harness; the production scored run stays in node_local_run and is untouched."""
-    from icx_engine.testing.runners import detect_runners
-    from icx_engine.testing.runners.install import RUNNER_SPECS, ensure_runner
-    from icx_engine.testing.runners.executor import run_spec
-    from icx_engine.testing.runners.junit import parse_junit_xml
-    import inspect
-
-    try:
-        runners = [r for r in detect_runners(Path(repo), category="ui") if r.name == "stagehand"]
-    except Exception:
-        return None
-    if not runners:
-        return None
-    r = runners[0]
-    req = getattr(r, "requires", None)
-    if req and req in RUNNER_SPECS:
-        try:
-            if await asyncio.to_thread(ensure_runner, req, None) is None:
-                return None
-        except Exception:
-            return None
-    out = os.path.join(tempfile.gettempdir(), f".icx-bench-{os.getpid()}-{id(flow_path)}.xml")
-    try:
-        rt = runtime_resolver("ui") if runtime_resolver else None
-        if inspect.isawaitable(rt):
-            rt = await rt
-    except Exception:
-        rt = None
-    try:
-        spec = r.build_command(Path(repo), rt, mode="replay", report=out)
-    except Exception:
-        return None
-    env = dict(spec.env or {})
-    env["ICX_UI_FLOW"] = flow_path
-    if target_url:
-        env["ICX_TARGET_URL"] = target_url
-    if storage_state:
-        env["ICX_STORAGE_STATE"] = storage_state
-    spec.env = env
-    try:
-        await run_spec(spec, timeout=timeout, keep_report=True)
-        return parse_junit_xml(out)
     except Exception:
         return None
     finally:

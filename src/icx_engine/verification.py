@@ -13,8 +13,8 @@ _STORY_TYPES = {"story", "task", "epic"}
 DEFAULT_TIER_LAYERS: dict[str, list[str]] = {
     "low": ["unit"],
     "medium": ["unit", "api"],
-    "high": ["unit", "api", "ui", "regression"],
-    "critical": ["unit", "mutation", "api", "ui", "regression", "performance", "security"],
+    "high": ["unit", "api", "agent", "regression"],
+    "critical": ["unit", "mutation", "api", "agent", "regression", "performance", "security"],
 }
 DEFAULT_TIER = "medium"
 

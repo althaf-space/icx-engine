@@ -1,9 +1,9 @@
-"""Phase B DAST expansion: extra injection classes, object-id robustness, expanded headers, URL DOM-XSS."""
+"""Phase B DAST expansion: extra injection classes, object-id robustness, expanded headers."""
 from __future__ import annotations
 
 from icx_engine.testing.analyzers.security_cases import (
-    api_security_requests, api_headers_check, ui_url_xss_steps,
-    INJECTION, SECURITY_HEADERS, XSS_MARKER, XSS_SAFE_EXPR,
+    api_security_requests, api_headers_check,
+    INJECTION, SECURITY_HEADERS,
 )
 
 
@@ -31,17 +31,3 @@ def test_expanded_security_headers_audited():
     for h in ("Strict-Transport-Security", "Referrer-Policy"):
         assert h in SECURITY_HEADERS
         assert f'header "{h}" exists' in content
-
-
-def test_ui_url_xss_probe_steps():
-    steps = ui_url_xss_steps("http://x/#/users", "table")
-    actions = [s["action"] for s in steps]
-    assert actions == ["goto", "waitfor", "assertjs"]
-    assert XSS_MARKER in steps[0]["target"]         # canary encoded into the URL
-    assert steps[2]["target"] == XSS_SAFE_EXPR       # asserts it did not execute
-    assert ui_url_xss_steps("", "table") == []
-
-
-def test_ui_url_xss_uses_ampersand_when_query_present():
-    steps = ui_url_xss_steps("http://x/page?a=1", "body")
-    assert "?a=1&q=" in steps[0]["target"]

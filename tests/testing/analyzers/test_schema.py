@@ -46,6 +46,31 @@ def test_partial_coverage_score():
     assert 0.8 < r.coverage_score < 0.85
 
 
+def test_near_zero_coverage_with_real_elements_is_rejected():
+    # A census can be internally CONSISTENT (mapped+unmapped==total per category) while every
+    # category self-reports mapped=0 - almost certainly the agent's own reconciliation table being
+    # wrong, not a genuinely near-empty census. Must be rejected, not silently accepted at coverage 0.
+    obj = _good_ui()
+    obj["coverageReport"]["reconciliation"] = {
+        "eventHandlers": {"total": 3, "mapped": 0, "unmapped": 3},
+        "inputSurfaces": {"total": 2, "mapped": 0, "unmapped": 2},
+    }
+    r = validate_census("ui", obj)
+    assert r.ok is False
+    assert r.coverage_score == 0.0
+    assert any("almost certainly" in e for e in r.errors)
+
+
+def test_low_but_plausible_coverage_is_not_rejected():
+    # A genuinely thin census (some real gaps, most mapped) must NOT be caught by the near-zero guard -
+    # only a suspiciously near-zero score is rejected.
+    obj = _good_ui()
+    obj["coverageReport"]["reconciliation"]["eventHandlers"] = {"total": 3, "mapped": 2, "unmapped": 1}
+    r = validate_census("ui", obj)
+    assert r.ok is True
+    assert r.coverage_score > 0.3
+
+
 def test_missing_reconciliation_flagged():
     obj = _good_ui()
     del obj["coverageReport"]["reconciliation"]

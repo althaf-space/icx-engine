@@ -30,6 +30,22 @@ def test_create_edit_sharing_submit_is_hard_defect():
     assert any("share the SAME submit selector" in h for h in r.hard)
 
 
+def test_create_edit_sharing_a_wizard_next_button_is_not_a_defect():
+    # REGRESSION (live false positive): submitButtons[] holds PER-STEP wizard buttons (label/step/
+    # selectors, per the analyzer prompt schema) - NOT alternate final-submit selectors. It is not
+    # consumed by flow generation (the real terminal action always uses the singular submitButton) and its
+    # per-step entries are commonly IDENTICAL step-navigation markup across create/edit (the same
+    # NEXT button UI) - that is normal, not a copy-paste defect. The cross-mode duplicate check must
+    # only compare the singular submitButton (the true terminal action), which is correctly distinct
+    # here (#save vs #update).
+    m = _base()
+    same_next = [{"label": "Next", "step": 1, "selectors": [".modal .tab-pane.active input[value='NEXT']"]}]
+    m["functionalities"][1]["submitButtons"] = same_next
+    m["functionalities"][2]["submitButtons"] = same_next   # identical NEXT selector - fine
+    r = lint_ui_census(m)
+    assert r.ok and not r.hard
+
+
 def test_create_with_fields_no_submit_is_hard():
     m = _base()
     del m["functionalities"][1]["submitButton"]

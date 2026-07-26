@@ -14,7 +14,7 @@ from pathlib import Path
 _ASSETS_DIR = Path(__file__).parent / "assets"
 
 # Family -> the runner surface that executes the analyzer's output.
-#   ui      -> Playwright/Stagehand (selectors, modals, toasts, inline errors) - incl server-rendered JSP
+#   ui      -> agent-authored Playwright (selectors, modals, toasts, inline errors) - incl server-rendered JSP
 #   backend -> HTTP API runner (endpoint schema -> schemathesis + hurl)
 #   cpp     -> C/C++ unit runner (GoogleTest/Catch2)
 #   sql     -> DB routine runner (utPLSQL/tSQLt/pgTAP)

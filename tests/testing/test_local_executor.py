@@ -14,7 +14,7 @@ def _report(passed=1, failed=0):
 
 def _aplan(pairs):
     """Return an async run_plan stub mapping spec-index -> report."""
-    async def _run_plan(specs, parallel=True, timeout=600.0):
+    async def _run_plan(specs, parallel=True, timeout=600.0, **_kw):
         return [(specs[i], rep) for (i, rep) in pairs]
     return _run_plan
 
@@ -71,7 +71,7 @@ async def test_runtime_resolver_and_target_url(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
                         lambda repo, category=None: [fake])
     captured = {}
-    async def _run_plan(specs, parallel=True, timeout=600.0):
+    async def _run_plan(specs, parallel=True, timeout=600.0, **_kw):
         captured["env"] = specs[0].env
         return [(specs[0], _report(passed=1))]
     monkeypatch.setattr("icx_engine.testing.runners.run_plan", _run_plan)
@@ -82,16 +82,12 @@ async def test_runtime_resolver_and_target_url(monkeypatch, tmp_path):
     assert res["ok"] is True
 
 
-async def test_agent_type_maps_to_ui(monkeypatch, tmp_path):
-    got = {}
-    def _detect(repo, category=None):
-        got["category"] = category
-        return [_FakeRunner("stagehand", "ui", "ui")]
-    monkeypatch.setattr("icx_engine.testing.runners.detect_runners", _detect)
-    monkeypatch.setattr("icx_engine.testing.runners.run_plan",
-                        _aplan([(0, _report(passed=1))]))
-    await le.run_local_verification(tmp_path, "agent")
-    assert got["category"] == "ui"
+async def test_agent_type_is_not_a_run_local_verification_category(tmp_path):
+    # agent-type is NOT executed by run_local_verification at all anymore - the agent runs its own
+    # Playwright test (node_author_flow) and node_local_run reads that report directly
+    # (_agent_report_result). Calling run_local_verification with "agent" has no category mapping.
+    res = await le.run_local_verification(tmp_path, "agent")
+    assert res["ok"] is False and "unknown test type" in res["reason"]
 
 
 # -- Step 1b: local_run node ---------------------------------------------------
@@ -134,48 +130,87 @@ async def test_node_local_run_guarded_on_exception(monkeypatch, tmp_path):
     assert out["status"] == "error" and "boom" in out["last_error"]
 
 
-# -- Step 2: UI authoring gate + Stagehand harness -----------------------------
+# -- Step 2: agent-authored Playwright test gate -------------------------------
 
 from icx_engine.testing.nodes import node_author_flow, route_after_auth
 
 
-def test_route_after_auth_ui_authors_first():
-    assert route_after_auth({"test_type": "ui"}) == "author_flow"
+def test_route_after_auth_agent_authors_first():
     assert route_after_auth({"test_type": "agent"}) == "author_flow"
     assert route_after_auth({"test_type": "api"}) == "local_run"
     assert route_after_auth({"test_type": "unit"}) == "local_run"
     assert route_after_auth({}) == "local_run"
 
 
-async def test_node_author_flow_caches_flow(monkeypatch, tmp_path):
-    from icx_engine.testing.runners import ui as _ui
-    monkeypatch.setattr(_ui, "_ui_cache_dir", lambda: tmp_path)
+async def test_node_author_flow_records_agent_report_fields(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.testing.nodes.interrupt", lambda p: {
-        "steps": [
-            {"action": "goto", "target": "http://x/login"},
-            {"action": "fill", "target": "#user", "value": "a", "description": "enter user"},
-            {"action": "click", "target": "#submit"},
-            {"action": "assert", "target": ".welcome", "value": "Welcome"},
-        ],
+        "report_path": str(tmp_path / "r.xml"),
+        "test_file": str(tmp_path / "screen.spec.ts"),
+        "covered": ["Create", "Edit"],
+        "findings": ["delete confirm dialog never closes"],
         "read_receipts": [],
     })
-    out = await node_author_flow({"test_type": "ui", "url": "http://x/login",
+    out = await node_author_flow({"test_type": "agent", "url": "http://x/login",
                                   "file_paths": ["src/Login.jsx"], "project": "P1"})
-    from icx_engine.testing.runners.ui import load_flow
-    flow = load_flow("P1")
-    assert flow is not None and flow.authored is True
-    assert [s.action for s in flow.steps] == ["goto", "fill", "click", "assert"]
+    assert out["agent_report_path"] == str(tmp_path / "r.xml")
+    assert out["agent_test_file"] == str(tmp_path / "screen.spec.ts")
+    assert out["agent_covered"] == ["Create", "Edit"]
+    assert out["agent_findings"] == ["delete confirm dialog never closes"]
     assert "read_receipts" in out
 
 
-def test_stagehand_harness_asset_exists():
-    from icx_engine.testing.runners.install import harness_path
-    from pathlib import Path
-    p = Path(harness_path())
-    assert p.exists() and p.name == "icx-replay.mjs"
-    txt = p.read_text(encoding="utf-8")
-    assert "Stagehand" in txt and "writeJUnit" in txt
-    assert all(ord(c) < 128 for c in txt)  # ASCII
+async def test_node_author_flow_gate_carries_checklist_rules(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt", lambda p: captured.update(p) or {
+        "report_path": str(tmp_path / "r.xml")})
+    await node_author_flow({"test_type": "agent", "url": "http://x", "file_paths": ["a.jsx"],
+                            "project": "P"})
+    assert captured["gate"] == "author_flow"
+    assert captured["rules"]           # rules_defaults/author_flow.md checklist text
+    assert "playwright" in captured    # pinned node/env info for the agent to use
+    assert captured["report_path"].endswith(".icx-agent-junit.xml")
+
+
+async def test_node_author_flow_no_tool_branding_in_data_guidance(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt", lambda p: captured.update(p) or {
+        "report_path": str(tmp_path / "r.xml")})
+    await node_author_flow({"test_type": "agent", "url": "http://x", "file_paths": ["a.jsx"],
+                            "project": "P", "test_writes": True})
+    msg = captured["message"]
+    assert "ICX_TEST" not in msg          # the old branded tag prefix must be gone
+    assert "GENERIC" in msg and "tool/vendor name" in msg
+
+
+async def test_node_author_flow_message_carries_iteration_cap(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt", lambda p: captured.update(p) or {
+        "report_path": str(tmp_path / "r.xml")})
+    await node_author_flow({"test_type": "agent", "url": "http://x", "file_paths": ["a.jsx"],
+                            "project": "P", "max_iterations": 5})
+    assert "5" in captured["message"] and "SELF-FIX BUDGET" in captured["message"]
+
+
+async def test_node_author_flow_message_mandates_both_sources_and_no_create_step_coverage(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt", lambda p: captured.update(p) or {
+        "report_path": str(tmp_path / "r.xml")})
+    await node_author_flow({"test_type": "agent", "url": "http://x", "file_paths": ["a.jsx"],
+                            "project": "P"})
+    msg = captured["message"]
+    assert "FLOOR" in msg and "discovered" in msg
+    assert "export/upload/download" in msg or "no create-step" in msg.lower()
+
+
+async def test_node_author_flow_records_agent_discovered(monkeypatch, tmp_path):
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt", lambda p: {
+        "report_path": str(tmp_path / "r.xml"),
+        "covered": ["Create"],
+        "discovered": ["Export CSV"],
+    })
+    out = await node_author_flow({"test_type": "agent", "url": "http://x", "file_paths": ["a.jsx"],
+                                  "project": "P"})
+    assert out["agent_discovered"] == ["Export CSV"]
 
 
 def test_discover_harness_asset_exists():
@@ -197,15 +232,15 @@ async def test_run_ui_discovery_empty_url_returns_none(tmp_path):
 
 async def test_run_ui_discovery_no_runner_returns_none(monkeypatch, tmp_path):
     from icx_engine.testing.local_executor import run_ui_discovery
-    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
-                        lambda repo, category=None: [])
+    monkeypatch.setattr("icx_engine.testing.runners.install.ensure_runner",
+                        lambda name, approve=None: None)
     assert await run_ui_discovery(str(tmp_path), "http://x/#/users") is None
 
 
 async def test_run_ui_discovery_parses_census(monkeypatch, tmp_path):
     from icx_engine.testing.local_executor import run_ui_discovery
-    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
-                        lambda repo, category=None: [_FakeRunner("stagehand", "ui", "ui")])
+    monkeypatch.setattr("icx_engine.testing.runners.install.ensure_runner",
+                        lambda name, approve=None: "/opt/icx/playwright/1.48.0")
     async def _fake_run_spec(spec, timeout=0, **kwargs):
         Path(spec.report_path).write_text(
             '{"functionalities":[{"functionality":"Create","modalDetails":{"triggerSelector":"#c"}}]}',
@@ -218,8 +253,8 @@ async def test_run_ui_discovery_parses_census(monkeypatch, tmp_path):
 
 async def test_run_ui_discovery_empty_crawl_returns_none(monkeypatch, tmp_path):
     from icx_engine.testing.local_executor import run_ui_discovery
-    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
-                        lambda repo, category=None: [_FakeRunner("stagehand", "ui", "ui")])
+    monkeypatch.setattr("icx_engine.testing.runners.install.ensure_runner",
+                        lambda name, approve=None: "/opt/icx/playwright/1.48.0")
     async def _fake_run_spec(spec, timeout=0, **kwargs):
         Path(spec.report_path).write_text('{"functionalities":[]}', encoding="utf-8")
     monkeypatch.setattr("icx_engine.testing.runners.executor.run_spec", _fake_run_spec)
@@ -235,17 +270,14 @@ def _source_model():
 
 
 async def test_author_flow_merges_discovered_census(monkeypatch, tmp_path):
-    from icx_engine.testing.runners import ui as _ui
-    monkeypatch.setattr(_ui, "_ui_cache_dir", lambda: tmp_path)
     async def _disc(repo, url, **kw):
         # discovery surfaces an Export the source census missed
         return {"functionalities": [{"functionality": "Export CSV",
                 "modalDetails": {"triggerSelector": "#exp"}, "type": "Download"}]}
-    async def _none(*a, **k):
-        return None
     monkeypatch.setattr(le, "run_ui_discovery", _disc)
-    monkeypatch.setattr(le, "run_ui_verify", _none)   # skip the live-DOM heal probe
-    out = await node_author_flow({"test_type": "ui", "url": "http://x/#/u",
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt",
+                        lambda p: {"report_path": str(tmp_path / "r.xml")})
+    out = await node_author_flow({"test_type": "agent", "url": "http://x/#/u",
                                   "file_paths": ["src/U.jsx"], "project": "PC1",
                                   "screen_model": _source_model()})
     merged = out["screen_model"]
@@ -254,27 +286,16 @@ async def test_author_flow_merges_discovered_census(monkeypatch, tmp_path):
 
 
 async def test_author_flow_degrades_to_source_when_no_discovery(monkeypatch, tmp_path):
-    from icx_engine.testing.runners import ui as _ui
-    monkeypatch.setattr(_ui, "_ui_cache_dir", lambda: tmp_path)
     async def _disc(repo, url, **kw):
         return None                                    # app/session unavailable
-    async def _none(*a, **k):
-        return None
     monkeypatch.setattr(le, "run_ui_discovery", _disc)
-    monkeypatch.setattr(le, "run_ui_verify", _none)
-    out = await node_author_flow({"test_type": "ui", "url": "http://x/#/u",
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt",
+                        lambda p: {"report_path": str(tmp_path / "r.xml")})
+    out = await node_author_flow({"test_type": "agent", "url": "http://x/#/u",
                                   "file_paths": ["src/U.jsx"], "project": "PC2",
                                   "screen_model": _source_model()})
     kinds = [f["functionality"] for f in out["screen_model"]["functionalities"]]
     assert kinds == ["Create"]                          # unchanged source census
-
-
-def test_ui_build_command_points_at_packaged_harness(tmp_path):
-    from icx_engine.testing.runners import get_runner
-    spec = get_runner("stagehand").build_command(tmp_path, runtime_path=None)
-    assert spec.command[1].endswith("icx-replay.mjs")
-    from pathlib import Path
-    assert Path(spec.command[1]).exists()
 
 
 # -- Step 4: DoD confidence surfaced from local_run ----------------------------
@@ -409,7 +430,7 @@ async def test_schemathesis_gets_base_url_flag(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.testing.runners.install.ensure_runner",
                         lambda name, approve=None: "/opt/schemathesis")
     captured = {}
-    async def _run_plan(specs, parallel=True, timeout=600.0):
+    async def _run_plan(specs, parallel=True, timeout=600.0, **_kw):
         captured["cmd"] = specs[0].command
         captured["env"] = specs[0].env
         return [(specs[0], _report(passed=1))]
@@ -432,31 +453,71 @@ async def test_pytest_no_requires_not_gated(monkeypatch, tmp_path):
     assert res["ok"] is True
 
 
-# -- authenticated UI replay: node_local_run threads the captured session through ---
+# -- agent-type completion: node_local_run reads the agent's own JUnit report ------
 
-async def test_node_local_run_passes_storage_state(monkeypatch, tmp_path):
-    import icx_engine.testing.local_executor as _le
-    from icx_engine.testing import auth as _auth
-    state_file = tmp_path / "st.json"
-    state_file.write_text("{}", encoding="utf-8")
-    rec = type("R", (), {"storage_state": str(state_file)})()
-    monkeypatch.setattr(_auth, "load_session", lambda p, h: rec)
-    monkeypatch.setattr(_auth, "host_of", lambda u: "host")
-    monkeypatch.setattr("icx_engine.testing.runners.ui.flow_path", lambda k: "/flow")
-    seen = {}
+_JUNIT_ONE_PASS = ('<?xml version="1.0"?><testsuite tests="1" failures="0" errors="0">'
+                  '<testcase name="create user" time="0.1"/></testsuite>')
 
-    async def _fake(repo, tt, **kw):
-        seen.update(kw)
-        return {"ok": True, "test_type": tt, "summary": {}, "runners": [], "reports": []}
-    monkeypatch.setattr(_le, "run_local_verification", _fake)
 
-    await node_local_run({"engine": "local", "test_type": "ui", "url": "http://x",
-                          "project": "proj", "file_paths": [str(tmp_path / "a.jsx")],
-                          "headless": False, "slowmo": 1500})
-    assert seen.get("storage_state") == str(state_file)
-    # node_local_run forwards the gate's headed + slowmo choice to the executor
-    assert seen.get("ui_headed") is True
-    assert seen.get("ui_slowmo") == 1500
+async def test_node_local_run_agent_type_never_calls_run_local_verification(monkeypatch, tmp_path):
+    report = tmp_path / "r.xml"
+    report.write_text(_JUNIT_ONE_PASS, encoding="utf-8")
+
+    async def _boom(*a, **k):
+        raise AssertionError("run_local_verification must not be called for agent-type")
+    monkeypatch.setattr("icx_engine.testing.local_executor.run_local_verification", _boom)
+
+    out = await node_local_run({"engine": "local", "test_type": "agent",
+                                "agent_report_path": str(report)})
+    assert out["status"] == "parsed"
+    assert out["full_report"]["ok"] is True
+    assert out["full_report"]["summary"]["total"] == 1
+
+
+async def test_node_local_run_agent_type_missing_report_is_not_ok(tmp_path):
+    out = await node_local_run({"engine": "local", "test_type": "agent",
+                                "agent_report_path": str(tmp_path / "never-written.xml")})
+    assert out["status"] == "parsed"
+    assert out["full_report"]["ok"] is False
+    assert "no JUnit report found" in out["full_report"]["reason"]
+    assert len(out["issues"]) == 1
+
+
+async def test_node_local_run_agent_type_flags_census_coverage_gaps(tmp_path):
+    report = tmp_path / "r.xml"
+    report.write_text(_JUNIT_ONE_PASS, encoding="utf-8")
+    model = {"functionalities": [{"functionality": "Create"}, {"functionality": "Delete"}]}
+    out = await node_local_run({"engine": "local", "test_type": "agent",
+                                "agent_report_path": str(report), "screen_model": model,
+                                "agent_covered": ["Create"]})   # Delete never mentioned
+    fr = out["full_report"]
+    assert fr["ok"] is False                     # passing tests, but coverage is incomplete
+    assert fr["coverage_gaps"] == ["Delete"]
+
+
+async def test_node_local_run_agent_type_discovered_closes_coverage_gap(tmp_path):
+    report = tmp_path / "r.xml"
+    report.write_text(_JUNIT_ONE_PASS, encoding="utf-8")
+    model = {"functionalities": [{"functionality": "Create"}, {"functionality": "Export CSV"}]}
+    out = await node_local_run({"engine": "local", "test_type": "agent",
+                                "agent_report_path": str(report), "screen_model": model,
+                                "agent_covered": ["Create"],
+                                "agent_discovered": ["Export CSV"]})  # agent found it itself
+    fr = out["full_report"]
+    assert fr["ok"] is True
+    assert fr["coverage_gaps"] == []
+    assert fr["discovered"] == ["Export CSV"]
+
+
+async def test_node_local_run_agent_type_no_gaps_when_fully_covered(tmp_path):
+    report = tmp_path / "r.xml"
+    report.write_text(_JUNIT_ONE_PASS, encoding="utf-8")
+    model = {"functionalities": [{"functionality": "Create"}]}
+    out = await node_local_run({"engine": "local", "test_type": "agent",
+                                "agent_report_path": str(report), "screen_model": model,
+                                "agent_covered": ["Create"]})
+    assert out["full_report"]["ok"] is True
+    assert out["full_report"]["coverage_gaps"] == []
 
 
 # -- installed ICX tool is put on the runner's PATH --------------------------------
@@ -477,7 +538,7 @@ async def test_installed_hurl_path_wired_onto_runner(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.testing.runners.install.ensure_runner",
                         lambda name, approve=None, node_dir=None: "/opt/icx/hurl/5.0.1")
     captured = {}
-    async def _run_plan(specs, parallel=True, timeout=600.0):
+    async def _run_plan(specs, parallel=True, timeout=600.0, **_kw):
         captured["env"] = specs[0].env
         return [(specs[0], _report(passed=1))]
     monkeypatch.setattr("icx_engine.testing.runners.run_plan", _run_plan)
@@ -486,47 +547,21 @@ async def test_installed_hurl_path_wired_onto_runner(monkeypatch, tmp_path):
     assert "/opt/icx/hurl/5.0.1" in captured["env"]["PATH"].split(os.pathsep)
 
 
-async def test_ui_headed_env_injected(monkeypatch, tmp_path):
-    fake = _FakeRunner("stagehand", "ui", "ui")
-    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
-                        lambda repo, category=None: [fake])
-    captured = {}
-    async def _run_plan(specs, parallel=True, timeout=600.0):
-        captured["env"] = specs[0].env
-        return [(specs[0], _report(passed=1))]
-    monkeypatch.setattr("icx_engine.testing.runners.run_plan", _run_plan)
-    await le.run_local_verification(tmp_path, "ui", target_url="http://x", ui_headed=True)
-    assert captured["env"].get("ICX_UI_HEADED") == "1"
-    # default (headless) -> not set
-    captured.clear()
-    await le.run_local_verification(tmp_path, "ui", target_url="http://x", ui_headed=False)
-    assert "ICX_UI_HEADED" not in captured["env"]
-
-
-async def test_ui_slowmo_env_injected(monkeypatch, tmp_path):
-    fake = _FakeRunner("stagehand", "ui", "ui")
-    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
-                        lambda repo, category=None: [fake])
-    captured = {}
-    async def _run_plan(specs, parallel=True, timeout=600.0):
-        captured["env"] = specs[0].env
-        return [(specs[0], _report(passed=1))]
-    monkeypatch.setattr("icx_engine.testing.runners.run_plan", _run_plan)
-    await le.run_local_verification(tmp_path, "ui", target_url="http://x", ui_headed=True, ui_slowmo=1000)
-    assert captured["env"].get("ICX_UI_SLOWMO") == "1000"
-    # slowmo 0 (headless) -> not set
-    captured.clear()
-    await le.run_local_verification(tmp_path, "ui", target_url="http://x", ui_slowmo=0)
-    assert "ICX_UI_SLOWMO" not in captured["env"]
-
-
-async def test_author_flow_agent_is_exploratory_ui_is_scripted(monkeypatch, tmp_path):
-    from icx_engine.testing.runners import ui as _ui
-    monkeypatch.setattr(_ui, "_ui_cache_dir", lambda: tmp_path)
+async def test_author_flow_gate_tells_agent_to_launch_headed_with_slowmo(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr("icx_engine.testing.nodes.interrupt",
-                        lambda p: seen.update(msg=p["message"], tt=p["test_type"]) or {"steps": [], "read_receipts": []})
-    await node_author_flow({"test_type": "agent", "url": "http://x", "file_paths": ["a.jsx"], "project": "A"})
-    assert seen["tt"] == "agent" and "EXPLORATORY" in seen["msg"] and "edge case" in seen["msg"].lower()
-    await node_author_flow({"test_type": "ui", "url": "http://x", "file_paths": ["a.jsx"], "project": "B"})
-    assert seen["tt"] == "ui" and "SCRIPTED" in seen["msg"]
+                        lambda p: seen.update(msg=p["message"], headless=p["headless"], slowmo=p["slowmo"])
+                        or {"report_path": str(tmp_path / "r.xml")})
+    await node_author_flow({"test_type": "agent", "url": "http://x", "file_paths": ["a.jsx"],
+                            "project": "A", "headless": False, "slowmo": 750})
+    assert seen["headless"] is False and seen["slowmo"] == 750
+    assert "HEADED" in seen["msg"] and "750" in seen["msg"]
+
+
+async def test_author_flow_gate_default_headless(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr("icx_engine.testing.nodes.interrupt",
+                        lambda p: seen.update(msg=p["message"], headless=p["headless"])
+                        or {"report_path": str(tmp_path / "r.xml")})
+    await node_author_flow({"test_type": "agent", "url": "http://x", "file_paths": ["a.jsx"], "project": "B"})
+    assert seen["headless"] is True and "HEADLESS" in seen["msg"]

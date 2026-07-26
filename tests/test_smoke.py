@@ -102,6 +102,30 @@ def test_test_rules_command(cli_runner, tmp_path, monkeypatch):
     assert "compat_scan.md" in result.output
 
 
+def test_test_rules_reset_reports_seeded_then_up_to_date(cli_runner, tmp_path, monkeypatch):
+    from icx_engine.testing import rules as _rules
+    monkeypatch.setattr(_rules, "rules_dir", lambda: tmp_path / "testing_rules")
+    first = cli_runner.invoke(app, ["test", "rules", "--reset"])
+    assert first.exit_code == 0
+    assert "Seeded" in first.output and "compat_scan.md" in first.output
+
+    second = cli_runner.invoke(app, ["test", "rules", "--reset"])
+    assert second.exit_code == 0
+    assert "Already current" in second.output
+
+
+def test_test_rules_reset_leaves_customized_file_alone(cli_runner, tmp_path, monkeypatch):
+    from icx_engine.testing import rules as _rules
+    monkeypatch.setattr(_rules, "rules_dir", lambda: tmp_path / "testing_rules")
+    d = tmp_path / "testing_rules"
+    d.mkdir(parents=True)
+    (d / "compat_scan.md").write_text("MY CUSTOM RULE", encoding="utf-8")
+    result = cli_runner.invoke(app, ["test", "rules", "--reset"])
+    assert result.exit_code == 0
+    assert "Left alone" in result.output and "compat_scan.md" in result.output
+    assert (d / "compat_scan.md").read_text(encoding="utf-8") == "MY CUSTOM RULE"
+
+
 def test_status_runs_with_no_config(cli_runner):
     from unittest.mock import patch
     with patch.object(ConfigManager, "load", return_value=AppConfig()):
@@ -502,7 +526,7 @@ def test_test_setup_ui_prompts_node_and_saves_config(cli_runner, isolated_config
 
     result = cli_runner.invoke(app, ["test", "setup", "-y", "--no-api"])
     assert result.exit_code == 0
-    assert calls["name"] == "stagehand"
+    assert calls["name"] == "playwright"
     assert calls["node_dir"].replace("\\", "/").endswith("node20/bin")   # node's dir on PATH for npm
     assert ConfigManager.load().harness_node_path == "/usr/local/node20/bin/node"
 

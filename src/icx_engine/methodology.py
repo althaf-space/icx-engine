@@ -9,6 +9,8 @@ tool (pullable on demand).
 """
 from __future__ import annotations
 
+from icx_engine.personas import strip_urls
+
 METHODOLOGY_VERSION = "1.0"
 
 # The always-present, per-ticket mandatory spine (kept short so the agent actually follows it).
@@ -71,6 +73,10 @@ _ARCHETYPES = {
                "resume-driven design; designing for imagined scale; one answer with no trade-offs shown"),
     "performance": ("no optimization without measurement; algorithmic > I/O > memory > cache > micro",
                     "optimizing the readable 5% while one unindexed query is the cost; caching over a bug"),
+    "testing": ("cover happy path + edges + negative + security + a11y from real execution, not "
+                "assumption; a pass counts only when the runner itself said so",
+                "declaring coverage complete without running it; skipping negative/edge/security "
+                "cases; treating a green run as proof when real edges were never exercised"),
     "database": ("model from access patterns not nouns; index to predicates; migrations without long locks",
                  "schemas from nouns; index-everything or none; migrations that lock big tables; money as float"),
     "security": ("trust boundaries hostile by default; vetted primitives; default-deny; dual-use limits",
@@ -85,14 +91,19 @@ _ARCHETYPES = {
               "answering from memory when it is checkable; over-answering a simple question; false confidence"),
 }
 
-# Text signals per archetype (first match in this order wins). Deterministic.
+# Text signals per archetype (first match in this order wins). Deterministic. Matched against
+# URL-stripped text (see classify_text) - a pasted URL's own path words must never drive this.
 _ARCHETYPE_SIGNALS = (
     ("debugging", ("error", "crash", "broken", "regression", "fails", "failing", "exception",
                    "stack trace", "not working", "bug", "500", "npe", "null pointer")),
-    ("security", ("auth", "token", "vulnerab", "injection", "secret", "xss", "csrf", "exploit",
-                  "sql injection", "sanitize", "escape")),
-    ("performance", ("slow", "latency", "performance", "timeout", "optimi", "n+1", "throughput",
-                     "memory leak")),
+    ("security", ("vulnerab", "injection", "secret", "xss", "csrf", "exploit",
+                  "sql injection", "sanitize", "penetration test", "pentest")),
+    ("testing", ("e2e", "playwright", "test case", "test cases", "which cases", "which all cases",
+                 "test coverage", "regression suite", "unit test", "api test", "test plan",
+                 "write tests", "test the screen", "browser test", "slowmo", "flaky")),
+    ("performance", ("too slow", "very slow", "runs slow", "slow load", "slow response", "slower",
+                     "slowly", "slowing down", "latency", "performance", "timeout", "optimi",
+                     "n+1", "throughput", "memory leak")),
     ("database", ("schema", "migration", "query", "sql", "index", "orm", "table", "join")),
     ("design", ("design", "architect", "structure", "scale", "trade-off", "approach", "should we")),
     ("planning", ("plan", "roadmap", "milestone", "sequence", "break down", "estimate")),
@@ -115,8 +126,9 @@ def _token_hit(token: str, text: str, words: list[str]) -> bool:
 
 
 def classify_text(text: str) -> str:
-    """Best-effort archetype from raw prompt text. Deterministic; recommendation - the agent confirms."""
-    t = (text or "").lower().strip()
+    """Best-effort archetype from raw prompt text. Deterministic; recommendation - the agent confirms.
+    URLs are stripped before matching so a pasted link's own path words never drive classification."""
+    t = strip_urls(text or "").lower().strip()
     words = [w.strip(".,;:!?()[]{}\"'") for w in t.split()]
     for arch, toks in _ARCHETYPE_SIGNALS:
         if any(_token_hit(tok, t, words) for tok in toks):

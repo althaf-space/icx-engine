@@ -23,3 +23,22 @@ def test_empty_prompt_defaults_safely():
 def test_code_archetypes_membership():
     assert "coding" in CODE_ARCHETYPES and "debugging" in CODE_ARCHETYPES
     assert "doubt" not in CODE_ARCHETYPES
+
+
+def test_is_trivial_conversational_skips():
+    from icx_engine.boost.classify import is_trivial
+    for p in ["thanks", "ok", "yes", "no", "sure", "continue", "proceed", "go ahead", "do it",
+              "looks good", "please continue", "got it", "perfect", "great", "yes please"]:
+        assert is_trivial(p), f"{p!r} should be trivial"
+
+
+def test_is_trivial_real_requests_boost():
+    from icx_engine.boost.classify import is_trivial
+    for p in ["fix the auth bug", "add a login endpoint", "what is a monad", "test this screen",
+              "can you check the database schema", "why is it slow", "continue the migration script"]:
+        assert not is_trivial(p), f"{p!r} should NOT be trivial (it has real content)"
+
+
+def test_is_trivial_empty_is_trivial():
+    from icx_engine.boost.classify import is_trivial
+    assert is_trivial("") and is_trivial("   ")

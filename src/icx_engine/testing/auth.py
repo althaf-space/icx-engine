@@ -22,6 +22,13 @@ def host_of(url: str) -> str:
     return urlparse(url).netloc
 
 
+def hostname_of(url: str) -> str:
+    """Bare hostname, no port - e.g. 'localhost' from 'localhost:3001'. Used to spot the common
+    dev-server-port-drift case (Vite/CRA auto-incrementing on a taken port) separately from a
+    genuinely different host."""
+    return urlparse(url).hostname or ""
+
+
 def store_path() -> Path:
     return Path.home() / ".icx" / "testing_auth.json"
 
@@ -100,6 +107,32 @@ def load_session(project: str, host: str, store: Path | None = None) -> AuthReco
         return None
     return AuthRecord(entry["session_id"], entry.get("captured_at", ""), entry["expires_at"],
                       entry.get("storage_state", ""))
+
+
+def list_sessions_for_project(project: str, store: Path | None = None) -> list[tuple[str, AuthRecord]]:
+    """Every NON-EXPIRED saved session for this project, across every host it was ever captured
+    against - keyed by (project, host), but one project can accumulate several host entries (a dev
+    server that changed port across restarts). Newest captured_at first. Never raises - a malformed
+    entry is skipped, not fatal."""
+    path = _resolve(store)
+    data = _read(path)
+    prefix = f"{project}::"
+    now = datetime.now(timezone.utc)
+    out: list[tuple[str, AuthRecord]] = []
+    for key, entry in data.items():
+        if not key.startswith(prefix) or not isinstance(entry, dict):
+            continue
+        try:
+            expires = datetime.fromisoformat(entry["expires_at"])
+        except (KeyError, ValueError):
+            continue
+        if now >= expires:
+            continue
+        out.append((key[len(prefix):], AuthRecord(
+            entry.get("session_id", ""), entry.get("captured_at", ""),
+            entry["expires_at"], entry.get("storage_state", ""))))
+    out.sort(key=lambda pair: pair[1].captured_at, reverse=True)
+    return out
 
 
 def clear_session(project: str, host: str, store: Path | None = None) -> None:

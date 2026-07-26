@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.4.1"
+version = "0.4.2"
 description = "ICX (Integrated Contextual X-ecution Engine): an AI-native intelligence layer for development teams. Extracts deep issue context from work trackers, processes attachments including images, documents, audio and video, runs multi-provider LLM analysis, maintains a local-first RAG memory, builds a multi-language codebase knowledge graph, reads SonarQube code-quality findings, and drives AI-assisted testing. Exposes everything to AI editors over MCP and the CLI."
 readme = "readme.md"
 license = { file = "license" }
@@ -114,8 +114,8 @@ packages = ["src/icx_engine"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/icx_engine/py.typed" = "icx_engine/py.typed"
-"src/icx_engine/testing/runners/assets/icx-replay.mjs" = "icx_engine/testing/runners/assets/icx-replay.mjs"
 "src/icx_engine/testing/runners/assets/icx-auth.mjs" = "icx_engine/testing/runners/assets/icx-auth.mjs"
+"src/icx_engine/testing/runners/assets/icx-discover.mjs" = "icx_engine/testing/runners/assets/icx-discover.mjs"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

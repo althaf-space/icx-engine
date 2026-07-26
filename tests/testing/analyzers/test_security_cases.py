@@ -1,17 +1,10 @@
-"""Built-in security cases (XSS woven into UI, SQLi/auth woven into API)."""
+"""Built-in security cases (SQLi/auth woven into API)."""
 from __future__ import annotations
 
 from icx_engine.testing.analyzers.security_cases import (
     api_security_requests, api_headers_check,
-    XSS_PAYLOAD, XSS_SAFE_EXPR, XSS_MARKER, INJECTION, LEAK_MARKERS, SECURITY_HEADERS,
+    INJECTION, LEAK_MARKERS, SECURITY_HEADERS,
 )
-
-
-def test_xss_contract_constants():
-    # UI XSS is woven in to_flow._emit_form (canary as the field value on the write submit + assertjs).
-    # The constants are the contract that binds the two.
-    assert XSS_MARKER in XSS_SAFE_EXPR
-    assert "onerror" in XSS_PAYLOAD and XSS_MARKER in XSS_PAYLOAD
 
 
 def test_api_sqli_probe_must_not_500():

@@ -21,6 +21,38 @@ def test_auth_safe_sanitizes():
     assert _auth._safe("") == "unknown"
 
 
+def test_hostname_of_strips_port():
+    assert _auth.hostname_of("http://localhost:3001/app") == "localhost"
+    assert _auth.hostname_of("http://example.com/app") == "example.com"
+
+
+# -- list_sessions_for_project: dev-server port-drift discovery ---------------------
+
+def test_list_sessions_for_project_finds_multiple_hosts(tmp_path):
+    store = tmp_path / "a.json"
+    _auth.save_session("proj1", "localhost:3000", "s1", store=store, storage_state="/x/1.json")
+    _auth.save_session("proj1", "localhost:3001", "s2", store=store, storage_state="/x/2.json")
+    _auth.save_session("proj2", "localhost:3000", "other", store=store, storage_state="/x/3.json")
+    hosts = {h for h, _ in _auth.list_sessions_for_project("proj1", store=store)}
+    assert hosts == {"localhost:3000", "localhost:3001"}
+
+
+def test_list_sessions_for_project_excludes_expired(tmp_path):
+    store = tmp_path / "a.json"
+    _auth.save_session("proj1", "localhost:3000", "s1", store=store, ttl_seconds=-10)  # already expired
+    assert _auth.list_sessions_for_project("proj1", store=store) == []
+
+
+def test_list_sessions_for_project_newest_first(tmp_path):
+    import time
+    store = tmp_path / "a.json"
+    _auth.save_session("proj1", "localhost:3000", "s1", store=store)
+    time.sleep(0.01)
+    _auth.save_session("proj1", "localhost:3001", "s2", store=store)
+    hosts = [h for h, _ in _auth.list_sessions_for_project("proj1", store=store)]
+    assert hosts == ["localhost:3001", "localhost:3000"]
+
+
 # -- capture: manual browser login, no creds in chat --------------------------------
 
 async def test_capture_session_saves_on_success(monkeypatch, tmp_path):
@@ -83,12 +115,12 @@ def test_auth_harness_asset_exists_and_ascii():
     assert all(ord(c) < 128 for c in txt)
 
 
-# -- replay build_command points Playwright at the ICX browser cache ----------------
+# -- harness env points Playwright at the ICX browser cache -------------------------
 
-def test_ui_build_command_sets_browsers_path(monkeypatch, tmp_path):
-    from icx_engine.testing.runners import get_runner
+def test_harness_env_sets_browsers_path(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.testing.runners.install.installed_path",
-                        lambda name: str(tmp_path / "sh"))
-    spec = get_runner("stagehand").build_command(tmp_path, runtime_path=None)
-    assert "PLAYWRIGHT_BROWSERS_PATH" in spec.env
-    assert spec.env["PLAYWRIGHT_BROWSERS_PATH"].endswith("browsers")
+                        lambda name: str(tmp_path / "pw"))
+    node, env = uiauth._harness_env()
+    assert "PLAYWRIGHT_BROWSERS_PATH" in env
+    assert env["PLAYWRIGHT_BROWSERS_PATH"].endswith("browsers")
+    assert "NODE_PATH" in env and env["NODE_PATH"].endswith("node_modules")

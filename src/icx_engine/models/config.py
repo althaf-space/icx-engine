@@ -76,7 +76,7 @@ class AppConfig(BaseModel):
 
     # Local testing engine
     test_max_iterations: int = 3
-    # Path to the Node executable used for the UI harness (Playwright/Stagehand), decoupled from the
+    # Path to the Node executable used for the UI harness (Playwright), decoupled from the
     # app's Node. Set interactively by `icx test setup`; editable here later. Empty = auto-discover.
     harness_node_path: str | None = None
 

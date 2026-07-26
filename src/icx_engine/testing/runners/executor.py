@@ -135,9 +135,9 @@ async def run_spec(spec: RunSpec, timeout: float = 600.0, keep_report: bool = Fa
     to DEVNULL - the JUnit file, not console output, is the result, so nothing is buffered in memory.
 
     keep_report=True skips the post-run deletion of an ICX-owned report file so a caller that reads the
-    harness's own output artifact (the UI discover/verify/replay helpers write a census/JSON to that
-    path and read it AFTER this returns) still finds it; those callers own the cleanup themselves. The
-    pre-run freshness delete still happens either way.
+    harness's own output artifact (the UI discover helper writes a census JSON to that path and reads
+    it AFTER this returns) still finds it; those callers own the cleanup themselves. The pre-run
+    freshness delete still happens either way.
     """
     # Freshness: never let a prior run's file masquerade as this run's result.
     _clean_own_report(spec.report_path)

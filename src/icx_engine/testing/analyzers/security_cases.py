@@ -1,22 +1,17 @@
-"""Built-in security test cases, woven into whatever method the user selected (Playwright UI / API).
+"""Built-in security test cases woven into the API layer (hurl).
 
-NOT a separate scanner - these are deterministic, offline cases generated INTO the same flow/spec:
-  - UI  (Playwright): inject an XSS canary into inputs, submit, assert it did NOT execute (and, where
-                      reflected, that it is escaped). The canary sets a neutral window flag only if the
-                      app renders it unescaped - so a passing case = the field is XSS-safe.
-  - API (hurl):       send SQLi / injection payloads in params + bodies and assert the server did not
-                      500 (crash/leak); for auth-gated endpoints, an unauthenticated call must 401/403.
+NOT a separate scanner - deterministic, offline cases generated INTO the same spec: send SQLi /
+injection payloads in params + bodies and assert the server did not 500 (crash/leak); for auth-gated
+endpoints, an unauthenticated call must 401/403.
 
-Payloads are the well-known OWASP / nuclei set. Always-on: every UI create/edit and every API endpoint
-gets its security cases so "what security tests to create" is a rule, not a per-run choice.
+Payloads are the well-known OWASP / nuclei set. Always-on: every API endpoint gets its security cases
+so "what security tests to create" is a rule, not a per-run choice.
+
+(The agent-type checklist - rules_defaults/author_flow.md - carries the equivalent UI security
+guidance - XSS canary injection, SQLi-shaped values - for the agent's own hand-written Playwright
+test to follow; there is no ICX-generated UI step list here anymore.)
 """
 from __future__ import annotations
-
-# The XSS canary sets a window flag ONLY if the browser executes it (i.e. the app rendered it
-# unescaped). The UI harness `assertjs` step then asserts the flag is absent -> field is safe.
-XSS_MARKER = "__xss_probe"
-XSS_PAYLOAD = f'"><img src=x onerror="window.{XSS_MARKER}=1">'
-XSS_SAFE_EXPR = f"window.{XSS_MARKER} === undefined"
 
 # Injection payloads per class - each is sent through the selected method and the server must not 500
 # (a 500 means it reached the engine unhandled) and must not leak an engine error in the body.
@@ -48,53 +43,6 @@ SECURITY_HEADERS = ["X-Content-Type-Options", "X-Frame-Options", "Content-Securi
 # Out-of-band object ids used to probe object-level robustness (IDOR-adjacent): a hostile/non-existent
 # id must not crash the server (500) or leak an engine error - it should 401/403/404.
 OOB_OBJECT_IDS = ["999999999", "0", "-1"]
-
-
-# UI XSS is woven directly in to_flow._emit_form: the create/update write submit fills every text
-# field with XSS_PAYLOAD (a valid non-empty string) and then asserts XSS_SAFE_EXPR, so the mutation
-# and the XSS check are ONE submit (no reopen, no loader race). The constants below are the contract.
-
-
-def ui_input_security_steps(selector: str, anchor: str, name: str = "input") -> list[dict]:
-    """Security probe for ANY free-text input that reaches a backend (search boxes, filters, query
-    fields - not just create/edit form fields). Types an XSS canary and asserts it does not execute
-    (reflected XSS), then types a SQLi payload and asserts the app stays up (no white-screen / crash
-    from a hostile query reaching the backend). Returns [] when there is no selector to test."""
-    if not selector:
-        return []
-    a = anchor or "body"
-    return [
-        {"action": "fill", "target": selector, "value": XSS_PAYLOAD,
-         "description": f"SECURITY(XSS): reflected payload in {name}"},
-        {"action": "waitfor", "target": a, "value": "", "description": f"{name}: reacts to payload"},
-        {"action": "assertjs", "target": XSS_SAFE_EXPR, "value": "",
-         "description": f"SECURITY(XSS): reflected input in {name} did NOT execute"},
-        {"action": "fill", "target": selector, "value": SQLI_PAYLOADS[0],
-         "description": f"SECURITY(SQLi): hostile query in {name}"},
-        {"action": "waitfor", "target": a, "value": "",
-         "description": f"SECURITY(SQLi): {name} stays up under a hostile query (no crash)"},
-    ]
-
-
-def ui_url_xss_steps(url: str, anchor: str) -> list[dict]:
-    """Reflected DOM-XSS probe via the URL: load the screen with an XSS canary in a query param, then
-    assert the app did not execute it (a screen that reflects location into the DOM unescaped would).
-    Returns [] when there is no URL/anchor to test."""
-    if not url:
-        return []
-    a = anchor or "body"
-    # URL-encoded <img src=x onerror=window.__xss_probe=1>
-    enc = f"%3Cimg%20src%3Dx%20onerror%3Dwindow.{XSS_MARKER}%3D1%3E"
-    sep = "&" if "?" in url else "?"
-    hostile = f"{url}{sep}q={enc}"
-    return [
-        {"action": "goto", "target": hostile, "value": "",
-         "description": "SECURITY(DOM-XSS): load the screen with a hostile URL parameter"},
-        {"action": "waitfor", "target": a, "value": "",
-         "description": "SECURITY(DOM-XSS): screen settles"},
-        {"action": "assertjs", "target": XSS_SAFE_EXPR, "value": "",
-         "description": "SECURITY(DOM-XSS): reflected URL parameter did NOT execute"},
-    ]
 
 
 # -- API (hurl) ---------------------------------------------------------------

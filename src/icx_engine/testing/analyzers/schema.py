@@ -81,6 +81,17 @@ def validate_census(family: str, spec: object) -> CensusReport:
     # Nothing to miss == fully covered. A valid census with zero elements in every category (e.g. a
     # pure utility module) must score 1.0, not 0.0 - else it wrongly drags down the DoD confidence.
     coverage = (mapped_all / total_all) if total_all > 0 else 1.0
+    # A census can be internally CONSISTENT (mapped + unmapped == total, per category) while every
+    # category still self-reports mapped=0 - i.e. "structurally fine, nothing is actually mapped".
+    # That is almost always the agent's OWN reconciliation table being wrong (dropped/zeroed while
+    # iterating on something else, e.g. fixing an unrelated lint finding) - not a legitimate census.
+    # Re-ask instead of silently accepting a near-zero coverage score with no signal anywhere.
+    if total_all > 0 and coverage < 0.3:
+        errors.append(
+            f"coverageReport.reconciliation reports {mapped_all}/{total_all} elements mapped "
+            f"({round(coverage, 4)}) - this is almost certainly the reconciliation table itself being "
+            f"wrong (not recomputed after another change), not a genuinely near-empty census. "
+            f"Recompute mapped/unmapped honestly for every category before resubmitting.")
     counts = obj.get("elementCensus", {})
     counts = counts.get("counts", {}) if isinstance(counts, dict) else {}
     totals = {k: _int(v) for k, v in counts.items()} if isinstance(counts, dict) else {}

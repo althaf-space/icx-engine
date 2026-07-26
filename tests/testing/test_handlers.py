@@ -1,10 +1,9 @@
 import pytest
-from icx_engine.testing.handlers import get_handler, TestModeHandler, UiHandler, ApiHandler, AgentHandler
+from icx_engine.testing.handlers import get_handler, TestModeHandler, ApiHandler, AgentHandler
 from icx_engine.testing.classify import FileClass
 
 
 def test_registry_resolves_each_mode():
-    assert isinstance(get_handler("ui"), UiHandler)
     assert isinstance(get_handler("agent"), AgentHandler)
     assert isinstance(get_handler("api"), ApiHandler)
 
@@ -15,7 +14,6 @@ def test_unknown_mode_raises():
 
 
 def test_relevant_layers():
-    assert get_handler("ui").relevant_layers() == {"frontend", "shared"}
     assert get_handler("agent").relevant_layers() == {"frontend", "shared"}
     assert get_handler("api").relevant_layers() == {"backend", "shared"}
 

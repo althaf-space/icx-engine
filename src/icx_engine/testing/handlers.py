@@ -19,13 +19,6 @@ class TestModeHandler(ABC):
         return check_compat(fc, self.mode)
 
 
-class UiHandler(TestModeHandler):
-    mode = "ui"
-
-    def relevant_layers(self) -> set[str]:
-        return {"frontend", "shared"}
-
-
 class AgentHandler(TestModeHandler):
     mode = "agent"
 
@@ -41,7 +34,6 @@ class ApiHandler(TestModeHandler):
 
 
 _REGISTRY: dict[str, TestModeHandler] = {
-    "ui": UiHandler(),
     "agent": AgentHandler(),
     "api": ApiHandler(),
 }

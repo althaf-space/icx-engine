@@ -103,7 +103,8 @@ RULES:
   staff-backend-engineer, staff-frontend-engineer, principal-ui-ux-architect,
   principal-data-architect, principal-database-architect, staff-devops-sre,
   principal-security-architect, staff-performance-engineer, principal-ml-engineer,
-  staff-mobile-engineer, principal-integration-architect, staff-qa-architect.
+  staff-mobile-engineer, principal-integration-architect, principal-qa-automation-architect,
+  principal-api-test-architect, principal-unit-test-architect.
 - persona_rationale: one short phrase (<= 12 words) explaining the persona choice. "" if none.\
 """
 

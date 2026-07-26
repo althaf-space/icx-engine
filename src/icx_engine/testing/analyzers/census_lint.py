@@ -1,9 +1,9 @@
 """Deterministic census linter - enforces census QUALITY independent of which agent produced it.
 
-The deterministic generators (`to_flow`, `to_api_spec`) already make the flow identical on every agent
-GIVEN a correct census. The one place agent variance leaks in is the census itself. This linter runs in
-ICX (not the agent) right after reconciliation and catches the structural defects any agent can make -
-the exact class of errors that broke live E2E runs:
+The census is what the agent's hand-written Playwright test (agent-type) and `to_api_spec` (api-type)
+are both authored FROM - a structural defect in the census silently propagates into whatever the
+agent writes. This linter runs in ICX (not the agent) right after reconciliation and catches the
+structural defects any agent can make - the exact class of errors that broke live E2E runs:
   - a create and an edit functionality sharing the SAME submit selector (copy error - each mutating
     mode has its own Save/Update button),
   - a create/edit form with fields but no submit (cannot save),
@@ -27,13 +27,28 @@ def _s(v) -> str:
     return str(v).strip() if v is not None else ""
 
 
-def _submit_selectors(func: dict) -> list[str]:
+def _terminal_submit_selectors(func: dict) -> list[str]:
+    """Only the SINGULAR `submitButton` - the one true terminal action (Create/Update/...). This is
+    what the cross-mode duplicate-selector check must compare, never `submitButtons[]` (see below)."""
     sb = func.get("submitButton")
     out: list[str] = []
     if isinstance(sb, dict):
         for c in (sb.get("selectors") or []):
             if _s(c):
                 out.append(_s(c))
+    return out
+
+
+def _submit_selectors(func: dict) -> list[str]:
+    """Every selector that means "this functionality can submit something", for the broader
+    has-any-submit / view-must-not-have-a-submit checks: the terminal `submitButton` PLUS the
+    per-step `submitButtons[]` array (`{label, step, selectors}` - one entry per wizard step, per the
+    analyzer prompt schema). `submitButtons[]` is not the terminal action - the checklist tells the
+    agent to drive wizard navigation from `steps[].nextButton` instead - and its per-step entries are
+    commonly IDENTICAL markup across create/edit (the same step-navigation UI, not a copy-paste
+    defect) - so it must never feed the cross-mode duplicate-selector check
+    (`_terminal_submit_selectors` above does)."""
+    out = list(_terminal_submit_selectors(func))
     if isinstance(func.get("submitButtons"), list):     # wizard: one per step
         for step in func["submitButtons"]:
             if isinstance(step, dict):
@@ -119,13 +134,16 @@ def lint_ui_census(model: dict) -> LintReport:
 
     kinds = [(f, _kind(f)) for f in funcs]
 
-    # submit-selector cross-check: two MUTATING modes (create/edit/clone) sharing an identical submit
-    # selector is almost always a copy error - each has its own Save/Update/Clone button. This is the
-    # exact defect that broke a live edit E2E (edit reused create's team-save instead of team-update).
+    # submit-selector cross-check: two MUTATING modes (create/edit/clone) sharing an identical TERMINAL
+    # submit selector is almost always a copy error - each has its own Save/Update/Clone button. This
+    # is the exact defect that broke a live edit E2E (edit reused create's team-save instead of
+    # team-update). Uses ONLY the singular `submitButton` (_terminal_submit_selectors) - NOT
+    # `submitButtons[]` (per-step wizard buttons), whose entries are commonly identical step-navigation
+    # markup across create/edit and are not a copy error (see _submit_selectors' docstring).
     mut = [(f, k) for f, k in kinds if k in ("create", "edit", "clone")]
     seen: dict[str, str] = {}
     for f, k in mut:
-        for sel in _submit_selectors(f):
+        for sel in _terminal_submit_selectors(f):
             if sel in seen and seen[sel] != k:
                 r.hard.append(
                     f"the '{k}' and '{seen[sel]}' forms share the SAME submit selector '{sel}' - each "

@@ -7,7 +7,11 @@ _DEFAULT_MAX_ITERATIONS = 3
 
 class TestingState(TypedDict):
     # Input
+    session_id: str | None                # MCP session id (thread_id) - set post-construction by the
+                                           # MCP handler; used as the browser-daemon registry key
     file_paths: list[str]
+    original_seeds: list[str]             # the file_paths as given at session start, never overwritten
+                                           # by expansion - the stable key for the known-screen cache
     context: str | None
     nl_intent: str | None                 # plain-English scenario request (SP3 NL authoring)
     acceptance_criteria: list[str]        # ticket acceptance criteria to author scenarios from (SP3)
@@ -21,9 +25,9 @@ class TestingState(TypedDict):
     scope: str                          # "ticket" | "full"
 
     # Submit config (Gate 3)
-    test_type: str | None               # "agent" | "ui" | "api" | "unit" - set at pick_type
-    headless: bool                      # UI/agent replay: hidden by default; visible when False
-    slowmo: int                         # UI/agent replay: ms slowdown+pause per step (0 headless; 1000 default headed)
+    test_type: str | None               # "agent" | "api" | "unit" - set at pick_type
+    headless: bool                      # agent-type: hidden by default; visible when False
+    slowmo: int                         # agent-type: ms slowdown+pause per step (0 headless; 1000 default headed)
 
     # API test extras
     api_endpoint: str | None
@@ -38,8 +42,21 @@ class TestingState(TypedDict):
     screen_model: dict | None             # the census/functionality model the agent produced
     census_coverage: float                # reconciliation coverage (1.0 = fully reconciled)
     census_warnings: list[str]            # advisory census-lint findings (non-blocking)
-    constraint_source: str                # "static" | "runtime" | "both" - how field values honor constraints
     test_writes: bool                     # allow real Save/Delete against the live app (default True)
+
+    # Agent-authored Playwright test (author_flow gate, agent-type only) - the agent writes and runs
+    # its own test; ICX only reads what it reports back.
+    agent_report_path: str | None         # JUnit report path the agent's own Playwright run wrote to
+    agent_test_file: str | None           # path to the Playwright test file the agent wrote
+    agent_covered: list[str]              # census functionality names/ids the agent self-reports covering
+    agent_findings: list[str]             # genuine app bugs the agent found (distinct from test failures)
+    agent_discovered: list[str]           # functionality/tags the agent found by reading code that the
+                                           # census never listed, and tested anyway (census is a floor)
+
+    # Known-screen fast path (skip expand/census/compat when a prior cleared run is provably fresh)
+    known_screen_available: bool          # set by node_known_screen_check when a fast-path was taken
+    all_candidate_files: list[str]        # full pre-exclusion candidate set from expand (or the cache,
+                                           # on fast-path) - used to detect a genuinely NEW file next run
 
     # Classification + compatibility
     classified: list[dict[str, Any]]
@@ -91,7 +108,9 @@ def make_initial_state(
     acceptance_criteria: list[str] | None = None,
 ) -> TestingState:
     return TestingState(
+        session_id=None,
         file_paths=list(file_paths),
+        original_seeds=list(file_paths),
         context=context,
         nl_intent=nl_intent,
         acceptance_criteria=list(acceptance_criteria or []),
@@ -109,13 +128,19 @@ def make_initial_state(
         screen_model=None,
         census_coverage=0.0,
         census_warnings=[],
-        constraint_source="both",
         test_writes=True,
+        agent_report_path=None,
+        agent_test_file=None,
+        agent_covered=[],
+        agent_findings=[],
+        agent_discovered=[],
         api_endpoint=None,
         api_method=None,
         api_payload=None,
         api_payload_type=None,
         api_headers=None,
+        known_screen_available=False,
+        all_candidate_files=[],
         classified=[],
         file_sources={},
         compat_iteration=0,

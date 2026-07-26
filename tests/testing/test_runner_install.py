@@ -92,9 +92,9 @@ def test_go_install_points_gobin_at_dest(tmp_path, monkeypatch):
     assert captured["env"]["GOBIN"] == str(dest)
 
 
-# -- UI bundle: stagehand + playwright + chromium, all under ~/.icx -----------------
+# -- UI bundle: playwright + chromium, all under ~/.icx -----------------
 
-def test_ui_bundle_installs_stagehand_playwright_and_chromium(tmp_path, monkeypatch):
+def test_ui_bundle_installs_playwright_and_chromium(tmp_path, monkeypatch):
     monkeypatch.setattr("icx_engine._proc.win_argv", lambda c: c)   # test raw argv, not OS wrapping
     calls = []
 
@@ -105,12 +105,14 @@ def test_ui_bundle_installs_stagehand_playwright_and_chromium(tmp_path, monkeypa
         return _R()
 
     monkeypatch.setattr(inst.subprocess, "run", _run)
-    dest = tmp_path / "stagehand" / RUNNER_SPECS["stagehand"].version
-    ok = inst._do_install(RUNNER_SPECS["stagehand"], dest)
+    dest = tmp_path / "playwright" / RUNNER_SPECS["playwright"].version
+    ok = inst._do_install(RUNNER_SPECS["playwright"], dest)
     assert ok is True
     assert calls[0][:2] == ["npm", "install"]
-    assert any("@browserbasehq/stagehand@" in c for c in calls[0])
-    assert any("playwright@" in c for c in calls[0])
+    assert any(c == f"playwright@{RUNNER_SPECS['playwright'].version}" for c in calls[0])
+    # @playwright/test is the actual test-runner package (playwright test CLI, --reporter=junit) -
+    # without it the agent cannot run the command the gate tells it to run.
+    assert any(c == f"@playwright/test@{RUNNER_SPECS['playwright'].version}" for c in calls[0])
     assert calls[1][-2:] == ["install", "chromium"]              # browser download
     assert (dest / "browsers").exists()                          # cached under the pinned home
 
@@ -121,8 +123,8 @@ def test_ui_bundle_fails_if_npm_fails(tmp_path, monkeypatch):
             returncode = 1
         return _R()
     monkeypatch.setattr(inst.subprocess, "run", _run)
-    dest = tmp_path / "stagehand" / RUNNER_SPECS["stagehand"].version
-    assert inst._do_install(RUNNER_SPECS["stagehand"], dest) is False
+    dest = tmp_path / "playwright" / RUNNER_SPECS["playwright"].version
+    assert inst._do_install(RUNNER_SPECS["playwright"], dest) is False
 
 
 # -- binary install (hurl) cross-OS ------------------------------------------------
@@ -235,8 +237,8 @@ def test_ui_bundle_uses_node_local_npm(tmp_path, monkeypatch):
         class _R: returncode = 0
         return _R()
     monkeypatch.setattr(inst.subprocess, "run", _run)
-    dest = tmp_path / "stagehand" / RUNNER_SPECS["stagehand"].version
-    ok = inst._do_install(RUNNER_SPECS["stagehand"], dest, node_dir=str(nodedir))
+    dest = tmp_path / "playwright" / RUNNER_SPECS["playwright"].version
+    ok = inst._do_install(RUNNER_SPECS["playwright"], dest, node_dir=str(nodedir))
     assert ok is True
     assert calls[0][0].endswith("npm.cmd")          # node-local npm, not bare "npm"
 
@@ -245,17 +247,18 @@ def test_ui_bundle_uses_node_local_npm(tmp_path, monkeypatch):
 
 def test_is_installed_ui_bundle_requires_full_install(tmp_path, monkeypatch):
     _fake_root(tmp_path, monkeypatch)
-    home = tmp_path / "stagehand" / RUNNER_SPECS["stagehand"].version
+    home = tmp_path / "playwright" / RUNNER_SPECS["playwright"].version
     nm = home / "node_modules"
     nm.mkdir(parents=True)
-    assert is_installed("stagehand") is False                 # npm ran but nothing else
-    (nm / "@browserbasehq" / "stagehand").mkdir(parents=True)
+    assert is_installed("playwright") is False                # npm ran but nothing else
     (nm / "playwright").mkdir(parents=True)
-    assert is_installed("stagehand") is False                 # no Chromium yet
+    assert is_installed("playwright") is False                # no @playwright/test yet
+    (nm / "@playwright" / "test").mkdir(parents=True)
+    assert is_installed("playwright") is False                 # no Chromium yet
     chrome = home / "browsers" / "chromium-1000"
     chrome.mkdir(parents=True)
     (chrome / "chrome").write_text("", encoding="utf-8")
-    assert is_installed("stagehand") is True                  # complete
+    assert is_installed("playwright") is True                 # complete
 
 
 def test_is_installed_binary_needs_the_file(tmp_path, monkeypatch):
@@ -281,10 +284,10 @@ def test_remove_runner_wipes_home(tmp_path, monkeypatch):
 
 def test_runtime_harness_path_copies_into_install_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(inst, "installed_path", lambda name: str(tmp_path))
-    packaged = inst.harness_path()
-    out = inst.runtime_harness_path("icx-replay.mjs", packaged)
-    assert out == str(tmp_path / "icx-replay.mjs")
-    assert (tmp_path / "icx-replay.mjs").is_file()          # copied next to node_modules
+    packaged = inst.discover_harness_path()
+    out = inst.runtime_harness_path("icx-discover.mjs", packaged)
+    assert out == str(tmp_path / "icx-discover.mjs")
+    assert (tmp_path / "icx-discover.mjs").is_file()          # copied next to node_modules
 
 
 def test_runtime_harness_path_falls_back_when_not_installed(monkeypatch):
@@ -297,7 +300,7 @@ def test_ui_bundle_browser_uses_resolved_playwright_cli(tmp_path, monkeypatch):
     # Chromium must be installed via node node_modules/playwright/cli.js (the imported Playwright),
     # NOT the .bin shim - so the browser build matches the runtime version.
     monkeypatch.setattr("icx_engine._proc.win_argv", lambda c: c)
-    dest = tmp_path / "stagehand" / RUNNER_SPECS["stagehand"].version
+    dest = tmp_path / "playwright" / RUNNER_SPECS["playwright"].version
     cli = dest / "node_modules" / "playwright" / "cli.js"
     cli.parent.mkdir(parents=True)
     cli.write_text("//cli", encoding="utf-8")
@@ -310,7 +313,7 @@ def test_ui_bundle_browser_uses_resolved_playwright_cli(tmp_path, monkeypatch):
         class _R: returncode = 0
         return _R()
     monkeypatch.setattr(inst.subprocess, "run", _run)
-    ok = inst._do_install(RUNNER_SPECS["stagehand"], dest, node_dir=str(nodedir))
+    ok = inst._do_install(RUNNER_SPECS["playwright"], dest, node_dir=str(nodedir))
     assert ok is True
     browser_cmd = calls[1]
     assert browser_cmd[0].endswith("node.exe")               # node runs it
@@ -321,9 +324,9 @@ def test_ui_bundle_browser_uses_resolved_playwright_cli(tmp_path, monkeypatch):
 def test_runtime_harness_path_refreshes_stale_copy(tmp_path, monkeypatch):
     # After an ICX upgrade, an existing install's old harness must be refreshed to the packaged one.
     monkeypatch.setattr(inst, "installed_path", lambda name: str(tmp_path))
-    packaged = inst.harness_path()
-    stale = tmp_path / "icx-replay.mjs"
+    packaged = inst.discover_harness_path()
+    stale = tmp_path / "icx-discover.mjs"
     stale.write_text("// OLD stale harness", encoding="utf-8")
-    out = inst.runtime_harness_path("icx-replay.mjs", packaged)
+    out = inst.runtime_harness_path("icx-discover.mjs", packaged)
     assert out == str(stale)
     assert stale.read_bytes() == Path(packaged).read_bytes()   # refreshed to current

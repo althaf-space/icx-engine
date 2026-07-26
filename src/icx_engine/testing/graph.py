@@ -12,6 +12,7 @@ from icx_engine.testing.state import TestingState
 from icx_engine.testing.nodes import (
     node_expand_files,
     node_analyze_screen,
+    node_known_screen_check,
     node_unit_author,
     node_mode_select,
     node_mode_gate,
@@ -34,6 +35,7 @@ from icx_engine.testing.nodes import (
     route_after_expand,
     route_after_scan,
     route_after_compat,
+    route_after_known_screen_check,
 )
 
 
@@ -101,6 +103,7 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
 
     # -- nodes ------------------------------------------------------------
     builder.add_node("expand_files",    node_expand_files)
+    builder.add_node("known_screen_check", node_known_screen_check)
     builder.add_node("analyze_screen",  node_analyze_screen)
     builder.add_node("mode_select",     node_mode_select)
     builder.add_node("pick_type",       node_pick_type)
@@ -126,7 +129,13 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
         "pick_type":    "pick_type",
         "expand_files": "expand_files",
     })
-    builder.add_edge("pick_type", "expand_files")
+    # known_screen_check silently falls through to expand_files unless a provably-fresh cached
+    # clearance exists AND the user opts into the fast path - see node_known_screen_check.
+    builder.add_edge("pick_type", "known_screen_check")
+    builder.add_conditional_edges("known_screen_check", route_after_known_screen_check, {
+        "expand_files": "expand_files",
+        "config_gate":  "config_gate",
+    })
     # automated path runs the Element Census (analyze_screen) BEFORE compatibility; manual skips it.
     builder.add_conditional_edges("expand_files", route_after_expand, {
         "compat_scan": "analyze_screen",

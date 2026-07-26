@@ -164,7 +164,6 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx test rules[/cyan]                                           Manage the local testing rulebooks
   [cyan]icx test sessions[/cyan]                                        List all active testing sessions
   [cyan]icx test cancel <SESSION_ID>[/cyan]                             Cancel an active testing session
-  [cyan]icx test benchmark[/cyan]                                       Run the testing benchmark scorecard (raw numbers vs competitors)
   [cyan]icx test analytics[/cyan]                                       Build the run-history analytics dashboard
 
 [bold]Boost (thinking channel)[/bold]
@@ -179,6 +178,11 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx sonar status[/cyan]                                         Show the active connection status
   [cyan]icx sonar projects[/cyan]                                       List projects the token can access
   [cyan]icx sonar report --project <KEY> --branch <B>[/cyan]           Compact summary: quality gate + counts (MCP tools give full detail)
+
+[bold]Skills[/bold]
+  [cyan]icx skills list[/cyan]                                        List every skill ICX has learned from verified fixes
+  [cyan]icx skills create[/cyan]                                      Create a skill by hand - no ticket required
+  [cyan]icx skills delete <NAME>[/cyan]                                Delete one skill
 
 [bold]MCP Server[/bold]
   [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio transport)
@@ -287,6 +291,9 @@ app.add_typer(sonar_app, name="sonar", rich_help_panel="Code Quality")
 
 boost_app = typer.Typer(help="ICX boost channel - measure the prompt-boost quality lift.", rich_markup_mode="rich")
 app.add_typer(boost_app, name="boost", rich_help_panel="Boost")
+
+skills_app = typer.Typer(help="Inspect ICX's learned skills.", rich_markup_mode="rich")
+app.add_typer(skills_app, name="skills", rich_help_panel="Skills")
 
 console = Console(highlight=False)
 
@@ -424,6 +431,103 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+
+
+# ---------------------------------------------------------------------------
+# Skills subcommands
+# ---------------------------------------------------------------------------
+
+@skills_app.command("list")
+def skills_list(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """List every skill ICX has learned from verified fixes."""
+    from icx_engine.skills.storage import SkillStorage
+    from rich.table import Table
+
+    try:
+        skills = SkillStorage().list_all()
+        if not skills:
+            typer.echo("No skills learned yet.")
+            return
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Name", style="cyan")
+        table.add_column("Description")
+        table.add_column("Scope", width=14)
+        table.add_column("Projects", width=10)
+        for s in skills:
+            table.add_row(s.name, s.description, s.scope_hint, str(len(s.origin_projects)))
+        console.print(table)
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=traceback)
+        raise typer.Exit(1)
+
+
+@skills_app.command("create")
+def skills_create(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """Create a skill by hand - no ticket required, general-purpose knowledge welcome."""
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+    from icx_engine.skills.writer import _slugify, write_or_update
+
+    try:
+        storage = SkillStorage()
+        name = typer.prompt("Skill name")
+        slug = _slugify(name)
+        if storage.read(slug) is not None:
+            console.print(f"[yellow]A skill named '{slug}' already exists - continuing will merge into "
+                          "it (safe - blocked automatically if it's been hand-edited since).[/yellow]")
+        description = typer.prompt("Description (third person - what it does and when to use it)")
+        when_to_use = typer.prompt("When to use")
+        procedure = typer.prompt("Procedure")
+        pitfalls = typer.prompt("Pitfalls (optional, Enter to skip)", default="")
+        verification = typer.prompt("Verification")
+        tied = typer.confirm("Is this tied to a specific project?", default=False)
+        origin_projects: list = []
+        if tied:
+            project_key = typer.prompt("Project key")
+            origin_projects = [project_key]
+
+        draft = SkillEntry(
+            name=slug, description=description, tags=[], origin_projects=origin_projects,
+            origin_issue_keys=[], scope_hint="repo-specific" if origin_projects else "generic",
+            title=name, when_to_use=when_to_use, procedure=procedure, pitfalls=pitfalls,
+            verification=verification,
+        )
+        draft.icx_hash = draft.compute_hash()
+        status = write_or_update(storage, draft)
+        if status == "skipped_user_edited":
+            console.print(f"[red]Skill '{slug}' was hand-edited since ICX last wrote it - not "
+                          "overwritten. Delete it first if you want to replace it entirely.[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]Skill '{slug}' {status}.[/green]")
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=traceback)
+        raise typer.Exit(1)
+
+
+@skills_app.command("delete")
+def skills_delete(
+    name: Annotated[str, typer.Argument(help="Skill name to delete")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Delete one skill."""
+    from icx_engine.skills.storage import SkillStorage
+    try:
+        storage = SkillStorage()
+        if storage.read(name) is None:
+            console.print(f"No skill named '{name}' found.")
+            return
+        confirmed = typer.confirm(f"Delete skill '{name}'?", default=False)
+        if not confirmed:
+            console.print("Cancelled.")
+            return
+        shutil.rmtree(storage._path(name).parent, ignore_errors=True)
+        console.print(f"[green]Deleted skill '{name}'.[/green]")
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=traceback)
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -2115,9 +2219,12 @@ HostOpt = Annotated[
     str | None,
     typer.Option(
         "--host",
-        help="Editor to target: claude, cursor, windsurf, codex, antigravity.",
+        help="Editor to target: claude, cursor, windsurf, codex, antigravity, vscode.",
     ),
 ]
+
+_HOST_NAMES = "claude, cursor, windsurf, codex, antigravity, vscode"
+
 
 def _json_snippet() -> str:
     from icx_engine.mcp_hosts import _resolve_icx_command
@@ -2138,6 +2245,22 @@ def _toml_snippet() -> str:
     from icx_engine.mcp_hosts import _resolve_icx_command
     cmd = _resolve_icx_command()
     return f'[mcp_servers.icx]\ncommand = "{cmd}"\nargs = ["mcp", "run"]'
+
+
+def _vscode_snippet() -> str:
+    from icx_engine.mcp_hosts import _resolve_icx_command
+    cmd = _resolve_icx_command()
+    return (
+        '{\n'
+        '  "servers": {\n'
+        '    "icx": {\n'
+        '      "type": "stdio",\n'
+        f'      "command": "{cmd}",\n'
+        '      "args": ["mcp", "run"]\n'
+        '    }\n'
+        '  }\n'
+        '}'
+    )
 
 
 @mcp_app.command("list")
@@ -2189,6 +2312,8 @@ def mcp_config(
         typer.echo(_json_snippet())
         typer.echo("\n--- Codex (TOML) ---\n")
         typer.echo(_toml_snippet())
+        typer.echo("\n--- VS Code (.vscode/mcp.json) ---\n")
+        typer.echo(_vscode_snippet())
         typer.echo("\nConfig file locations:")
         for h in list_hosts():
             typer.echo(f"  {h.label:<14} {h.config_path}")
@@ -2203,9 +2328,15 @@ def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: Tracebac
 
     \b
     ICX detects which AI editors are installed and, for each, does everything MCP-related:
-      - registers the ICX MCP server (so its tools appear in the editor), and
-      - on Claude Code, installs the enforcement so every prompt is boosted through ICX
-        first (the UserPromptSubmit hook + the CLAUDE.md rule; tickets also route to ICX).
+      - registers the ICX MCP server (so its tools appear in the editor),
+      - installs the native /icx-boost command (a Claude Code skill, VS Code prompt file, Cursor
+        command, Windsurf/Antigravity workflow, or Codex prompt) - boost only runs when you
+        explicitly invoke it, never on every message, and it auto-refines in one call, and
+      - installs routing enforcement for work-tracker tickets, testing requests, and Sonar/code-
+        quality requests, which always go through ICX regardless of whether boost was invoked.
+        Claude Code gets a hard pre-agent hook (UserPromptSubmit) + a CLAUDE.md rule; the other
+        editors get the rule written into their global rules file (instruction-based - they expose
+        no pre-agent shell hook).
     Nothing else to run - `icx mcp remove` undoes all of it. After running this, restart
     your editor.
 
@@ -2213,24 +2344,24 @@ def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: Tracebac
     Examples:
       icx mcp setup                  Auto-detect and configure all installed editors
       icx mcp setup --host claude    Configure Claude Code only
-      icx mcp setup --host cursor    Configure Cursor only
+      icx mcp setup --host vscode    Configure VS Code only
     """
-    from icx_engine.mcp_hosts import get_host, detect_installed_hosts, write_icx_entry, install_enforcement
+    from icx_engine.mcp_hosts import (
+        get_host, detect_installed_hosts, write_icx_entry, install_enforcement, install_boost_command,
+    )
 
     try:
         if host is not None:
             target = get_host(host)
             if target is None:
-                err_console.print(
-                    f"Unknown host '{host}'. Valid options: claude, cursor, windsurf, codex, antigravity"
-                )
+                err_console.print(f"Unknown host '{host}'. Valid options: {_HOST_NAMES}")
                 raise typer.Exit(1)
             targets = [target]
         else:
             targets = detect_installed_hosts()
             if not targets:
                 typer.echo("No known MCP host config directories detected.")
-                typer.echo("Specify one with --host claude | cursor | windsurf | codex | antigravity")
+                typer.echo(f"Specify one with --host {' | '.join(_HOST_NAMES.split(', '))}")
                 raise typer.Exit(1)
 
         for target in targets:
@@ -2241,8 +2372,11 @@ def mcp_setup(host: HostOpt = None, debug: DebugOpt = False, traceback: Tracebac
                 )
             else:
                 console.print(f"[green]OK ICX entry written to {result.path}[/green]")
-            # Install ICX-first ticket-routing enforcement (Claude Code only; no-op elsewhere).
             if not result.fallback:
+                cmd_msg = install_boost_command(target)
+                if cmd_msg:
+                    console.print(f"[green]OK {cmd_msg}[/green]")
+                # Install ticket/testing/sonar routing enforcement (no-op for non-enforcing hosts).
                 for msg in install_enforcement(target):
                     console.print(f"[green]OK {msg}[/green]")
     except typer.Exit:
@@ -2257,23 +2391,24 @@ def mcp_remove(host: HostOpt = None, debug: DebugOpt = False, traceback: Traceba
     """Remove ICX from your AI editor - undoes everything [bold]icx mcp setup[/bold] did.
 
     \b
-    Removes the ICX MCP server entry AND, on Claude Code, the boost/routing enforcement
-    (the UserPromptSubmit hook + the CLAUDE.md rule), returning the agent to normal.
+    Removes the ICX MCP server entry, the native /icx-boost command file, and (on Claude Code) the
+    UserPromptSubmit hook + CLAUDE.md rule (other editors: their global-rules block), returning the
+    agent to normal.
 
     \b
     Examples:
       icx mcp remove                 Remove ICX from all detected editors
       icx mcp remove --host claude   Remove from Claude Code only
     """
-    from icx_engine.mcp_hosts import get_host, detect_installed_hosts, remove_icx_entry, remove_enforcement
+    from icx_engine.mcp_hosts import (
+        get_host, detect_installed_hosts, remove_icx_entry, remove_enforcement, remove_boost_command,
+    )
 
     try:
         if host is not None:
             target = get_host(host)
             if target is None:
-                err_console.print(
-                    f"Unknown host '{host}'. Valid options: claude, cursor, windsurf, codex, antigravity"
-                )
+                err_console.print(f"Unknown host '{host}'. Valid options: {_HOST_NAMES}")
                 raise typer.Exit(1)
             targets = [target]
         else:
@@ -2288,7 +2423,9 @@ def mcp_remove(host: HostOpt = None, debug: DebugOpt = False, traceback: Traceba
                 console.print(f"[green]OK ICX entry removed from {target.config_path}[/green]")
             else:
                 typer.echo(f"No ICX entry found in {target.config_path}")
-            # Remove ICX-first ticket-routing enforcement (Claude Code only; no-op elsewhere).
+            if remove_boost_command(target):
+                console.print(f"[green]OK /icx-boost command removed ({target.command_path})[/green]")
+            # Remove ticket/testing/sonar routing enforcement (no-op for non-enforcing hosts).
             for msg in remove_enforcement(target):
                 console.print(f"[green]OK {msg}[/green]")
     except typer.Exit:
@@ -2826,7 +2963,7 @@ def test_cancel(
 @test_app.command("setup")
 @_guarded
 def test_setup(
-    ui: Annotated[bool, typer.Option(help="Install UI tooling (Playwright + Stagehand + Chromium).")] = True,
+    ui: Annotated[bool, typer.Option(help="Install UI tooling (Playwright + Chromium).")] = True,
     api: Annotated[bool, typer.Option(help="Install API tooling (Schemathesis, Hurl).")] = True,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Approve all installs without prompting.")] = False,
     force: Annotated[bool, typer.Option("--force", "-f", help="Wipe and reinstall (fixes a broken/partial install).")] = False,
@@ -2840,7 +2977,8 @@ def test_setup(
     Runs in stages:
       Step 1 - API tooling via pip/binary: Schemathesis, Hurl.
       Step 2 - UI tooling: asks for a Node >= 18 path (saved to config.json), then installs
-               Stagehand + Playwright + the Chromium browser using that Node.
+               Playwright + the Chromium browser using that Node - the connected agent runs its own
+               Playwright tests against this install (see 'icx test setup --help' for agent-type tests).
     Unit tests use your project's own frameworks (mvn/gradle/pytest/...) - nothing to install here.
     The Node you give is used ONLY for the UI harness; your app keeps its own Node. Change it later
     by editing 'harness_node_path' in ~/.icx/config.json (or re-run this command).
@@ -2860,7 +2998,7 @@ def test_setup(
         return
 
     if force:
-        for _n in (["schemathesis", "hurl"] if api else []) + (["stagehand"] if ui else []):
+        for _n in (["schemathesis", "hurl"] if api else []) + (["playwright"] if ui else []):
             remove_runner(_n)
         console.print("[dim]--force: cleared existing installs, reinstalling.[/dim]")
 
@@ -2895,10 +3033,10 @@ def test_setup(
                 any_fail = True
                 console.print(f"  [yellow]skipped/failed[/yellow] {label}")
 
-    # -- Step 2: UI tooling (Node -> Stagehand + Playwright + Chromium) ----------
+    # -- Step 2: UI tooling (Node -> Playwright + Chromium) ----------------------
     if ui:
         console.print("\n[bold]Step 2 - UI tooling (needs Node >= 18)[/bold]")
-        if is_installed("stagehand"):
+        if is_installed("playwright"):
             console.print("  [green]OK[/green] UI tooling already installed.")
         else:
             node_exe = _resolve_or_prompt_harness_node(yes, node)
@@ -2912,9 +3050,9 @@ def test_setup(
                 ConfigManager.save(cfg)
                 console.print(f"  Using harness Node: {node_exe}")
                 node_dir = str(_Path(node_exe).parent)
-                console.print("  Installing Stagehand + Playwright + Chromium "
+                console.print("  Installing Playwright + Chromium "
                               "(downloads a browser, please wait) ...")
-                path = ensure_runner("stagehand", approve=_approve, node_dir=node_dir)
+                path = ensure_runner("playwright", approve=_approve, node_dir=node_dir)
                 if path:
                     console.print(f"  [green]OK[/green] UI tooling -> {path}")
                 else:
@@ -2925,41 +3063,6 @@ def test_setup(
         console.print("\n[yellow]Some tools were not installed.[/yellow] Re-run 'icx test setup' to retry.")
     else:
         console.print("\n[bold green]Testing tooling ready.[/bold green]")
-
-
-@test_app.command("benchmark")
-@_guarded
-def test_benchmark(
-    repeats: Annotated[int, typer.Option("--repeats", help="Scored repeat runs per app (feeds flakiness).")] = 2,
-    out: Annotated[str, typer.Option("--out", help="Path for the HTML scorecard.")] = "benchmark_scorecard.html",
-    storage_state: Annotated[str, typer.Option("--storage-state", help="Playwright storageState JSON for an authenticated app.")] = "",
-    install_browsers: Annotated[bool, typer.Option("--install-browsers/--no-install-browsers",
-        help="Approve installing a missing ICX_UI_TARGETS engine (firefox/webkit) on demand.")] = False,
-    debug: DebugOpt = False,
-    traceback: TracebackOpt = False,
-) -> None:
-    """Run the ICX testing benchmark across the corpus and write an HTML scorecard.
-
-    Measures coverage, misfire rate, flakiness, authoring effort, and speed on ground-truth-labeled
-    apps, and places ICX's measured numbers beside competitors' published figures. Apps that are not
-    reachable are skipped. Requires the UI tooling (run 'icx test setup') and the apps to be running.
-    """
-    import asyncio
-    from pathlib import Path as _Path
-    from icx_engine.testing.benchmark.runner import run_benchmark
-    from icx_engine.testing.benchmark.report import render_scorecard
-
-    approve = (lambda _engine: True) if install_browsers else None
-    metrics = asyncio.run(run_benchmark(repeats=repeats, storage_state=storage_state or None, approve=approve))
-    if not metrics:
-        typer.echo("No apps produced a benchmark run (apps unreachable or UI tooling missing).")
-        raise typer.Exit(code=0)
-    for m in metrics:
-        typer.echo(f"{m.app}: recall={round(100 * m.coverage.recall)}% "
-                   f"misfire={round(100 * m.misfire_rate)}% flakiness={round(100 * m.flakiness)}% "
-                   f"authoring_actions={m.authoring_actions} tests={m.total_tests}")
-    path = render_scorecard(metrics, _Path(out))
-    typer.echo(f"Scorecard written to {path}")
 
 
 @test_app.command("analytics")
@@ -3077,7 +3180,10 @@ def test_configure(debug: DebugOpt = False, traceback: TracebackOpt = False) -> 
 
 @test_app.command("rules")
 @_guarded
-def test_rules(reset: bool = typer.Option(False, "--reset", help="Re-seed any missing default rule files."),
+def test_rules(reset: bool = typer.Option(
+                   False, "--reset",
+                   help="Pick up bundled rule updates for files you never touched; seed any missing "
+                        "file. Never overwrites a file you actually edited."),
                debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Show the testing rulebook - the mandatory per-gate rules the agent must follow.
 
@@ -3086,6 +3192,11 @@ def test_rules(reset: bool = typer.Option(False, "--reset", help="Re-seed any mi
     <gate>.md and injects its text into every gate, so editing a file changes agent
     behavior on the next gate - no code change, and it applies in every session.
 
+    --reset tells a stale untouched copy apart from a real customization: a file is
+    only refreshed to the current bundled content when it still matches the pristine
+    marker ICX wrote the last time IT (not you) touched that file - i.e. nothing has
+    edited it since. Anything else is left completely alone.
+
     \b
     Example:
       icx test rules
@@ -3093,7 +3204,22 @@ def test_rules(reset: bool = typer.Option(False, "--reset", help="Re-seed any mi
     """
     from icx_engine.testing import rules as _rules
 
-    _rules.ensure_seeded()
+    if reset:
+        outcome = _rules.refresh_stale()
+        if outcome["refreshed"]:
+            console.print(f"[green]Refreshed (picked up a bundled update):[/green] "
+                          f"{', '.join(outcome['refreshed'])}")
+        if outcome["seeded"]:
+            console.print(f"[green]Seeded (were missing):[/green] {', '.join(outcome['seeded'])}")
+        if outcome["up_to_date"]:
+            console.print(f"[dim]Already current: {', '.join(outcome['up_to_date'])}[/dim]")
+        if outcome["skipped"]:
+            console.print(f"[yellow]Left alone (customized or untracked - delete the file if you "
+                          f"want the bundled default instead):[/yellow] {', '.join(outcome['skipped'])}")
+        if not any(outcome.values()):
+            console.print("[yellow]No bundled rule files found.[/yellow]")
+    else:
+        _rules.ensure_seeded()
     d = _rules.rules_dir()
     console.print(f"Rulebook directory: [cyan]{d}[/cyan]")
     files = sorted(d.glob("*.md")) if d.exists() else []
@@ -3108,7 +3234,8 @@ def test_rules(reset: bool = typer.Option(False, "--reset", help="Re-seed any mi
             line += f"   [dim](enforced sections: {', '.join(req)})[/dim]"
         console.print(line)
     console.print("\nEdit any file to change the mandatory rules for that gate. "
-                  "Delete a file and run [cyan]icx test rules --reset[/cyan] to restore its default.")
+                  "Run [cyan]icx test rules --reset[/cyan] any time to pick up bundled updates to "
+                  "files you never touched.")
 
 
 # ---------------------------------------------------------------------------

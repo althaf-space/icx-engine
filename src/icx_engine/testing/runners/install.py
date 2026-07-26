@@ -2,7 +2,7 @@
 
 Sibling of graph/parser/lsp_manager.py, same discipline: version-pinned, reuse-if-present, checksum
 option, NEVER silent (install requires user approval), fail-closed when required. This is for ICX's
-OWN tooling (Playwright/Stagehand/Schemathesis/Hurl/k6/mutation tools) - NOT the user's language
+OWN tooling (Playwright/Schemathesis/Hurl/k6/mutation tools) - NOT the user's language
 SDKs (those go through runtime_manager as a discover/ask/remember registry).
 
 Adapters call `ensure_runner(name, approve=...)` before building their command. When the runner is
@@ -29,10 +29,10 @@ class RunnerSpec:
 
 # Pinned runner tooling. Versions are deliberate; bump intentionally, never "latest".
 RUNNER_SPECS: dict[str, RunnerSpec] = {
-    "playwright":   RunnerSpec("playwright", "npm", "playwright", "1.48.0"),
-    # UI bundle: installs Stagehand + Playwright AND downloads the Chromium browser into the pinned
-    # home (never global, never the user's repo) - so approving "stagehand" makes UI fully runnable.
-    "stagehand":    RunnerSpec("stagehand", "ui-bundle", "@browserbasehq/stagehand", "1.9.0"),
+    # UI bundle: installs Playwright AND downloads the Chromium browser into the pinned home (never
+    # global, never the user's repo) - so approving "playwright" makes UI test authoring/execution
+    # fully runnable. The agent runs its own hand-written Playwright tests against this install.
+    "playwright":   RunnerSpec("playwright", "ui-bundle", "playwright", "1.48.0"),
     "jest-junit":   RunnerSpec("jest-junit", "npm", "jest-junit", "16.0.0"),
     "stryker":      RunnerSpec("stryker", "npm", "@stryker-mutator/core", "8.6.0"),
     "schemathesis": RunnerSpec("schemathesis", "pip", "schemathesis", "3.36.0"),
@@ -66,12 +66,12 @@ def is_installed(name: str) -> bool:
         return False
 
     if spec.kind == "ui-bundle":
-        # Need Stagehand + Playwright installed AND the Chromium browser downloaded.
+        # Need Playwright, the @playwright/test runner, AND the Chromium browser downloaded.
         nm = home / "node_modules"
         browsers = browsers_dir(home)
         return (
-            (nm / "@browserbasehq" / "stagehand").is_dir()
-            and (nm / "playwright").is_dir()
+            (nm / "playwright").is_dir()
+            and (nm / "@playwright" / "test").is_dir()
             and browsers.is_dir() and any(browsers.iterdir())
         )
     if spec.kind == "binary":
@@ -256,7 +256,7 @@ def _npm_for(node_dir: str | None) -> str:
 
 
 def _install_ui_bundle(spec: RunnerSpec, dest: Path, node_dir: str | None = None) -> bool:
-    """Install Stagehand + Playwright into dest, then download Chromium into dest/browsers.
+    """Install Playwright into dest, then download Chromium into dest/browsers.
 
     Everything lands under ~/.icx/testing (never global, never the user's repo). Returns True only
     when BOTH the npm install and the browser download succeed. Never raises. npm is taken from the
@@ -266,13 +266,15 @@ def _install_ui_bundle(spec: RunnerSpec, dest: Path, node_dir: str | None = None
     import logging
     from icx_engine._proc import win_argv
     _log = logging.getLogger("icx.testing.install")
-    pw_version = RUNNER_SPECS["playwright"].version
     base_env = _node_path_env(node_dir)
     npm_exe = _npm_for(node_dir)
     try:
+        # @playwright/test is the actual test-runner package (the `playwright test` CLI, `test()`/
+        # `expect()`, --reporter=junit) - the base `playwright` package alone provides only the
+        # browser-automation API + browser install, not the runner the agent is told to invoke.
+        # Pinned to the same version so the two stay compatible (they must match).
         npm = [npm_exe, "install", "--prefix", str(dest),
-               f"{spec.package}@{spec.version}", f"playwright@{pw_version}",
-               "pixelmatch@5.3.0", "pngjs@7.0.0", "axe-core@4.10.0"]
+               f"{spec.package}@{spec.version}", f"@playwright/test@{spec.version}"]
         r1 = subprocess.run(win_argv(npm), capture_output=True, text=True, timeout=600, env=base_env)
         if r1.returncode != 0:
             _log.warning("UI npm install failed (rc=%s): %s", r1.returncode,
@@ -363,7 +365,7 @@ def ensure_browser(engine: str, approve: Callable[[str], bool] | None = None) ->
     present or successfully installed, False otherwise. Never raises.
 
     Reuses the same mechanism as the Chromium download in `_install_ui_bundle`: the browsers dir
-    pinned under the Stagehand install, `node node_modules/playwright/cli.js install <engine>` run
+    pinned under the Playwright install, `node node_modules/playwright/cli.js install <engine>` run
     with PLAYWRIGHT_BROWSERS_PATH pointed at that dir (falling back to the playwright-core cli.js or
     the .bin/playwright shim, same as the Chromium path). The node used is the pinned harness Node
     resolved via `_harness_node_dir()` (falls back to bare PATH 'node' if unresolved), never a bare
@@ -374,10 +376,10 @@ def ensure_browser(engine: str, approve: Callable[[str], bool] | None = None) ->
     engine = (engine or "").strip().lower()
     if engine not in _BROWSER_ENGINES:
         return False
-    sh = installed_path("stagehand")
-    if not sh:
+    pw = installed_path("playwright")
+    if not pw:
         return False
-    dest = Path(sh)
+    dest = Path(pw)
     root = browsers_dir(dest)
     if root.is_dir() and any(root.glob(f"{engine}-*")):
         return True                                     # already installed
@@ -409,11 +411,6 @@ def ensure_browser(engine: str, approve: Callable[[str], bool] | None = None) ->
     return r.returncode == 0 and root.is_dir() and any(root.glob(f"{engine}-*"))
 
 
-def harness_path() -> str:
-    """Path to the packaged Stagehand replay harness (.mjs ships with ICX)."""
-    return str(Path(__file__).parent / "assets" / "icx-replay.mjs")
-
-
 def auth_harness_path() -> str:
     """Path to the packaged Playwright session-capture harness (.mjs ships with ICX)."""
     return str(Path(__file__).parent / "assets" / "icx-auth.mjs")
@@ -430,10 +427,10 @@ def runtime_harness_path(basename: str, packaged: str) -> str:
     node_modules. Copies the packaged .mjs into the UI install dir on first use and returns that
     copy; falls back to the packaged path when the UI bundle is not installed (e.g. in ICX's own
     tests)."""
-    sh = installed_path("stagehand")
-    if not sh:
+    pw = installed_path("playwright")
+    if not pw:
         return packaged
-    dst = Path(sh) / basename
+    dst = Path(pw) / basename
     # Always refresh from the packaged copy so an ICX upgrade's newer harness reaches EXISTING
     # installs (copy-if-missing would leave old users running a stale .mjs). Cheap - tiny file.
     try:

@@ -6,7 +6,8 @@
 // export controls, the per-row action icons (view / edit / delete), and - by opening the create form -
 // its fields (type, real maxLength, required, control kind) and whether it is a multi-step wizard.
 //
-// Output: a census JSON (the exact shape census_to_flow consumes) written to --out.
+// Output: a census JSON (the same shape the source-code analyzer census uses, so it can be merged with
+// it and handed to the connected agent to author its Playwright test from) written to --out.
 //
 //   node icx-discover.mjs --url <screenUrl> --state <storageState.json> --out <census.json>
 

@@ -16,6 +16,34 @@ def test_doubt_archetype_present():
     assert "doubt" in m._ARCHETYPES
 
 
+def test_testing_archetype_present():
+    assert "testing" in m._ARCHETYPES
+
+
+def test_classify_text_e2e_testing_request_is_testing_not_performance():
+    # REGRESSION: "slowmo" (a real Playwright term) used to prefix-collide with the bare "slow"
+    # performance token ("slowmo".startswith("slow")), misclassifying every testing request that
+    # mentions slow-motion replay as "performance".
+    prompt = ("I need to do e2e testing for this screen, cover every case, and tell me which "
+              "cases fail. Run it in slowmo so I can watch.")
+    assert m.classify_text(prompt) == "testing"
+
+
+def test_classify_text_slowmo_alone_does_not_trigger_performance():
+    assert m.classify_text("run the test in slowmo") != "performance"
+
+
+def test_classify_text_real_performance_complaint_still_classifies():
+    assert m.classify_text("the dashboard is very slow to load") == "performance"
+    assert m.classify_text("api response is slower than before") == "performance"
+
+
+def test_classify_text_strips_url_path_words_before_matching():
+    # a URL path segment ("/login") must not itself drive classification
+    prompt = "run e2e tests on http://localhost:3000/app/login#/users and tell me which cases fail"
+    assert m.classify_text(prompt) == "testing"
+
+
 def test_build_checklist_for_general_task():
     c = m.build_checklist_for("add a create-user form", env={"has_repo": True})
     assert c["mandatory"] is True

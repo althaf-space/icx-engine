@@ -217,100 +217,6 @@ def test_check_security_headers_nosniff_enforced():
     assert xcto.passed is False
 
 
-# -- Phase 5: UI runner (Stagehand author -> deterministic Playwright replay) ---
-
-from icx_engine.testing.runners import UiStep, UiFlow, save_flow, load_flow, plan_ui_run
-from icx_engine.testing.runners import ui as _ui_mod
-
-
-def test_ui_runner_registered_with_category():
-    assert get_runner("stagehand").category == "ui"
-
-
-def test_ui_runner_is_repo_agnostic(tmp_path):
-    # UI testing is URL-driven; ICX brings its own Playwright/Stagehand. The runner must be available
-    # regardless of repo contents - a frontend repo, a backend repo, or an empty dir all qualify.
-    r = get_runner("stagehand")
-    assert r.detect(tmp_path) is True                                   # empty dir
-    (tmp_path / "package.json").write_text(
-        json.dumps({"dependencies": {"react": "^18"}}), encoding="utf-8")
-    assert r.detect(tmp_path) is True                                   # frontend repo
-    spec = r.build_command(tmp_path, runtime_path=None)
-    assert "--mode" in spec.command and "replay" in spec.command
-    assert spec.report_path.endswith(".icx-ui-junit.xml")
-
-
-def test_ui_detect_true_for_backend_only_repo(tmp_path):
-    # A Spring Boot / Express backend serving a UI must still get UI testing (hits the URL).
-    (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"express": "^4"}}), encoding="utf-8")
-    assert get_runner("stagehand").detect(tmp_path) is True
-    (tmp_path / "pom.xml").write_text("<project/>", encoding="utf-8")   # pure java backend
-    assert get_runner("stagehand").detect(tmp_path) is True
-
-
-def test_flow_cache_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr(_ui_mod, "_ui_cache_dir", lambda: tmp_path)
-    flow = UiFlow(name="login", url="http://x/login", authored=True, steps=[
-        UiStep(action="goto", target="http://x/login"),
-        UiStep(action="fill", target="#user", value="a", description="enter user"),
-        UiStep(action="click", target="#submit"),
-        UiStep(action="assert", target=".welcome", value="Welcome"),
-    ])
-    save_flow("PROJ-1", flow)
-    loaded = load_flow("PROJ-1")
-    assert loaded is not None
-    assert loaded.authored is True
-    assert [s.action for s in loaded.steps] == ["goto", "fill", "click", "assert"]
-    assert loaded.steps[1].value == "a"
-
-
-def test_flow_cache_roundtrip_select_and_waitfor(tmp_path, monkeypatch):
-    # Real-world login: text fields + a <select> dropdown (e.g. tenant) + a non-submit
-    # button, then wait for the post-login redirect before asserting. select/waitfor must
-    # survive the cache so the agent-authored flow replays deterministically.
-    monkeypatch.setattr(_ui_mod, "_ui_cache_dir", lambda: tmp_path)
-    flow = UiFlow(name="login", url="http://x/login", authored=True, steps=[
-        UiStep(action="goto", target="http://x/login"),
-        UiStep(action="fill", target="#loginUsername", value="admin"),
-        UiStep(action="fill", target="#loginPassword", value="admin"),
-        UiStep(action="select", target="#tenant", value="SMART", description="pick tenant"),
-        UiStep(action="click", target="#loginButton"),
-        UiStep(action="waitfor", target="body", description="post-login redirect"),
-        UiStep(action="assert", target="body", value="app"),
-    ])
-    save_flow("PROJ-SEL", flow)
-    loaded = load_flow("PROJ-SEL")
-    assert loaded is not None
-    assert [s.action for s in loaded.steps] == \
-        ["goto", "fill", "fill", "select", "click", "waitfor", "assert"]
-    sel = next(s for s in loaded.steps if s.action == "select")
-    assert sel.target == "#tenant" and sel.value == "SMART"
-
-
-def test_flow_cache_deterministic_reload(tmp_path, monkeypatch):
-    monkeypatch.setattr(_ui_mod, "_ui_cache_dir", lambda: tmp_path)
-    flow = UiFlow(name="f", authored=True, steps=[UiStep(action="click", target="#x")])
-    save_flow("K", flow)
-    a = load_flow("K").to_dict()
-    b = load_flow("K").to_dict()
-    assert a == b  # identical replay input every time -> deterministic
-
-
-def test_plan_ui_run_replay_vs_author():
-    authored = UiFlow(name="f", authored=True, steps=[UiStep(action="click", target="#x")])
-    assert plan_ui_run(authored) == "replay"
-    assert plan_ui_run(UiFlow(name="f")) == "author"          # no steps
-    assert plan_ui_run(None) == "author"
-    not_authored = UiFlow(name="f", authored=False, steps=[UiStep(action="click", target="#x")])
-    assert plan_ui_run(not_authored) == "author"
-
-
-def test_ui_included_in_category_filter(tmp_path):
-    (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"vue": "^3"}}), encoding="utf-8")
-    ui = {r.name for r in detect_runners(tmp_path, category="ui")}
-    assert "stagehand" in ui
-
-
 # -- Phase 6: executor (real subprocess run) -----------------------------------
 
 import sys as _sys
@@ -463,31 +369,6 @@ async def test_run_spec_leaves_non_icx_report(tmp_path):
                     cwd=str(tmp_path), report_path=str(report))
     r = await run_spec(spec, timeout=120)
     assert r.ok is True and report.exists()
-
-
-def test_ui_build_command_verify_mode(tmp_path):
-    # verify mode targets a caller-supplied report path and passes --mode verify to the harness.
-    from icx_engine.testing.runners.ui import _StagehandUi
-    out = str(tmp_path / "verify.json")
-    spec = _StagehandUi().build_command(tmp_path, None, mode="verify", report=out)
-    assert "--mode" in spec.command and spec.command[spec.command.index("--mode") + 1] == "verify"
-    assert spec.report_path == out and out in spec.command
-
-
-def test_ui_build_command_defaults_to_replay(tmp_path):
-    from icx_engine.testing.runners.ui import _StagehandUi
-    spec = _StagehandUi().build_command(tmp_path, None)
-    assert spec.command[spec.command.index("--mode") + 1] == "replay"
-    assert spec.report_path.endswith(".icx-ui-junit.xml")
-
-
-async def test_run_ui_verify_none_when_no_ui_runner(monkeypatch, tmp_path):
-    # best-effort: no stagehand runner detected -> returns None, never raises.
-    import icx_engine.testing.local_executor as le
-    monkeypatch.setattr("icx_engine.testing.runners.detect_runners",
-                        lambda repo, category=None: [])
-    r = await le.run_ui_verify(tmp_path, flow_path="/f.json", target_url="http://x")
-    assert r is None
 
 
 def test_parse_report_path_dir_rejects_stale_xml(tmp_path):

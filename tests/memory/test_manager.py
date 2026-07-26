@@ -701,3 +701,10 @@ def test_restore_triggers_pattern_refresh_per_project(tmp_path):
             # Simulate explicit post-import pattern refresh (as done in cli.py)
             mgr._patterns.refresh(entries, "PROJ")
         mock_refresh.assert_called_once_with(entries, "PROJ")
+
+
+def test_save_signature_has_no_skills_parameters():
+    import inspect
+    from icx_engine.memory.manager import MemoryManager
+    sig = inspect.signature(MemoryManager.save)
+    assert list(sig.parameters) == ["self", "entry", "restore"]
