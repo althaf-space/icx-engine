@@ -1,36 +1,29 @@
 from icx_engine.models.config import AppConfig
 
 
-def test_magik_base_url_default():
+def test_test_max_iterations_default():
     cfg = AppConfig()
-    assert cfg.magik_base_url == "http://localhost:7646"
+    assert cfg.test_max_iterations == 3
 
 
-def test_magik_api_key_default_none():
-    cfg = AppConfig()
-    assert cfg.magik_api_key is None
+def test_testing_fields_accept_values():
+    cfg = AppConfig(test_max_iterations=5)
+    assert cfg.test_max_iterations == 5
 
 
-def test_magik_max_iterations_default():
-    cfg = AppConfig()
-    assert cfg.magik_max_iterations == 3
+def test_config_clamps_out_of_range_testing_knobs():
+    # Hand-edited config.json must never crash load or drive an unbounded loop - values are clamped.
+    assert AppConfig(test_max_iterations=0).test_max_iterations == 1
+    assert AppConfig(test_max_iterations=99999).test_max_iterations == 100
+    # in-range values pass through untouched
+    assert AppConfig(test_max_iterations=7).test_max_iterations == 7
 
 
-def test_magik_api_key_excluded_from_serialization():
-    cfg = AppConfig(magik_api_key="secret-key-123")
-    serialized = cfg.model_dump()
-    assert "magik_api_key" not in serialized or serialized.get("magik_api_key") is None
-
-
-def test_magik_fields_accept_values():
-    cfg = AppConfig(
-        magik_base_url="http://localhost:3000",
-        magik_api_key="mykey",
-        magik_max_iterations=5,
-    )
-    assert cfg.magik_base_url == "http://localhost:3000"
-    assert cfg.magik_api_key == "mykey"
-    assert cfg.magik_max_iterations == 5
+def test_legacy_keys_ignored_on_construct():
+    # Old keys (magik_*, retired agent_max_steps) must not crash load; pydantic ignores unknown.
+    cfg = AppConfig(magik_base_url="http://x", magik_api_key="k", agent_max_steps=99)
+    assert not hasattr(cfg, "magik_base_url")
+    assert not hasattr(cfg, "agent_max_steps")
 
 
 # TestingState tests
@@ -51,7 +44,6 @@ def test_make_initial_state_defaults():
     assert state["fix_log"] == []
     assert state["status"] == "pending"
     assert state["test_type"] is None
-    assert state["agent_provider"] == "openai"
     assert state["headless"] is True
     assert state["scope"] == "ticket"
     assert state["merge_files"] is False  # single file
@@ -96,8 +88,8 @@ def test_testing_state_is_total_dict():
     hints = get_type_hints(TestingState)
     required_keys = {
         "file_paths", "context", "detection_mode", "json_spec",
-        "test_type", "agent_provider", "headless", "scope", "merge_files",
-        "url", "profile_screen", "run_id",
+        "test_type", "headless", "scope", "merge_files",
+        "url", "run_id",
         "test_mode", "manual_result",
         "iteration", "max_iterations", "issues", "fix_log", "status", "last_error",
     }
@@ -122,7 +114,6 @@ def test_initial_state_has_auth_fields():
     assert s["project"] is None
     assert s["host"] is None
     assert s["auto_auth_recover"] is True
-    assert s["profile_pushed"] is False
 
 
 def test_initial_state_has_coverage_fields():
@@ -133,9 +124,31 @@ def test_initial_state_has_coverage_fields():
 def test_initial_state_has_funnel_fields():
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
     assert s["compat_findings"] == []
-    assert s["profile_markdown"] is None
+
+
+def test_config_gate_visible_option_sets_headless(monkeypatch):
+    import icx_engine.testing.nodes as nodes
+    s = make_initial_state(file_paths=["a.jsx"], test_mode="automated")
+    s["test_type"] = "agent"
+    s["url"] = "http://x/login"
+    monkeypatch.setattr(nodes, "interrupt", lambda p: {"visible": True})
+    import asyncio as _a
+    out = _a.run(nodes.node_config_gate(s))
+    assert out["headless"] is False        # visible:true -> headed replay
 
 
 def test_initial_state_has_read_receipts():
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
     assert s["read_receipts"] == []
+
+
+def test_initial_state_has_agent_discovered():
+    s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
+    assert s["agent_discovered"] == []
+
+
+def test_initial_state_has_known_screen_fields():
+    s = make_initial_state(file_paths=["a.tsx", "b.tsx"], test_mode="automated")
+    assert s["original_seeds"] == ["a.tsx", "b.tsx"]
+    assert s["known_screen_available"] is False
+    assert s["all_candidate_files"] == []

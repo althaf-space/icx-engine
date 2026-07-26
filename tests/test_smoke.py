@@ -14,6 +14,28 @@ def test_help_exits_cleanly(cli_runner):
         assert cmd in result.output
 
 
+def test_full_help_lists_every_command():
+    """Drift guard: EVERY registered command must appear in the hand-written `icx --help` text, so a
+    new command can never be silently invisible. If this fails, add the command to _FULL_HELP."""
+    import typer
+    from icx_engine.cli import _FULL_HELP
+
+    cli = typer.main.get_command(app)
+
+    def walk(cmd, prefix=""):
+        out = []
+        if isinstance(cmd, click.Group):
+            for name, sub in cmd.commands.items():
+                out += walk(sub, (prefix + " " + name).strip())
+        else:
+            out.append(prefix)
+        return out
+
+    commands = walk(cli, "icx")
+    missing = [c for c in commands if c not in _FULL_HELP and c[len("icx "):] not in _FULL_HELP]
+    assert not missing, f"commands missing from `icx --help`: {missing}"
+
+
 def test_graph_help(cli_runner):
     result = cli_runner.invoke(app, ["graph", "--help"])
     assert result.exit_code == 0
@@ -78,6 +100,30 @@ def test_test_rules_command(cli_runner, tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "2b.md" in result.output
     assert "compat_scan.md" in result.output
+
+
+def test_test_rules_reset_reports_seeded_then_up_to_date(cli_runner, tmp_path, monkeypatch):
+    from icx_engine.testing import rules as _rules
+    monkeypatch.setattr(_rules, "rules_dir", lambda: tmp_path / "testing_rules")
+    first = cli_runner.invoke(app, ["test", "rules", "--reset"])
+    assert first.exit_code == 0
+    assert "Seeded" in first.output and "compat_scan.md" in first.output
+
+    second = cli_runner.invoke(app, ["test", "rules", "--reset"])
+    assert second.exit_code == 0
+    assert "Already current" in second.output
+
+
+def test_test_rules_reset_leaves_customized_file_alone(cli_runner, tmp_path, monkeypatch):
+    from icx_engine.testing import rules as _rules
+    monkeypatch.setattr(_rules, "rules_dir", lambda: tmp_path / "testing_rules")
+    d = tmp_path / "testing_rules"
+    d.mkdir(parents=True)
+    (d / "compat_scan.md").write_text("MY CUSTOM RULE", encoding="utf-8")
+    result = cli_runner.invoke(app, ["test", "rules", "--reset"])
+    assert result.exit_code == 0
+    assert "Left alone" in result.output and "compat_scan.md" in result.output
+    assert (d / "compat_scan.md").read_text(encoding="utf-8") == "MY CUSTOM RULE"
 
 
 def test_status_runs_with_no_config(cli_runner):
@@ -396,26 +442,17 @@ def test_test_help_shows_subcommands(cli_runner):
     result = cli_runner.invoke(app, ["test", "--help"])
     assert result.exit_code == 0
     output = click.unstyle(result.output)
-    for cmd in ("health", "run", "status", "sessions", "cancel"):
+    for cmd in ("sessions", "cancel"):
         assert cmd in output
 
 
-def test_test_health_requires_magik_running(cli_runner):
-    result = cli_runner.invoke(app, ["test", "health"])
-    # Either succeeds (Magik running) or exits with non-zero (unreachable).
-    # We just check it doesn't crash with an unhandled exception.
-    # typer.Exit raises SystemExit - that is the controlled exit path, not a crash.
-    assert result.exit_code in (0, 1)
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-
-
 def test_test_module_importable():
-    from icx_engine.testing.client import MagikClient
     from icx_engine.testing.state import TestingState, make_initial_state
     from icx_engine.testing.graph import get_db_path
-    assert callable(MagikClient)
+    from icx_engine.testing.local_executor import run_local_verification
     assert callable(make_initial_state)
     assert callable(get_db_path)
+    assert callable(run_local_verification)
 
 
 def test_v2_testing_modules_importable():
@@ -436,30 +473,100 @@ def test_appconfig_has_sonar_fields():
     assert "sonar_token" not in cfg.model_dump()
 
 
-def test_appconfig_has_agent_step_fields():
+def test_appconfig_has_testing_fields():
     from icx_engine.models.config import AppConfig
     cfg = AppConfig()
-    assert cfg.magik_agent_max_steps == 50
-    assert cfg.magik_agent_step_cap == 60
+    assert cfg.test_max_iterations == 3
 
 
-def test_test_configure_sets_agent_steps(cli_runner, isolated_config):
+def test_test_configure_sets_max_iterations(cli_runner, isolated_config):
     from icx_engine.cli import app
     from icx_engine.config_manager import ConfigManager
-    # answers in prompt order: base_url, api_key, max_iterations, agent_max_steps, agent_step_cap
-    result = cli_runner.invoke(app, ["test", "configure"], input="http://host-x:7646\n\n7\n40\n80\n")
+    # single prompt now: max fix iterations
+    result = cli_runner.invoke(app, ["test", "configure"], input="7\n")
     assert result.exit_code == 0
     cfg = ConfigManager.load()
-    assert cfg.magik_max_iterations == 7
-    assert cfg.magik_agent_max_steps == 40
-    assert cfg.magik_agent_step_cap == 80
+    assert cfg.test_max_iterations == 7
 
 
-def test_test_configure_help_mentions_steps(cli_runner):
+def test_test_configure_help_mentions_iterations(cli_runner):
     from icx_engine.cli import app
     result = cli_runner.invoke(app, ["test", "configure", "--help"])
     assert result.exit_code == 0
-    assert "step" in result.stdout.lower()
+    assert "iteration" in result.stdout.lower()
+
+
+def test_test_setup_api_only_installs_pip_tools(cli_runner, monkeypatch):
+    from icx_engine.cli import app
+    import icx_engine.cli as _cli
+    calls = []
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: False)
+    monkeypatch.setattr("icx_engine.testing.runners.install.ensure_runner",
+                        lambda name, approve=None, node_dir=None: calls.append(name) or f"/opt/{name}")
+    result = cli_runner.invoke(app, ["test", "setup", "-y", "--no-ui"])
+    assert result.exit_code == 0
+    assert calls == ["schemathesis", "hurl"]            # step 1 only, no Node
+
+
+def test_test_setup_ui_prompts_node_and_saves_config(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    import icx_engine.cli as _cli
+    from icx_engine.config_manager import ConfigManager
+    calls = {}
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: False)
+
+    def _ensure(name, approve=None, node_dir=None):
+        calls["name"] = name
+        calls["node_dir"] = node_dir
+        return f"/opt/{name}"
+    monkeypatch.setattr("icx_engine.testing.runners.install.ensure_runner", _ensure)
+    # the interactive node resolver returns a validated executable
+    monkeypatch.setattr(_cli, "_resolve_or_prompt_harness_node",
+                        lambda yes, node_opt="": "/usr/local/node20/bin/node")
+
+    result = cli_runner.invoke(app, ["test", "setup", "-y", "--no-api"])
+    assert result.exit_code == 0
+    assert calls["name"] == "playwright"
+    assert calls["node_dir"].replace("\\", "/").endswith("node20/bin")   # node's dir on PATH for npm
+    assert ConfigManager.load().harness_node_path == "/usr/local/node20/bin/node"
+
+
+def test_resolve_reuses_valid_configured_node_without_prompt(monkeypatch):
+    import icx_engine.cli as _cli
+    from icx_engine import runtime_manager as rm
+    monkeypatch.setattr(rm, "normalize_node_exe", lambda p: p or None)
+    monkeypatch.setattr(rm, "validate_runtime", lambda lang, path: "20.11.0")   # >= 18
+    monkeypatch.setattr("icx_engine.config_manager.ConfigManager.load",
+                        staticmethod(lambda: type("C", (), {"harness_node_path": "/n20/node"})()))
+    # yes=False but must NOT prompt - the configured node is already valid.
+    assert _cli._resolve_or_prompt_harness_node(yes=False) == "/n20/node"
+
+
+def test_resolve_node_opt_override(monkeypatch):
+    import icx_engine.cli as _cli
+    from icx_engine import runtime_manager as rm
+    monkeypatch.setattr(rm, "normalize_node_exe", lambda p: p or None)
+    monkeypatch.setattr(rm, "validate_runtime", lambda lang, path: "22.0.0")
+    assert _cli._resolve_or_prompt_harness_node(False, node_opt="/x/node") == "/x/node"
+
+
+def test_resolve_rejects_old_node_and_no_modern_found(monkeypatch):
+    import icx_engine.cli as _cli
+    from icx_engine import runtime_manager as rm
+    monkeypatch.setattr(rm, "normalize_node_exe", lambda p: p or None)
+    monkeypatch.setattr(rm, "validate_runtime", lambda lang, path: "16.20.0")   # < 18
+    monkeypatch.setattr(rm, "discover_runtimes", lambda lang: [])               # nothing else
+    monkeypatch.delenv("ICX_HARNESS_NODE", raising=False)
+    monkeypatch.setattr("icx_engine.config_manager.ConfigManager.load",
+                        staticmethod(lambda: type("C", (), {"harness_node_path": "/old/node"})()))
+    assert _cli._resolve_or_prompt_harness_node(yes=True) is None
+
+
+def test_test_setup_help_mentions_playwright(cli_runner):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["test", "setup", "--help"])
+    assert result.exit_code == 0
+    assert "playwright" in result.stdout.lower()
 
 
 def test_appconfig_has_sonar_enable_fields():
@@ -528,3 +635,38 @@ def test_format_build_duration():
     assert _format_build_duration(45.4) == "45s"
     assert _format_build_duration(97) == "1m 37s"
     assert _format_build_duration(3660) == "1h 01m"
+
+
+def test_clean_stale_artifacts_removes_profile_gen(tmp_path, monkeypatch):
+    import icx_engine.config_manager as cm
+    monkeypatch.setattr(cm, "_icx_dir", lambda: tmp_path)
+    rules = tmp_path / "testing_rules"
+    rules.mkdir(parents=True)
+    stale = rules / "profile_gen.md"
+    stale.write_text("old", encoding="utf-8")
+    keep = rules / "2b.md"
+    keep.write_text("live", encoding="utf-8")
+    removed = cm.clean_stale_artifacts()
+    assert str(stale) in removed
+    assert not stale.exists()
+    assert keep.exists()                       # live rulebooks untouched
+    assert cm.clean_stale_artifacts() == []    # idempotent
+
+
+def test_update_strips_stale_config_keys(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    from icx_engine.config_manager import CONFIG_PATH, stale_config_keys_on_disk
+    import json
+    # simulate an older user's config carrying retired keys
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps({
+        "test_max_iterations": 3, "agent_max_steps": 100, "magik_base_url": "http://x",
+    }), encoding="utf-8")
+    assert set(stale_config_keys_on_disk()) == {"agent_max_steps", "magik_base_url"}
+    result = cli_runner.invoke(app, ["update"])
+    assert result.exit_code == 0
+    on_disk = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    assert "agent_max_steps" not in on_disk       # stripped from disk
+    assert "magik_base_url" not in on_disk
+    assert "test_max_iterations" in on_disk        # live field kept
+    assert stale_config_keys_on_disk() == []       # nothing stale remains

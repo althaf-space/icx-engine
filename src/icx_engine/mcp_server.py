@@ -5,6 +5,7 @@ Communicates over: stdin/stdout (MCP JSON-RPC protocol)
 """
 from __future__ import annotations
 import asyncio
+import functools
 import json
 import logging
 import re
@@ -20,7 +21,7 @@ MCP_MEMORY_TIMEOUT_SECONDS = 2.0
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, Prompt, PromptArgument, PromptMessage, GetPromptResult
 
 from icx_engine.config_manager import ConfigManager
 from icx_engine import engine
@@ -32,6 +33,8 @@ from icx_engine.exceptions import (
     RateLimited,
     InvalidInput,
 )
+from icx_engine.skills.router import rank_skills, rank_skills_for_tags
+from icx_engine.skills.storage import SkillStorage
 
 server = Server("icx")
 
@@ -130,6 +133,11 @@ def _save_memory_sync(entry) -> None:
     _ensure_memory_manager().save(entry)
 
 
+def _show_entry_sync(issue_key: str):
+    """Look up a saved MemoryEntry by issue_key. Runs inside the memory thread."""
+    return _ensure_memory_manager().show(issue_key)
+
+
 def _negate_resolution_sync(issue_key: str, reason: str) -> dict:
     """Negate a resolution. Runs inside the memory thread."""
     return _ensure_memory_manager().negate_resolution(issue_key, reason)
@@ -144,67 +152,27 @@ def _verify_resolution_sync(issue_key: str, feedback_note: str) -> dict:
 # Senior-persona planning layer (additive; prepended to _icx_next.instruction).
 # ---------------------------------------------------------------------------
 
-_PERSONA_SLUGS: set[str] = {
-    "cto", "principal-engineer", "solution-architect", "system-architect",
-    "enterprise-architect", "staff-backend-engineer", "staff-frontend-engineer",
-    "principal-ui-ux-architect", "principal-data-architect", "principal-database-architect",
-    "staff-devops-sre", "principal-security-architect", "staff-performance-engineer",
-    "principal-ml-engineer", "staff-mobile-engineer", "principal-integration-architect",
-    "staff-qa-architect",
-}
+# The persona data + selectors live in the shared pure module `personas.py` (reused by the boost refine
+# CTO-grade prompt). Aliased to the historical private names so this module + its tests are unchanged.
+from icx_engine import personas as _personas
 
-_DEFAULT_PERSONA = "system-architect"
-_UI_PERSONAS = {"principal-ui-ux-architect", "staff-frontend-engineer"}
-
-# Ordered: first slug whose keyword set hits the ticket text wins the keyword heuristic.
-_PERSONA_KEYWORDS: list[tuple[str, set[str]]] = [
-    ("principal-security-architect", {"auth", "login", "token", "jwt", "oauth", "password",
-        "credential", "secret", "vulnerab", "injection", "xss", "csrf", "encrypt", "permission"}),
-    ("principal-database-architect", {"index", "query plan", "slow query", "sql", "join",
-        "deadlock", "n+1", "orm query", "table scan"}),
-    ("principal-data-architect", {"schema", "migration", "pipeline", "etl", "data model",
-        "warehouse", "ingest", "dataset"}),
-    ("staff-performance-engineer", {"latency", "throughput", "slow", "timeout", "memory leak",
-        "cpu", "performance", "profil", "bottleneck", "p99", "load"}),
-    ("staff-devops-sre", {"deploy", "ci/cd", "terraform", "kubernetes", "docker",
-        "infra", "cluster", "helm", "reliability", "outage", "rollout"}),
-    ("principal-ml-engineer", {"inference", "training", "embedding", "ml",
-        "prediction", "dataset drift", "fine-tune"}),
-    ("staff-mobile-engineer", {"android", "ios", "react native", "swift", "kotlin app",
-        "mobile", "app store", "play store"}),
-    ("principal-integration-architect", {"webhook", "third-party", "integration", "event bus",
-        "kafka", "message queue", "api contract", "grpc", "proto"}),
-    ("staff-qa-architect", {"test coverage", "flaky", "regression suite", "qa", "test plan",
-        "e2e"}),
-    ("principal-ui-ux-architect", {"button", "layout", "css", "styling", "modal", "form",
-        "screen", "ui", "ux", "responsive", "accessib", "component render"}),
-    ("staff-frontend-engineer", {"react", "vue", "state management", "redux", "hook", "frontend",
-        "client-side", "dom"}),
-    ("staff-backend-engineer", {"api", "endpoint", "service", "controller", "repository",
-        "backend", "server", "handler", "null pointer", "500"}),
-    ("solution-architect", {"integrate systems", "end-to-end", "cross-service", "microservice"}),
-    ("system-architect", {"architecture", "data flow", "scaling", "refactor", "coupling"}),
-]
-
-_UI_VOCAB = {"button", "layout", "css", "styling", "modal", "form", "screen", "ui", "ux",
-    "responsive", "accessib", "render", "component", "page", "click"}
-_BACKEND_VOCAB = {"api", "endpoint", "service", "controller", "repository", "backend",
-    "server", "handler", "database", "query", "schema", "null pointer"}
-
-_KW_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+_PERSONA_SLUGS = _personas.PERSONA_SLUGS
+_DEFAULT_PERSONA = _personas.DEFAULT_PERSONA
+_UI_PERSONAS = _personas.UI_PERSONAS
+_PERSONA_KEYWORDS = _personas.PERSONA_KEYWORDS
+_UI_VOCAB = _personas.UI_VOCAB
+_BACKEND_VOCAB = _personas.BACKEND_VOCAB
+_PERSONA_PROFILE = _personas.PERSONA_PROFILE
+_kw_hit = _personas.kw_hit
 
 
-def _kw_hit(text: str, kw: str) -> bool:
-    """Match kw against lowercased text. Multi-word or non-alnum tokens match as a
-    substring; a single alphanumeric token matches at a word start with any suffix
-    (prefix-word), so 'endpoint' hits 'endpoints' but 'ci' does NOT hit 'decision'."""
-    if " " in kw or not kw.isalnum():
-        return kw in text
-    pat = _KW_RE_CACHE.get(kw)
-    if pat is None:
-        pat = re.compile(r"\b" + re.escape(kw) + r"\w*")
-        _KW_RE_CACHE[kw] = pat
-    return pat.search(text) is not None
+def _persona_text(analysis: dict) -> str:
+    parts = [
+        str(analysis.get("problem_summary") or analysis.get("summary", "")),
+        str(analysis.get("detailed_description") or analysis.get("description", "")),
+        str(analysis.get("impact", "")),
+    ]
+    return " ".join(parts).lower()
 
 
 def _persona_text(analysis: dict) -> str:
@@ -252,28 +220,6 @@ def _select_persona(analysis: dict) -> tuple[str, str]:
 
 _CONFIDENCE_GATE = 0.6
 _COMPLETENESS_GATE = 0.5
-
-# slug -> (spoken role title, one-line domain focus for the rubric)
-_PERSONA_PROFILE: dict[str, tuple[str, str]] = {
-    "cto": ("CTO", "weigh business impact, risk, and long-term maintainability above local convenience"),
-    "principal-engineer": ("principal engineer", "attack the hardest ambiguity first and prove the mechanism, not the symptom"),
-    "solution-architect": ("solution architect", "design the end-to-end flow across every system the change touches"),
-    "system-architect": ("senior system architect", "reason about service boundaries, data flow, scaling, and migration safety"),
-    "enterprise-architect": ("enterprise architect", "keep the change consistent with organization-wide standards and other systems"),
-    "staff-backend-engineer": ("staff backend engineer", "trace the request path, service and data layers, and error handling"),
-    "staff-frontend-engineer": ("staff frontend engineer", "reason about component state, data fetching, and render correctness"),
-    "principal-ui-ux-architect": ("principal UI/UX architect", "reason about layout, interaction, accessibility, and visual states"),
-    "principal-data-architect": ("principal data architect", "reason about the schema, data modeling, and pipeline integrity"),
-    "principal-database-architect": ("principal database architect", "reason about query plans, indexing, and transactional correctness"),
-    "staff-devops-sre": ("staff DevOps/SRE", "reason about deployment, reliability, rollout, and blast radius in production"),
-    "principal-security-architect": ("principal security architect", "reason about the trust boundary, authn/authz, and exploit paths"),
-    "staff-performance-engineer": ("staff performance engineer", "reason about latency, throughput, allocation, and measured bottlenecks"),
-    "principal-ml-engineer": ("principal ML engineer", "reason about the model, data, evaluation, and inference path"),
-    "staff-mobile-engineer": ("staff mobile engineer", "reason about the platform lifecycle, device constraints, and app state"),
-    "principal-integration-architect": ("principal integration architect", "reason about API contracts, events, retries, and third-party failure modes"),
-    "staff-qa-architect": ("staff QA architect", "reason about coverage, edge cases, and how correctness will be proven"),
-}
-
 
 def _persona_preamble(slug: str, confidence: float | None, completeness: float | None) -> str:
     title, focus = _PERSONA_PROFILE.get(slug, _PERSONA_PROFILE[_DEFAULT_PERSONA])
@@ -329,6 +275,59 @@ def _apply_persona(analysis: dict | None, icx_instruction: str) -> tuple[str, di
         return icx_instruction, None
 
 
+def _apply_dod(analysis: dict | None, icx_instruction: str, graphs: list | None) -> tuple[str, dict | None]:
+    """Append a Definition-of-Done VERIFY phase + checklist to the instruction. Guarded: any
+    failure returns the instruction unchanged and dod=None so analyze_issue never breaks.
+    Risk tier + recommended layers are a RECOMMENDATION; the user selects at the gate."""
+    try:
+        if not isinstance(analysis, dict):
+            return icx_instruction, None
+        from icx_engine.verification import build_dod_checklist, compute_risk_tier, recommend_layers
+        checklist = build_dod_checklist(analysis)
+        tier = compute_risk_tier(analysis, graphs)
+        layers = recommend_layers(tier)
+        lines = [
+            "",
+            "==============================================================================",
+            "DEFINITION OF DONE - you MUST verify with evidence before declaring done:",
+            f"  Recommended verification (risk tier: {tier}) - the user chooses which to run: "
+            + ", ".join(layers),
+            "  Checklist (each must be proven, not asserted):",
+        ]
+        for i, it in enumerate(checklist, 1):
+            lines.append(f"    {i}. [{it['method']}] {it['check']}")
+        lines += [
+            "  Flow: reproduce (bug) / set up check (feature) -> implement -> EXECUTE the check ->",
+            "  capture the exact command + output -> adversarial self-review of the diff -> done.",
+            "  Then call record_verification with the evidence. save_memory will refuse a verified",
+            "  success without it (or pass verified_by_human=true if you verified manually).",
+            "==============================================================================",
+        ]
+        block = "\n".join(lines)
+        dod = {"risk_tier": tier, "recommended_layers": layers, "checklist": checklist}
+        return icx_instruction + "\n" + block, dod
+    except Exception:
+        _log.debug("dod layer skipped", exc_info=True)
+        return icx_instruction, None
+
+
+def _apply_methodology(analysis: dict | None, icx_instruction: str) -> tuple[str, dict | None]:
+    """Prepend the MANDATORY ICX methodology one-pager to the instruction and return the per-ticket
+    checklist for response['methodology']. Guarded - never breaks analyze."""
+    try:
+        from icx_engine.methodology import build_checklist, ONE_PAGER
+        block = (
+            "\n=============================================================================="
+            "\nMANDATORY METHODOLOGY - follow this on EVERY ticket (call get_methodology for full detail):"
+            f"\n{ONE_PAGER}"
+            "=============================================================================="
+        )
+        return icx_instruction + "\n" + block, build_checklist(analysis)
+    except Exception:
+        _log.debug("methodology layer skipped", exc_info=True)
+        return icx_instruction, None
+
+
 def _write_attachment_files(result, issue_key_val: str) -> dict[str, dict[str, str]]:
     """Write full-text sidecars (<name>.full.md) and raw originals (<name>) for non-image
     attachments to the per-issue temp dir. Returns {filename: {full_text, raw}}. Fully guarded -
@@ -369,6 +368,11 @@ def _write_attachment_files(result, issue_key_val: str) -> dict[str, dict[str, s
     return attachment_paths
 
 
+# Strong reference to the background sweep task - without it the event loop keeps only a weak
+# ref and the task can be GC'd mid-flight ("Task was destroyed but it is pending!").
+_SWEEP_TASK: "asyncio.Task | None" = None
+
+
 async def _periodic_temp_sweep(interval_seconds: int = 3600) -> None:
     """Background daemon: sweep stale temp dirs (24h TTL) every interval. Guarantees cleanup
     even when ICX is idle, for the lifetime of the MCP server. Guarded and non-fatal."""
@@ -399,6 +403,17 @@ _MEM_BY_FILE_TOOL = "memory_find_by_file"
 _MEM_RELATED_TOOL = "memory_get_related"
 _MEM_PATTERNS_TOOL = "memory_get_patterns"
 _SAVE_TOOL_NAME = "save_memory"
+_RECORD_VERIFICATION_TOOL = "record_verification"
+_GET_METHODOLOGY_TOOL = "get_methodology"
+_LOCK_PLAN_TOOL = "lock_plan"
+_BOOST_TOOL = "icx_boost"
+_BOOST_REFINE_TOOL = "icx_boost_refine"
+_BOOST_PROMPT_NAME = "icx-boost"
+_SKILL_GET_TOOL = "icx_skill_get"
+_SKILLS_INDEX_TOOL = "icx_skills_index"
+_DRAFT_SKILL_TOOL = "draft_skill"
+_UI_AUTH_CAPTURE_TOOL = "ui_auth_capture"
+_UI_AUTH_INLINE_TOOL = "ui_auth_inline"
 _GRAPH_BLAST_RADIUS_TOOL = "graph_blast_radius"
 _GRAPH_CYCLES_TOOL = "graph_cycles"
 _GRAPH_DEAD_CODE_TOOL = "graph_dead_code"
@@ -406,19 +421,74 @@ _GRAPH_OWNERSHIP_TOOL = "graph_ownership"
 _REINFORCE_TOOL_NAME = "reinforce_memory_usage"
 _AUDIT_TOOL_NAME = "get_memory_audit"
 
-# Magik-AI testing tools
-_MAGIK_HEALTH_TOOL = "magik_health_check"
-_MAGIK_START_TOOL = "start_testing_session"
-_MAGIK_RESUME_TOOL = "resume_testing_session"
-_MAGIK_STATUS_TOOL = "magik_test_status"
-_MAGIK_RESULTS_TOOL = "magik_test_results"
+# Testing session tools (LangGraph entry - local engine)
+_TESTING_START_TOOL = "start_testing_session"
+_TESTING_RESUME_TOOL = "resume_testing_session"
+_TESTING_STATUS_TOOL = "get_testing_session_status"
 
-# Magik-AI auth tools
-_MAGIK_LOGIN_START_TOOL = "magik_login_start"
-_MAGIK_LOGIN_CAPTURE_TOOL = "magik_login_capture"
-_MAGIK_LOGIN_CANCEL_TOOL = "magik_login_cancel"
-_MAGIK_LOGIN_INLINE_TOOL = "magik_login_inline"
-_MAGIK_LOGOUT_TOOL = "magik_logout"
+# Background-task registry for testing-session gates that trigger real browser work (verify/heal,
+# scored execution). A gate that answers within _TESTING_QUICK_TIMEOUT behaves exactly as before
+# (inline result, no contract change). One that runs longer is detached into a tracked asyncio.Task
+# so the MCP call returns immediately with status:"running" instead of blocking - the caller polls
+# get_testing_session_status instead of staring at one opaque call with no way to tell "working"
+# from "stuck". Keyed by session_id; best-effort only (an MCP server restart drops tracking, but
+# get_testing_session_status still falls back to a plain checkpoint read in that case).
+_TESTING_RUNNING: dict[str, "asyncio.Task"] = {}
+_TESTING_ERRORS: dict[str, str] = {}
+_TESTING_QUICK_TIMEOUT = 20.0
+
+
+def _testing_task_done_cb(session_id: str, task) -> None:
+    _TESTING_RUNNING.pop(session_id, None)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        _TESTING_ERRORS[session_id] = str(exc)
+
+
+async def _testing_invoke_tracked(session_id: str, coro) -> bool:
+    """Run a testing-graph coroutine (ainvoke) as a tracked background task. Returns True if it
+    completed within the quick timeout - caller reads the result exactly as before. Returns False if
+    it is still running past the timeout; the task keeps executing in the background (asyncio.shield
+    means the wait_for timeout never cancels it) and get_testing_session_status polls it to done."""
+    task = asyncio.create_task(coro)
+    task.add_done_callback(functools.partial(_testing_task_done_cb, session_id))
+    _TESTING_RUNNING[session_id] = task
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_TESTING_QUICK_TIMEOUT)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+def _testing_gate_snapshot(session_id: str, snapshot) -> dict:
+    """Shared shape for start/resume/status: extract the pending gate (if any) and done-ness from a
+    LangGraph state snapshot. See resume_testing_session for why `not snapshot.next` alone is not a
+    reliable done signal."""
+    gate_data = {}
+    has_interrupt = bool(snapshot.tasks and snapshot.tasks[0].interrupts)
+    if has_interrupt:
+        gate_data = snapshot.tasks[0].interrupts[0].value
+    is_done = (not snapshot.next) and (not has_interrupt)
+    vals = getattr(snapshot, "values", None) or {}
+    return {
+        "session_id": session_id, "done": is_done, "gate": gate_data,
+        "status": vals.get("status"), "error": vals.get("last_error") if is_done else None,
+    }
+
+def _ICX_FALLBACK(kind: str, connect_cmd: str) -> str:
+    """Graceful-fallback instruction when ICX supports an integration but it is not connected. ICX stays
+    the preferred path; the agent reuses its own connector meanwhile, else proceeds normally - and always
+    tells the user it is not enabled. Same 3-tier intelligence as the boost link handling."""
+    return (
+        f"ICX supports the {kind} integration but it is not connected. Do this, in order: "
+        f"(1) TELL the user it is not enabled and to connect ICX (`{connect_cmd}`) - the preferred path; "
+        f"(2) MEANWHILE, if you have your own {kind} tool/MCP connector, use it to get the data and "
+        f"continue; (3) if neither is available, proceed with the normal flow and note that the ICX "
+        f"{kind} integration is off. Do not fabricate the data."
+    )
+
 
 # Sonar code-quality tools (direct SonarQube reader, gated by sonar_enabled)
 _SONAR_STATUS_TOOL = "sonar_status"
@@ -487,73 +557,7 @@ def _sonar_scope_args(args: dict | None) -> dict | None:
         "limit": limit,
     }
 
-_MAGIK_LOGIN_START_DESCRIPTION = (
-    "Open a visible browser for manual login to a target app. "
-    "RULES: 1) Call only during an auth_gate with auth_mode 'capture'. "
-    "2) Input MUST be {\"loginUrl\": \"<full login URL>\"}. "
-    "3) Returns {interactiveId}. Tell the user to complete login in the opened browser, "
-    "then call magik_login_capture with that interactiveId. 4) Do NOT invent a sessionId."
-)
-_MAGIK_LOGIN_CAPTURE_DESCRIPTION = (
-    "Capture the authenticated session after the user finishes manual login. "
-    "RULES: 1) Input MUST be {\"interactiveId\": \"<from magik_login_start>\", \"label\": \"<optional>\"}. "
-    "2) Returns {sessionId}. 3) Resume the auth_gate with {\"auth_mode\": \"capture\", \"session_id\": \"<sessionId>\"}."
-)
-_MAGIK_LOGIN_CANCEL_DESCRIPTION = (
-    "Cancel an in-progress interactive login. RULES: 1) Input MUST be {\"interactiveId\": \"<id>\"}."
-)
-_MAGIK_LOGIN_INLINE_DESCRIPTION = (
-    "Log in with credentials and get a session. "
-    "RULES: 1) Call only during an auth_gate with auth_mode 'inline'. "
-    "2) Input MUST be {\"loginUrl\": \"<url>\", \"username\": \"<user>\", \"password\": \"<pass>\"}. "
-    "3) Credentials are sent straight to Magik and never stored by ICX. "
-    "4) Returns {sessionId}. Resume the auth_gate with {\"auth_mode\": \"inline\", \"session_id\": \"<sessionId>\"}."
-)
-_MAGIK_LOGOUT_DESCRIPTION = (
-    "Delete a captured session. RULES: 1) Input MUST be {\"sessionId\": \"<id>\"}."
-)
-
-_MAGIK_HEALTH_DESCRIPTION = """\
-ICX FULL WORKFLOW - GLOBAL TOOL SEQUENCE (read this first):
-  After development complete: ask "How would you like to test? 1. automated  2. manual"
-
-  AUTOMATED PATH (user chose 1):
-  [17] magik_health_check           [<1s]  MANDATORY FIRST - you are here
-  [18] start_testing_session        [1-5s] MANDATORY SECOND
-  [19] resume_testing_session       Gate 1 - confirm file list
-  [19] resume_testing_session       Gate 2 - detection mode + scope + URL
-  [19] resume_testing_session       Gate 2b - AI generates JSON spec
-  [19] resume_testing_session       Gate 3 - test type + config (URL MUST be user-confirmed)
-       --- Magik-AI runs test (30s-30min) ---
-  [19] resume_testing_session       Gate 4 - show issues, propose fixes
-  [19] resume_testing_session       Gate 5 - confirm fixes applied
-       (loop Gate 3-5 until issues = 0 or Limit Gate fires)
-  [19] resume_testing_session       Gate ui_check - MANDATORY UI verification
-  [19] resume_testing_session       Gate memory_save - MANDATORY Magik session record
-       --- after done: true AND user explicitly confirms fix works ---
-  [20] reinforce_memory_usage       if memory_search result influenced your approach
-  [21] save_memory                  FINAL STEP - ONLY after human confirmation
-
-  MANUAL PATH (user chose 2):
-  [18] start_testing_session(test_mode="manual")  [no health check needed]
-  [19] resume_testing_session       Gate 1 - confirm file list
-  [19] resume_testing_session       Gate manual - user runs test, confirms done
-  [19] resume_testing_session       Gate manual_result - report result + issues
-  [19] resume_testing_session       Gate ui_check - MANDATORY UI verification
-  [19] resume_testing_session       Gate memory_save - MANDATORY Magik session record
-       --- after done: true AND user explicitly confirms fix works ---
-  [20] reinforce_memory_usage       if memory_search result influenced your approach
-  [21] save_memory                  FINAL STEP - ONLY after human confirmation
-
-Verify Magik-AI Tester is running and reachable. AUTOMATED PATH ONLY - skip for manual.
-Magik-AI must be running - the user double-clicks the .exe to start it.
-
-RETURNS: {ok: true, data: {status: "up", uptimeSec: N}} on success.
-         {ok: false, error: "..."} when unreachable - ask user to start Magik-AI, then retry.
-RUNTIME: <1 second.\
-"""
-
-_MAGIK_START_DESCRIPTION = """\
+_TESTING_START_DESCRIPTION = """\
 Begin a testing session for a set of changed files. <- you are here: [2] automated or [1] manual
 
 ICX expands file_paths via the codebase graph (blast_radius + subsystem cluster + co-change partners
@@ -564,7 +568,7 @@ Pass session_id to ALL subsequent resume_testing_session calls. Never reuse a se
 graph_available: false means codebase graph not built - only seed files shown at Gate 1.
 
 file_paths: FRONTEND/UI source SEED file(s) for the screen being tested (.js/.jsx/.tsx/.vue).
-  Magik-AI is a UI tester - it needs frontend screen files, NEVER backend files
+  The UI verification layer needs frontend screen files, NEVER backend files
   (.java/.py/.go/.cs). ICX expands whatever seeds you pass; you only need to produce the seed.
 
   PHASE A - PICK THE SEED UI FILE(S) before calling this tool. Ask the user how to choose:
@@ -584,6 +588,7 @@ file_paths: FRONTEND/UI source SEED file(s) for the screen being tested (.js/.js
 context: one-line description of what changed - used for graph expansion and shown at all gates.
 test_mode: REQUIRED - "automated" or "manual". You MUST ask the user before calling this tool.
 max_iterations: max automated fix loops before Limit Gate. Default from config (3).
+nl_intent / acceptance_criteria: optional, seed extra NL/ticket-driven scenarios (agent test_type).
 
 DEFAULT POSTURE - ICX gate data is for the USER to read and decide. You never advance the
 workflow on your own except to GENERATE the test spec at Gate 2b. Everywhere else: present the
@@ -595,20 +600,16 @@ THESE ARE HARD RULES. THEY ARE NOT SUGGESTIONS. VIOLATIONS ARE NOT ACCEPTABLE.
 
 RULE 0 - ASK MODE FIRST, BEFORE ANY TOOL CALL, NO EXCEPTIONS:
 When development is complete, you MUST ask the user:
-  "Do you want automated testing (Magik-AI runs it) or manual testing (you run it yourself)?"
-Do NOT call magik_health_check. Do NOT call start_testing_session. Do NOT read any file.
+  "Do you want automated testing (ICX runs it) or manual testing (you run it yourself)?"
+Do NOT call start_testing_session. Do NOT read any file.
 This is the FIRST action. Skipping it or calling any tool before getting the answer is a CRITICAL VIOLATION.
 
-RULE 1 - AUTOMATED PATH ONLY: magik_health_check is MANDATORY before start_testing_session.
-  After the user says "automated":
-    Step 1: call magik_health_check. If it fails, stop and ask the user to start Magik-AI.
-    Step 2: call start_testing_session(test_mode="automated") only after health check succeeds.
-  NEVER call start_testing_session without a prior successful magik_health_check. That is a VIOLATION.
+RULE 1 - AUTOMATED PATH: after the user says "automated", call
+  start_testing_session(test_mode="automated"). ICX runs the verification suite locally and async;
+  there is no external tester and no health check.
 
-RULE 2 - MANUAL PATH: skip health check entirely.
-  After the user says "manual":
-    Call start_testing_session(test_mode="manual") directly. No health check. No Magik tools.
-  magik_health_check is NOT called in the manual path. Calling it for manual is a VIOLATION.
+RULE 2 - MANUAL PATH: after the user says "manual", call
+  start_testing_session(test_mode="manual") directly.
 
 RULE 3 - EVERY GATE REQUIRES HUMAN INPUT BEFORE RESUMING. NO SKIPPING. NO AUTO-FILL:
   done: false means a gate is waiting. BEFORE calling resume_testing_session:
@@ -619,7 +620,7 @@ RULE 3 - EVERY GATE REQUIRES HUMAN INPUT BEFORE RESUMING. NO SKIPPING. NO AUTO-F
   Never assume the seed file list is correct without user verification.
   Gate 2b specifically: Read ALL files completely before generating json_spec.
   Never generate json_spec without reading every file in gate.file_paths first.
-  Follow gate.magik_prompt exactly - all required sections must be present.
+  Follow gate.rules exactly - all required sections must be present.
 
 RULE 4 - URL MUST BE USER-CONFIRMED AT GATE 3:
   Show the full URL to the user. Wait for explicit confirmation before responding to Gate 3.
@@ -636,18 +637,16 @@ RULE 6 - GATE memory_save IS MANDATORY, NEVER SKIP:
 ================================================================================
 
 AUTOMATED TOOL SEQUENCE (all steps in exact call order):
-  [1]  magik_health_check           [<1s]  MANDATORY FIRST
-  [2]  start_testing_session        [1-5s] <- you are here
-  [3]  resume_testing_session       Gate 1 - file list confirmation
-  [4]  resume_testing_session       Gate 2 - detection mode + scope + URL
-  [5]  resume_testing_session       Gate 2b - AI generates JSON spec (Gate 2a first if auto_detect)
-  [6]  resume_testing_session       Gate 3 - test type + config (RULE 4: URL confirmation)
-       --- Magik-AI runs test (30s-30min) ---
-  [7]  resume_testing_session       Gate 4 - show issues, propose fixes to user
-  [8]  resume_testing_session       Gate 5 - user confirms fixes applied
-       (loop [6]-[8] until issues = 0 or Limit Gate fires)
-  [9]  resume_testing_session       Gate ui_check - MANDATORY (RULE 5)
-  [10] resume_testing_session       Gate memory_save - MANDATORY (RULE 6)
+  [1]  start_testing_session        [1-5s] <- you are here
+  [2]  resume_testing_session       Gate 1 - file list confirmation
+  [3]  resume_testing_session       Gate 2b / author_flow - AI authors the test flow (UI) - AGENT-GENERATE
+  [4]  resume_testing_session       Gate 3 - layer selection + config (RULE 4: URL confirmation)
+       --- ICX runs the local verification suite (unit/api/ui), no external tester ---
+  [5]  resume_testing_session       Gate 4 - show issues, propose fixes to user
+  [6]  resume_testing_session       Gate 5 - user confirms fixes applied
+       (loop [4]-[6] until issues = 0 or Limit Gate fires)
+  [7]  resume_testing_session       Gate ui_check - MANDATORY (RULE 5)
+  [8]  resume_testing_session       Gate memory_save - MANDATORY (RULE 6)
 
 MANUAL TOOL SEQUENCE (all steps in exact call order):
   [1]  start_testing_session(test_mode="manual")  <- you are here
@@ -658,14 +657,14 @@ MANUAL TOOL SEQUENCE (all steps in exact call order):
   [6]  resume_testing_session       Gate memory_save - MANDATORY (RULE 6)
 
 SIDE GATES (automated path only - fire when conditions are met):
-  Error Gate ("error"): Magik unreachable or run failed.
+  Error Gate ("error"): a verification run failed.
     options: retry / skip_iteration / end_session
   Limit Gate ("limit"): max iterations reached with issues remaining.
     options: continue (+3 iterations) / end_session
 RUNTIME: 1-5 seconds for graph expansion, then Gate 1 interrupt.\
 """
 
-_MAGIK_RESUME_DESCRIPTION = """\
+_TESTING_RESUME_DESCRIPTION = """\
 Resume a paused testing session at the next gate. <- you are here for gates [3]-[10] automated or [2]-[6] manual.
 
 session_id: UUID from start_testing_session. REQUIRED on every call. Never omit.
@@ -678,13 +677,16 @@ Every gate is exactly ONE of two kinds. How you respond depends entirely on whic
 
 USER-DECISION gates - the answer belongs to the USER. You MUST stop, show every field,
 ask, and wait for the user's reply before responding. NEVER auto-fill, default, or assume:
-    mode, pick_type, expand, compat_check, 2a, api_manual, 3, auth_gate, profile_push,
+    mode, pick_type, expand, compat_check, 2a, api_manual, 3, auth_gate,
     4, 5, error, limit, manual, manual_result, ui_check, memory_save
 
 AGENT-GENERATE gates - the answer is YOURS to produce. You generate each fully and submit it
 directly. You MUST NOT delegate these to the user or ask them to write them:
-    2b, compat_scan, profile_gen, expand_scan
-    (2b: json_spec generation; compat_scan: file compatibility detection; profile_gen: profile markdown; expand_scan: repo grep for related files)
+    2b, compat_scan, author_flow, expand_scan, analyze_screen, unit_author
+    (2b: json_spec generation; compat_scan: file compatibility detection; author_flow: write AND RUN a
+    real Playwright test yourself, self-healing until the checklist is covered; expand_scan: repo grep
+    for related files; analyze_screen: framework Element Census; unit_author: write unit tests from
+    the census)
 
 DEFAULT POSTURE - ICX gate data is for the USER to read and decide. You never advance the
 workflow on your own except to generate the spec at Gate 2b. Everywhere else: present the
@@ -702,7 +704,7 @@ RULE 0 - NEVER AUTO-RESPOND TO A USER-DECISION GATE. HUMAN IN THE LOOP IS MANDAT
     4. Only AFTER the user replies: call resume_testing_session with their answer.
   Responding to a USER-DECISION gate using defaults, assumptions, or auto-fill WITHOUT user
   input is a CRITICAL VIOLATION. Even if the answer seems obvious - ASK.
-  AGENT-GENERATE gates (2b, compat_scan, profile_gen, expand_scan) are the opposite: you produce
+  AGENT-GENERATE gates (2b, compat_scan, author_flow, expand_scan) are the opposite: you produce
   the output yourself and submit it directly - never hand these to the user. Your read, your generation.
 
 RULEBOOK RULE - gate.rules is BINDING, read it every time:
@@ -712,7 +714,7 @@ RULEBOOK RULE - gate.rules is BINDING, read it every time:
   carries it and obey it exactly. The user can edit these files to tighten the rules; treat the
   text you receive as law for that step. Never ignore it because you "already know" the gate.
 
-RE-READ RULE - applies to every AGENT-GENERATE gate (2b, compat_scan, profile_gen, expand_scan):
+RE-READ RULE - applies to every AGENT-GENERATE gate (2b, compat_scan, author_flow, expand_scan):
   You MUST open and read every file in file_paths fully, start to end, in that step. Earlier
   reads, summaries, or memory are STALE and forbidden as a basis - read each file again
   completely even if you read it before. Partial reading or relying on memory causes missed
@@ -725,9 +727,14 @@ RULE 1 - CHECK gate.gate BEFORE RESPONDING:
   Using the wrong format silently drops fields and corrupts the session. That is a VIOLATION.
 
 RULE 2 - NEVER SKIP A GATE:
-  done: false means a gate is waiting. Call resume_testing_session immediately after user input.
+  done: false + gate set means a gate is waiting. Call resume_testing_session immediately after
+  user input.
+  status: "running" (gate is null) means no gate is waiting yet - real browser work is still in
+  progress. Call get_testing_session_status(session_id) to poll instead of calling this tool
+  again; only come back to resume_testing_session once polling returns an actual gate.
   done: true means the session is over. Stop calling this tool.
-  Calling this tool after done: true, or failing to call it when done: false, are both VIOLATIONS.
+  Calling this tool after done: true, calling it again while status is "running", or failing to
+  call it when a real gate is waiting, are all VIOLATIONS.
 
 RULE 3 - GATE 3 URL IS ALWAYS USER-CONFIRMED:
   Display the URL to the user. Wait for explicit confirmation.
@@ -747,7 +754,7 @@ RULE 6 - GATE memory_save IS ALWAYS {"save": "yes"|"no"}:
   Skipping memory_save is a VIOLATION.
 
 RULE 7 - confirmed_files AT GATE "expand" MUST BE FRONTEND/UI FILES ONLY:
-  Magik-AI is a UI tester. It uses source files to generate test specs for screens.
+  The UI verification layer is a UI tester. It uses source files to author test flows for screens.
   confirmed_files MUST be frontend files: .js .jsx .tsx .vue .html
   NEVER include backend files (.java .py .go .cs .rb .kt) in confirmed_files.
   If the user only provides backend files, ask: "Which UI screen file(s) test this feature?"
@@ -783,19 +790,35 @@ RESPONDING WITHOUT SHOWING EVERY FIELD = CRITICAL VIOLATION. NO EXCEPTIONS.
 Gate "mode" - Test mode selection [USER-DECISION]:
   YOU MUST SHOW THE USER AND WAIT FOR THEIR REPLY - VIOLATION IF SKIPPED:
     "Select test mode:
-       1. automated - Full automated pipeline (Magik runs the test for you).
+       1. automated - Full automated pipeline (ICX runs the verification for you).
        2. manual    - You run the test manually and report results.
      What is your choice?"
   WAIT for reply. Response: {"choice": "automated"|"manual"}
 
 Gate "pick_type" - Test type selection [USER-DECISION]:
+  This is the ONLY gate that asks the test type. Gate 3 later just confirms the URL - it does NOT
+  re-ask the type. Do not ask the user to re-pick the type anywhere else.
   YOU MUST SHOW THE USER AND WAIT FOR THEIR REPLY - VIOLATION IF SKIPPED:
     "Select test type:
-       1. agent - Adaptive AI browser-use. Handles dynamic UIs. (recommended)
-       2. ui    - Strict Playwright field-by-field validation.
-       3. api   - REST endpoint test only. No browser needed.
+       1. agent - YOU write a real Playwright test covering the screen's Element Census, run it
+                  yourself, and self-heal until it passes (frontend, needs a URL).
+       2. api   - REST endpoint test (backend, needs a URL).
+       3. unit  - Run the repo's own unit tests (no URL, no running app).
      What is your choice?"
-  WAIT for reply. Response: {"test_type": "agent"|"ui"|"api"}
+  WAIT for reply. Response: {"test_type": "agent"|"api"|"unit"}
+
+Gate "known_screen" - Known-screen fast path [USER-DECISION, agent-type only, RARE]:
+  This gate ONLY appears when ICX found a PROVABLY FRESH cached clearance of this EXACT screen from
+  a prior session - every cached file byte-identical to then, AND a fresh check found no new related
+  file. If it does not appear, there was no cache, it was stale, or a new file was found - in every
+  one of those cases ICX already moved straight to expand_scan, no action needed from you.
+  When it DOES appear, show the user: "Found a prior cleared run of this screen from gate.cached_at
+  (gate.confirmed_files count files, gate.functionality_count functionalities, coverage
+  gate.census_coverage). Reuse it and skip straight to URL/layer confirmation, or redo file discovery
+  and the census from scratch?"
+  WAIT for reply. Response: {"decision": "fast_path"|"rescan"}. Anything other than "fast_path" is
+  treated as "rescan" - the normal expand_scan/expand/analyze_screen/compat_scan pipeline runs exactly
+  as if there had been no cache.
 
 Gate "expand_scan" - Related file discovery [AGENT-GENERATE]:
   This gate is YOURS to produce. Do NOT show it to the user or wait for their reply.
@@ -824,16 +847,47 @@ Gate "expand" - File confirmation [USER-DECISION]:
      <if graph_available is false: 'Expanded by grep (graph not built): <files you grep-expanded>'>
      Graph available: <gate.graph_available>
 
-     IMPORTANT: Magik is a UI tester. It needs FRONTEND files (.js .jsx .tsx .vue).
-     Do NOT send backend files (.java .py .go .cs .rb .kt) to Magik.
+     IMPORTANT: the UI verification layer is a UI tester. It needs FRONTEND files (.js .jsx .tsx .vue).
+     Do NOT send backend files (.java .py .go .cs .rb .kt) to the UI layer.
 
-     Which frontend/UI screen file(s) should be sent to Magik for testing?
+     Which frontend/UI screen file(s) should be verified?
      Confirm this set, or add/remove files."
   WAIT for user reply. Use ONLY frontend files they confirm.
   NEVER include backend files in confirmed_files. That is a VIOLATION.
   (Seed selection - endpoint/route, changed UI, or backend->UI grep bridge - happened before
   start_testing_session; see that tool. Here you only expand + confirm.)
   Response: {"confirmed_files": ["abs/path/Screen.jsx", ...], "url": "<optional>"}
+  This list IS the file set for the rest of the session - every later gate (analyze_screen,
+  compat_scan, ...) only ever sees what you confirm here. Omit a file you want excluded; it will
+  NOT reappear later. If you resume without confirmed_files, ICX keeps the full candidate list.
+
+Gate "analyze_screen" - Element Census [AGENT-GENERATE]:
+  ICX selected the framework-specific analyzer prompt (gate.analyzer_id / gate.analyzer_family) and
+  put its FULL text in gate.analyzer_prompt. APPLY that prompt to the confirmed files and return its
+  STRICT JSON census - EXACTLY the schema the prompt defines - wrapped as {"screen_model": {...}}.
+  The census enumerates EVERY interactive element, field, validation, and message and reconciles the
+  counts (coverageReport.reconciliation). This model is what makes authoring miss NOTHING - a missed
+  census element is a missed test. If the reconciliation counts do not add up, ICX re-asks naming the
+  shortfall; fix it and resubmit. Read every file fully first (RE-READ RULE).
+  ICX ALSO LINTS the census structurally (agent-independent) and RE-ASKS on hard defects, so no agent's
+  mistake slips through: (a) CREATE and EDIT/MODIFY must have DIFFERENT submit selectors - never copy
+  one onto the other; (b) every create/edit form needs its own submit + trigger; (c) every field needs
+  a domSelectors/selector; (d) no duplicate functionality ids. Soft advisories (a text field with no
+  captured length/format constraint) are recorded, not blocking - but capture length/format from the
+  code (maxLength/minLength/min/max/pattern, type email/tel/url/number) because the save uses them.
+  (At authoring time ICX also crawls the LIVE screen and FUSES that discovered census with yours -
+  the COMBINED census - so real rendered selectors/wizard-nav back your JS-hidden constraints. You
+  only produce the source census here; the live crawl and merge are automatic.)
+  Response: {"screen_model": { ...the analyzer prompt's strict JSON... }, "read_receipts": [...]}
+
+Gate "unit_author" - Write unit tests from the census [AGENT-GENERATE]:
+  For a unit test, ICX gives you the Element Census (gate.screen_model) enumerating every testable
+  unit/routine/function of the module. WRITE COMPREHENSIVE tests covering EVERY one of them - happy
+  path + edge/invalid/error cases + every validation - using YOUR editor to create the test files IN
+  THE REPO (framework in gate.message, keyed to gate.analyzer_family: GoogleTest/Catch2 for C/C++,
+  utPLSQL/tSQLt/pgTAP for SQL, pytest/JUnit/jest/go test/cargo/rspec/phpunit for language units). The
+  runner discovers and runs them on the next step. Do not skip any censused unit. Confirm when done.
+  Response: {"read_receipts": [...]}   (acknowledge; the tests you wrote are in the repo)
 
 Gate "compat_scan" - File compatibility detection [AGENT-GENERATE]:
   This gate is YOURS to produce. Do NOT show it to the user or wait for their reply.
@@ -891,8 +945,8 @@ Gate "compat_check" - Compatibility review [USER-DECISION]:
 
 Gate "2" - Detection mode + scope [automated only]:
   YOU MUST SHOW ALL FIELDS TO THE USER AND GET ANSWERS FOR EACH - SKIPPING ANY = VIOLATION:
-    "DETECTION MODE - how Magik generates the test spec:
-       1. auto_detect - Magik opens the URL with Playwright and scans live page fields.
+    "DETECTION MODE - how the UI layer generates the test spec:
+       1. auto_detect - the UI layer opens the URL with Playwright and scans live page fields.
                         App must be running and URL must be accessible.
        2. json_spec   - AI reads your JSX/TSX source files directly. No browser needed.
                         Use when URL requires VPN or auth.
@@ -918,7 +972,7 @@ Gate "2" - Detection mode + scope [automated only]:
 
 Gate "2a" - Detected fields confirmation [auto_detect only, fires before Gate 2b]:
   YOU MUST SHOW ALL OF THIS TO THE USER - SKIPPING ANY = VIOLATION:
-    "Magik scanned the page. Review before generating the test spec:
+    "The UI layer scanned the page. Review before generating the test spec:
      URL:         <gate.url>
      Page title:  <gate.page_title>
      Field groups detected (<gate.group_count> groups):
@@ -936,8 +990,8 @@ Gate "2b" - JSON spec generation [both modes]:
     Do NOT begin generating json_spec until every listed file is fully read.
     "I already know what the file contains" is NOT a valid reason to skip reading. Read it.
 
-  RULE 2b-2 - FOLLOW gate.magik_prompt EXACTLY. THE PROMPT IS THE SPECIFICATION:
-    gate.magik_prompt contains the complete output format. Follow it without deviation.
+  RULE 2b-2 - FOLLOW gate.rules EXACTLY. THE RULEBOOK IS THE SPECIFICATION:
+    gate.rules contains the complete output format. Follow it without deviation.
     The output JSON MUST include ALL of these top-level sections - missing any = VIOLATION:
       - screenName, fileName, filePath, associatedFiles, moduleName, description
       - rootFile                    (fileName, filePath, describesUrl, containsTriggers[])
@@ -979,7 +1033,7 @@ Gate "2b" - JSON spec generation [both modes]:
 
   RULE 2b-5 - DO NOT INVENT A SHORTCUT SPEC:
     You are NOT permitted to produce a simplified spec based on your own judgment.
-    The output format is dictated entirely by gate.magik_prompt.
+    The output format is dictated entirely by gate.rules.
     Any deviation - any section omitted, any field left empty without a real reason,
     any selector guessed instead of extracted - is a CRITICAL VIOLATION.
 
@@ -1023,71 +1077,75 @@ Gate "api_manual" - Manual API endpoint entry [USER-DECISION, api test type only
   Response: {"api_endpoint": "<url>", "api_method": "<method>",
              "api_payload": "<payload or empty>", "api_payload_type": "json"|"form"|"none"}
 
-Gate "3" - Test configuration [automated only]:
-  Note: test_type is no longer selected here - it was collected at gate "pick_type" earlier.
-  YOU MUST SHOW EVERY FIELD BELOW AND GET USER ANSWER FOR EACH - SKIPPING ANY = CRITICAL VIOLATION:
-    "AI PROVIDER - which AI drives the test (agent and ui modes):
-       1. openai - OpenAI GPT. Default. Magik is tuned for this.
-       2. claude - Anthropic Claude.
-     Current: <gate.current.agent_provider shown as 1/2>. What is your choice?
-
-     HEADLESS - browser visibility:
-       1. yes - Run browser hidden. About 3x faster. Recommended.
-       2. no  - Show the browser window. Use for debugging only.
-     Current: <1 if headless else 2>. What is your choice?
-
+Gate "3" - URL confirmation [automated only]:
+  The test type was ALREADY chosen at gate "pick_type" (gate.test_type). DO NOT re-ask it here.
+  The layer that runs is gate.test_type by default (gate.recommended_layers). Extra layers in
+  gate.optional_layers are OPTIONAL - only mention them if the user asks; never force a re-pick.
+  For test_type "unit" there is NO URL - just confirm and proceed.
+  SHOW THE USER:
+    "You chose the '<gate.test_type>' test - that layer will run. Confirm the target URL:
      TARGET URL: <gate.current.url or 'NOT SET'>
-     Required for agent and ui types. Confirm this URL or provide a new one.
-     (Do NOT proceed until user explicitly confirms the URL.)
-
-     PROFILE SCREEN (optional): <gate.current.profile_screen or 'not set'>
-     Screen name from the active Magik project profile. Press Enter to skip.
-
-     Answer every field above (type 1/2 for numbered choices):"
+     (unit needs no URL.) Reply 'accept' to run your chosen type, or list layers to override.
+     For agent: you will run your test HEADLESS (hidden) by default. Ask if the user wants to WATCH
+     it (visible browser); if yes, include visible:true. If visible, ALSO ask the user the SLOWMO
+     pace in ms (how long to slow + pause on each step so they can follow) - DEFAULT 1000 (1s) when
+     visible, 0 when headless - and pass it as slowmo."
   WAIT for user reply on ALL fields. Responding without all answers is a CRITICAL VIOLATION.
   (RULE 3: URL must be explicitly confirmed by user. Never submit a URL you assumed.)
-  Response: {"agent_provider":"openai"|"claude",
-             "headless":"yes"|"no",
+  Response: {"layers":["unit","api",...],
              "url":"http://...",
-             "profile_screen":"Name"|null}
-  --- After this response Magik runs the test. Do not timeout. Wait for next gate. ---
+             "visible": true|false,   (agent only - true = watch the browser)
+             "slowmo": 1000}          (agent + visible only - ms slowed+paused per step; default 1000, headless forces 0)
+  --- After this response ICX runs the local verification suite. This can take minutes - expect
+  {"status": "running"} back and poll get_testing_session_status(session_id) rather than assuming
+  a hang; see RUNNING in this tool's top-level RETURNS section. ---
 
 Gate "auth_gate" - Authentication configuration [USER-DECISION]:
   YOU MUST SHOW THE USER AND WAIT FOR THEIR REPLY - VIOLATION IF SKIPPED:
     "Authentication required for the test target. Choose auth mode:
        public  - No login needed. Target is publicly accessible.
-       reuse   - Reuse a previously captured session.
-       capture - Record a new login session now (use magik_login_start/capture tools).
-       inline  - Provide credentials directly (use magik_login_inline tool).
+       reuse   - Reuse a previously stored session.
+       capture - ICX opens a REAL browser; you log in BY HAND; ICX saves the session.
+       inline  - You provide the APP credentials; ICX drives the login form and saves it.
      What is your choice?"
-  For capture and inline modes, use the magik_login_start, magik_login_capture, or
-  magik_login_inline tools to perform the login, then resume with the session_id they return.
-  Response (public/reuse): {"auth_mode": "public"|"reuse"}
-  Response (capture/inline, after login tool): {"auth_mode": "capture"|"inline", "session_id": "<id>"}
+  capture: call the ui_auth_capture tool (url + file_paths); it opens a browser for MANUAL login -
+    NEVER ask the user for their username/password in chat for capture.
+  inline: call the ui_auth_inline tool (url + file_paths + username + password); ONLY inline collects
+    credentials, and they go to ICX's browser process, never into chat history.
+  reuse: uses the stored session for this project + host. public: no auth.
+  Response (any mode, AFTER the capture/inline tool returns ok): {"auth_mode": "public"|"reuse"|"capture"|"inline"}
+  Port drift: if gate.other_host_sessions is non-empty, the exact host has no session but this SAME
+  project has one at a different port (a dev server auto-incrementing past a taken port is the usual
+  cause). Show it to the user; reuse it with {"auth_mode": "reuse", "reuse_host": "<host>"} - cookie
+  auth transfers across a port change, but localStorage/sessionStorage auth (common in SPAs) does NOT
+  (origin-scoped including port), so warn the user and be ready to fall back to capture if the app
+  still looks logged out.
 
-Gate "profile_gen" - Project Profile generation [AGENT-GENERATE]:
+Gate "author_flow" - write AND run a real Playwright test [AGENT-GENERATE, agent test type only]:
   This gate is YOURS to produce. Do NOT show it to the user or wait for their reply.
-  Read every file in gate.file_paths. Apply gate.magik_prompt to generate the Project Profile.
-    gate.magik_prompt: the Magik profile creation prompt - follow it exactly for format and sections.
-    gate.file_paths: source files describing the application screens and flows.
-    gate.base_url: the application base URL (include in the profile where relevant).
-  After reading all files and applying the prompt, resume immediately with the full markdown.
-  Response: {"profile_markdown": "<full markdown>", "read_receipts": [{"path": "<p>", "line_count": <n>, "last_line": "<text>"}]}
-  - profile_markdown must be a complete Project Profile following the magik_prompt format.
-  - read_receipts: one entry per file you opened and read fully this step (path, total line count, text of the last line).
-  - This is your generation - not the user's. Produce it and submit it directly.
-
-Gate "profile_push" - Profile push confirmation [USER-DECISION]:
-  YOU MUST SHOW THE USER AND WAIT FOR THEIR REPLY - VIOLATION IF SKIPPED:
-    "Push a Magik Project Profile?
-       agent - the agent reads your source and generates the profile (AGENT-GENERATE at profile_gen).
-       file  - use an existing Project Profile markdown (.md) file you provide.
-       no    - skip profile push.
-     What is your choice?"
-  WAIT for reply. Response: {"push": "agent"|"file"|"no"}.
-  For file, also provide the profile: {"push": "file", "profile_path": "<path to a .md file>"}
-  or {"push": "file", "profile_markdown": "<raw markdown>"}. A missing/empty file is non-fatal
-  (the run continues without a profile). The legacy value "yes" is accepted as "agent".
+  gate.screen_model is the Element Census (COMBINED: live-DOM crawl fused with the source census,
+  so every selector already resolves). gate.rules carries the mandatory checklist (RULEBOOK RULE
+  applies - read it in full, every time) - CRUD lifecycle, validation, security (XSS/SQLi), a11y,
+  error-handling, data safety. Follow it; it is binding.
+  WRITE a real Playwright test file in the repo (your own editor tools) covering the checklist for
+  every functionality in gate.screen_model. RUN it YOURSELF (your Bash tool) against ICX's OWN
+  pinned Playwright install - gate.playwright gives {node, env: {NODE_PATH, PLAYWRIGHT_BROWSERS_PATH}}
+  to use, so you run ICX's install, never a bare npx/global one. Point the run's JUnit reporter at
+  gate.report_path (e.g. `playwright test <file> --reporter=junit --output=<gate.report_path>`).
+  READ Playwright's own failures (real stack traces, real selector mismatches) and FIX YOUR OWN
+  script, then re-run - repeat until the checklist is covered or you have confirmed a genuine
+  application bug (report it as a finding, never force a false pass by weakening an assertion).
+  BROWSER: gate.headless / gate.slowmo carry the user's visible/slowmo choice from gate 3 - launch
+  your own browser context accordingly (headed + slowMo when the user asked to watch).
+  AUTH: if gate.auth_mode is capture/inline/reuse, gate.storage_state is a Playwright storageState
+  path - load it into your browser context and go straight to gate.url; do NOT author login steps.
+  For a public app with no saved session, author real login steps yourself (read the actual form).
+  Response: {"report_path": "<path you actually wrote the JUnit report to>",
+             "test_file": "<path to the Playwright file you wrote>",
+             "covered": ["<functionality names/ids from screen_model you covered>"],
+             "findings": ["<genuine app bugs found, if any>"]}
+  - This is your generation AND your execution - not the user's, not ICX's. Produce it, run it,
+    self-heal it, submit the result directly.
 
 Gate "4" - Issue review [automated only]:
   YOU MUST SHOW THE USER (VIOLATION IF SKIPPED):
@@ -1152,10 +1210,10 @@ Gate "memory_save" - Save session record [both paths]:
   WAIT for user reply. Never auto-save without asking. (RULE 6)
   Response: {"save": "yes"|"no"}
 
-Gate "error" - Magik unreachable or run failed [automated only]:
+Gate "error" - verification run failed [automated only]:
   YOU MUST SHOW THE USER (VIOLATION IF SKIPPED):
     "Test stopped: <gate.message>
-       1. retry          - Reconnect and resubmit the same test run.
+       1. retry          - Re-run the same verification.
        2. skip_iteration - Count this iteration as 0 issues and continue.
        3. end_session    - Stop testing and go to UI check."
   WAIT. Response: {"choice":"1"|"2"|"3"|"retry"|"skip_iteration"|"end_session"}
@@ -1171,43 +1229,40 @@ RETURNS: {session_id, done: bool, gate: {gate: "...", message: "...", ...} | nul
 done: false -> gate.gate is set -> use that gate's format above for the next call.
 done: true  -> gate is null -> session complete, workflow finished.
 
-RUNTIME: <2s for all gates. Gate 3 response waits 30s-30min while Magik runs the test.\
+RUNNING (real browser work - verify/heal, scored execution - can take minutes): instead of gate,
+you may get {"session_id", "status": "running", "done": false, "gate": null, "poll": "..."}.
+This means the call returned before the work finished - it is NOT stuck and NOT an error. Do:
+  1. Tell the user ICX is still running (do not go silent - say what is happening).
+  2. Call get_testing_session_status(session_id) to check progress. Space out polls (e.g. every
+     15-30s) rather than hammering the tool - the work is bounded internally and will finish.
+  3. Once status is no longer "running", the response has the normal {done, gate} shape above -
+     resume from there exactly as usual.
+  NEVER call resume_testing_session again while status is "running" - there is no gate waiting
+  for an answer yet, and a stray resume on a still-executing session is rejected.
+
+RUNTIME: <2s for most gates. Gate 3 response and any AGENT-GENERATE gate that follows a live-DOM
+verify/heal pass can run long - expect "status": "running" and poll rather than assuming a hang.\
 """
 
-_MAGIK_STATUS_DESCRIPTION = """\
-Poll the current state of a Magik-AI test run. Stateless - does not require an active testing session.
-USE WHEN: The MCP connection timed out mid-test and you need to check if the run completed,
-or when the user asks "is the test done yet?" outside of an active session loop.
-SKIP IF: The testing session is still active - results are delivered automatically via resume_testing_session.
+_TESTING_STATUS_DESCRIPTION = """\
+Poll a testing session that returned {"status": "running"} from start_testing_session or \
+resume_testing_session. Cheap, read-only, safe to call repeatedly.
 
-RETURNS: {ok: true, data: {runId, state, counters: {pass, fail, warn, skip, error, total}, reportUrl}}
-  state: "pending" | "running" | "completed" | "failed" | "cancelled"
-  reportUrl: populated only when state is completed or failed
-  counters for agent runs: {steps, successes, errors} (no pass/fail/total)
-{ok: false, error: "run not found - Magik may have restarted"} when the run is gone.
-{ok: false, error: "..."} when Magik is unreachable.
+session_id: the same UUID from start_testing_session.
 
-EXAMPLE: magik_test_status(run_id="ui-1748602800-abc123") ->
-  state: "running", counters: {pass: 12, fail: 2, total: 24}
-  -> 2 failures so far, still running. Check again in 30 seconds.
+RETURNS one of:
+  {"session_id", "status": "running", "done": false, "gate": null}
+    Still executing. Wait and poll again (every 15-30s is enough - do not busy-poll).
+  {"session_id", "done": false, "gate": {...}, "status": "..."}
+    Finished and a new gate is waiting - handle it exactly like any resume_testing_session gate
+    response (see resume_testing_session's GATE POSTURE CLASSIFICATION and per-gate rules).
+  {"session_id", "done": true, "gate": null, "status": "...", "error": null|"..."}
+    Session complete.
+  {"error": "..."}
+    session_id unknown/malformed, or the session's state could not be read.
 
-run_id prefix indicates type: "ui-..." for UI tests, "api-..." for API tests, "agent-..." for agent runs.
-RUNTIME: <1 second.\
-"""
-
-_MAGIK_RESULTS_DESCRIPTION = """\
-Fetch the final test results for a completed Magik-AI run as clean JSON. Stateless.
-USE WHEN: After magik_test_status shows state=completed or state=failed, when operating outside the session loop.
-SKIP IF: The testing session is still active - Gate 4 delivers results automatically without calling this.
-
-RETURNS: {ok: true, issues: [...], raw: {...}}
-  issues: parsed list of test findings. Content depends on test type and Magik version.
-  raw: full report JSON from Magik-AI for direct inspection.
-{ok: false, error: "run not complete yet - check magik_test_status first"} if state is not terminal.
-{ok: false, error: "run not found"} if Magik restarted and the run was lost.
-
-run_id: the runId returned by Magik-AI when the test was submitted.
-RUNTIME: <2 seconds.\
+Never call resume_testing_session while a status poll still returns "running" - only call it again
+once you have a gate to answer.\
 """
 
 # ---------------------------------------------------------------------------
@@ -1232,15 +1287,20 @@ ICX TOOL SEQUENCE - WORKFLOW ORDER (read this first):
   [14] memory_find_by_file    [<1s]  MANDATORY before editing each file
   [15] memory_get_related     [<1s]  hidden coupling - call after finding bug location
   [16] memory_get_patterns    [<1s]  systemic analysis - call for recurring bug categories
-       --- implement fix here, only after explicit user approval ---
+       --- LOCK THE PLAN before writing any code ---
+  [17] lock_plan              [<1s]  MANDATORY - submit the files you will change; blocks on any
+                                     high-signal file you missed (fuses graph+grep+semantic+memory)
+       --- implement fix here, only after lock_plan returns ok AND explicit user approval ---
        --- ask: "How would you like to test? 1. automated  2. manual" ---
-  [17] magik_health_check      [<1s]  AUTOMATED ONLY - verify Magik-AI running before starting session
   [18] start_testing_session   [1-5s] begin test session (pass test_mode from user's answer)
   [19] resume_testing_session         respond to every gate in sequence until done: true
+                                       (a "status":"running" reply means poll
+                                        get_testing_session_status instead of resuming again)
        --- after testing confirms fix works ---
   [20] reinforce_memory_usage [<1s]  MANDATORY first if any memory_search result influenced your approach
   [21] save_memory                   MANDATORY - only after testing confirms fix works - always after [20]
-  [22] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
+  [22] draft_skill                   MANDATORY - immediately after [21], every time, even if skill_worthy=false
+  [23] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
 
 Runs AI analysis on issue text only - attachments are not downloaded or processed. \
 Use when the issue description and comments contain sufficient context, or for quick triage.
@@ -1323,6 +1383,12 @@ The only trigger that allows you to begin implementation is the user explicitly 
 or telling you to proceed. Silence, partial responses, or ambiguous replies do NOT count as \
 approval. If unclear, ask again. Do not assume.
 
+RULE 3b - SPEC-LOCK BEFORE CODE:
+After you decide which files to change and BEFORE writing any code, call lock_plan with those files. \
+It returns high-signal files you missed (graph/grep/semantic/memory). You MUST NOT write code until \
+lock_plan returns ok - resolve each blocking_missed file by including it or justifying it. This is \
+what prevents a wrong-scope first attempt.
+
 RULE 4 - APPROACH CHANGE:
 If the user requests a different approach, you MUST present the revised plan using the same \
 confirmation format above and wait for approval again. You MUST NOT begin implementing the \
@@ -1331,11 +1397,11 @@ revised approach without a second explicit approval.
 RULE 5 - TESTING GATE:
 After implementation is complete, you MUST ask the user:\n\
   "How would you like to test this fix?\n\
-   1. automated - Magik-AI runs the test for you\n\
+   1. automated - ICX runs the local verification for you\n\
    2. manual    - you run it yourself and confirm the result"\n\
 Do NOT call reinforce_memory_usage or save_memory yet. Do NOT skip this question.\n\
 Based on the user's answer:\n\
-  If 1 (automated): call magik_health_check [17], then start_testing_session [18], then resume all gates [19].\n\
+  If 1 (automated): call start_testing_session [18], then resume all gates [19].\n\
   If 2 (manual):    call start_testing_session(test_mode="manual") [18], then resume all gates [19].\n\
 Complete the full testing flow (all gates through memory_save).\n\
 After testing session reaches done: true:\n\
@@ -1345,8 +1411,9 @@ After testing session reaches done: true:\n\
   If yes:\n\
     call reinforce_memory_usage [20] FIRST (if any memory_search result influenced your approach).\n\
     call save_memory [21] with all required fields.\n\
+    call draft_skill [22] IMMEDIATELY after - mandatory, even if the honest judgment is skill_worthy=false.\n\
   If no: do not call save_memory. Session ends here.\n\
-save_memory [21] is the FINAL step. It is NEVER called before testing completes or without human confirmation.
+draft_skill [22] is the FINAL step, called right after save_memory [21]. Neither is skipped once testing completes and the user confirms.
 
 RULE 6 - MANDATORY TOOL COMPLETENESS:
 Before presenting the confirmation format, you MUST have called every tool whose skip condition is NOT met. \
@@ -1380,6 +1447,7 @@ WORKFLOW (follow in order, no skipping):
    If yes:
      a. call reinforce_memory_usage [20] FIRST if memory_search result was used
      b. call save_memory [21] with resolution_note, files_changed, root_cause_pattern, and all required fields
+     c. call draft_skill [22] immediately after - mandatory, even if skill_worthy=false
    If no: stop. Do not call save_memory.\
 """
 
@@ -1401,15 +1469,20 @@ ICX TOOL SEQUENCE - WORKFLOW ORDER (read this first):
   [14] memory_find_by_file    [<1s]  MANDATORY before editing each file
   [15] memory_get_related     [<1s]  hidden coupling - call after finding bug location
   [16] memory_get_patterns    [<1s]  systemic analysis - call for recurring bug categories
-       --- implement fix here, only after explicit user approval ---
+       --- LOCK THE PLAN before writing any code ---
+  [17] lock_plan              [<1s]  MANDATORY - submit the files you will change; blocks on any
+                                     high-signal file you missed (fuses graph+grep+semantic+memory)
+       --- implement fix here, only after lock_plan returns ok AND explicit user approval ---
        --- ask: "How would you like to test? 1. automated  2. manual" ---
-  [17] magik_health_check      [<1s]  AUTOMATED ONLY - verify Magik-AI running before starting session
   [18] start_testing_session   [1-5s] begin test session (pass test_mode from user's answer)
   [19] resume_testing_session         respond to every gate in sequence until done: true
+                                       (a "status":"running" reply means poll
+                                        get_testing_session_status instead of resuming again)
        --- after testing confirms fix works ---
   [20] reinforce_memory_usage [<1s]  MANDATORY first if any memory_search result influenced your approach
   [21] save_memory                   MANDATORY - only after testing confirms fix works - always after [20]
-  [22] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
+  [22] draft_skill                   MANDATORY - immediately after [21], every time, even if skill_worthy=false
+  [23] get_memory_audit        [<1s]  diagnostic only - when investigating why a result ranks unexpectedly
 
 Fetches and analyzes a work item (bug, story, or task) with full vision and OCR processing \
 for image attachments. Identifies relevant codebase files via graph navigation.
@@ -1490,6 +1563,12 @@ The only trigger that allows you to begin implementation is the user explicitly 
 or telling you to proceed. Silence, partial responses, or ambiguous replies do NOT count as \
 approval. If unclear, ask again. Do not assume.
 
+RULE 3b - SPEC-LOCK BEFORE CODE:
+After you decide which files to change and BEFORE writing any code, call lock_plan with those files. \
+It returns high-signal files you missed (graph/grep/semantic/memory). You MUST NOT write code until \
+lock_plan returns ok - resolve each blocking_missed file by including it or justifying it. This is \
+what prevents a wrong-scope first attempt.
+
 RULE 4 - APPROACH CHANGE:
 If the user requests a different approach, you MUST present the revised plan using the same \
 confirmation format above and wait for approval again. You MUST NOT begin implementing the \
@@ -1498,11 +1577,11 @@ revised approach without a second explicit approval.
 RULE 5 - TESTING GATE:
 After implementation is complete, you MUST ask the user:\n\
   "How would you like to test this fix?\n\
-   1. automated - Magik-AI runs the test for you\n\
+   1. automated - ICX runs the local verification for you\n\
    2. manual    - you run it yourself and confirm the result"\n\
 Do NOT call reinforce_memory_usage or save_memory yet. Do NOT skip this question.\n\
 Based on the user's answer:\n\
-  If 1 (automated): call magik_health_check [17], then start_testing_session [18], then resume all gates [19].\n\
+  If 1 (automated): call start_testing_session [18], then resume all gates [19].\n\
   If 2 (manual):    call start_testing_session(test_mode="manual") [18], then resume all gates [19].\n\
 Complete the full testing flow (all gates through memory_save).\n\
 After testing session reaches done: true:\n\
@@ -1512,8 +1591,9 @@ After testing session reaches done: true:\n\
   If yes:\n\
     call reinforce_memory_usage [20] FIRST (if any memory_search result influenced your approach).\n\
     call save_memory [21] with all required fields.\n\
+    call draft_skill [22] IMMEDIATELY after - mandatory, even if the honest judgment is skill_worthy=false.\n\
   If no: do not call save_memory. Session ends here.\n\
-save_memory [21] is the FINAL step. It is NEVER called before testing completes or without human confirmation.
+draft_skill [22] is the FINAL step, called right after save_memory [21]. Neither is skipped once testing completes and the user confirms.
 
 RULE 6 - MANDATORY TOOL COMPLETENESS:
 Before presenting the confirmation format, you MUST have called every tool whose skip condition is NOT met. \
@@ -1974,6 +2054,122 @@ _PROFILE_SCHEMA = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Shared boost brief builder - used by both the icx_boost TOOL (_call_tool)
+# and the icx-boost PROMPT (_get_prompt). Kept as one function so the two
+# entry points never drift.
+# ---------------------------------------------------------------------------
+
+def _run_boost_brief(prompt: str, repo_path: str | None = None, current_file: str | None = None,
+                     is_continuation: bool = False, links_in=None) -> dict:
+    """Build the one-pass boost brief. Returns a plain dict - never raises (degrades to a minimal
+    methodology-only brief on internal failure so callers always get a usable response)."""
+    try:
+        from icx_engine.boost.classify import is_trivial
+        if is_trivial(prompt):
+            return {
+                "skip": True,
+                "reason": "conversational/continuation message - no boost needed; answer directly "
+                          "(continue the current task with the context you already have).",
+                "boost_meta": {"deterministic": True, "llm_used": False, "trivial": True},
+            }
+    except Exception:
+        pass   # never let the guard block a real boost
+    try:
+        from icx_engine.boost.service import build_boost_brief
+        provided = [str(u) for u in (links_in or [])]
+        brief = build_boost_brief(
+            prompt, repo_path=repo_path, current_file=current_file,
+            is_continuation=is_continuation, links_in=provided,
+            env_fn=_boost_env, signals_fn=_context_signals, connected_fn=_icx_connected)
+        try:
+            idx = rank_skills(prompt, brief.get("archetype", "coding"), storage=SkillStorage())
+            if idx:
+                brief["skills"] = {"index": idx}
+        except Exception:
+            pass   # a skill-ranking failure must never break the boost response
+        return brief
+    except Exception as exc:
+        from icx_engine.methodology import build_checklist_for as _bcf
+        m = _bcf(prompt)
+        return {
+            "archetype": m["archetype"], "methodology": m,
+            "context": {"activated_signals": [], "files": [], "skipped": str(exc)},
+            "links": [], "clarifications": [], "gates": m["gate_sequence"],
+            "boosted_prompt": prompt, "boost_meta": {"deterministic": True, "llm_used": False},
+            "mandatory_directive": "Follow the ICX methodology; boost degraded to minimal mode.",
+            "intent": prompt,
+        }
+
+
+def _auto_refine_brief(prompt: str, brief: dict) -> dict:
+    """Auto-refine pass: takes a boost brief and deterministically applies compose_cto_prompt with an
+    empty spec (no agent-drafted objective/requirements needed) so a single call produces the full
+    two-pass CTO-grade prompt. The agent may still call icx_boost_refine itself afterwards with a
+    hand-drafted spec for a stronger result - that stays optional, not required."""
+    if brief.get("skip"):
+        return brief
+    from icx_engine.boost.refine import compose_cto_prompt
+    archetype = brief.get("archetype", "coding")
+    context = brief.get("context") or {}
+    brief = dict(brief)
+    brief["boosted_prompt"] = compose_cto_prompt(prompt, archetype, None, context)
+    brief["boost_meta"] = {**(brief.get("boost_meta") or {}), "auto_refined": True}
+    brief["refine_note"] = (
+        "This already ran boost + an auto-refine pass in one call - work from boosted_prompt directly, "
+        "no second call is required. Optionally call icx_boost_refine yourself with a hand-drafted "
+        "objective/requirements/constraints/acceptance/dims for an even stronger spec."
+    )
+    return brief
+
+
+def _boosted(prompt: str, repo_path: str | None = None, current_file: str | None = None,
+            is_continuation: bool = False, links_in=None) -> dict:
+    """One call, two passes: build the boost brief then auto-apply the refine pass. This is what both
+    the icx_boost tool and the icx-boost MCP prompt return, so neither entry point ever needs a second
+    manual call to reach the CTO-grade result."""
+    brief = _run_boost_brief(prompt, repo_path=repo_path, current_file=current_file,
+                             is_continuation=is_continuation, links_in=links_in)
+    return _auto_refine_brief(prompt, brief)
+
+
+@server.list_prompts()
+async def _list_prompts() -> list[Prompt]:
+    return [
+        Prompt(
+            name=_BOOST_PROMPT_NAME,
+            description=(
+                "Boost this request into a CTO-grade working spec in ONE call - boost + an auto-refine "
+                "pass both run deterministically before you see the result, so no second slash command "
+                "or tool call is required. Use this on demand (e.g. /icx-boost <your request>) instead "
+                "of on every message."
+            ),
+            arguments=[
+                PromptArgument(name="prompt", description="The raw user request.", required=True),
+                PromptArgument(name="repo_path", description="Project path, if any.", required=False),
+                PromptArgument(name="current_file", description="File in focus, if any.", required=False),
+            ],
+        ),
+    ]
+
+
+@server.get_prompt()
+async def _get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
+    args = arguments or {}
+    if name != _BOOST_PROMPT_NAME:
+        raise ValueError(f"Unknown prompt: {name}")
+    prompt = str(args.get("prompt", "")).strip()
+    if not prompt:
+        raise ValueError("prompt argument is required")
+    repo_path = args.get("repo_path") or None
+    current_file = args.get("current_file") or None
+    brief = _boosted(prompt, repo_path=repo_path, current_file=current_file)
+    return GetPromptResult(
+        description="ICX boosted + auto-refined CTO-grade working spec",
+        messages=[PromptMessage(role="user", content=TextContent(type="text", text=json.dumps(brief)))],
+    )
+
+
 @server.list_tools()
 async def _list_tools() -> list[Tool]:
     # Do NOT call ConfigManager.load() here - it triggers a keyring health check
@@ -2004,6 +2200,86 @@ async def _list_tools() -> list[Tool]:
             name=_FULL_TOOL_NAME,
             description=_FULL_DESCRIPTION + profile_hint,
             inputSchema=analyze_schema,
+        ),
+        # ------------------------------------------------------------------ #
+        # [1b] Methodology - the mandatory discipline; analyze already        #
+        #      injects the one-pager, this returns the full framework         #
+        # ------------------------------------------------------------------ #
+        Tool(
+            name=_GET_METHODOLOGY_TOOL,
+            description=(
+                "Return the full ICX problem-solving methodology (intake, context, classify, decompose, "
+                "plan, execute, self-check, confidence, fail-well, verify) with archetypes, decision "
+                "rules, and pitfalls. analyze_issue already injects the mandatory one-pager into its "
+                "response.methodology - call this when you want the complete framework. Following the "
+                "methodology on every ticket is MANDATORY. No input."
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        Tool(
+            name=_BOOST_TOOL,
+            description=(
+                "The ICX thinking channel - call this ON DEMAND (e.g. the user typed /icx-boost, or an "
+                "MCP-prompt-capable editor invoked the icx-boost prompt) rather than on every message. "
+                "Give it the user's raw prompt; it returns a boosted brief: the real intent, the task "
+                "archetype, the MANDATORY ICX methodology for that archetype, only the codebase context "
+                "the problem actually needs (graph/grep/memory - skipped for a plain question or when no "
+                "repo is connected), clarifications, the gate sequence, any links (preserved + tagged with "
+                "how to pull them - via an ICX tool, by connecting ICX, or with your own tool), and a "
+                "boosted_prompt to work from - this already includes an auto-refine pass (deterministic, "
+                "no second call needed). Follow mandatory_directive. A work-tracker ticket reference "
+                "(ABC-123, a Jira/GitHub/Linear/GitLab URL) or a SonarQube reference is ALWAYS routed "
+                "through ICX (analyze_issue_fast / sonar_* tools) regardless of whether boost was called - "
+                "that routing is independent of this on-demand channel."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "The raw user request."},
+                    "repo_path": {"type": "string", "description": "Project path, if any."},
+                    "current_file": {"type": "string", "description": "File in focus, if any."},
+                    "is_continuation": {"type": "boolean",
+                                        "description": "True if iterating on an ongoing problem."},
+                },
+                "required": ["prompt"],
+            },
+        ),
+        Tool(
+            name=_BOOST_REFINE_TOOL,
+            description=(
+                "OPTIONAL enrichment on top of icx_boost - not required, since icx_boost already returns "
+                "an auto-refined CTO-grade boosted_prompt in one call. Call this only when YOU (the agent, "
+                "no extra model cost) have your own deeper understanding of the request and want to draft "
+                "a STRUCTURED spec for an even stronger result (measurably stronger - proven +18% "
+                "requirement coverage over the auto-refined default). ICX deterministically assembles the "
+                "final expert prompt: a best-in-class persona chosen per problem, your restated objective, "
+                "the codebase context, the merged requirements, constraints, deliverable, acceptance "
+                "criteria + ICX gates, and the methodology standard. Draft these (all optional; ICX fills "
+                "any gap): objective (restate the ask professionally), requirements[], constraints[], "
+                "deliverable, acceptance[] (definition of done), dims[] (extra completeness items). Supply "
+                "at least one of objective/requirements/dims."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "The original user request (verbatim)."},
+                    "objective": {"type": "string", "description": "Your professional restatement of the real goal."},
+                    "requirements": {"type": "array", "items": {"type": "string"},
+                                     "description": "Explicit + inferred functional requirements."},
+                    "constraints": {"type": "array", "items": {"type": "string"},
+                                    "description": "Tech stack, conventions, and things NOT to do."},
+                    "deliverable": {"type": "string", "description": "What to produce and in what form."},
+                    "acceptance": {"type": "array", "items": {"type": "string"},
+                                   "description": "Definition of done - how the result is judged."},
+                    "dims": {"type": "array", "items": {"type": "string"},
+                             "description": "Extra task-specific completeness items a rushed answer forgets."},
+                    "archetype": {"type": "string",
+                                  "description": "Archetype from icx_boost. Optional; re-classified if omitted."},
+                    "repo_path": {"type": "string", "description": "Project path, if any."},
+                    "current_file": {"type": "string", "description": "File in focus, if any."},
+                },
+                "required": ["prompt"],
+            },
         ),
         # ------------------------------------------------------------------ #
         # [3] Memory search - immediately after analyze, before graph        #
@@ -2396,19 +2672,41 @@ async def _list_tools() -> list[Tool]:
             },
         ),
         # ------------------------------------------------------------------ #
-        # [17-19] Magik-AI testing - ask user preference, then run          #
-        #         [17] health_check (automated only)                        #
+        # [17] lock_plan - spec-lock the file set BEFORE coding             #
+        # ------------------------------------------------------------------ #
+        Tool(
+            name=_LOCK_PLAN_TOOL,
+            description=(
+                "SPEC-LOCK - call this AFTER gathering context and deciding which files to change, and "
+                "BEFORE writing any code. Submit the files you plan to change; ICX fuses graph + grep + "
+                "semantic + memory signals and returns any HIGH-signal file your plan MISSED (a direct "
+                "dependent, a co-change partner, or a file a prior fix touched). It is the guard against "
+                "a wrong-scope first attempt. Input: {issue_ref, chosen_files:[paths you will change], "
+                "justifications?:{path:reason}, project_path?, keywords?:[ticket symbols/routes/errors]}. "
+                "Returns {ok, coverage, blocking_missed[], advisory_missed[], accepted[]}. "
+                "HARD RULE: do NOT write code until ok is true. For each blocking_missed file, either add "
+                "it to chosen_files and call again, or justify it. This runs no LLM - it is deterministic."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_ref": {"type": "string"},
+                    "chosen_files": {"type": "array", "items": {"type": "string"}},
+                    "justifications": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "project_path": {"type": "string"},
+                    "keywords": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["issue_ref", "chosen_files"],
+            },
+        ),
+        # ------------------------------------------------------------------ #
+        # [18-19] local testing - ask user preference, then run             #
         #         [18] start_testing_session                                #
         #         [19] resume_testing_session (all gates)                   #
         # ------------------------------------------------------------------ #
         Tool(
-            name=_MAGIK_HEALTH_TOOL,
-            description=_MAGIK_HEALTH_DESCRIPTION,
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-        Tool(
-            name=_MAGIK_START_TOOL,
-            description=_MAGIK_START_DESCRIPTION,
+            name=_TESTING_START_TOOL,
+            description=_TESTING_START_DESCRIPTION,
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2416,13 +2714,19 @@ async def _list_tools() -> list[Tool]:
                     "context": {"type": "string"},
                     "max_iterations": {"type": "integer", "minimum": 1},
                     "test_mode": {"type": "string", "enum": ["automated", "manual"]},
+                    "test_writes": {"type": "boolean",
+                                    "description": "agent-type: allow real Create/Update/Delete writes against the live app (default true). Set false for a read-only environment - the agent's test then exercises forms (fill/validate/cancel) without submitting a real write."},
+                    "nl_intent": {"type": "string",
+                                  "description": "Optional plain-English scenario request (e.g. 'test duplicate email error') to seed extra NL-driven test scenarios."},
+                    "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                                            "description": "Optional ticket acceptance criteria to author extra scenarios from."},
                 },
                 "required": ["file_paths", "test_mode"],
             },
         ),
         Tool(
-            name=_MAGIK_RESUME_TOOL,
-            description=_MAGIK_RESUME_DESCRIPTION,
+            name=_TESTING_RESUME_TOOL,
+            description=_TESTING_RESUME_DESCRIPTION,
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2430,6 +2734,17 @@ async def _list_tools() -> list[Tool]:
                     "response": {"type": "object"},
                 },
                 "required": ["session_id", "response"],
+            },
+        ),
+        Tool(
+            name=_TESTING_STATUS_TOOL,
+            description=_TESTING_STATUS_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                },
+                "required": ["session_id"],
             },
         ),
         # ------------------------------------------------------------------ #
@@ -2549,12 +2864,160 @@ async def _list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "One-paragraph summary of what attachments showed. Max 500 chars.",
                     },
+                    "verified_by_human": {
+                        "type": "boolean",
+                        "description": "Manual-verification override: set true when the user personally tested and confirmed the fix (manual path). Lets save_memory record a verified success without an automated record_verification. Still requires outcome_feedback_note.",
+                    },
                 },
                 "required": ["issue_key", "summary", "problem_description", "resolution_note", "files_changed", "tags", "work_item_type"],
             },
         ),
+        Tool(
+            name=_DRAFT_SKILL_TOOL,
+            description=(
+                "MANDATORY immediately after every save_memory call where outcome_verified=true - no "
+                "exceptions, even when the honest judgment is skill_worthy=false. YOU decide: is this "
+                "fix non-obvious and likely to recur? If save_memory's response included "
+                "related_skills, check whether one of those names already covers this - reuse that "
+                "skill_name to refine it (your fresh text replaces the stale text) rather than create "
+                "a near-duplicate. Write description in third person, stating both what the skill does "
+                "and when to use it (e.g. 'Fixes N+1 query patterns in SQLAlchemy. Use when a list "
+                "endpoint is slow and profiling shows repeated single-row queries.'). Generalize - do "
+                "not paraphrase the raw ticket. Input: {issue_key, skill_worthy, skill_name?, "
+                "description?, when_to_use?, procedure?, verification?, pitfalls?, tags?} - the five "
+                "content fields are required when skill_worthy=true. Returns {status: skipped} or "
+                "{status: created|updated, name} or {error}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "The issue_key from the save_memory call this follows."},
+                    "skill_worthy": {"type": "boolean", "description": "Your own judgment - false is a valid, expected answer."},
+                    "skill_name": {"type": "string", "description": "Required when skill_worthy=true. Reuse an existing name (from related_skills) to refine it, or pick a new one to create."},
+                    "description": {"type": "string", "description": "Required when skill_worthy=true. Third person - states what it does AND when to use it."},
+                    "when_to_use": {"type": "string", "description": "Required when skill_worthy=true. The trigger condition."},
+                    "procedure": {"type": "string", "description": "Required when skill_worthy=true. The generalized step-by-step fix."},
+                    "verification": {"type": "string", "description": "Required when skill_worthy=true. How to confirm this class of fix worked."},
+                    "pitfalls": {"type": "string", "description": "Optional. Gotchas or wrong turns."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional. Merged with the originating entry's own tags."},
+                },
+                "required": ["issue_key", "skill_worthy"],
+            },
+        ),
+        Tool(
+            name=_SKILL_GET_TOOL,
+            description=(
+                "USE WHEN icx_boost's brief includes a skills.index entry you want full context on - "
+                "fetches one learned skill's complete markdown body (When to Use/Procedure/Pitfalls/"
+                "Verification). Never bulk-fetch every candidate - call this only for the name(s) you "
+                "actually want. Input: {name}. Returns {body} or {error}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill name, from skills.index in the icx_boost brief."},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name=_SKILLS_INDEX_TOOL,
+            description=(
+                "USE WHEN you suspect icx_boost's skills.index or save_memory's related_skills missed "
+                "something relevant - both are ranked/capped hints, not the full picture. Returns EVERY "
+                "learned skill's name and description, unranked, uncapped. Scan it yourself and decide "
+                "what's actually relevant; then call icx_skill_get for full content on the one(s) you "
+                "want. No input."
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        Tool(
+            name=_RECORD_VERIFICATION_TOOL,
+            description=(
+                "Record Definition-of-Done verification evidence before declaring a ticket done. "
+                "Submit each DoD item with the exact command run and its output; every item must "
+                "have a non-empty command, non-empty output, and passed=true to be accepted. "
+                "Required before save_memory can record a verified success on the automated path "
+                "(or pass verified_by_human=true to save_memory if you verified manually). "
+                "Input: {issue_key, dod_items:[{check, method, passed, command, output}], "
+                "self_review_note, layers_run?}. Returns {accepted, missing, confidence}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string"},
+                    "dod_items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "check": {"type": "string"},
+                                "method": {"type": "string"},
+                                "passed": {"type": "boolean"},
+                                "command": {"type": "string"},
+                                "output": {"type": "string"},
+                            },
+                            "required": ["check", "passed", "command", "output"],
+                        },
+                    },
+                    "self_review_note": {"type": "string"},
+                    "layers_run": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["issue_key", "dod_items"],
+            },
+        ),
+        Tool(
+            name=_UI_AUTH_CAPTURE_TOOL,
+            description=(
+                "CAPTURE a UI login session by opening a REAL browser for the user to log in by hand "
+                "- NEVER ask the user for their username/password in chat for this. Call this at the "
+                "auth_gate when the user chose 'capture'. ICX opens a headed Chromium at the login "
+                "URL; the user logs in manually; when they reach success_url (or close the window) "
+                "ICX saves the authenticated session (cookies+localStorage) for this project+host and "
+                "the UI test replays already logged in. Input: {url, file_paths:[seed files, to key "
+                "the session to this project], success_url?}. Returns {ok, storage_state}. After ok, "
+                "resume the auth_gate with {\"auth_mode\":\"capture\"}. If it fails with a Playwright/"
+                "tooling error, DO NOT run npm/npx/playwright install in the user's repo - ICX brings "
+                "its own tooling; tell the user to run `icx test setup --force` instead."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "file_paths": {"type": "array", "items": {"type": "string"}},
+                    "success_url": {"type": "string"},
+                },
+                "required": ["url", "file_paths"],
+            },
+        ),
+        Tool(
+            name=_UI_AUTH_INLINE_TOOL,
+            description=(
+                "INLINE login: the user provides the APPLICATION credentials (username/password the "
+                "app requires) and ICX drives the login form, then saves the authenticated session. "
+                "Use at the auth_gate when the user chose 'inline'. The credentials are passed to "
+                "ICX's browser process only - never stored by ICX beyond the resulting session, never "
+                "echoed. Input: {url, file_paths, username, password, success_url?, user_selector?, "
+                "pass_selector?, submit_selector?}. Returns {ok, storage_state}. After ok, resume the "
+                "auth_gate with {\"auth_mode\":\"inline\"}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "file_paths": {"type": "array", "items": {"type": "string"}},
+                    "username": {"type": "string"},
+                    "password": {"type": "string"},
+                    "success_url": {"type": "string"},
+                    "user_selector": {"type": "string"},
+                    "pass_selector": {"type": "string"},
+                    "submit_selector": {"type": "string"},
+                },
+                "required": ["url", "file_paths", "username", "password"],
+            },
+        ),
         # ------------------------------------------------------------------ #
-        # [22] Audit trail - diagnostic only                                 #
+        # [23] Audit trail - diagnostic only                                 #
         # ------------------------------------------------------------------ #
         Tool(
             name=_AUDIT_TOOL_NAME,
@@ -2576,52 +3039,10 @@ async def _list_tools() -> list[Tool]:
             },
         ),
         # ------------------------------------------------------------------ #
-        # [23-24] Magik-AI fallback - stateless, when session disconnected   #
-        # ------------------------------------------------------------------ #
-        Tool(
-            name=_MAGIK_STATUS_TOOL,
-            description=_MAGIK_STATUS_DESCRIPTION,
-            inputSchema={
-                "type": "object",
-                "properties": {"run_id": {"type": "string"}},
-                "required": ["run_id"],
-            },
-        ),
-        Tool(
-            name=_MAGIK_RESULTS_TOOL,
-            description=_MAGIK_RESULTS_DESCRIPTION,
-            inputSchema={
-                "type": "object",
-                "properties": {"run_id": {"type": "string"}},
-                "required": ["run_id"],
-            },
-        ),
-        # ------------------------------------------------------------------ #
-        # [25-29] Magik-AI auth - drive login during auth_gate               #
-        # ------------------------------------------------------------------ #
-        Tool(name=_MAGIK_LOGIN_START_TOOL, description=_MAGIK_LOGIN_START_DESCRIPTION,
-             inputSchema={"type": "object", "properties": {"loginUrl": {"type": "string"}},
-                          "required": ["loginUrl"]}),
-        Tool(name=_MAGIK_LOGIN_CAPTURE_TOOL, description=_MAGIK_LOGIN_CAPTURE_DESCRIPTION,
-             inputSchema={"type": "object",
-                          "properties": {"interactiveId": {"type": "string"}, "label": {"type": "string"}},
-                          "required": ["interactiveId"]}),
-        Tool(name=_MAGIK_LOGIN_CANCEL_TOOL, description=_MAGIK_LOGIN_CANCEL_DESCRIPTION,
-             inputSchema={"type": "object", "properties": {"interactiveId": {"type": "string"}},
-                          "required": ["interactiveId"]}),
-        Tool(name=_MAGIK_LOGIN_INLINE_TOOL, description=_MAGIK_LOGIN_INLINE_DESCRIPTION,
-             inputSchema={"type": "object",
-                          "properties": {"loginUrl": {"type": "string"}, "username": {"type": "string"},
-                                         "password": {"type": "string"}},
-                          "required": ["loginUrl", "username", "password"]}),
-        Tool(name=_MAGIK_LOGOUT_TOOL, description=_MAGIK_LOGOUT_DESCRIPTION,
-             inputSchema={"type": "object", "properties": {"sessionId": {"type": "string"}},
-                          "required": ["sessionId"]}),
-        # ------------------------------------------------------------------ #
         # Sonar code-quality tools - direct SonarQube reader, read-only      #
         # ------------------------------------------------------------------ #
         Tool(name=_SONAR_STATUS_TOOL,
-             description="Show Sonar configuration and live connection health. Works regardless of sonar_enabled.",
+             description="USE WHEN the user asks about code quality and you must first confirm Sonar is reachable: shows Sonar configuration and live connection health. ALWAYS call this before other sonar_* tools if a connection error is possible. Works regardless of sonar_enabled.",
              inputSchema={"type": "object", "properties": {}, "required": []}),
         Tool(name=_SONAR_PROJECTS_TOOL,
              description=("Discover SonarQube projects the token can access. FOLLOW the mandatory protocol in the "
@@ -2640,24 +3061,29 @@ async def _list_tools() -> list[Tool]:
                           "properties": {"project": {"type": "string"}, "query": {"type": "string"}},
                           "required": ["project"]}),
         Tool(name=_SONAR_MEASURES_TOOL,
-             description="Fetch project measures (bugs, vulnerabilities, code smells, security hotspots, coverage, duplication, technical debt, ratings, tests) for a project/branch. Requires sonar_enabled.",
+             description="USE WHEN you need the headline code-quality numbers for a project: MUST fetch project measures (bugs, vulnerabilities, code smells, security hotspots, coverage, duplication, technical debt, ratings, tests) for a project/branch here rather than guessing them. Requires sonar_enabled.",
              inputSchema={"type": "object",
                           "properties": {"project": {"type": "string"}, "branch": {"type": "string"}},
                           "required": ["project"]}),
         Tool(name=_SONAR_QUALITY_GATE_TOOL,
-             description="Fetch the quality gate status and failing conditions for a project/branch. Requires sonar_enabled.",
+             description="USE WHEN deciding if code is releasable or why a build's quality gate failed: MUST fetch the quality gate status and failing conditions for a project/branch here - never assert pass/fail without it. Requires sonar_enabled.",
              inputSchema={"type": "object",
                           "properties": {"project": {"type": "string"}, "branch": {"type": "string"}},
                           "required": ["project"]}),
         Tool(name=_SONAR_FINDINGS_TOOL,
-             description=("Fetch scoped findings (bugs, vulnerabilities, code smells, security hotspots) for a project/branch. "
-                          "Scope to the files the developer is working on by passing `files` (a user-supplied list of paths); "
-                          "omit `files` for the whole project. Filter with types/severities/statuses/author/assignee/new_code_only. Requires sonar_enabled."),
+             description=("USE WHEN the user wants the specific Sonar issues on their code: MUST fetch scoped findings "
+                          "(bugs, vulnerabilities, code smells, security hotspots) for a project/branch here - do not "
+                          "invent findings. Scope to the files the developer is working on by passing `files` (a "
+                          "user-supplied list of paths); omit `files` for the whole project. Filter with "
+                          "types/severities/statuses/author/assignee/new_code_only. Requires sonar_enabled."),
              inputSchema=_SONAR_SCOPE_SCHEMA),
         Tool(name=_SONAR_REPORT_TOOL,
-             description=("Assemble a full structured report for a project/branch: quality gate, project measures, per-file measures, "
-                          "findings (issues + security hotspots), duplication blocks, and test-coverage gaps. Pass `files` (user-supplied paths) "
-                          "to scope everything to the developer's working set; omit for the whole project. Requires sonar_enabled."),
+             description=("USE WHEN you need the complete code-quality picture in one call (prefer this over calling the "
+                          "individual sonar_* tools separately): MUST assemble a full structured report for a "
+                          "project/branch - quality gate, project measures, per-file measures, findings (issues + "
+                          "security hotspots), duplication blocks, and test-coverage gaps. Pass `files` (user-supplied "
+                          "paths) to scope everything to the developer's working set; omit for the whole project. "
+                          "Requires sonar_enabled."),
              inputSchema=_SONAR_SCOPE_SCHEMA),
     ]
 
@@ -3210,6 +3636,199 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
+    if name == _RECORD_VERIFICATION_TOOL:
+        from icx_engine.verification import validate_evidence, build_confidence_report, compute_risk_tier
+        issue_key = args.get("issue_key", "")
+        if not isinstance(issue_key, str) or not issue_key.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "issue_key must be a non-empty string."}))]
+        items = args.get("dod_items")
+        if not isinstance(items, list) or not items:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "dod_items must be a non-empty list."}))]
+        norm = [{
+            "check": str(it.get("check", "")),
+            "method": str(it.get("method", "")),
+            "passed": bool(it.get("passed", False)),
+            "command": str(it.get("command", "")),
+            "output": str(it.get("output", ""))[:4000],
+        } for it in items if isinstance(it, dict)]
+        result = validate_evidence(norm)
+        layers_run = [str(x) for x in (args.get("layers_run") or [])]
+        tier = compute_risk_tier(_session_get(issue_key.strip(), "analysis", {}) or {})
+        confidence = build_confidence_report(norm, tier, layers_run)
+        if result["accepted"]:
+            _session_set(issue_key.strip(), "verification", {"items": norm, "confidence": confidence})
+        return [TextContent(type="text", text=json.dumps(
+            {"accepted": result["accepted"], "missing": result["missing"], "confidence": confidence}))]
+
+    if name == _GET_METHODOLOGY_TOOL:
+        from icx_engine.methodology import full_text, METHODOLOGY_VERSION
+        return [TextContent(type="text", text=json.dumps(
+            {"version": METHODOLOGY_VERSION, "methodology": full_text()}))]
+
+    if name == _BOOST_TOOL:
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "prompt must be a non-empty string."}))]
+        repo_path = args.get("repo_path") if isinstance(args.get("repo_path"), str) else None
+        current_file = args.get("current_file") if isinstance(args.get("current_file"), str) else None
+        is_continuation = bool(args.get("is_continuation"))
+        links_in = args.get("links") if isinstance(args.get("links"), list) else []
+        brief = _boosted(prompt, repo_path=repo_path, current_file=current_file,
+                         is_continuation=is_continuation, links_in=links_in)
+        return [TextContent(type="text", text=json.dumps(brief))]
+
+    if name == _BOOST_REFINE_TOOL:
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return [TextContent(type="text", text=json.dumps({"error": "prompt must be a non-empty string."}))]
+        # Structured spec (all optional; ICX fills any gap). `dims` kept for back-compat.
+        def _slist(v):
+            return [str(x) for x in v] if isinstance(v, list) else []
+        spec = {
+            "objective": str(args.get("objective", "")) if isinstance(args.get("objective"), str) else "",
+            "requirements": _slist(args.get("requirements")),
+            "constraints": _slist(args.get("constraints")),
+            "acceptance": _slist(args.get("acceptance")),
+            "deliverable": str(args.get("deliverable", "")) if isinstance(args.get("deliverable"), str) else "",
+            "dims": _slist(args.get("dims")),
+        }
+        if not (spec["objective"] or spec["requirements"] or spec["dims"]):
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "supply at least one of: objective, requirements, dims (your drafted spec)."}))]
+        repo_path = args.get("repo_path") if isinstance(args.get("repo_path"), str) else None
+        current_file = args.get("current_file") if isinstance(args.get("current_file"), str) else None
+        try:
+            from icx_engine.boost.classify import classify
+            from icx_engine.boost.refine import compose_cto_prompt, merge_dims
+            from icx_engine.methodology import _GATE_SEQUENCE
+            archetype = args.get("archetype") if isinstance(args.get("archetype"), str) and args.get("archetype") else classify(prompt)
+            # Gather context the same way icx_boost does (adaptive) so the CTO prompt carries it too.
+            context = {"files": []}
+            try:
+                env = _boost_env(repo_path, False)
+                from icx_engine.boost.router import plan_activation
+                from icx_engine.context_completeness import fan_out, fuse_rank
+                plan = plan_activation(prompt, archetype, env)
+                if plan.signals and repo_path:
+                    seeds = [current_file] if current_file else []
+                    kw = [w for w in prompt.lower().split() if len(w) > 3][:8]
+                    g, gr, se, me = _context_signals(repo_path, seeds, kw)
+                    sig = {"graph": g, "grep": gr, "semantic": se, "memory": me}
+                    active = {k: (sig[k] if k in plan.signals else None) for k in sig}
+                    scored = fuse_rank(fan_out(seeds, graph=active["graph"], grep=active["grep"],
+                                               semantic=active["semantic"], memory=active["memory"]))
+                    context["files"] = [s.to_dict() for s in scored if s.tier != "seed"][:20]
+            except Exception:
+                pass
+            cto = compose_cto_prompt(prompt, archetype, spec, context)
+            return [TextContent(type="text", text=json.dumps({
+                "archetype": archetype,
+                "merged_requirements": merge_dims(archetype, spec["requirements"] + spec["dims"]),
+                "boosted_prompt": cto,
+                "gates": list(_GATE_SEQUENCE),
+                "boost_meta": {"deterministic": True, "llm_used": False, "pass": 2},
+                "mandatory_directive": ("This is your CTO-grade working spec - a persona-scoped, "
+                                        "fully-structured version of the request. Answer it completely to "
+                                        "its acceptance criteria; pass the gates (lock_plan before coding, "
+                                        "record_verification before done). Do not fall back to the raw prompt."),
+            }))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"refine failed: {exc}", "boosted_prompt": prompt}))]
+
+    if name == _LOCK_PLAN_TOOL:
+        issue_ref = args.get("issue_ref", "")
+        chosen = args.get("chosen_files")
+        if not isinstance(issue_ref, str) or not issue_ref.strip():
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "issue_ref must be a non-empty string."}))]
+        if not isinstance(chosen, list) or not chosen:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "chosen_files must be a non-empty list of the files you plan to change."}))]
+        chosen = [str(f) for f in chosen]
+        justifications = args.get("justifications") if isinstance(args.get("justifications"), dict) else {}
+        justifications = {str(k): str(v) for k, v in justifications.items()}
+        keywords = [str(k) for k in (args.get("keywords") or [])]
+        project_path = args.get("project_path") or _lock_plan_repo(chosen)
+
+        from icx_engine.context_completeness import fan_out, fuse_rank, miss_check
+        graph_sig, grep_sig, semantic_sig, memory_sig = _context_signals(project_path, chosen, keywords)
+        candidates = fan_out(chosen, graph=graph_sig, grep=grep_sig, semantic=semantic_sig, memory=memory_sig)
+        scored = fuse_rank(candidates, prior_fix=_lock_plan_prior_fix(chosen))
+        result = miss_check(chosen, scored, justifications)
+        _session_set(issue_ref.strip(), "locked_plan", {
+            "chosen": chosen, "justifications": justifications,
+            "coverage": result["coverage"], "ok": result["ok"],
+        })
+        return [TextContent(type="text", text=json.dumps({
+            "ok": result["ok"],
+            "coverage": result["coverage"],
+            "blocking_missed": result["blocking_missed"],
+            "advisory_missed": [m for m in result["missed"] if not m["blocking"]],
+            "accepted": result["accepted"],
+            "instruction": (
+                "Do NOT write code until ok is true. For each entry in blocking_missed, either add the "
+                "file to chosen_files and call lock_plan again, or pass justifications[path]='reason' "
+                "if it is genuinely irrelevant. advisory_missed is optional context to consider."
+            ),
+        }))]
+
+    if name in (_UI_AUTH_CAPTURE_TOOL, _UI_AUTH_INLINE_TOOL):
+        url = args.get("url")
+        file_paths = args.get("file_paths")
+        if not isinstance(url, str) or not url.strip():
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "url must be a non-empty string."}))]
+        if not isinstance(file_paths, list) or not file_paths:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "file_paths must be a non-empty list."}))]
+        from icx_engine.testing import auth as _auth, ui_auth as _ui_auth
+        from icx_engine.testing.nodes import _resolve_project_id
+        from icx_engine.testing.runners.install import is_installed
+        if not is_installed("playwright"):
+            return [TextContent(type="text", text=json.dumps({
+                "ok": False,
+                "error": ("UI tooling (Playwright + Chromium) is not installed. Run "
+                          "'icx test setup' once to download it into ~/.icx/testing (it does NOT touch "
+                          "your repo), then retry."),
+            }))]
+        project = _resolve_project_id([str(f) for f in file_paths]) or "unknown"
+        host = _auth.host_of(url)
+        if not host:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "url has no host."}))]
+        success_url = args.get("success_url") or ""
+        try:
+            if name == _UI_AUTH_CAPTURE_TOOL:
+                path, detail = await _ui_auth.capture_session(project, host, url, success_url=success_url)
+            else:
+                username = args.get("username")
+                password = args.get("password")
+                if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
+                    return [TextContent(type="text", text=json.dumps(
+                        {"ok": False, "error": "username and password are required for inline login."}))]
+                path, detail = await _ui_auth.inline_session(
+                    project, host, url, username, password, success_url=success_url,
+                    user_selector=args.get("user_selector") or "",
+                    pass_selector=args.get("pass_selector") or "",
+                    submit_selector=args.get("submit_selector") or "",
+                )
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+        if path:
+            return [TextContent(type="text", text=json.dumps({"ok": True, "storage_state": path}))]
+        _d = (detail or "").strip()
+        _low = _d.lower()
+        _tool_broken = any(s in _low for s in (
+            "playwright", "cannot find package", "module_not_found", "err_module_not_found",
+            "executable doesn't exist", "chromium"))
+        if _tool_broken:
+            err = (f"ICX's own UI tooling (Playwright/Chromium under ~/.icx/testing) is missing or "
+                   f"broken. DO NOT install Playwright, npm, or npx into the user's repo - ICX brings "
+                   f"its own. Fix it by running in a terminal: `icx test setup --force`. "
+                   f"(harness detail: {_d[:300]})")
+        else:
+            err = f"session capture failed: {_d}"
+        return [TextContent(type="text", text=json.dumps({"ok": False, "error": err}))]
+
     if name == _SAVE_TOOL_NAME:
         issue_key = args.get("issue_key", "")
         if not isinstance(issue_key, str) or not issue_key.strip() or len(issue_key) > 2048:
@@ -3297,6 +3916,20 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                 {"error": "A resolution cannot be simultaneously verified and negated."}
             ))]
 
+        # DoD gate: a verified success needs accepted verification evidence, unless the user
+        # verified manually (verified_by_human=true - the manual override lane).
+        verified_by_human = bool(args.get("verified_by_human", False))
+        if outcome_verified and not verified_by_human:
+            _vrec = _session_get(issue_key.strip(), "verification", None)
+            if not _vrec:
+                return [TextContent(type="text", text=json.dumps({
+                    "error": (
+                        "Cannot record a verified success: no accepted verification evidence for "
+                        "this issue. Call record_verification first (automated path), or pass "
+                        "verified_by_human=true with outcome_feedback_note if you verified manually."
+                    )
+                }))]
+
         extra = {
             "root_cause_pattern": root_cause_pattern,
             "pattern_confidence": pattern_confidence,
@@ -3311,6 +3944,7 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             "diagnosis_steps": int(args.get("diagnosis_steps") or 0),
             "full_ticket_text": (args.get("full_ticket_text") or "")[:2000],
             "attachment_summary": (args.get("attachment_summary") or "")[:500],
+            "verified_by_human": verified_by_human,
         }
 
         text = await _handle_save_memory(
@@ -3325,6 +3959,75 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             extra=extra,
         )
         return [TextContent(type="text", text=text)]
+
+    if name == _DRAFT_SKILL_TOOL:
+        issue_key = args.get("issue_key")
+        if not isinstance(issue_key, str) or not issue_key.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "issue_key must be a non-empty string."}))]
+        skill_worthy = bool(args.get("skill_worthy", False))
+        if not skill_worthy:
+            return [TextContent(type="text", text=json.dumps({"status": "skipped"}))]
+
+        skill_name = args.get("skill_name")
+        description = args.get("description")
+        when_to_use = args.get("when_to_use")
+        procedure = args.get("procedure")
+        verification = args.get("verification")
+        missing = [
+            field_name for field_name, value in (
+                ("skill_name", skill_name), ("description", description),
+                ("when_to_use", when_to_use), ("procedure", procedure),
+                ("verification", verification),
+            ) if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"skill_worthy=true requires: {', '.join(missing)}."}))]
+
+        try:
+            loop = asyncio.get_running_loop()
+            entry = await loop.run_in_executor(_get_memory_executor(), _show_entry_sync, issue_key.strip())
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"Failed to look up memory entry for issue_key '{issue_key}': {exc}"}))]
+        if entry is None:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"No memory entry found for issue_key '{issue_key}'. Call save_memory first."}))]
+        if not entry.outcome_verified:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "The entry for this issue_key is not outcome_verified. A skill can only be drafted from a verified fix."}))]
+
+        pitfalls = args.get("pitfalls") if isinstance(args.get("pitfalls"), str) else ""
+        tags = [str(t) for t in (args.get("tags") or [])] if isinstance(args.get("tags"), list) else []
+
+        try:
+            from icx_engine.skills.writer import draft_skill_entry, write_or_update
+            draft = draft_skill_entry(
+                entry, skill_name.strip(), description.strip(), when_to_use.strip(),
+                procedure.strip(), verification.strip(), pitfalls=pitfalls, tags=tags,
+            )
+            status = write_or_update(SkillStorage(), draft)
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"Failed to draft skill: {exc}"}))]
+        return [TextContent(type="text", text=json.dumps({"status": status, "name": draft.name}))]
+
+    if name == _SKILL_GET_TOOL:
+        skill_name = args.get("name")
+        if not isinstance(skill_name, str) or not skill_name.strip():
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "name must be a non-empty string."}))]
+        entry = SkillStorage().read(skill_name.strip())
+        if entry is None:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"No skill named '{skill_name}' found."}))]
+        return [TextContent(type="text", text=json.dumps({"body": entry.to_markdown()}))]
+
+    if name == _SKILLS_INDEX_TOOL:
+        skills = SkillStorage().list_all()
+        return [TextContent(type="text", text=json.dumps(
+            {"skills": [{"name": s.name, "description": s.description} for s in skills]}))]
 
     if name == _REINFORCE_TOOL_NAME:
         source_key = args.get("source_key", "")
@@ -3378,20 +4081,7 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
-    if name == _MAGIK_HEALTH_TOOL:
-        from icx_engine.testing.client import MagikClient, MagikUnreachable
-        from icx_engine.config_manager import ConfigManager as _CM
-        cfg = _CM.load()
-        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
-        try:
-            data = await client.health_check()
-            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
-        except MagikUnreachable as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        finally:
-            await client.aclose()
-
-    if name == _MAGIK_START_TOOL:
+    if name == _TESTING_START_TOOL:
         from icx_engine.testing.graph import get_testing_graph
         from icx_engine.testing.state import make_initial_state
         from icx_engine.testing.validate import validate_session_args
@@ -3406,6 +4096,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         context = args.get("context")
         max_iterations = args.get("max_iterations")
         test_mode = args.get("test_mode")
+        nl_intent = args.get("nl_intent") or None
+        acceptance_criteria = args.get("acceptance_criteria") or []
         cfg = _CM.load()
 
         project = None
@@ -3424,134 +4116,92 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         initial_state = make_initial_state(
             file_paths=file_paths,
             context=context,
-            max_iterations=max_iterations if max_iterations is not None else cfg.magik_max_iterations,
+            max_iterations=max_iterations if max_iterations is not None else cfg.test_max_iterations,
             test_mode=test_mode,
+            nl_intent=nl_intent,
+            acceptance_criteria=acceptance_criteria,
         )
         initial_state["project"] = project
-        initial_state["agent_max_steps"] = cfg.magik_agent_max_steps
+        initial_state["session_id"] = session_id
+        if "test_writes" in args:
+            initial_state["test_writes"] = bool(args.get("test_writes"))
         graph = await get_testing_graph()
         config = {"configurable": {"thread_id": session_id}}
-        await graph.ainvoke(initial_state, config=config)
+        finished = await _testing_invoke_tracked(session_id, graph.ainvoke(initial_state, config=config))
+        if not finished:
+            return [TextContent(type="text", text=json.dumps({
+                "ok": True, "session_id": session_id, "status": "running", "done": False, "gate": None,
+                "poll": ("Still running real work (graph expansion/verification). Call "
+                          "get_testing_session_status(session_id) to check progress - do NOT call "
+                          "resume_testing_session again until status is no longer 'running'."),
+            }))]
         snapshot = await graph.aget_state(config)
-        gate_data = {}
-        if snapshot.tasks and snapshot.tasks[0].interrupts:
-            gate_data = snapshot.tasks[0].interrupts[0].value
-        return [TextContent(type="text", text=json.dumps({
-            "ok": True, "session_id": session_id, "gate": gate_data,
-        }))]
+        result = _testing_gate_snapshot(session_id, snapshot)
+        result["ok"] = True
+        del result["error"]
+        return [TextContent(type="text", text=json.dumps(result))]
 
-    if name == _MAGIK_RESUME_TOOL:
+    if name == _TESTING_RESUME_TOOL:
         from icx_engine.testing.graph import get_testing_graph
         from langgraph.types import Command as _Command
         session_id = args["session_id"]
         response = args["response"]
+        running = _TESTING_RUNNING.get(session_id)
+        if running is not None and not running.done():
+            return [TextContent(type="text", text=json.dumps({
+                "session_id": session_id, "status": "running", "done": False, "gate": None,
+                "error": ("This session is still executing the previous gate. Call "
+                          "get_testing_session_status(session_id) instead of resuming again."),
+            }))]
         graph = await get_testing_graph()
         config = {"configurable": {"thread_id": session_id}}
-        # SECURITY: a Magik auth sessionId in the resume payload would be persisted to the
-        # sessions DB writes table. Save it to the auth store and strip it before resuming,
-        # so the durable checkpoint never holds the credential.
-        if (isinstance(response, dict) and response.get("session_id")
-                and str(response.get("auth_mode", "")).lower() in ("capture", "inline")):
-            try:
-                from icx_engine.testing import auth as _auth
-                from icx_engine.testing.nodes import _resolve_project_name
-                pre = await graph.aget_state(config)
-                st = pre.values or {}
-                project = st.get("project") or _resolve_project_name(st.get("file_paths", []))
-                host = _auth.host_of(st.get("url") or "")
-                if project and host:
-                    _auth.save_session(project, host, str(response["session_id"]))
-                    response = {k: v for k, v in response.items() if k != "session_id"}
-            except Exception:
-                pass
-        await graph.ainvoke(_Command(resume=response), config=config)
+        # SECURITY: an auth sessionId in the resume payload would be persisted to the durable
+        # checkpoint. STRIP it before resuming so the credential never lands on disk. The real
+        # authenticated session is already persisted (with its storage_state path) by the
+        # ui_auth_capture / ui_auth_inline tools - we must NOT re-save here, which would overwrite
+        # that record with an empty storage_state and make the replay run unauthenticated.
+        if isinstance(response, dict) and "session_id" in response:
+            response = {k: v for k, v in response.items() if k != "session_id"}
+        finished = await _testing_invoke_tracked(session_id, graph.ainvoke(_Command(resume=response), config=config))
+        if not finished:
+            return [TextContent(type="text", text=json.dumps({
+                "session_id": session_id, "status": "running", "done": False, "gate": None,
+                "poll": ("Still running real work (verify/heal or scored test execution can take "
+                          "several minutes). Call get_testing_session_status(session_id) to check "
+                          "progress - do NOT call resume_testing_session again until status is no "
+                          "longer 'running'."),
+            }))]
+        # A session is DONE only when nothing is pending AND no gate is waiting for input. A node
+        # with several interrupt() calls (e.g. expand_files: expand_scan then expand) pauses at its
+        # LATER interrupt with snapshot.next == () while an interrupt is still pending - so `not next`
+        # alone would wrongly report done mid-flow and abandon the run before any test executes.
         snapshot = await graph.aget_state(config)
-        gate_data = {}
-        if snapshot.tasks and snapshot.tasks[0].interrupts:
-            gate_data = snapshot.tasks[0].interrupts[0].value
-        is_done = not snapshot.next
-        return [TextContent(type="text", text=json.dumps({
-            "session_id": session_id,
-            "done": is_done,
-            "gate": gate_data,
-        }))]
+        result = _testing_gate_snapshot(session_id, snapshot)
+        return [TextContent(type="text", text=json.dumps(result))]
 
-    if name == _MAGIK_STATUS_TOOL:
-        from icx_engine.testing.client import MagikClient, MagikUnreachable, MagikRunLost
-        from icx_engine.config_manager import ConfigManager as _CM
-        run_id = args["run_id"]
-        cfg = _CM.load()
-        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
+    if name == _TESTING_STATUS_TOOL:
+        from icx_engine.testing.graph import get_testing_graph
+        session_id = args.get("session_id", "")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return [TextContent(type="text", text=json.dumps({"error": "session_id is required."}))]
+        session_id = session_id.strip()
+        running = _TESTING_RUNNING.get(session_id)
+        if running is not None and not running.done():
+            return [TextContent(type="text", text=json.dumps({
+                "session_id": session_id, "status": "running", "done": False, "gate": None,
+            }))]
+        graph = await get_testing_graph()
+        config = {"configurable": {"thread_id": session_id}}
         try:
-            data = await client.get_run_status(run_id)
-            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
-        except MagikRunLost:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "run not found - Magik may have restarted"}))]
-        except MagikUnreachable as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        finally:
-            await client.aclose()
-
-    if name == _MAGIK_RESULTS_TOOL:
-        from icx_engine.testing.client import MagikClient, MagikUnreachable, MagikRunLost, MagikReportNotReady
-        from icx_engine.testing.nodes import parse_report_placeholder
-        from icx_engine.config_manager import ConfigManager as _CM
-        run_id = args["run_id"]
-        cfg = _CM.load()
-        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
-        try:
-            raw = await client.get_run_report(run_id)
-            issues = parse_report_placeholder(raw)
-            return [TextContent(type="text", text=json.dumps({"ok": True, "issues": issues, "raw": raw}))]
-        except MagikReportNotReady:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "run not complete yet - check magik_test_status first"}))]
-        except MagikRunLost:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "run not found"}))]
-        except MagikUnreachable as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        finally:
-            await client.aclose()
-
-    if name in (_MAGIK_LOGIN_START_TOOL, _MAGIK_LOGIN_CAPTURE_TOOL, _MAGIK_LOGIN_CANCEL_TOOL,
-                _MAGIK_LOGIN_INLINE_TOOL, _MAGIK_LOGOUT_TOOL):
-        from icx_engine.testing.client import MagikClient, MagikError
-        from icx_engine.testing.validate import validate_login_args
-        from icx_engine.config_manager import ConfigManager as _CM
-        cfg = _CM.load()
-        client = MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
-        try:
-            if name == _MAGIK_LOGIN_START_TOOL:
-                ok, msg = validate_login_args(args, ["loginUrl"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.interactive_login_start(args["loginUrl"])
-            elif name == _MAGIK_LOGIN_CAPTURE_TOOL:
-                ok, msg = validate_login_args(args, ["interactiveId"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.interactive_login_capture(args["interactiveId"], args.get("label"))
-            elif name == _MAGIK_LOGIN_CANCEL_TOOL:
-                ok, msg = validate_login_args(args, ["interactiveId"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.interactive_login_cancel(args["interactiveId"])
-            elif name == _MAGIK_LOGIN_INLINE_TOOL:
-                ok, msg = validate_login_args(args, ["loginUrl", "username", "password"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.inline_login(args["loginUrl"], args["username"], args["password"])
-            else:
-                ok, msg = validate_login_args(args, ["sessionId"])
-                if not ok:
-                    return [TextContent(type="text", text=json.dumps({"ok": False, "error": msg}))]
-                data = await client.logout(args["sessionId"])
-            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
-        except MagikError as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            snapshot = await graph.aget_state(config)
         except Exception as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
-        finally:
-            await client.aclose()
+            return [TextContent(type="text", text=json.dumps({"error": f"cannot read session state: {exc}"}))]
+        result = _testing_gate_snapshot(session_id, snapshot)
+        prior_error = _TESTING_ERRORS.pop(session_id, None)
+        if prior_error and not result.get("error"):
+            result["error"] = prior_error
+        return [TextContent(type="text", text=json.dumps(result))]
+
 
     if name == _SONAR_STATUS_TOOL:
         from icx_engine.sonar import service as _sonar_svc
@@ -3567,7 +4217,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             data = await _sonar_svc.projects(query=_sonar_opt_str(args, "query"))
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -3580,7 +4231,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             data = await _sonar_svc.branches(project, query=_sonar_opt_str(args, "query"))
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -3597,7 +4249,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                 data = await _sonar_svc.quality_gate(project, branch)
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -3611,7 +4264,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             data = await fn(**scope)
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -3672,6 +4326,137 @@ def _degraded_graph_response(code: str, project_path, warn_user: str, extra: dic
     if extra:
         resp.update(extra)
     return resp
+
+
+def _lock_plan_repo(chosen: list[str]) -> str:
+    """Best-effort repo root for lock_plan when project_path is not given: common dir of chosen files."""
+    import os
+    dirs = [os.path.dirname(p) for p in chosen if p]
+    if not dirs:
+        return os.getcwd()
+    try:
+        return os.path.commonpath(dirs) if len(dirs) > 1 else (dirs[0] or os.getcwd())
+    except ValueError:
+        return dirs[0] or os.getcwd()
+
+
+def _lock_plan_prior_fix(chosen: list[str]) -> set:
+    """Files a prior resolution touched for any chosen file (memory), boosting them to high-tier."""
+    out: set[str] = set()
+    for f in chosen:
+        try:
+            rows = _find_by_file_sync(f, None) or []
+        except Exception:
+            rows = []
+        for r in rows:
+            for p in (r.get("files_changed") or []):
+                if p:
+                    out.add(str(p))
+    return out
+
+
+def _icx_connected() -> dict:
+    """Which ICX-native link targets are configured: jira (a connector connection) + sonarqube (an
+    active sonar connection). Guarded - any config error degrades to 'not connected' (a safe tier-2)."""
+    out = {"jira": False, "sonarqube": False}
+    try:
+        cfg = ConfigManager.load()
+        try:
+            out["jira"] = any(getattr(c, "connector_type", "") == "jira"
+                              for c in (getattr(cfg, "connections", None) or []))
+        except Exception:
+            pass
+        try:
+            out["sonarqube"] = cfg.active_sonar_connection() is not None
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return out
+
+
+def _boost_env(repo_path: str | None, is_continuation: bool) -> dict:
+    """Detect the boost environment: is there a usable repo, and is a code graph built for it?
+    Never raises - a detection failure degrades to 'not available'."""
+    from pathlib import Path as _P
+    has_repo = False
+    try:
+        has_repo = bool(repo_path) and _P(repo_path).is_dir()
+    except OSError:
+        has_repo = False
+    has_graph = False
+    if has_repo:
+        try:
+            has_graph = isinstance(_load_querier_simple(repo_path), tuple)
+        except Exception:
+            has_graph = False
+    return {"has_repo": has_repo, "has_graph": has_graph, "is_continuation": bool(is_continuation)}
+
+
+def _context_signals(project_path: str, seeds: list[str], keywords: list[str]):
+    """Build the four guarded retrieval signals (graph, grep, semantic, memory) for lock_plan.
+    Each is a zero-arg callable returning [(path, reason)]; any failure degrades to [] (never raises).
+    ICX makes no LLM call here - these are deterministic graph/grep/memory lookups."""
+    from pathlib import Path as _P
+
+    def _graph():
+        loaded = _load_querier_simple(project_path)
+        if not isinstance(loaded, tuple):
+            return []
+        q, _ = loaded
+        out = []
+        try:
+            br = q.get_blast_radius(seeds, max_depth=5, min_confidence=0.3)
+            for p in (br.get("direct_dependents") or []):
+                out.append((p, "direct graph dependent of a planned file"))
+            for p in (br.get("missing_changes") or []):
+                out.append((p, "co-changes with a planned file (often edited together)"))
+        except Exception:
+            return out
+        return out
+
+    def _grep():
+        try:
+            from icx_engine.testing.expand import expand_via_grep
+            found = expand_via_grep(seeds, _P(project_path))
+            return [(p, "references/imports a planned file") for p in found]
+        except Exception:
+            return []
+
+    def _semantic():
+        loaded = _load_querier_simple(project_path)
+        if not isinstance(loaded, tuple):
+            return []
+        q, _ = loaded
+        query = " ".join(keywords) if keywords else " ".join(_P(s).stem for s in seeds)
+        if not query.strip():
+            return []
+        try:
+            results = q.find_context(query) or []          # returns list[ContextResult] (.file/.reason)
+            out = []
+            for r in results[:10]:
+                path = getattr(r, "file", None)
+                if path:
+                    out.append((str(path), "semantically related to the ticket"))
+            return out
+        except Exception:
+            return []
+
+    def _memory():
+        out = []
+        for f in seeds:
+            try:
+                rows = _find_by_file_sync(f, None) or []
+            except Exception:
+                rows = []
+            for r in rows:
+                key = r.get("issue_key") or "a prior ticket"
+                for p in (r.get("files_changed") or []):     # MemoryEntry.files_changed
+                    if p:
+                        out.append((str(p), f"touched by prior fix {key}"))
+        return out
+
+    return _graph, _grep, _semantic, _memory
 
 
 def _load_querier_simple(project_path: str) -> tuple | dict:
@@ -4192,7 +4977,7 @@ async def _handle_analyze_issue(
             "ITERATION RULE - applies for the rest of this task, no exceptions:\n"
             "After EVERY code change you make - including fixes requested during iteration - STOP "
             "and ask the user to test before making any further change or calling "
-            "reinforce_memory_usage/save_memory. This repeats on the 2nd, 3rd, and every "
+            "reinforce_memory_usage/save_memory/draft_skill. This repeats on the 2nd, 3rd, and every "
             "subsequent fix. A prior 'looks good' or 'works' does NOT carry over to a new edit - "
             "each new change requires its own fresh test confirmation."
         )
@@ -4268,7 +5053,7 @@ async def _handle_analyze_issue(
                 "using memory_search results as a pattern reference.\n"
                 "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
                 "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first "
-                "(if memory_search result was used), then save_memory."
+                "(if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                 + _MANDATORY_TAIL
             )
         elif len(graphs) > 1:
@@ -4341,7 +5126,7 @@ async def _handle_analyze_issue(
                     "STEP 4: On explicit approval - implement exactly the stated approach, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 5: Ask the user to test.\n"
-                    "STEP 6: Only after user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 6: Only after user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + (f"\n{stale_warning}" if stale_warning else "")
                     + _MANDATORY_TAIL
                 )
@@ -4360,7 +5145,7 @@ async def _handle_analyze_issue(
                     "STEP 4: Wait for explicit user approval.\n"
                     "STEP 5: On approval - implement exactly the stated approach.\n"
                     "STEP 6: Ask the user to test.\n"
-                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
             else:
@@ -4377,7 +5162,7 @@ async def _handle_analyze_issue(
                     "STEP 4: Wait for explicit user approval.\n"
                     "STEP 5: On approval - implement exactly the stated approach.\n"
                     "STEP 6: Ask the user to test.\n"
-                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: After user confirms - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
         else:
@@ -4408,7 +5193,7 @@ async def _handle_analyze_issue(
                     "STEP 4: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 5: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 6: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory.\n"
+                    "STEP 6: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false).\n"
                     + _MANDATORY_TAIL
                     + stale_warning
                 )
@@ -4429,7 +5214,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory.\n"
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false).\n"
                     + _MANDATORY_TAIL + "\n"
                     f"Optionally call analyze_issue_fast again with the same project_paths in ~{eta}s "
                     "to cross-check your file selection against the completed graph."
@@ -4453,7 +5238,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
             elif graph_status == "not_registered":
@@ -4478,7 +5263,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
             else:
@@ -4496,7 +5281,7 @@ async def _handle_analyze_issue(
                     "STEP 5: On explicit approval only - implement exactly the approach you stated, "
                     "using memory_search results as a pattern reference.\n"
                     "STEP 6: Ask the user to test. Do not proceed until they respond.\n"
-                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory."
+                    "STEP 7: Only after the user confirms it works - call reinforce_memory_usage first (if memory_search result was used), then save_memory, then IMMEDIATELY call draft_skill with your own skill_worthy judgment (mandatory, even when the honest answer is false)."
                     + _MANDATORY_TAIL
                 )
 
@@ -4558,6 +5343,9 @@ async def _handle_analyze_issue(
             analysis = json.loads(result.model_dump_json(exclude={"images", "attachment_full_texts", "attachment_raw"}))
 
         icx_instruction, _persona_info = _apply_persona(analysis, icx_instruction)
+        icx_instruction, _method_info = _apply_methodology(analysis, icx_instruction)
+        icx_instruction, _dod_info = _apply_dod(analysis, icx_instruction, graphs)
+        _session_set(issue_key_val, "analysis", analysis)
 
         _attachment_processing: str | None = None
         if skip_vision:
@@ -4589,6 +5377,10 @@ async def _handle_analyze_issue(
         response["graphs"] = graphs
         if _persona_info:
             response["persona"] = _persona_info
+        if _method_info:
+            response["methodology"] = _method_info
+        if _dod_info:
+            response["dod"] = _dod_info
 
         # Phase 10: intelligence layer - quick internal memory search when ready
         _mem_state_now = _get_memory_state()
@@ -4670,6 +5462,7 @@ async def _handle_analyze_issue(
             "code": "NO_CONNECTION",
             "message": str(exc),
             "action_required": "tell_user_to_run_icx_connection_add",
+            "fallback": _ICX_FALLBACK("work-tracker", "icx connection --add"),
         })
     except RateLimited as exc:
         return json.dumps({
@@ -4823,12 +5616,19 @@ async def _handle_save_memory(
         except Exception:
             pass
 
-        return json.dumps({
+        response = {
             "saved": True,
             "issue_key": entry.issue_key,
             "summary": summary[:80],
             "root_cause_pattern": entry.root_cause_pattern,
-        })
+        }
+        try:
+            related = rank_skills_for_tags(tags, entry.root_cause_pattern, storage=SkillStorage())
+            if related:
+                response["related_skills"] = related
+        except Exception:
+            pass   # a ranking failure must never block a successful memory save
+        return json.dumps(response)
     except ICXError as exc:
         return json.dumps({"error": str(exc), "type": type(exc).__name__})
     except Exception as exc:
@@ -4900,19 +5700,42 @@ def run_mcp_server() -> None:
         loop = asyncio.get_running_loop()
         loop.run_in_executor(_get_memory_executor(), _prewarm_memory)
 
+        # One-time stale-artifact cleanup so upgraders shed files older versions left behind.
+        try:
+            from icx_engine.config_manager import clean_stale_artifacts
+            clean_stale_artifacts()
+        except Exception:
+            pass
+
         # Temp-dir cleanup: purge >24h dirs on startup, then hourly in the background.
         from icx_engine.graph.storage import sweep_stale_temp_dirs
         try:
             sweep_stale_temp_dirs()
         except Exception:
             pass
-        asyncio.create_task(_periodic_temp_sweep())
+        global _SWEEP_TASK
+        _SWEEP_TASK = asyncio.create_task(_periodic_temp_sweep())
 
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await server.run(
+                    read_stream,
+                    write_stream,
+                    server.create_initialization_options(),
+                )
+        finally:
+            # Graceful shutdown: stop the background sweep and release the testing checkpoint
+            # connection so no task/WAL connection lingers past exit. Guarded and non-fatal.
+            if _SWEEP_TASK is not None:
+                _SWEEP_TASK.cancel()
+                try:
+                    await _SWEEP_TASK
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                from icx_engine.testing.graph import close_testing_graph
+                await close_testing_graph()
+            except Exception:
+                pass
 
     asyncio.run(_serve())

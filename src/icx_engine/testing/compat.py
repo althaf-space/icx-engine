@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from icx_engine.testing.classify import FileClass
 
-_UI_MODES = {"ui", "agent"}
+_UI_MODES = {"agent"}
 
 
 @dataclass
@@ -21,7 +21,7 @@ def check_compat(fc: FileClass, mode: str) -> CompatVerdict:
 
     if mode in _UI_MODES:
         if fc.layer == "backend":
-            reasons.append(f"{fc.path} is a backend file; not testable in a UI run")
+            reasons.append(f"{fc.path} is a backend file; not testable in an agent (UI) run")
             changes.append("Drop this file, or run it under API mode instead")
             return CompatVerdict(fc.path, False, reasons, changes)
         if fc.layer not in ("frontend", "shared"):
@@ -43,7 +43,7 @@ def check_compat(fc: FileClass, mode: str) -> CompatVerdict:
     if mode == "api":
         if fc.layer == "frontend":
             reasons.append(f"{fc.path} is a frontend file; not testable in an API run")
-            changes.append("Drop this file, or run it under UI mode instead")
+            changes.append("Drop this file, or run it under agent mode instead")
             return CompatVerdict(fc.path, False, reasons, changes)
         t = fc.testability
         if not t.get("exposes_endpoint", False):

@@ -4,18 +4,15 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
 from icx_engine.testing.state import TestingState
-from icx_engine.testing.client import MagikClient, MagikError, MagikUnreachable, MagikRunLost, MagikReportNotReady, MagikAuthError
 from icx_engine.testing.classify import classify_file
 from icx_engine.testing.compat import build_report
 from icx_engine.testing.handlers import get_handler
 from icx_engine.testing.expand import expand_via_grep, union_rank
 from icx_engine.testing import auth as _auth
 from icx_engine.testing import apispec as _apispec
-from icx_engine.testing import profile_gen as _profile_gen
 from icx_engine.testing import rules as _rules
 
 _log = logging.getLogger(__name__)
@@ -38,6 +35,7 @@ def _record_receipts(state: TestingState, gate: str, response: dict) -> list[dic
 
 _POLL_INTERVAL = 30
 _MAX_RETRIES = 3
+_URL_GATE_MAX_REASK = 3   # gate 3: re-ask a missing ui/agent URL this many times before erroring
 _RETRY_BACKOFF = [5, 15, 45]
 _TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
@@ -48,16 +46,6 @@ def _resolve_choice(response: dict[str, Any], key: str, numbered_map: dict[str, 
     return numbered_map.get(value, value)
 
 
-def _stream_supported() -> bool:
-    from icx_engine.config_manager import ConfigManager
-    cfg = ConfigManager.load()
-    return bool(getattr(cfg, "magik_use_streaming", True))
-
-
-def _make_client(config: Any | None = None) -> MagikClient:
-    from icx_engine.config_manager import ConfigManager
-    cfg = config or ConfigManager.load()
-    return MagikClient(base_url=cfg.magik_base_url, api_key=cfg.magik_api_key)
 
 
 def _load_querier(project_paths: list[str]):
@@ -159,8 +147,6 @@ def _expand_files_via_graph(
     return sorted(expanded)
 
 
-def _infer_url_from_files(file_paths: list[str], querier: Any | None) -> str | None:
-    return None
 
 
 def _apply_scope(prompt: str | None, file_paths: list[str], scope: str) -> str | None:
@@ -178,19 +164,23 @@ def _apply_scope(prompt: str | None, file_paths: list[str], scope: str) -> str |
 # -- node_pick_type: test type selection -----------------------------------
 
 async def node_pick_type(state: TestingState) -> dict:
-    _TYPE_MAP = {"1": "agent", "2": "ui", "3": "api"}
+    # The ONE place the test type is chosen. Gate 3 later only confirms the URL - it never re-asks
+    # the type.
+    _TYPE_MAP = {"1": "agent", "2": "api", "3": "unit"}
     response = interrupt({
         "gate": "pick_type",
         "message": (
-            "Pick the test type. ICX selects files based on your choice.\n\n"
-            "  1. agent - adaptive AI browser-use (frontend).\n"
-            "  2. ui    - strict Playwright field validation (frontend).\n"
-            "  3. api   - REST endpoint test (backend)."
+            "Pick the test type (chosen ONCE - gate 3 will only confirm the URL, not ask this again).\n\n"
+            "  1. agent - you (the connected agent) write a real Playwright test covering the screen's "
+            "Element Census, run it yourself, and fix your own script until it passes (frontend, "
+            "needs a URL).\n"
+            "  2. api   - REST endpoint test (backend, needs a URL).\n"
+            "  3. unit  - run the repo's unit tests (no URL, no running app)."
         ),
-        "options": ["1. agent", "2. ui", "3. api"],
+        "options": ["1. agent", "2. api", "3. unit"],
     })
     test_type = _resolve_choice(response, "test_type", _TYPE_MAP)
-    if test_type not in ("agent", "ui", "api"):
+    if test_type not in ("agent", "api", "unit"):
         test_type = "agent"
     return {"test_type": test_type}
 
@@ -235,7 +225,7 @@ async def node_expand_files(state: TestingState) -> dict:
     classified: list[dict[str, Any]] = []
     selected: list[str] = []
     off_type: list[str] = []
-    relevant = get_handler(mode).relevant_layers() if mode in ("ui", "agent", "api") else None
+    relevant = get_handler(mode).relevant_layers() if mode in ("agent", "api") else None
 
     for path, _src in ranked:
         try:
@@ -252,7 +242,13 @@ async def node_expand_files(state: TestingState) -> dict:
 
     confirmed = interrupt({
         "gate": "expand",
-        "message": "Confirm files for testing. Off-type files are excluded by default.",
+        "message": (
+            "Confirm files for testing. Off-type files are excluded by default. Resume with "
+            "{\"confirmed_files\": [<paths>]} listing EXACTLY the files you want tested for the "
+            "rest of this session - anything you omit here is excluded for every later gate "
+            "(analyze_screen, compat_scan, etc.), not just this one. If you resume without "
+            "confirmed_files, ICX keeps the full selected_files list (nothing gets excluded)."
+        ),
         "test_type": mode,
         "selected_files": selected,
         "excluded_off_type": off_type,
@@ -262,10 +258,216 @@ async def node_expand_files(state: TestingState) -> dict:
     final = confirmed.get("confirmed_files", selected)
     return {
         "file_paths": final,
+        "all_candidate_files": selected,
         "file_sources": file_sources,
         "classified": [c for c in classified if c["path"] in set(final)],
         "url": confirmed.get("url") or state.get("url"),
         "read_receipts": _record_receipts(state, "expand_scan", scan),
+    }
+
+
+# -- node_known_screen_check: known-screen fast path (skip expand/census/compat) -----
+#
+# Safety bar (deliberately conservative - a wrong fast-path skip means a real change goes
+# untested): fast_path is offered to the user ONLY when the cache is PROVABLY fresh - every
+# cached confirmed file's content is byte-identical to what was cached, AND a cheap, deterministic
+# re-discovery (ICX's own graph + grep - no agent call) over the original seeds finds no candidate
+# file outside what was seen last time. Either check failing means no gate is even shown; the
+# session falls straight through to the normal expand_files pipeline, exactly like a cache miss.
+
+def _deterministic_candidates(seeds: list[str]) -> set[str]:
+    """The same graph+grep candidate set node_expand_files falls back to - ICX-local, no agent call,
+    so it can run silently as a staleness probe before ever asking the user anything."""
+    querier = _load_querier(seeds)
+    graph_expanded = _expand_files_via_graph(seeds, querier)
+    root = _project_root(seeds)
+    grepped: list[str] = []
+    if root is not None:
+        try:
+            grepped = expand_via_grep(seeds, root)
+        except Exception as exc:
+            _log.warning("known_screen_check: grep expand failed: %s", exc)
+    ranked = union_rank(seeds, graph_expanded, grepped)
+    return {p for p, _src in ranked}
+
+
+async def node_known_screen_check(state: TestingState) -> dict:
+    """USER-DECISION gate: before the expand -> census -> compat pipeline runs, check whether this
+    exact screen (project + original seed files) was already cleared in a prior session. A cache hit
+    that is NOT provably fresh (see module docstring) is treated exactly like a cache miss - falls
+    through silently, no gate, no choice, no override. Only a provably fresh hit is ever offered to
+    the user as an optional fast path."""
+    from icx_engine.testing import screen_cache as _cache
+
+    seeds = state.get("original_seeds") or state.get("file_paths") or []
+    project = _resolve_project_id(seeds)
+    if project is None:
+        return {"known_screen_available": False}
+
+    entry = _cache.load_screen(project, seeds)
+    if entry is None or entry.test_type != (state.get("test_type") or ""):
+        return {"known_screen_available": False}
+
+    hash_fresh, changed = _cache.freshness(entry)
+    if not hash_fresh:
+        return {"known_screen_available": False}
+    try:
+        discovered_now = _deterministic_candidates(seeds)
+    except Exception as exc:
+        _log.warning("known_screen_check: re-discovery failed, treating as stale: %s", exc)
+        return {"known_screen_available": False}
+    new_files = sorted(discovered_now - set(entry.all_candidates))
+    if new_files:
+        return {"known_screen_available": False}
+
+    n_funcs = len((entry.screen_model or {}).get("functionalities") or [])
+    response = interrupt({
+        "gate": "known_screen",
+        "cached_at": entry.cached_at,
+        "confirmed_files": entry.confirmed_files,
+        "functionality_count": n_funcs,
+        "census_coverage": entry.census_coverage,
+        "message": (
+            f"This exact screen was cleared before, on {entry.cached_at} "
+            f"({len(entry.confirmed_files)} files, {n_funcs} functionalities, "
+            f"coverage {entry.census_coverage:.0%}). Every cached file is byte-identical to then, "
+            "and a fresh check found no new related file - safe to reuse. "
+            "Reply {\"decision\": \"fast_path\"} to reuse the cached scope/census/compat clearance "
+            "and skip straight to URL/layer confirmation, or {\"decision\": \"rescan\"} to redo file "
+            "discovery, census, and compat scan from scratch anyway."
+        ),
+    })
+    decision = str((response or {}).get("decision", "")).strip().lower() if isinstance(response, dict) else ""
+    if decision != "fast_path":
+        return {"known_screen_available": False}
+
+    out: dict[str, Any] = {
+        "known_screen_available": True,
+        "file_paths": list(entry.confirmed_files),
+        "all_candidate_files": list(entry.all_candidates),
+        "screen_model": entry.screen_model,
+        "census_coverage": entry.census_coverage,
+        "analyzer_id": entry.analyzer_id,
+        "analyzer_family": entry.analyzer_family,
+        "compat_resolution": dict(entry.compat_resolution),
+    }
+    if entry.url and not state.get("url"):
+        out["url"] = entry.url
+    return out
+
+
+def route_after_known_screen_check(state: TestingState) -> str:
+    return "config_gate" if state.get("known_screen_available") else "expand_files"
+
+
+# -- node_analyze_screen: per-framework Element Census (zero-miss backbone) ----
+
+_CENSUS_MAX_REASK = 2   # re-ask the agent this many times when reconciliation counts do not add up
+
+
+async def node_analyze_screen(state: TestingState) -> dict:
+    """Run the framework-specific Element Census so authoring misses NOTHING.
+
+    Selects the analyzer prompt for the detected framework, injects it + the confirmed files, and
+    the agent returns the census/functionality model (strict JSON). ICX then runs the reconciliation
+    gate (counts must add up) and re-asks (bounded) if the census was cut short. The resulting
+    `screen_model` feeds `author_flow`, which converts it into comprehensive ordered steps.
+
+    Fully guarded: no analyzer match, an unparseable model, or any error degrades cleanly to the
+    existing free-authoring behavior - this node can never break a session.
+    """
+    from icx_engine.testing.analyzers import select_analyzer, prompt_text
+    from icx_engine.testing.analyzers.schema import validate_census
+
+    try:
+        spec = select_analyzer(file_paths=state.get("file_paths") or [])
+    except Exception:
+        spec = None
+    if spec is None:
+        return {}   # unknown framework -> skip census, author freely
+
+    try:
+        prompt = prompt_text(spec)
+    except Exception:
+        prompt = ""
+    if not prompt.strip():
+        return {}
+
+    model: dict | None = None
+    coverage = 0.0
+    last_receipt: dict = {}
+    attempt = 0
+    reask_note = ""
+    census_warnings: list[str] = []
+    while attempt <= _CENSUS_MAX_REASK:
+        attempt += 1
+        payload = {
+            "gate": "analyze_screen",
+            "analyzer_id": spec.id,
+            "analyzer_family": spec.family,
+            "file_paths": state.get("file_paths"),
+            "message": (
+                f"ELEMENT CENSUS ({spec.label}). Apply the analyzer prompt to the listed files and "
+                f"return its STRICT JSON census as {{\"screen_model\": {{...}}}}. The census is the ONLY "
+                f"input to test generation - if it is incomplete, the tests are incomplete. ICX LINTS "
+                f"it structurally and RE-ASKS until it is complete; completeness is MANDATORY, not "
+                f"best-effort. Before returning, CONFIRM every item:\n"
+                f"  [ ] EVERY functionality on the screen (list, search, sort, pagination, refresh, "
+                f"create, view, edit, delete, clone, activate, approve, DOWNLOAD/EXPORT, bulk, ...).\n"
+                f"  [ ] EVERY field on each create/edit form, each with its domSelectors.\n"
+                f"  [ ] Each field's real length/format read FROM THE CODE (maxLength/minLength/min/max/"
+                f"pattern; type email/tel/url/number) - the save uses these.\n"
+                f"  [ ] CREATE and EDIT/MODIFY submit buttons captured SEPARATELY (they differ - e.g. "
+                f"Save vs Update); never copy one onto the other.\n"
+                f"  [ ] If a create/edit form is a MULTI-STEP WIZARD (tabs / NEXT navigation), model it "
+                f"as a `steps` array - each step with its fields + nextButton, last step submits. Do "
+                f"NOT flatten a wizard into one field list; it will not run.\n"
+                f"  [ ] DOWNLOAD/EXPORT controls captured as their own functionality (trigger + "
+                f"type Download).\n"
+                f"  [ ] Any app-level confirm popup (NO/YES / OK dialog) - note its confirm-button "
+                f"selector.\n"
+                f"A miss on ANY of these is a missed or broken test. Read every file FULLY first."
+                + (f"\n\nPREVIOUS ATTEMPT REJECTED - FIX: {reask_note}" if reask_note else "")
+                + _REREAD_MANDATE
+            ),
+        }
+        # Send the (large) prompt text only on the FIRST attempt - the agent already has it on
+        # re-ask, and re-embedding 15-33KB in every reask bloats the durable checkpoint.
+        if attempt == 1:
+            payload["analyzer_prompt"] = prompt
+        resp = interrupt(payload)
+        last_receipt = resp if isinstance(resp, dict) else {}
+        raw = last_receipt.get("screen_model") if isinstance(last_receipt, dict) else None
+        report = validate_census(spec.family, raw)
+        # STRUCTURAL LINT (UI only): reconciliation checks counts add up; the lint checks the census is
+        # actually BUILDABLE + correct - create/edit not sharing a submit, every mutating form has its
+        # own submit + trigger, every field has a selector. This enforces census quality independent of
+        # which agent produced it, so no agent's mistake (wrong edit-submit, missing selector) slips
+        # through. Hard defects re-ask; soft warnings are recorded and proceed.
+        lint = None
+        if spec.family == "ui":
+            from icx_engine.testing.analyzers.census_lint import lint_ui_census
+            lint = lint_ui_census(raw if isinstance(raw, dict) else {})
+        if report.ok and (lint is None or lint.ok):
+            model = raw if isinstance(raw, dict) else None
+            coverage = report.coverage_score
+            census_warnings = list(lint.soft) if lint else []
+            break
+        notes = list(report.errors[:6]) if not report.ok else []
+        if lint and lint.hard:
+            notes = (lint.hard[:6] + notes)[:6]
+        reask_note = "; ".join(notes) or "census did not reconcile"
+        coverage = report.coverage_score
+        model = raw if isinstance(raw, dict) else model  # keep best-effort even if not perfect
+        census_warnings = list(lint.soft) if lint else []
+
+    return {
+        "analyzer_id": spec.id,
+        "analyzer_family": spec.family,
+        "screen_model": model,
+        "census_coverage": coverage,
+        "census_warnings": census_warnings,
+        "read_receipts": _record_receipts(state, "analyze_screen", last_receipt),
     }
 
 
@@ -288,6 +490,13 @@ _COMPAT_MANDATE = (
     "'less robust but fine'. The runner's tolerance is not your excuse. If a real user or a deterministic "
     "test would struggle with a control as written, it IS a finding. 'Probably works' / 'should be ok' / "
     "'optional' are not verdicts - if you are not certain it is cleanly testable as-is, it is a finding."
+    " FORBIDDEN - shallow undefined-identifier checks: before flagging ANY identifier as undefined/"
+    "missing, you must check the WHOLE repo for its definition, not just this file's own imports/"
+    "destructures - grep for it, and check index.html (and any public/ or static/ HTML) for a classic "
+    "<script src=...> tag that defines it as a global (a legitimate pattern needing no import). Flagging "
+    "a repo-wide-defined global as undefined because you only looked at one file's imports is the exact "
+    "shallow-inspection failure this mandate exists to prevent - hold your own undefined-checks to the "
+    "same rigor you are required to hold the rest of this scan to."
     " REPORT, DO NOT DECIDE: every concern, however small, becomes a finding you show the user - what you "
     "saw (path + line), why it impedes testing, and the concrete change you propose. You do NOT silently "
     "accept, skip, or drop anything; the user decides each finding's fate and you then execute exactly "
@@ -328,7 +537,7 @@ def route_after_scan(state: TestingState) -> str:
     findings = state.get("compat_findings", [])
     if any(not f.get("compatible", True) for f in findings):
         return "compat_check"
-    return "generate_context"
+    return "config_gate"
 
 
 # -- node_compat_check: compatibility gate with human-in-the-loop remediation --
@@ -417,8 +626,8 @@ async def node_mode_gate(state: TestingState) -> dict:
         "gate": 2,
         "message": (
             "Answer all questions below. Press Enter after each.\n\n"
-            "DETECTION MODE (how Magik generates the test spec):\n"
-            "  1. auto_detect - Magik opens the URL live with Playwright, scans page fields.\n"
+            "DETECTION MODE (how the UI layer generates the test spec):\n"
+            "  1. auto_detect - the UI layer opens the URL live with Playwright, scans page fields.\n"
             "                   Requires the app to be running and URL accessible.\n"
             "  2. json_spec   - AI reads your JSX/TSX source files directly. No browser needed.\n"
             "                   Use this when URL requires VPN or auth.\n"
@@ -471,7 +680,7 @@ async def node_mode_gate(state: TestingState) -> dict:
     return update
 
 
-# -- node_generate_context: Magik prompt fetch + AI editor spec ------------
+# -- gate 2b: rulebook-injected JSON spec generation -----------------------
 
 _SPEC_MAX_REASK = 2
 
@@ -513,274 +722,145 @@ def _run_gate_2b(base_payload: dict) -> tuple[dict, list[str]]:
             return resp, missing   # bounded - caller records spec_warnings, never silently hides
 
 
-async def node_generate_context(state: TestingState) -> dict:
-    if state.get("test_type") == "api":
-        import json as _json
-        client = _make_client()
-        base = state.get("api_endpoint") or ""
-        ep = None
-        for path in state["file_paths"]:
-            try:
-                content = Path(path).read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            ep = _apispec.extract_endpoint(path, content)
-            if ep is not None:
-                break
-        try:
-            if ep is None or not base:
-                raise ValueError("no endpoint derivable")
-            spec = _apispec.build_request_spec(base, ep, headers=state.get("api_headers"))
-            payload = _json.dumps(spec)
-            await client.parse_spec(payload, "json")
-            return {
-                "api_endpoint": spec["url"],
-                "api_method": ep.method,
-                "api_payload": payload,
-                "api_payload_type": "json",
-            }
-        except Exception as exc:
-            _log.warning("api auto-spec failed (%s) - falling back to manual entry", exc)
-            response = interrupt({
-                "gate": "api_manual",
-                "message": "Could not auto-build the API spec. Provide endpoint details.",
-                "needed": ["api_endpoint", "api_method", "api_payload", "api_payload_type"],
-            })
-            return {
-                "api_endpoint": response.get("api_endpoint") or base,
-                "api_method": response.get("api_method") or "POST",
-                "api_payload": response.get("api_payload") or "{}",
-                "api_payload_type": response.get("api_payload_type") or "json",
-            }
-        finally:
-            await client.aclose()
-
-    mode = state.get("detection_mode") or "json_spec"
-    scope = state.get("scope", "ticket")
-    client = _make_client()
-
-    try:
-        if mode == "auto_detect":
-            url = state.get("url")
-            if not url:
-                _log.warning("auto_detect requested but no URL - falling back to json_spec")
-                mode = "json_spec"
-            else:
-                try:
-                    r = await client._client.post(
-                        f"{client._base}/api/v1/generate-prompt",
-                        json={
-                            "file_paths": state["file_paths"],
-                            "mode": "auto_detect",
-                            "url": url,
-                            "headless": True,
-                        },
-                        timeout=60.0,
-                    )
-                    if r.status_code == 200 and r.json().get("ok"):
-                        data = r.json()["data"]
-                        raw_prompt = data.get("prompt")
-                        groups = data.get("groups", [])
-                        page_title = data.get("page_title")
-
-                        # Gate 2a: confirm URL and detected fields before AI spec generation
-                        confirmation = interrupt({
-                            "gate": "2a",
-                            "message": (
-                                "Magik scanned the page. Confirm the URL is correct "
-                                "and review detected fields before AI generates the test spec."
-                            ),
-                            "url": url,
-                            "page_title": page_title,
-                            "detected_groups": groups,
-                            "group_count": len(groups),
-                        })
-                        final_url = confirmation.get("url", url)
-                        scoped_prompt = _apply_scope(raw_prompt, state["file_paths"], scope)
-
-                        # Gate 2b (AI editor): generate JSON spec from detected fields
-                        spec_response, spec_missing = _run_gate_2b({
-                            "message": "Generate a JSON test spec from the detected page structure.",
-                            "magik_prompt": scoped_prompt,
-                            "file_paths": state["file_paths"],
-                            "context": state.get("context"),
-                            "merge_files": state.get("merge_files", False),
-                            "instruction": (
-                                "Analyze the magik_prompt (which contains detected page fields) "
-                                "and the source files. Return a structured JSON test spec as json_spec."
-                                + _REREAD_MANDATE
-                            ),
-                        })
-                        out = {
-                            "detection_mode": "auto_detect",
-                            "url": final_url,
-                            "json_spec": spec_response.get("json_spec"),
-                            "read_receipts": _record_receipts(state, "2b", spec_response),
-                        }
-                        if spec_missing:
-                            out["spec_warnings"] = spec_missing
-                        return out
-                    else:
-                        _log.warning("generate-prompt returned %s, falling back to json_spec", r.status_code)
-                        mode = "json_spec"
-                except GraphBubbleUp:
-                    raise
-                except Exception as exc:
-                    _log.warning("auto_detect failed (%s), falling back to json_spec", exc)
-                    mode = "json_spec"
-
-        if mode == "json_spec":
-            json_creation_prompt: str | None = None
-            try:
-                r = await client._client.get(
-                    f"{client._base}/prompt/json-creation",
-                    timeout=15.0,
-                )
-                if r.status_code == 200:
-                    json_creation_prompt = r.text
-            except Exception as exc:
-                _log.warning("could not fetch json-creation prompt: %s", exc)
-
-            merge = state.get("merge_files", len(state["file_paths"]) > 1)
-            file_list = "\n".join(f"- {f}" for f in state["file_paths"])
-            merge_instruction = (
-                "\n\nMULTI-FILE MERGE REQUEST\n"
-                "Analyze these files together. Generate the combined JSON spec.\n"
-                "The root file is the listing/parent page. Other files are modal/child components.\n"
-                "Produce ONE JSON whose functionalities[] array covers every user-facing action.\n"
-            ) if merge and len(state["file_paths"]) > 1 else ""
-
-            full_prompt = (
-                (json_creation_prompt or "Analyze the provided source files and generate a JSON test spec.")
-                + f"\n\nFiles:\n{file_list}"
-                + merge_instruction
-            )
-            full_prompt = _apply_scope(full_prompt, state["file_paths"], scope) or full_prompt
-
-            # Gate 2b (AI editor): AI reads JSX files and generates JSON spec
-            spec_response, spec_missing = _run_gate_2b({
-                "message": (
-                    "Analyze the source files using the prompt below and generate a JSON test spec."
-                ),
-                "magik_prompt": full_prompt,
-                "file_paths": state["file_paths"],
-                "context": state.get("context"),
-                "merge_files": merge,
-                "instruction": (
-                    "Read each file listed in file_paths, apply the magik_prompt instructions, "
-                    "and return the resulting JSON spec as json_spec in your response."
-                    + _REREAD_MANDATE
-                ),
-            })
-            out = {
-                "detection_mode": "json_spec",
-                "json_creation_prompt": json_creation_prompt,
-                "json_spec": spec_response.get("json_spec"),
-                "merge_files": merge,
-                "read_receipts": _record_receipts(state, "2b", spec_response),
-            }
-            if spec_missing:
-                out["spec_warnings"] = spec_missing
-            return out
-    finally:
-        await client.aclose()
-
-    return {"detection_mode": mode, "json_spec": None}
 
 
 # -- Gate 3: submission config ----------------------------------------------
 
+def _save_known_screen(state: TestingState) -> None:
+    """Refresh the known-screen cache whenever a session reaches config_gate with a settled census -
+    on a full rescan this writes the new clearance; on a fast-path reuse it just bumps cached_at.
+    Agent-type only (the cache models a UI screen's census/compat clearance); best-effort, never
+    raises - a cache-write failure must never affect the run."""
+    if state.get("test_type") != "agent" or not state.get("screen_model"):
+        return
+    try:
+        from icx_engine.testing import screen_cache as _cache
+        seeds = state.get("original_seeds") or state.get("file_paths") or []
+        project = _resolve_project_id(seeds)
+        if project is None:
+            return
+        _cache.save_screen(
+            project, seeds,
+            test_type="agent",
+            url=state.get("url"),
+            all_candidates=state.get("all_candidate_files") or state.get("file_paths") or [],
+            confirmed_files=state.get("file_paths") or [],
+            screen_model=state.get("screen_model"),
+            census_coverage=state.get("census_coverage") or 0.0,
+            analyzer_id=state.get("analyzer_id"),
+            analyzer_family=state.get("analyzer_family"),
+            compat_resolution=state.get("compat_resolution") or {},
+        )
+    except Exception as exc:
+        _log.warning("known_screen_check: cache save failed: %s", exc)
+
+
 async def node_config_gate(state: TestingState) -> dict:
-    _PROV_MAP  = {"1": "openai", "2": "claude"}
-    _HEAD_MAP  = {"1": True, "2": False}
+    """Gate 3 (local engine): CONFIRM the URL and lock in the layer to run. The layer is ANCHORED on
+    the test type already picked at pick_type (no re-asking the type). Risk-tier extras are offered as
+    OPTIONAL add-ons only; the default is exactly the picked type.
+    """
+    _save_known_screen(state)
+    from icx_engine.verification import compute_risk_tier, recommend_layers
+    test_type = state.get("test_type") or "unit"
+    analysis = {"problem_summary": state.get("context") or ""}
+    tier = compute_risk_tier(analysis)
+    # Anchor: the picked type IS the layer. Extras are only suggestions, never the default.
+    recommended = [test_type]
+    optional_extra = [l for l in recommend_layers(tier) if l != test_type]
+    cur_url = state.get("url")
+    needs_url = test_type in ("agent", "api")
 
-    from icx_engine.config_manager import ConfigManager as _CM
-    _cfg = _CM.load()
-    _step_cap = getattr(_cfg, "magik_agent_step_cap", 60)
-
-    cur_prov  = state.get("agent_provider", "openai")
-    cur_head  = state.get("headless", True)
-    cur_url   = state.get("url")
-    cur_prof  = state.get("profile_screen")
-    cur_slow  = state.get("slow_mo", 0)
-    cur_steps = state.get("agent_max_steps", 50)
+    extra_line = (f"  Optional extra layers you could add: {', '.join(optional_extra)}\n"
+                  if optional_extra else "")
+    url_line = (f"TARGET URL: {cur_url or 'NOT SET - required for this type'}\n  Confirm this URL or provide a new one.\n"
+                if needs_url else "TARGET URL: not needed for unit tests.\n")
+    is_browser = test_type == "agent"
+    visible_line = ("BROWSER: headless (hidden, faster) by default. Reply visible:true to WATCH the "
+                    "test drive a real browser.\n"
+                    "SLOWMO: when visible, each step is slowed + paused so you can follow it. Reply "
+                    "slowmo:<ms> to set the pace (default 1000 = 1s when visible; 0 when headless). "
+                    "Ask the user what slowmo they want before accepting.\n" if is_browser else "")
 
     response = interrupt({
         "gate": 3,
         "message": (
-            "Answer ALL questions below before submitting. Reply to each.\n\n"
-            "AI PROVIDER (for agent/ui modes):\n"
-            "  1. openai - OpenAI GPT (default, what Magik is tuned for).\n"
-            "  2. claude - Anthropic Claude.\n"
-            f"  Current: {{'1' if cur_prov=='openai' else '2'}}. {cur_prov}\n\n"
-            "HEADLESS MODE:\n"
-            "  1. yes - Run browser hidden (~3x faster). Recommended.\n"
-            "  2. no  - Show the browser window (useful for debugging).\n"
-            f"  Current: {{'1. yes' if cur_head else '2. no'}}\n\n"
-            f"TARGET URL: {cur_url or 'NOT SET - required for agent and ui types'}\n"
-            "  Confirm URL or provide a new one.\n\n"
-            f"PROFILE SCREEN (optional): {cur_prof or 'not set'}\n"
-            "  Screen name from active Magik project profile. Leave blank to skip.\n\n"
-            f"SLOW_MO (ms delay between actions): {cur_slow}\n"
-            "  0 = no delay (recommended). Use >0 only for step-by-step debugging.\n\n"
-            f"AGENT MAX STEPS (agent mode only): {cur_steps}\n"
-            f"  Max browser actions the AI agent can take. Step cap (configurable): {_step_cap}.\n"
-            "  Simple screen: 25-30. Complex multi-step wizard: 40-60. Default: 50."
+            f"You chose the '{test_type}' test - that layer will run. This gate only confirms the URL "
+            f"(it does NOT re-ask the type).\n\n"
+            f"{extra_line}"
+            f"{url_line}"
+            f"{visible_line}"
+            "Reply 'accept' to run just your chosen type, or list layers to override."
         ),
-        "options": {
-            "agent_provider": ["1. openai", "2. claude"],
-            "headless":       ["1. yes (hidden)", "2. no (visible browser)"],
-        },
-        "current": {
-            "agent_provider":  cur_prov,
-            "headless":        "1. yes" if cur_head else "2. no",
-            "url":             cur_url,
-            "profile_screen":  cur_prof,
-            "slow_mo":         cur_slow,
-            "agent_max_steps": cur_steps,
-        },
-        "json_spec_preview": (state.get("json_spec") or "")[:500] or None,
+        "test_type": test_type,
+        "risk_tier": tier,
+        "recommended_layers": recommended,
+        "optional_layers": optional_extra,
+        "current": {"url": cur_url, "visible": not state.get("headless", True),
+                    "slowmo_default_when_visible": 1000,
+                    "test_writes": bool(state.get("test_writes", True))},
     })
 
-    test_type = state.get("test_type") or "agent"
+    layers = response.get("layers") if isinstance(response, dict) else None
+    selected = [str(l) for l in layers] if isinstance(layers, list) and layers else recommended
+    final_url = (response.get("url") if isinstance(response, dict) else None) or state.get("url")
 
-    prov = _resolve_choice(response, "agent_provider", _PROV_MAP)
-    if prov not in ("openai", "claude"):
-        prov = state.get("agent_provider", "openai")
-
-    headless_raw = _resolve_choice(response, "headless", _HEAD_MAP)
-    if isinstance(headless_raw, bool):
-        headless = headless_raw
-    elif str(headless_raw).lower() in ("false", "no", "0"):
-        headless = False
-    else:
-        headless = state.get("headless", True)
-
-    final_url = response.get("url") or state.get("url")
-
-    if test_type in ("ui", "agent") and not final_url:
+    # agent needs a URL. If none was supplied, RE-ASK (a fresh interrupt) rather than raising -
+    # raising would escape the unguarded graph.ainvoke in the resume handler and, because the
+    # gate-3 resume value is already consumed, every retry would replay the url-less value and
+    # re-raise, permanently stranding the session. A fresh interrupt lets the next resume deliver
+    # the URL. Bounded so a client that never supplies one cannot loop forever.
+    reask = 0
+    while test_type == "agent" and not final_url and reask < _URL_GATE_MAX_REASK:
+        reask += 1
+        r2 = interrupt({
+            "gate": 3,
+            "needs_url": True,
+            "test_type": test_type,
+            "message": (f"A TARGET URL is REQUIRED for a '{test_type}' test and none is set. "
+                        f"Reply with the URL to test, e.g. {{\"url\": \"http://...\"}}."),
+        })
+        if isinstance(r2, dict) and r2.get("url"):
+            final_url = r2["url"]
+    if test_type == "agent" and not final_url:
         raise ValueError(
-            f"test_type '{test_type}' requires a URL. Provide url in your config response."
+            f"test_type '{test_type}' requires a URL but none was provided after {reask} attempts."
         )
 
-    raw_steps = response.get("agent_max_steps", state.get("agent_max_steps", 50))
-    try:
-        agent_max_steps = max(1, min(_step_cap, int(raw_steps)))
-    except (TypeError, ValueError):
-        agent_max_steps = state.get("agent_max_steps", 50)
-
     update: dict[str, Any] = {
-        "agent_provider":  prov,
-        "headless":        headless,
-        "profile_screen":  response.get("profile_screen", state.get("profile_screen")),
-        "slow_mo":         int(response.get("slow_mo", state.get("slow_mo", 0))),
-        "agent_max_steps": agent_max_steps,
+        "selected_layers": selected,
+        "risk_tier": tier,
         "status": "running",
     }
+    # Visible browser option (agent only): visible:true -> the agent launches its own browser headed.
+    resp = response if isinstance(response, dict) else {}
+    if "visible" in resp:
+        headless = not bool(resp.get("visible"))
+    elif "headless" in resp:
+        headless = bool(resp.get("headless"))
+    else:
+        headless = bool(state.get("headless", True))
+    update["headless"] = headless
+    # slowmo (agent only): 0 when headless; when visible, the user-chosen ms or 1s default so a
+    # human can follow each step. Ignored for api/unit.
+    if is_browser:
+        if headless:
+            slowmo = 0
+        else:
+            raw = resp.get("slowmo")
+            try:
+                slowmo = max(0, int(raw)) if raw is not None else 1000
+            except (TypeError, ValueError):
+                slowmo = 1000
+        update["slowmo"] = slowmo
+    # test_writes override (agent/api): the user can turn real Create/Update/Delete writes off at
+    # this gate for a read-only environment, without restarting the session.
+    if "test_writes" in resp:
+        update["test_writes"] = bool(resp.get("test_writes"))
     if final_url:
         update["url"] = final_url
     for k in ("api_endpoint", "api_method", "api_payload", "api_payload_type", "api_headers"):
-        if k in response:
+        if isinstance(response, dict) and k in response:
             update[k] = response[k]
     return update
 
@@ -834,25 +914,57 @@ async def node_auth_gate(state: TestingState) -> dict:
     project = state.get("project") or _resolve_project_id(state["file_paths"])
     existing = _auth.load_session(project, host) if project and host else None
 
+    # Dev-server port drift (Vite/CRA/webpack-dev-server auto-increments on a taken port): the
+    # EXACT host has no valid session, but this same project has one at a different port on the
+    # same hostname. Surface it explicitly rather than silently falling back to public - the user
+    # decides, ICX never auto-matches a session across hosts on its own.
+    other_sessions: list[dict[str, str]] = []
+    if project and not _valid_stored_session(existing):
+        hostname = _auth.hostname_of(url)
+        for h, rec in (_auth.list_sessions_for_project(project) if project else []):
+            if h == host or not _valid_stored_session(rec):
+                continue
+            if hostname and h.split(":")[0] == hostname:
+                other_sessions.append({"host": h, "captured_at": rec.captured_at,
+                                       "expires_at": rec.expires_at})
+
+    other_line = ""
+    if other_sessions:
+        listing = "; ".join(f"{o['host']} (captured {o['captured_at']})" for o in other_sessions)
+        other_line = (
+            f"\n  NOTE: no session for {host}, but this project has one at a different port on the "
+            f"same host: {listing}. This is likely just a dev-server port change (same app). Reply "
+            f"{{\"auth_mode\": \"reuse\", \"reuse_host\": \"<one of the hosts above>\"}} to reuse it - "
+            "cookie-based auth transfers across a port change, but localStorage/sessionStorage-based "
+            "auth (common in SPAs) is ORIGIN-SCOPED INCLUDING PORT and will NOT restore correctly; if "
+            "the app still looks logged out after reuse, capture fresh instead."
+        )
+
     response = interrupt({
         "gate": "auth_gate",
         "test_type": state.get("test_type"),
         "host": host,
         "has_valid_session": existing is not None,
         "session_expires_at": existing.expires_at if existing else None,
+        "other_host_sessions": other_sessions,
         "message": (
             "Choose how to authenticate this run.\n"
-            "  public  - no login; Magik will not attempt auth (fixes wandering).\n"
-            "  capture - log in once in a visible browser, reuse the session.\n"
+            "  public  - no login; the run does not attempt auth.\n"
+            "  capture - ICX opens a REAL browser; the user logs in BY HAND; ICX saves the session.\n"
+            "            (Do NOT ask the user for username/password in chat for this.)\n"
             "  reuse   - reuse the stored session for this project + host.\n"
-            "  inline  - provide credentials; ICX logs in and stores the session."
+            "  inline  - the user provides the APP credentials; ICX drives the login form + saves it."
+            + other_line
         ),
         "options": ["public", "capture", "reuse", "inline"],
         "instruction": (
-            "For capture/inline, perform the login via the magik_login_* MCP tools first, "
-            "then resume with {\"auth_mode\": \"capture\"|\"inline\", \"session_id\": \"<id>\"}. "
-            "For reuse, resume with {\"auth_mode\": \"reuse\"}. "
-            "For public, resume with {\"auth_mode\": \"public\"}."
+            "For capture: call the ui_auth_capture tool (url + file_paths) - it opens a browser for "
+            "manual login and saves the session. For inline: call ui_auth_inline (url + file_paths + "
+            "username + password) - only inline collects credentials, and they go to ICX's browser "
+            "process, never into chat history. After either tool returns ok, resume with "
+            "{\"auth_mode\": \"capture\"|\"inline\"}. For reuse, resume with {\"auth_mode\": \"reuse\"}, "
+            "optionally with {\"reuse_host\": \"<host>\"} to reuse a session from gate.other_host_sessions "
+            "instead of the current host. For public, resume with {\"auth_mode\": \"public\"}."
         ),
     })
 
@@ -872,320 +984,525 @@ async def node_auth_gate(state: TestingState) -> dict:
         sid = response.get("session_id")
         if sid and project and host:
             _auth.save_session(project, host, str(sid))
-    elif mode == "reuse" and existing is None:
-        update["auth_mode"] = "public"
-        update["auto_auth_recover"] = False
+    elif mode == "reuse":
+        reuse_host = str(response.get("reuse_host") or "").strip()
+        if reuse_host and reuse_host != host and project:
+            other_rec = _auth.load_session(project, reuse_host)
+            if _valid_stored_session(other_rec):
+                # Alias the other host's session under the CURRENT host key - _session_storage
+                # re-derives host from state["url"] at use time, so this is what makes the reused
+                # storageState actually get picked up for THIS run's target URL.
+                _auth.save_session(project, host, other_rec.session_id,
+                                   storage_state=other_rec.storage_state)
+            else:
+                update["auth_mode"] = "public"
+                update["auto_auth_recover"] = False
+        elif not _valid_stored_session(existing):
+            # `existing` can be a non-None RECORD (TTL not expired) whose storage_state file is
+            # missing, empty, or corrupt - reuse must not silently proceed unauthenticated against
+            # that record. Same fallback as the never-had-a-session case: public, and drop the
+            # auto-recover flag so a later step never claims "session restored" when nothing usable
+            # was found.
+            update["auth_mode"] = "public"
+            update["auto_auth_recover"] = False
     return update
 
 
-# -- node_profile_push: profile_push gate (user yes/no) then profile_gen ------
-# First interrupt: user decides whether to push a profile.
-# On yes: fetch the profile-creation prompt from Magik, then second interrupt
-# (AGENT-GENERATE) so the agent reads the source files and returns the markdown.
-# If the agent returns no markdown, fall back to the ICX heuristic generator.
-
-def _read_profile_file(path_str: str) -> str | None:
-    # Read a user-provided Project Profile markdown file. Returns the text, or
-    # None if it is missing/unreadable/empty.
+def _valid_stored_session(rec) -> bool:
+    """A stored auth record is usable only if its storage_state file exists and parses as a
+    Playwright storage state with actual cookies or localStorage origins - not just present."""
+    if rec is None or not rec.storage_state:
+        return False
+    p = Path(rec.storage_state)
+    if not p.exists():
+        return False
     try:
-        p = Path(path_str)
-        if not p.is_file():
-            return None
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        return text if text.strip() else None
-    except OSError:
-        return None
-
-
-async def node_profile_push(state: TestingState) -> dict:
-    if state.get("test_type") == "api":
-        return {"profile_pushed": False}
-    decision = interrupt({
-        "gate": "profile_push",
-        "message": (
-            "Push a Magik Project Profile? It enriches the run and enables functional "
-            "cross-field cases.\n"
-            "  agent - the agent reads your source and generates the profile markdown.\n"
-            "  file  - use an existing Project Profile markdown file you provide.\n"
-            "  no    - skip."
-        ),
-        "options": ["agent", "file", "no"],
-        "default": "agent",
-        "instruction": (
-            "Resume with {\"push\": \"agent\"} to have the agent generate it, "
-            "{\"push\": \"file\", \"profile_path\": \"<path to a .md profile>\"} "
-            "(or {\"push\": \"file\", \"profile_markdown\": \"<raw markdown>\"}) to use an "
-            "existing profile, or {\"push\": \"no\"} to skip."
-        ),
-    })
-    choice = str(decision.get("push", "no")).strip().lower()
-    if choice in ("no", "0", "false"):
-        return {"profile_pushed": False}
-
-    client = _make_client()
-    try:
-        # Option: use a profile file the user provides (raw markdown or a path).
-        if choice == "file":
-            md = decision.get("profile_markdown")
-            if not (isinstance(md, str) and md.strip()):
-                path_str = decision.get("profile_path") or ""
-                md = _read_profile_file(str(path_str)) if path_str else None
-            if not (isinstance(md, str) and md.strip()):
-                _log.warning("profile file missing/unreadable/empty: %r", decision.get("profile_path"))
-                return {"profile_pushed": False}
-            await client.submit_profile(md)
-            return {"profile_pushed": True, "profile_markdown": md}
-
-        # Default: agent-generate (choice == "agent" or the legacy "yes").
-        try:
-            prompt = await client.get_profile_creation_prompt()
-        except Exception as exc:
-            _log.warning("could not fetch profile-creation prompt: %s", exc)
-            prompt = ""
-
-        gen = interrupt({
-            "gate": "profile_gen",
-            "magik_prompt": prompt,
-            "file_paths": state["file_paths"],
-            "base_url": state.get("url") or "",
-            "rules": _rules.load_gate_rules("profile_gen"),
-            "rules_path": _rules.gate_rules_path("profile_gen"),
-            "instruction": (
-                "Read the source files in file_paths and apply magik_prompt to produce the Project "
-                "Profile as Markdown. Return {\"profile_markdown\": \"<full markdown>\"}."
-                + _REREAD_MANDATE
-            ),
-        })
-        md = gen.get("profile_markdown")
-        if not md:
-            display = _resolve_project_name(state["file_paths"]) or "project"
-            md = _profile_gen.build_profile_markdown(state.get("classified", []), display, state.get("url") or "")
-        await client.submit_profile(md)
-        return {"profile_pushed": True, "profile_markdown": md, "read_receipts": _record_receipts(state, "profile_gen", gen)}
-    except GraphBubbleUp:
-        raise
-    except Exception as exc:
-        _log.warning("profile push failed: %s", exc)
-        return {"profile_pushed": False}
-    finally:
-        await client.aclose()
+        import json
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and bool(data.get("cookies") or data.get("origins"))
 
 
 # -- node_submit ------------------------------------------------------------
 
-async def node_submit(state: TestingState) -> dict:
-    from icx_engine.testing.handlers import get_handler
-    client = _make_client()
-    test_type = state.get("test_type") or "agent"
-
-    sid = None
-    needs_session = test_type in ("ui", "agent") and state.get("auth_mode") in ("capture", "reuse", "inline")
-    if needs_session:
-        project, host = state.get("project"), state.get("host")
-        rec = _auth.load_session(project, host) if project and host else None
-        sid = rec.session_id if rec else None
-        if sid is None:
-            # The run asked for an authenticated session but the stored one is
-            # expired or missing. Route to relogin instead of silently running
-            # unauthenticated.
-            await client.aclose()
-            return {"status": "auth_error",
-                    "last_error": "saved session expired or unavailable - re-authenticate"}
-    submit_state = {**state, "_auth_session_id": sid,
-                    "auto_auth_recover": state.get("auto_auth_recover", True)}
-
+def _local_repo_root(state: TestingState) -> str:
+    """Derive the repo root for local verification from the confirmed/seed file paths."""
+    import os
+    fps = state.get("file_paths") or []
+    if not fps:
+        return os.getcwd()
+    dirs = [os.path.dirname(p) for p in fps if p]
     try:
-        data = await get_handler(test_type).submit(client, submit_state)
-    except MagikAuthError as exc:
-        return {"status": "auth_error", "last_error": str(exc)}
-    except ValueError as exc:
-        return {"status": "error", "last_error": str(exc)}
-    except MagikError as exc:
-        return {"status": "error", "last_error": str(exc)}
+        return os.path.commonpath(dirs) if len(dirs) > 1 else (dirs[0] or os.getcwd())
+    except ValueError:
+        return dirs[0] or os.getcwd()
+
+
+def _session_storage(state: TestingState) -> str | None:
+    """Path to the captured/inline authenticated session (Playwright storageState) for this URL, or
+    None. Shared by discovery, verify/heal, and the scored replay so all three run logged-in."""
+    try:
+        host = _auth.host_of(state.get("url") or "")
+        project = state.get("project")
+        rec = _auth.load_session(project, host) if project and host else None
+        if rec and rec.storage_state and Path(rec.storage_state).exists():
+            return rec.storage_state
+    except Exception:
+        pass
+    return None
+
+
+async def _combined_census(state: TestingState, source_model: dict) -> dict:
+    """The ONE census path for UI/agent: fuse the runtime-DISCOVERED census (live DOM crawl) with the
+    source census the agent produced. Discovery supplies real selectors, real control kinds, and the
+    real wizard-step structure (it can never name a selector that does not exist); source supplies the
+    JS-hidden constraints (maxLength/regex/format) and any fields the crawler could not read. Merged
+    they beat either alone - this is why COMBINED is the only method, not a user-selectable mode.
+
+    Degrades to the source census ONLY when the live app/session is physically unavailable (tooling
+    absent, app down, empty crawl) - a fallback, never a choice. Never raises."""
+    try:
+        from icx_engine.testing.local_executor import run_ui_discovery
+        from icx_engine.testing.analyzers.census_merge import merge_census
+        repo = _local_repo_root(state)
+        resolver = await _runtime_resolver(repo)
+        discovered = await run_ui_discovery(
+            repo, state.get("url") or "", storage_state=_session_storage(state),
+            runtime_resolver=resolver, ui_headed=not state.get("headless", True))
+        if isinstance(discovered, dict) and discovered.get("functionalities"):
+            merged = merge_census(discovered, source_model)
+            if isinstance(merged, dict) and merged.get("functionalities"):
+                return merged
+    except Exception:
+        pass
+    return source_model
+
+
+def route_after_auth(state: TestingState) -> str:
+    """agent authors its own Playwright test; unit WITH a census authors tests first; api/plain-unit run."""
+    tt = state.get("test_type")
+    if tt == "agent":
+        return "author_flow"
+    if tt == "unit" and isinstance(state.get("screen_model"), dict) and state.get("screen_model"):
+        return "unit_author"
+    return "local_run"
+
+
+# per-language test-authoring guidance for the unit_author gate, keyed to the census analyzer family.
+_UNIT_FRAMEWORK_HINT = {
+    "cpp":  "C/C++: GoogleTest (TEST/TEST_F) or Catch2 (TEST_CASE), registered via CMake add_test so ctest runs them.",
+    "sql":  "SQL routines: utPLSQL (--%test), tSQLt (test schema procs), or pgTAP - matching your ICX_SQL_TEST_CMD framework.",
+    "grpc": "gRPC: a client that calls each rpc and asserts the response/status, runnable via your ICX_GRPC_TEST_CMD.",
+    "iac":  "IaC: policy/validation assertions (checkov custom checks / tflint rules / terraform validate) per your ICX_IAC_TEST_CMD.",
+    "backend": "the repo's unit framework (pytest / JUnit / jest / go test / cargo test / rspec / phpunit) - one test per unit/handler.",
+    "ui":   "the repo's unit framework for these components.",
+}
+
+
+async def node_unit_author(state: TestingState) -> dict:
+    """UNIT test authoring from the Element Census: instruct the agent to WRITE comprehensive tests
+    covering EVERY unit/routine/function the census enumerated, using its own editor, so the language
+    runner (pytest/ctest/utPLSQL/...) discovers and executes them on the next step. This is what makes
+    the unit family comprehensive - without it the census would be informational only. Guarded: no
+    census -> no-op (plain run of whatever tests already exist)."""
+    model = state.get("screen_model")
+    if not (isinstance(model, dict) and model):
+        return {}
+    fam = str(state.get("analyzer_family") or "backend")
+    hint = _UNIT_FRAMEWORK_HINT.get(fam, _UNIT_FRAMEWORK_HINT["backend"])
+    resp = interrupt({
+        "gate": "unit_author",
+        "analyzer_family": fam,
+        "analyzer_id": state.get("analyzer_id"),
+        "screen_model": model,
+        "message": (
+            "WRITE COMPREHENSIVE UNIT TESTS from the Element Census in gate.screen_model. Cover EVERY "
+            "testable unit / routine / function / endpoint it lists - happy path AND edge/invalid/error "
+            "cases and every validation. Use YOUR EDITOR to create the test files IN THE REPO so the "
+            f"runner discovers them. Framework: {hint} Do not skip any censused unit - a missed unit is "
+            "a missed test. When the files are written, confirm to proceed to the run."
+        ),
+    })
+    return {"read_receipts": _record_receipts(state, "unit_author", resp if isinstance(resp, dict) else {})}
+
+
+async def node_author_flow(state: TestingState) -> dict:
+    """AGENT-GENERATE gate: the connected agent writes a REAL Playwright test file and runs it
+    itself (its own Bash tool, against ICX's pinned Playwright install), reading Playwright's own
+    failures and fixing its own script until the checklist rulebook is covered. ICX provides the
+    census (what to cover, with live-DOM-verified selectors) and the pinned tool paths; ICX does not
+    generate, execute, or interpret any test content itself - see rules_defaults/author_flow.md for
+    the checklist the agent follows. The census is a floor, not a ceiling: the agent may test and
+    report functionality it discovers by reading source that the census never listed (`discovered`).
+    The agent's own self-fix loop is bounded by `max_iterations` (communicated in the gate message,
+    not separately enforced by ICX). agent-type only."""
+    auth_mode = str(state.get("auth_mode") or "public")
+    if auth_mode in ("capture", "inline", "reuse"):
+        # A session was captured/reused: ICX restores it (cookies + localStorage + sessionStorage)
+        # BEFORE navigation, so the app boots already logged in. Do NOT re-author login steps.
+        login_line = (
+            "A saved login session WILL be restored automatically before the test runs (storage_state "
+            "path in gate.storage_state), so do NOT author any login steps in your Playwright test - "
+            "load that storage state into your browser context and go straight to the target URL."
+        )
+    else:
+        login_line = (
+            "This app has NO saved session - author real login steps for THIS app first (read the "
+            "actual login form, do not assume a 2-field layout), then proceed."
+        )
+    model = state.get("screen_model")
+    if isinstance(model, dict) and model and state.get("url"):
+        # COMBINED CENSUS: fuse the live-DOM crawl with the agent's source census. Discovery supplies
+        # real selectors/control kinds/wizard structure (it can never name a selector that does not
+        # exist); source supplies JS-hidden constraints (maxLength/regex/format) the crawler cannot
+        # read. Degrades to the source census only when the live app/session is unavailable.
+        model = await _combined_census(state, model)
+
+    writes_line = (
+        "DATA WRITES ARE ENABLED: actually submit Create/Update and perform Delete against the live "
+        "app. Use clearly-tagged, GENERIC test data (e.g. a 'Test'/'QA' prefix + a run-unique "
+        "timestamp token) so created records are identifiable, and clean up what you created. NEVER "
+        "embed a tool/vendor name (e.g. 'ICX') in any data value - it is internal tooling, not app data."
+        if state.get("test_writes", True) else
+        "DATA WRITES ARE DISABLED: exercise the forms (open/fill/reset/validate/cancel) and open "
+        "view/edit, but do NOT click the final Save/Update or confirm a Delete."
+    )
+    max_iter = int(state.get("max_iterations") or 3)
+    iteration_cap_line = (
+        f"SELF-FIX BUDGET: you get at most {max_iter} write/run/read-failure/fix rounds in this pass. "
+        "If the checklist is still not covered after that many rounds, STOP fixing - resume with "
+        "whatever report/coverage you have and list what's left as findings. Do not loop indefinitely."
+    )
+
+    repo = _local_repo_root(state)
+    storage_state = _session_storage(state)
+    report_path = str(Path(repo) / ".icx-agent-junit.xml")
+    playwright_env = _playwright_env()
+    headless = bool(state.get("headless", True))
+    slowmo = int(state.get("slowmo") or 0)
+    browser_line = (
+        "Launch your browser HEADLESS (default, fastest)." if headless else
+        f"Launch your browser HEADED (visible:true was chosen) with slowMo:{slowmo} so a human can "
+        "watch it - the user wants to see this run."
+    )
+    from icx_engine.testing.analyzers.scenarios import build_scenario_guidance
+    scenario_guidance = build_scenario_guidance(state.get("nl_intent"), state.get("acceptance_criteria"))
+
+    response = interrupt({
+        "gate": "author_flow",
+        "test_type": "agent",
+        "screen_model": model if isinstance(model, dict) else None,
+        "url": state.get("url"),
+        "auth_mode": auth_mode,
+        "storage_state": storage_state,
+        "file_paths": state.get("file_paths"),
+        "report_path": report_path,
+        "rules": _rules.load_gate_rules("author_flow"),
+        "rules_path": _rules.gate_rules_path("author_flow"),
+        "playwright": playwright_env,
+        "headless": headless,
+        "slowmo": slowmo,
+        "message": (
+            f"{login_line}\n\n{writes_line}\n\n{browser_line}\n\n{iteration_cap_line}\n\n"
+            "Follow gate.rules (the checklist) in full - it is binding, read it every time. "
+            "gate.screen_model is a FLOOR, not a ceiling: you are the one actually reading this "
+            "app's source - if you find a functionality, field, or tag (e.g. an upload/export/report "
+            "action) that gate.screen_model never listed, TEST IT TOO and report it in \"discovered\" "
+            "below; never skip something real just because ICX's census didn't name it. For a "
+            "functionality with no create-step (export/upload/download/report), exercise it against "
+            "whatever real data already exists - do not skip it for lack of a record to create. If "
+            "the live app or source disagrees with what gate.screen_model says, trust what you "
+            "actually see/read, adapt, and say why in \"findings\" or \"discovered\". "
+            "Write a real Playwright test file in this repo covering gate.screen_model per the "
+            "checklist, then run it YOURSELF (Bash) against ICX's pinned Playwright install - see "
+            "gate.playwright for the node executable and env vars (NODE_PATH, "
+            "PLAYWRIGHT_BROWSERS_PATH) to set, so you use ICX's own install, not a bare npx/global "
+            "one. Point the run at gate.report_path with a JUnit reporter "
+            "(`--reporter=junit --output=<gate.report_path>` for `playwright test`, or the "
+            "equivalent for your test runner). Read failures Playwright itself reports, fix your "
+            "OWN script, re-run - repeat until the checklist is covered or you have confirmed a "
+            "genuine app bug (report it, do not force a false pass). "
+            "Resume with {\"report_path\": \"<path you actually wrote the JUnit report to>\", "
+            "\"test_file\": \"<path to the test file you wrote>\", \"covered\": [\"<census "
+            "functionality names/ids you covered>\"], \"discovered\": [\"<functionality/tag names "
+            "you found by reading code and tested, that gate.screen_model never listed>\"], "
+            "\"findings\": [\"<genuine app bugs found, if any>\"]}."
+            + scenario_guidance
+        ),
+    })
+
+    out = {"read_receipts": _record_receipts(state, "author_flow", response if isinstance(response, dict) else {})}
+    if isinstance(model, dict) and model:
+        out["screen_model"] = model
+    if isinstance(response, dict):
+        out["agent_report_path"] = str(response.get("report_path") or report_path)
+        out["agent_test_file"] = str(response.get("test_file") or "")
+        out["agent_covered"] = list(response.get("covered") or [])
+        out["agent_findings"] = list(response.get("findings") or [])
+        out["agent_discovered"] = list(response.get("discovered") or [])
+    return out
+
+
+def _playwright_env() -> dict:
+    """Node executable + env vars for ICX's own pinned Playwright install, so the agent runs its
+    hand-written test against ICX's tooling (never a bare npx/global install). Best-effort - an
+    absent install still returns a usable shape (empty env), the gate message tells the agent what
+    each field means regardless."""
+    try:
+        from icx_engine.runtime_manager import resolve_harness_node
+        from icx_engine.testing.runners.install import installed_path, browsers_dir
+        node = resolve_harness_node() or "node"
+        pw = installed_path("playwright")
+        env = {}
+        if pw:
+            env["NODE_PATH"] = str(Path(pw) / "node_modules")
+            env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir(Path(pw)))
+        return {"node": node, "env": env, "installed": bool(pw)}
+    except Exception:
+        return {"node": "node", "env": {}, "installed": False}
+
+
+# lang aliases: runner.lang -> Runtime Manager language key
+_RUNTIME_LANG_ALIAS = {"js-ts": "node", "javascript": "node", "typescript": "node"}
+
+
+async def _runtime_resolver(repo: str):
+    """Return an async resolver(lang)->path that uses the Runtime Manager to pick the repo-correct
+    runtime, non-blocking. Falls back to None (runner uses PATH) when not resolvable.
+
+    Memoized per (lang, repo) for the resolver's lifetime: resolving spawns a version-probe
+    subprocess on a registry miss, and one run may query several same-language runners - the cache
+    collapses those to a single resolution.
+    """
+    cache: dict[str, str | None] = {}
+
+    async def _resolve(lang: str):
+        from icx_engine.runtime_manager import resolve_runtime, resolve_harness_node
+        key = _RUNTIME_LANG_ALIAS.get(lang, lang)
+        if key in cache:
+            return cache[key]
+        try:
+            if key in ("ui", "agent"):
+                # The UI harness (Playwright) needs a MODERN node, decoupled from the
+                # app's node - a node-14/16 project still gets UI testing on a discovered node-18+.
+                path = await asyncio.to_thread(resolve_harness_node)
+            else:
+                res = await asyncio.to_thread(resolve_runtime, key, repo)
+                path = res.path if getattr(res, "status", "") == "resolved" else None
+        except Exception:
+            path = None
+        cache[key] = path
+        return path
+    return _resolve
+
+
+def _agent_report_result(state: TestingState) -> dict:
+    """Build the same {ok, test_type, reason, runners, summary, reports, cases, unavailable} shape
+    run_local_verification returns, but from the JUnit report the AGENT's own Playwright run wrote
+    (see node_author_flow) - ICX parses it, never executes anything itself for agent-type. Adds
+    `coverage_gaps`: census functionalities neither `covered` nor `discovered` named (the census is
+    a floor - anything the agent found by reading source and tested closes a gap same as a census
+    item does), `discovered`: functionality/tags the agent found on its own, and `findings`: genuine
+    app bugs the agent reported (distinct from test failures)."""
+    from icx_engine.testing.runners.junit import parse_junit_xml
+
+    report_path = str(state.get("agent_report_path") or "")
+    if not report_path or not Path(report_path).exists():
+        return {"ok": False, "test_type": "agent",
+                "reason": f"no JUnit report found at {report_path or '(none given)'} - the agent's "
+                          f"Playwright run may not have completed or was not pointed at this path",
+                "runners": ["playwright"], "summary": {}, "reports": [], "cases": [], "unavailable": []}
+
+    rep = parse_junit_xml(report_path)
+    discovered = [str(d).strip() for d in (state.get("agent_discovered") or []) if str(d).strip()]
+    covered = {str(c).strip().lower() for c in (state.get("agent_covered") or []) if str(c).strip()}
+    covered |= {d.lower() for d in discovered}
+    model = state.get("screen_model")
+    gaps: list[str] = []
+    if isinstance(model, dict) and covered:
+        for f in (model.get("functionalities") or []):
+            if not isinstance(f, dict):
+                continue
+            name = str(f.get("functionality") or f.get("id") or "").strip()
+            if name and name.lower() not in covered:
+                gaps.append(name)
+
+    summary = {"total": rep.total, "passed": rep.passed, "failures": rep.failures,
+              "errors": rep.errors, "skipped": rep.skipped}
+    return {
+        "ok": rep.ok and not gaps,
+        "test_type": "agent",
+        "reason": "" if rep.ok and not gaps else
+                  ("tests failed or none ran" if not rep.ok else
+                   f"census functionalities not covered by the agent's test: {', '.join(gaps)}"),
+        "runners": ["playwright"],
+        "summary": summary,
+        "reports": [{"runner": "playwright", "report_path": report_path, "total": rep.total, "ok": rep.ok}],
+        "cases": [(c.name, c.status, c.time) for c in rep.cases],
+        "unavailable": [],
+        "coverage_gaps": gaps,
+        "discovered": discovered,
+        "findings": list(state.get("agent_findings") or []),
+    }
+
+
+async def node_local_run(state: TestingState) -> dict:
+    """Run the local (in-process, async) verification suite and feed the result to the review gate.
+
+    Executes engine='local'. Fully async; never blocks the event loop. Uses the Runtime Manager to
+    run each layer on the repo-correct runtime. Maps a failed suite to a single issue so the review
+    gate handles it uniformly.
+
+    agent-type does NOT invoke a runner here - the agent already ran its own Playwright test (see
+    node_author_flow); this just reads the JUnit report it produced (`_agent_report_result`).
+    """
+    test_type = state.get("test_type") or "unit"
+    repo = _local_repo_root(state)
+
+    if test_type == "agent":
+        res = _agent_report_result(state)
+        if res.get("ok"):
+            return {"status": "parsed", "issues": [], "full_report": res, "run_id": "local"}
+        issues = [{
+            "name": "verification_failed",
+            "description": res.get("reason", "agent test run did not pass"),
+            "severity": "high",
+            "detail": res.get("summary", {}),
+        }]
+        return {"status": "parsed", "issues": issues, "full_report": res, "run_id": "local"}
+
+    from icx_engine.testing.local_executor import run_local_verification
+    if test_type == "api":
+        # Materialize the backend census into openapi.json + *.hurl so schemathesis (schema fuzz) and
+        # hurl (scripted per-endpoint status asserts) have something to run - the census IS the spec.
+        model = state.get("screen_model")
+        if isinstance(model, dict) and model and str(state.get("analyzer_family")) == "backend":
+            try:
+                from icx_engine.testing.analyzers.to_api_spec import materialize_api_spec
+                materialize_api_spec(model, repo, state.get("url") or "")
+            except Exception:
+                pass
+    try:
+        resolver = await _runtime_resolver(repo)
+        res = await run_local_verification(
+            repo, test_type, target_url=state.get("url"), runtime_resolver=resolver,
+        )
     except Exception as exc:
-        return {"status": "error", "last_error": f"unexpected error submitting test: {exc}"}
-    finally:
-        await client.aclose()
-    return {"run_id": data["runId"], "status": "polling", "issues": []}
+        # An execution error is a FAILURE, not a pass. Emit an issue so route_after_check_issues does
+        # not treat empty issues as "all tests passed" (which would make memory_save record a false
+        # green). The review gate then surfaces it to the user.
+        return {"status": "error", "last_error": f"local verification failed: {exc}",
+                "run_id": "local",
+                "issues": [{"name": "verification_error",
+                            "description": f"local verification failed to run: {exc}",
+                            "severity": "high", "detail": {}}]}
+
+    # DoD integration: derive a confidence report from the suite result so the agent can feed
+    # record_verification / save_memory. One DoD item per runner (evidence = its command + summary).
+    try:
+        from icx_engine.verification import build_confidence_report
+        tier = str(state.get("risk_tier") or "medium")
+        layers = list(state.get("selected_layers") or [test_type])
+        dod_items = [{
+            "check": f"{rep.get('runner', 'runner')} verification",
+            "method": test_type,
+            "passed": bool(rep.get("ok")),
+            "command": str(rep.get("runner", "")),
+            "output": f"total={rep.get('total', 0)}",
+        } for rep in res.get("reports", [])]
+        # Census coverage as a DoD dimension: when the Element Census ran, surface how completely the
+        # authored tests cover the screen model (1.0 = every censused element reconciled). This makes
+        # "nothing missed" a visible, scored part of Definition-of-Done, not just an internal check.
+        cov = float(state.get("census_coverage") or 0.0)
+        if state.get("screen_model") is not None:
+            dod_items.append({
+                "check": f"element-census coverage ({state.get('analyzer_id') or 'analyzer'})",
+                "method": "census-reconciliation",
+                "passed": cov >= 0.999,
+                "command": "analyze_screen",
+                "output": f"coverage={cov}",
+            })
+            res["census_coverage"] = cov
+        res["confidence"] = build_confidence_report(dod_items, tier, layers)
+        res["dod_items"] = dod_items
+    except Exception:
+        pass
+
+    # STATIC SECURITY (always on): native, no-install scan of the repo source - leaked secrets, dangerous
+    # code patterns (SAST-lite), and dependency/SCA - folded onto res['security']. Fully guarded; a scan
+    # failure never affects the node result. Runtime DAST probes run separately inside the UI/API flow.
+    try:
+        from icx_engine.testing.security import fold_into_result
+        fold_into_result(res, repo)
+    except Exception:
+        pass
+
+    # TEST QUALITY (always on, honest): regression selection (relevant tests for the change), performance
+    # regression (when before/after metrics are provided), and mutation scoring (opt-in via a report path).
+    # Each reports real data or an honest 'not run: <reason>'. Fully guarded - never affects the result.
+    try:
+        from icx_engine.testing.quality_advisory import fold_quality
+        fold_quality(res, repo)
+    except Exception:
+        pass
+
+    # ANALYTICS (opt-in, off by default): record this run into the local history store. Fully guarded
+    # - a recording failure never affects the node result.
+    try:
+        from icx_engine.testing.analytics.record import analytics_enabled, record_from_result
+        if analytics_enabled():
+            import time as _t
+            record_from_result(res, app=str(state.get("project") or state.get("url") or "app"),
+                               run_id=f"{state.get('project') or 'run'}-{int(_t.time())}", ts=_t.time())
+    except Exception:
+        pass
+
+    # HUMAN REPORT (always on): write a browser-viewable HTML report of this run to
+    # ~/.icx/testing/reports/ (or ICX_TEST_REPORTS_DIR) + refresh index.html. Fully guarded - a report
+    # write never affects the node result. The MCP agent gets the structured result; this is the mirror
+    # a human can open and read.
+    try:
+        import time as _rt
+        from icx_engine.testing.reporting.session_report import write_session_report
+        write_session_report(res, {
+            "app": str(state.get("project") or state.get("url") or "app"),
+            "url": str(state.get("url") or ""),
+            "test_type": str(state.get("test_type") or res.get("test_type") or ""),
+            "ts": int(_rt.time()),
+            "run_id": f"{state.get('project') or 'run'}-{int(_rt.time())}",
+        })
+    except Exception:
+        pass
+
+    if res.get("ok"):
+        return {"status": "parsed", "issues": [], "full_report": res, "run_id": "local"}
+    issues = [{
+        "name": "verification_failed",
+        "description": res.get("reason", "local verification did not pass"),
+        "severity": "high",
+        "detail": res.get("summary", {}),
+    }]
+    return {"status": "parsed", "issues": issues, "full_report": res, "run_id": "local"}
+
+
 
 
 # -- node_poll --------------------------------------------------------------
 
-async def node_poll(state: TestingState) -> dict:
-    from icx_engine.testing.session_store import spawn_bg_poll, get_bg_result, mark_bg_done
-
-    run_id = state["run_id"]
-    if not run_id:
-        return {"status": "error", "last_error": "run_id missing before polling"}
-
-    if _stream_supported():
-        client = _make_client()
-        try:
-            async for event, data in client.stream_run(run_id):
-                if event == "auth_required":
-                    return {"status": "auth_error",
-                            "last_error": f"auth required at {data.get('loginUrl', 'login')}"}
-                if event == "done":
-                    state_val = data.get("state", "completed")
-                    return {"status": "test_complete", "run_state": state_val,
-                            "run_counters": data.get("counters", {})}
-        except Exception as exc:
-            _log.warning("stream failed (%s) - falling back to interval poll", exc)
-        finally:
-            await client.aclose()
-
-    spawn_bg_poll(run_id)
-
-    client = _make_client()
-    retries = 0
-
-    try:
-        while True:
-            bg_result = get_bg_result(run_id)
-            if bg_result:
-                mark_bg_done(run_id)
-                return {"status": "test_complete", **bg_result}
-
-            await asyncio.sleep(_POLL_INTERVAL)
-            try:
-                snap = await client.get_run_status(run_id)
-                retries = 0
-            except MagikRunLost:
-                return {"status": "error", "last_error": f"run {run_id} not found - Magik may have restarted"}
-            except MagikUnreachable as exc:
-                retries += 1
-                if retries > _MAX_RETRIES:
-                    return {"status": "error", "last_error": str(exc)}
-                await asyncio.sleep(_RETRY_BACKOFF[min(retries - 1, len(_RETRY_BACKOFF) - 1)])
-                continue
-            except Exception as exc:
-                retries += 1
-                if retries > _MAX_RETRIES:
-                    return {"status": "error", "last_error": str(exc)}
-                continue
-
-            if snap["state"] in _TERMINAL_STATES:
-                mark_bg_done(run_id)
-                return {
-                    "status": "test_complete",
-                    "run_state": snap["state"],
-                    "run_counters": snap.get("counters", {}),
-                }
-    finally:
-        await client.aclose()
 
 
 # -- node_error_gate --------------------------------------------------------
 
-async def node_error_gate(state: TestingState) -> dict:
-    _ERROR_MAP = {"1": "retry", "2": "skip_iteration", "3": "end_session"}
-    response = interrupt({
-        "gate": "error",
-        "message": f"Test stopped: {state.get('last_error', 'unknown error')}",
-        "options": ["1. retry", "2. skip_iteration", "3. end_session"],
-    })
-    choice = _resolve_choice(response, "choice", _ERROR_MAP)
-    if choice == "retry":
-        return {"status": "running", "last_error": None}
-    elif choice == "skip_iteration":
-        return {"status": "test_complete", "issues": [], "run_state": "skipped"}
-    else:
-        return {"status": "cancelled"}
 
 
 # -- node_parse_report ------------------------------------------------------
 
-def parse_report(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract actionable failures from Magik report JSON.
-
-    Handles two report shapes:
-      UI/API test - top-level keys: meta, summary, analysis, fields, results[]
-      Agent run   - top-level keys: runId, kind, verdict{}, counters{}, history[]
-    Returns a flat list of issue dicts, one per failure.
-    """
-    if not raw:
-        return []
-
-    issues: list[dict[str, Any]] = []
-
-    # -- UI / API test report ----------------------------------------------
-    results = raw.get("results")
-    if isinstance(results, list):
-        for r in results:
-            if r.get("status") in ("fail", "error"):
-                issues.append({
-                    "type": "test_failure",
-                    "id": r.get("id"),
-                    "name": r.get("testName") or r.get("name"),
-                    "category": r.get("category"),
-                    "field": r.get("fieldName"),
-                    "input": r.get("inputValue"),
-                    "expected": r.get("expectedBehavior"),
-                    "actual": r.get("actualBehavior"),
-                    "status": r.get("status"),
-                    "priority": r.get("priority", "medium"),
-                    "note": r.get("aiNote"),
-                    "duration_ms": r.get("duration"),
-                })
-        return issues
-
-    # -- Agent run report --------------------------------------------------
-    verdict = raw.get("verdict") or {}
-    if not verdict.get("success", True):
-        issues.append({
-            "type": "agent_goal_not_met",
-            "summary": verdict.get("summary"),
-            "run_id": raw.get("runId"),
-            "state": raw.get("state"),
-            "url": raw.get("url"),
-            "goal": raw.get("goal"),
-            "counters": raw.get("counters", {}),
-        })
-
-    history = raw.get("history") or []
-    for step in history:
-        if step.get("error") or step.get("ok") is False:
-            issues.append({
-                "type": "agent_step_error",
-                "step": step.get("step"),
-                "action": step.get("action"),
-                "error": step.get("error"),
-                "observation": step.get("observation"),
-            })
-
-    return issues
 
 
 # kept for test compatibility - delegates to real parser
-def parse_report_placeholder(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    return parse_report(raw)
 
 
-async def node_parse_report(state: TestingState) -> dict:
-    if state["status"] == "test_complete" and state.get("issues"):
-        return {}
-
-    run_id = state["run_id"]
-    if not run_id:
-        return {"issues": [], "status": "test_complete"}
-
-    client = _make_client()
-    try:
-        raw = await client.get_run_report(run_id)
-    except MagikReportNotReady:
-        await asyncio.sleep(10)
-        try:
-            raw = await client.get_run_report(run_id)
-        except Exception:
-            raw = {}
-    except Exception as exc:
-        _log.warning("report fetch failed for %s: %s", run_id, exc)
-        raw = {}
-    finally:
-        await client.aclose()
-
-    issues = parse_report(raw)
-    return {"issues": issues, "status": "test_complete", "full_report": raw}
 
 
 # -- node_review ------------------------------------------------------------
@@ -1253,8 +1570,8 @@ async def node_mode_select(state: TestingState) -> dict:
         "gate": "mode",
         "message": (
             "Choose how to run this test.\n\n"
-            "  1. automated - ICX submits to Magik-AI, polls for results,\n"
-            "                 shows issues found, loops until clean, then asks\n"
+            "  1. automated - ICX runs the local verification suite, shows issues\n"
+            "                 found, loops until clean, then asks\n"
             "                 you to verify the UI.\n"
             "  2. manual    - You run the test yourself. ICX waits, then asks\n"
             "                 you to report the result before saving the record."
@@ -1421,7 +1738,7 @@ def route_after_compat(state: TestingState) -> str:
         return "compat_scan"
     if state.get("status") == "compat_empty":
         return "ui_check"
-    return "generate_context"
+    return "config_gate"
 
 
 def route_after_mode_select(state: TestingState) -> str:
@@ -1446,17 +1763,5 @@ def route_after_check_issues(state: TestingState) -> str:
     return "loop"
 
 
-def route_after_poll(state: TestingState) -> str:
-    if state["status"] in ("error", "auth_error"):
-        return "error_gate"
-    return "parse_report"
 
 
-def route_after_error_gate(state: TestingState) -> str:
-    if state.get("status") == "auth_error":
-        return "auth_gate"
-    if state["status"] == "cancelled":
-        return "ui_check"
-    if state["status"] == "test_complete":
-        return "parse_report"
-    return "submit"

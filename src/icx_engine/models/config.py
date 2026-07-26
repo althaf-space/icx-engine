@@ -74,13 +74,17 @@ class AppConfig(BaseModel):
     current_llm_profile: str | None = None
     default_connection: str | None = None  # "connector_type:domain", e.g. "jira:company.atlassian.net", "github:company.github.com"
 
-    # Magik-AI Tester integration
-    magik_base_url: str = "http://localhost:7646"
-    magik_api_key: str | None = Field(default=None, exclude=True)
-    magik_max_iterations: int = 3
-    magik_use_streaming: bool = True
-    magik_agent_max_steps: int = 50
-    magik_agent_step_cap: int = 60
+    # Local testing engine
+    test_max_iterations: int = 3
+    # Path to the Node executable used for the UI harness (Playwright), decoupled from the
+    # app's Node. Set interactively by `icx test setup`; editable here later. Empty = auto-discover.
+    harness_node_path: str | None = None
+
+    @field_validator("test_max_iterations")
+    @classmethod
+    def _clamp_iterations(cls, v: int) -> int:
+        # Clamp (never raise) so a hand-edited config.json can't crash load or drive an unbounded loop.
+        return max(1, min(int(v), 100))
 
     # Sonar / code quality (direct SonarQube Web API reader). Multiple named
     # server connections with one active, mirroring llm_profiles/current_llm_profile.
@@ -134,7 +138,7 @@ class AppConfig(BaseModel):
     # Generic, pluggable third-party integration settings. New integrations
     # register a config model via `icx_engine.integrations.register_integration`
     # and store their settings here, instead of adding fields to AppConfig.
-    # Magik/Sonar above remain inline for backward compatibility.
+    # Testing/Sonar settings above remain inline for backward compatibility.
     integrations: dict[str, dict] = {}
 
     def integration(self, name: str):

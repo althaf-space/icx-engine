@@ -20,20 +20,20 @@ def _backend(schema=True):
     )
 
 
-def test_ui_mode_frontend_ready_is_compatible():
-    v = check_compat(_frontend(), "ui")
+def test_agent_mode_frontend_ready_is_compatible():
+    v = check_compat(_frontend(), "agent")
     assert v.compatible is True
     assert v.required_changes == []
 
 
-def test_ui_mode_frontend_missing_selector_needs_change():
-    v = check_compat(_frontend(ok_selector=False), "ui")
+def test_agent_mode_frontend_missing_selector_needs_change():
+    v = check_compat(_frontend(ok_selector=False), "agent")
     assert v.compatible is False
     assert any("data-testid" in c for c in v.required_changes)
 
 
-def test_ui_mode_backend_file_off_type():
-    v = check_compat(_backend(), "ui")
+def test_agent_mode_backend_file_off_type():
+    v = check_compat(_backend(), "agent")
     assert v.compatible is False
     assert any("backend" in r.lower() for r in v.reasons)
 
@@ -56,6 +56,6 @@ def test_api_mode_frontend_file_off_type():
 
 
 def test_build_report_one_verdict_per_file():
-    report = build_report([_frontend(), _backend()], "ui")
+    report = build_report([_frontend(), _backend()], "agent")
     assert len(report) == 2
     assert all(isinstance(v, CompatVerdict) for v in report)

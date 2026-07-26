@@ -11,12 +11,19 @@ import pytest
 from icx_engine import mcp_hosts
 from icx_engine.mcp_hosts import (
     get_host,
+    list_hosts,
+    write_icx_entry,
+    remove_icx_entry,
     install_enforcement,
     remove_enforcement,
+    install_boost_command,
+    remove_boost_command,
     _HOOK_FILENAME,
     _RULE_START,
     _RULE_END,
 )
+
+_ALL_HOSTS = ("claude", "cursor", "windsurf", "codex", "antigravity", "vscode")
 
 
 @pytest.fixture
@@ -27,20 +34,66 @@ def fake_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture
+def fake_cwd(tmp_path, monkeypatch):
+    """Redirect cwd to a temp project dir - vscode's host paths are workspace-relative."""
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
 # -- enforces flag -------------------------------------------------------------
 
-def test_claude_host_enforces():
-    assert get_host("claude").enforces is True
+def test_all_hosts_enforce():
+    # every supported editor now gets ICX routing enforcement (ticket/testing/sonar)
+    for name in _ALL_HOSTS:
+        assert get_host(name).enforces is True
 
 
-def test_other_hosts_do_not_enforce():
-    for name in ("cursor", "windsurf", "codex", "antigravity"):
-        assert get_host(name).enforces is False
+def test_enforcement_kind_per_host():
+    assert get_host("claude").enforce_kind == "hook"          # hard pre-agent hook
+    for name in ("cursor", "windsurf", "codex", "antigravity", "vscode"):
+        h = get_host(name)
+        assert h.enforce_kind == "rules"                       # instruction-based rules file
+        assert h.rules_path is not None
 
 
-def test_install_enforcement_noop_for_non_claude(fake_home):
-    assert install_enforcement(get_host("cursor")) == []
-    assert remove_enforcement(get_host("cursor")) == []
+def test_six_hosts_registered():
+    names = {h.name for h in list_hosts()}
+    assert names == set(_ALL_HOSTS)
+
+
+def test_rules_host_writes_routing_rule_to_its_global_file(fake_home):
+    # windsurf global_rules.md, codex AGENTS.md, antigravity GEMINI.md, cursor .mdc all get the rule
+    for name, rel in (
+        ("windsurf", (".codeium", "windsurf", "memories", "global_rules.md")),
+        ("codex", (".codex", "AGENTS.md")),
+        ("antigravity", (".gemini", "GEMINI.md")),
+        ("cursor", (".cursor", "rules", "icx.mdc")),
+    ):
+        install_enforcement(get_host(name))
+        p = fake_home.joinpath(*rel)
+        assert p.exists(), f"{name} rule file not written"
+        text = p.read_text(encoding="utf-8")
+        assert _RULE_START in text and _RULE_END in text
+        assert "analyze_issue_fast" in text
+        assert "icx_boost" in text and "/icx-boost" in text   # points to the on-demand command
+
+
+def test_rules_host_preserves_existing_content(fake_home):
+    gr = fake_home / ".codeium" / "windsurf" / "memories" / "global_rules.md"
+    gr.parent.mkdir(parents=True, exist_ok=True)
+    gr.write_text("# my rules\nkeep this line\n", encoding="utf-8")
+    install_enforcement(get_host("windsurf"))
+    text = gr.read_text(encoding="utf-8")
+    assert "keep this line" in text and _RULE_START in text
+    remove_enforcement(get_host("windsurf"))
+    text = gr.read_text(encoding="utf-8")
+    assert "keep this line" in text and _RULE_START not in text   # ICX block stripped, user text kept
+
+
+def test_cursor_surfaces_honest_manual_caveat(fake_home):
+    msgs = install_enforcement(get_host("cursor"))
+    assert any("Settings" in m and "User Rules" in m for m in msgs)
 
 
 # -- install -------------------------------------------------------------------
@@ -138,16 +191,167 @@ def _run_detector(fake_home, prompt: str) -> str:
     return proc.stdout
 
 
-def test_detector_fires_on_bare_ticket_key(fake_home):
+def test_detector_silent_on_plain_request(fake_home):
+    # No ticket/testing/sonar signal -> the hook is silent. Boost is on-demand only (/icx-boost),
+    # never injected here - this is the behavior change this build makes.
+    out = _run_detector(fake_home, "refactor the auth module")
+    assert out == ""
+
+
+def test_detector_silent_on_plain_question(fake_home):
+    out = _run_detector(fake_home, "decode this UTF-8 please")
+    assert out == ""           # UTF-8 is denied as a ticket, and nothing else matches
+
+
+def test_detector_adds_ticket_routing_on_bare_key(fake_home):
     out = _run_detector(fake_home, "VILMA-2048 login broken")
     assert "analyze_issue_fast" in out
+    assert "icx_boost" not in out                    # boost is not injected by the hook anymore
 
 
-def test_detector_fires_on_issue_url(fake_home):
+def test_detector_adds_ticket_routing_on_issue_url(fake_home):
     out = _run_detector(fake_home, "see https://github.com/org/repo/issues/12")
     assert "analyze_issue_fast" in out
+    assert "icx_boost" not in out
 
 
-def test_detector_silent_on_non_ticket(fake_home):
-    assert _run_detector(fake_home, "decode this UTF-8 please") == ""
-    assert _run_detector(fake_home, "refactor the auth module") == ""
+def test_detector_silent_on_empty_prompt(fake_home):
+    assert _run_detector(fake_home, "") == ""
+
+
+def test_install_migrates_legacy_hook_file(fake_home):
+    # Simulate an older install: a stale icx-ticket-gate.py present.
+    hooks = fake_home / ".icx" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    legacy = hooks / "icx-ticket-gate.py"
+    legacy.write_text("# old", encoding="utf-8")
+    install_enforcement(get_host("claude"))
+    assert not legacy.exists()                       # legacy removed
+    assert (hooks / _HOOK_FILENAME).exists()          # current present
+
+
+def test_remove_cleans_legacy_hook_file(fake_home):
+    hooks = fake_home / ".icx" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "icx-ticket-gate.py").write_text("# old", encoding="utf-8")
+    install_enforcement(get_host("claude"))
+    remove_enforcement(get_host("claude"))
+    assert not (hooks / "icx-ticket-gate.py").exists()
+    assert not (hooks / _HOOK_FILENAME).exists()
+
+
+def test_detector_routes_testing_requests(fake_home):
+    out = _run_detector(fake_home, "please test the login screen and check coverage")
+    assert "start_testing_session" in out
+    assert "analyze_issue_fast" not in out and "sonar_" not in out
+    assert "icx_boost" not in out
+
+
+def test_detector_routes_sonar_requests(fake_home):
+    out = _run_detector(fake_home, "show me the sonarqube quality gate and vulnerabilities")
+    assert "sonar_" in out
+    assert "start_testing_session" not in out
+    assert "icx_boost" not in out
+
+
+def test_rule_block_mandates_ticket_testing_sonar_routing():
+    from icx_engine.mcp_hosts import _RULE_BLOCK
+    b = _RULE_BLOCK
+    assert "analyze_issue_fast" in b
+    assert "start_testing_session" in b
+    assert "sonar_" in b
+
+
+def test_rule_block_points_to_on_demand_boost_not_every_message():
+    from icx_engine.mcp_hosts import _RULE_BLOCK
+    b = _RULE_BLOCK
+    assert "/icx-boost" in b and "icx_boost_refine" in b
+    assert "on-demand" in b.lower() or "SEPARATE" in b
+    assert "EVERY single message" not in b           # the old blanket mandate is gone
+
+
+def test_rule_block_covers_agent_connector_fallback_for_other_links():
+    # any other URL (Figma/Slack/etc): ICX connector -> agent's own connector -> tell the user
+    from icx_engine.mcp_hosts import _RULE_BLOCK
+    b = _RULE_BLOCK.lower()
+    assert "connector" in b
+
+
+# -- vscode host: different config shape ("servers", not "mcpServers") ---------
+
+def test_vscode_host_uses_servers_key_and_stdio_type():
+    h = get_host("vscode")
+    assert h.mcp_key == "servers"
+    assert h.entry_type == "stdio"
+
+
+def test_vscode_write_uses_servers_key(fake_cwd):
+    (fake_cwd / ".vscode").mkdir()
+    h = get_host("vscode")
+    result = write_icx_entry(h)
+    assert not result.fallback
+    data = json.loads(h.config_path.read_text(encoding="utf-8"))
+    assert "servers" in data and "mcpServers" not in data
+    assert data["servers"]["icx"]["type"] == "stdio"
+    assert remove_icx_entry(h) is True
+    assert "icx" not in json.loads(h.config_path.read_text(encoding="utf-8"))["servers"]
+
+
+def test_vscode_not_detected_falls_back(fake_cwd):
+    # no .vscode dir present -> fallback path, matching every other host's fallback contract
+    h = get_host("vscode")
+    result = write_icx_entry(h)
+    assert result.fallback and result.path == fake_cwd / ".mcp.json"
+
+
+# -- native /icx-boost command file (all 6 hosts) -------------------------------
+
+def test_every_host_has_a_command_file_configured():
+    for name in _ALL_HOSTS:
+        h = get_host(name)
+        assert h.command_path is not None
+        assert h.command_content.strip()
+
+
+def test_install_boost_command_writes_file_per_host(fake_home, fake_cwd):
+    for name in _ALL_HOSTS:
+        h = get_host(name)
+        msg = install_boost_command(h)
+        assert msg is not None and str(h.command_path) in msg
+        assert h.command_path.exists()
+        text = h.command_path.read_text(encoding="utf-8")
+        assert "icx_boost" in text
+        assert "explicitly invoked" in text            # on-demand, not every message
+
+
+def test_remove_boost_command_deletes_file_per_host(fake_home, fake_cwd):
+    for name in _ALL_HOSTS:
+        h = get_host(name)
+        install_boost_command(h)
+        assert remove_boost_command(h) is True
+        assert not h.command_path.exists()
+        assert remove_boost_command(h) is False         # already gone - safe, no crash
+
+
+def test_install_boost_command_is_idempotent(fake_home):
+    h = get_host("claude")
+    install_boost_command(h)
+    first = h.command_path.read_text(encoding="utf-8")
+    install_boost_command(h)
+    second = h.command_path.read_text(encoding="utf-8")
+    assert first == second
+
+
+def test_claude_skill_uses_short_command_name(fake_home):
+    h = get_host("claude")
+    install_boost_command(h)
+    text = h.command_path.read_text(encoding="utf-8")
+    assert "name: icx-boost" in text
+    assert h.command_path.name == "SKILL.md"
+    assert h.command_path.parent.name == "icx-boost"
+
+
+def test_antigravity_rules_path_is_gemini_md_not_agents_md():
+    # earlier assumption (.gemini/AGENTS.md) was wrong per editor research - fixed to GEMINI.md
+    h = get_host("antigravity")
+    assert h.rules_path.name == "GEMINI.md"

@@ -16,6 +16,14 @@ FORBIDDEN - deferring to the runner:
 - "Probably works" / "should be ok" / "optional" are not verdicts. If you are not
   certain a thing is cleanly testable as-is, it is a finding.
 
+FORBIDDEN - shallow undefined-identifier checks:
+- Before flagging ANY identifier as undefined/missing, check the WHOLE repo for its
+  definition - not just this file's own imports/destructures.
+- Grep for it, and check index.html (and any public/ or static/ HTML) for a classic
+  `<script src=...>` tag that defines it as a global. That is a legitimate pattern
+  needing no import - flagging it as undefined because you only looked at one
+  file's imports is the exact shallow-inspection failure this rule exists to stop.
+
 REPORT, DO NOT DECIDE:
 - Every concern, however small, becomes a finding: what you saw (path + line), why
   it impedes testing, and the concrete change you propose.

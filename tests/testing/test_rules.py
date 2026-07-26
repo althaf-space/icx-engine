@@ -12,7 +12,7 @@ def test_ensure_seeded_copies_defaults():
     d = _rules.rules_dir()
     names = {f.name for f in d.glob("*.md")}
     assert {"_common.md", "2b.md", "compat_scan.md", "compat_check.md",
-            "profile_gen.md", "expand_scan.md"} <= names
+            "expand_scan.md"} <= names
 
 
 def test_ensure_seeded_never_overwrites_user_edits():
@@ -23,10 +23,70 @@ def test_ensure_seeded_never_overwrites_user_edits():
     assert f.read_text(encoding="utf-8") == "MY CUSTOM RULE"
 
 
+def test_refresh_stale_seeds_missing_files():
+    outcome = _rules.refresh_stale()
+    assert "compat_scan.md" in outcome["seeded"]
+    assert (_rules.rules_dir() / "compat_scan.md").exists()
+
+
+def test_refresh_stale_leaves_edited_file_alone():
+    _rules.ensure_seeded()
+    f = _rules.rules_dir() / "compat_scan.md"
+    f.write_text("MY CUSTOM RULE", encoding="utf-8")   # edited after seeding, no re-marking
+    outcome = _rules.refresh_stale()
+    assert "compat_scan.md" in outcome["skipped"]
+    assert f.read_text(encoding="utf-8") == "MY CUSTOM RULE"
+
+
+def test_refresh_stale_reports_up_to_date_when_unchanged():
+    _rules.ensure_seeded()
+    outcome = _rules.refresh_stale()
+    assert "compat_scan.md" in outcome["up_to_date"]
+    assert "compat_scan.md" not in outcome["refreshed"]
+
+
+def test_refresh_stale_picks_up_a_bundled_update_on_untouched_file():
+    # simulate: user has an untouched, pristine-tracked copy from an OLDER bundled version;
+    # the bundled default then changes (a real rule fix ships) - refresh_stale must pick it up.
+    real_default_text = (_rules._DEFAULTS_DIR / "compat_scan.md").read_text(encoding="utf-8")
+
+    # emulate the "older bundled content" by writing it as what the user has (still pristine-marked
+    # to itself), so refresh_stale sees: current == old marker, but bundled has since moved on.
+    old_content = "# an older bundled compat_scan.md\nold rule text\n"
+    f = _rules.rules_dir() / "compat_scan.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(old_content, encoding="utf-8")
+    _rules._write_pristine_marker("compat_scan.md", _rules._hash_text(old_content))
+
+    outcome = _rules.refresh_stale()
+    assert "compat_scan.md" in outcome["refreshed"]
+    assert f.read_text(encoding="utf-8") == real_default_text
+
+
+def test_refresh_stale_leaves_untracked_existing_file_alone():
+    # a file present with no pristine marker at all (e.g. an install from before this mechanism
+    # existed) must be conservatively treated as customized, not silently overwritten.
+    f = _rules.rules_dir()
+    f.mkdir(parents=True, exist_ok=True)
+    (f / "compat_scan.md").write_text("some pre-existing content, no marker", encoding="utf-8")
+    outcome = _rules.refresh_stale()
+    assert "compat_scan.md" in outcome["skipped"]
+    assert (f / "compat_scan.md").read_text(encoding="utf-8") == "some pre-existing content, no marker"
+
+
 def test_load_gate_rules_includes_common_and_specific():
     text = _rules.load_gate_rules("compat_scan")
     assert "COMMON" in text                       # from _common.md
     assert "testability assessment" in text       # from compat_scan.md
+
+
+def test_compat_scan_rules_forbid_shallow_undefined_check():
+    # REGRESSION: the shallow-undefined-check fix was added to the hardcoded _COMPAT_MANDATE in
+    # nodes.py but NOT to this durable, user-editable rulebook file - the one the RULEBOOK RULE
+    # tells the agent is binding. Both must carry it.
+    text = _rules.load_gate_rules("compat_scan")
+    assert "index.html" in text and "script src" in text
+    assert "grep for it" in text.lower()
 
 
 def test_load_gate_rules_falls_back_to_bundled_when_deleted():
@@ -161,7 +221,7 @@ async def test_compat_scan_payload_carries_rules(monkeypatch):
         return {"all_compatible": True, "findings": [{"path": "a.tsx", "compatible": True}]}
     monkeypatch.setattr(nodes, "interrupt", fake)
     s = make_initial_state(file_paths=["a.tsx"], test_mode="automated")
-    s["test_type"] = "ui"
+    s["test_type"] = "agent"
     await nodes.node_compat_scan(s)
     assert captured.get("rules") and "testability assessment" in captured["rules"]
     assert captured.get("rules_path", "").endswith("compat_scan.md")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -24,9 +25,39 @@ def gate_rules_path(gate: str) -> str:
     return str(rules_dir() / f"{gate}.md")
 
 
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _pristine_dir() -> Path:
+    return rules_dir() / ".pristine"
+
+
+def _pristine_marker_path(name: str) -> Path:
+    return _pristine_dir() / f"{name}.sha256"
+
+
+def _write_pristine_marker(name: str, content_hash: str) -> None:
+    d = _pristine_dir()
+    d.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
+    try:
+        _pristine_marker_path(name).write_text(content_hash, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_pristine_marker(name: str) -> str | None:
+    p = _pristine_marker_path(name)
+    try:
+        return p.read_text(encoding="utf-8").strip() if p.exists() else None
+    except OSError:
+        return None
+
+
 def ensure_seeded() -> None:
     """Copy any missing bundled default into ~/.icx/testing_rules/. Never overwrites
-    a file the user has already edited or created."""
+    a file the user has already edited or created. Newly-seeded files get a pristine
+    marker (see refresh_stale) recording that ICX, not the user, wrote them."""
     d = rules_dir()
     d.mkdir(parents=True, exist_ok=True,
             **({"mode": 0o700} if sys.platform != "win32" else {}))
@@ -36,9 +67,69 @@ def ensure_seeded() -> None:
         dst = d / src.name
         if not dst.exists():
             try:
-                dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+                content = src.read_text(encoding="utf-8")
+                dst.write_text(content, encoding="utf-8")
+                _write_pristine_marker(src.name, _hash_text(content))
             except OSError:
                 pass
+
+
+def refresh_stale() -> dict[str, list[str]]:
+    """Pick up bundled rule IMPROVEMENTS without ever touching a user's actual customization -
+    the gap plain ensure_seeded() cannot close, because "file exists" alone cannot tell a stale
+    pristine copy apart from a genuinely edited one.
+
+    A local `<gate>.md` is refreshed to the current bundled content ONLY when its content hash
+    still matches the pristine marker ICX itself wrote the last time it (not the user) touched
+    that file - i.e. nothing has edited it since. Any file with no marker (an install from before
+    this mechanism existed) or a marker that no longer matches (something changed it since) is
+    left completely alone and reported as skipped - conservatively assumed customized.
+
+    Returns {"seeded": [...], "refreshed": [...], "skipped": [...], "up_to_date": [...]} - file
+    names, for the CLI to report what happened.
+    """
+    d = rules_dir()
+    d.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
+    result: dict[str, list[str]] = {"seeded": [], "refreshed": [], "skipped": [], "up_to_date": []}
+    if not _DEFAULTS_DIR.exists():
+        return result
+    for src in _DEFAULTS_DIR.glob("*.md"):
+        name = src.name
+        try:
+            bundled = src.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        bundled_hash = _hash_text(bundled)
+        dst = d / name
+        if not dst.exists():
+            try:
+                dst.write_text(bundled, encoding="utf-8")
+                _write_pristine_marker(name, bundled_hash)
+                result["seeded"].append(name)
+            except OSError:
+                pass
+            continue
+        try:
+            current = dst.read_text(encoding="utf-8")
+        except OSError:
+            result["skipped"].append(name)
+            continue
+        current_hash = _hash_text(current)
+        if current_hash == bundled_hash:
+            result["up_to_date"].append(name)
+            continue
+        marker = _read_pristine_marker(name)
+        if marker is not None and marker == current_hash:
+            # untouched since ICX last wrote it - safe to pick up the new bundled content
+            try:
+                dst.write_text(bundled, encoding="utf-8")
+                _write_pristine_marker(name, bundled_hash)
+                result["refreshed"].append(name)
+            except OSError:
+                result["skipped"].append(name)
+        else:
+            result["skipped"].append(name)
+    return result
 
 
 def _read_one(gate: str) -> str:

@@ -14,6 +14,7 @@ This is the complete reference for contributing to ICX. Read it before writing a
 6. [Adding a new LLM provider](#6-adding-a-new-llm-provider)
 7. [Memory Module](#7-memory-module)
    - [7a. Graph Module](#7a-graph-module)
+   - [7b. Skills Module](#7b-skills-module)
 8. [Extending the CLI](#8-extending-the-cli)
 9. [Testing - rules and patterns](#9-testing--rules-and-patterns)
 10. [Security rules - non-negotiable](#10-security-rules--non-negotiable)
@@ -36,7 +37,7 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.),
-  exposing 37 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 10 graph query tools, 4 historical memory tools, 3 memory-save-family tools (`save_memory`, `reinforce_memory_usage`, `get_memory_audit`), 10 testing tools (`magik_health_check`, `start_testing_session`, `resume_testing_session`, `magik_test_status`, `magik_test_results`, `magik_login_start`, `magik_login_capture`, `magik_login_cancel`, `magik_login_inline`, `magik_logout`), and 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`)
+  exposing 31 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 10 graph query tools, 4 historical memory tools, 4 memory/verification tools (`save_memory`, `record_verification`, `reinforce_memory_usage`, `get_memory_audit`), 3 testing tools (`start_testing_session`, `resume_testing_session`, `get_testing_session_status`), and 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`)
 
 The architecture is deliberately split along two axes:
 
@@ -61,6 +62,12 @@ ICX/
 |   +-- grounding.py            # visual grounding pass - re-verifies analysis against images
 |   +-- mcp_server.py           # MCP stdio server
 |   +-- mcp_hosts.py            # MCP host config file management
+|   +-- runtime_manager.py      # language-runtime discover/ask/remember/reuse registry (never installs SDKs)
+|   +-- context_completeness.py # fuse graph+grep+semantic+memory signals, rank, miss-check (pure)
+|   +-- methodology.py          # mandatory agent problem-solving methodology (pure, ASCII); injected into analyze; classify_text + build_checklist_for generalize it to any prompt
+|   +-- boost/                   # universal boost channel: classify.py (archetype), router.py (adaptive signal activation), brief.py (deterministic boosted brief + prompt), benchmark/ (proof: corpus+grader+runner+HTML scorecard)
+|   +-- _proc.py                # shared cross-platform process-TREE kill (group/psutil/taskkill)
+|   +-- verification.py         # Definition-of-Done: checklist, risk tiering, evidence + confidence (pure)
 |   +-- config_manager.py       # load/save config + keyring/env-var secret management
 |   +-- exceptions.py           # all ICX exception classes (incl. GraphError)
 |   +-- error_display.py        # Rich Panel error rendering - render_icx_error()
@@ -115,24 +122,40 @@ ICX/
 |   |       \-- resolvers/      # semantic edge resolvers (Spring, React, Django, FastAPI, etc.)
 |   +-- services/
 |   |   \-- connection_service.py  # platform auth flows (_connect_jira_token, _connect_jira_oauth)
-|   +-- testing/                # Testing orchestration module
+|   +-- testing/                # Testing orchestration module (local engine)
 |   |   +-- __init__.py
-|   |   +-- client.py           # Async httpx client for all Magik-AI HTTP calls
 |   |   +-- state.py            # LangGraph TypedDict state + make_initial_state factory
 |   |   +-- nodes.py            # LangGraph node functions + conditional routing
 |   |   +-- graph.py            # StateGraph wiring, SqliteSaver factory, session cleanup
-|   |   +-- session_store.py    # Background poll task registry + session list/cancel
+|   |   +-- local_executor.py   # run_local_verification: detect runners -> run -> normalized result
+|   |   +-- perf.py             # performance-regression comparison (before/after metrics)
+|   |   +-- regression.py       # graph-driven regression test selection
+|   |   +-- mutation.py         # mutation-test filter for AI-drafted unit tests
+|   |   +-- quality_advisory.py # folds perf/regression/mutation onto res['quality'] for the report (real data or honest not-run)
+|   |   +-- runners/            # polyglot runner plugins: base registry, junit parse, unit/api adapters, ephemeral repro, async DAG executor, runner-install manager (install.py); assets/icx-auth.mjs (session capture/inline), assets/icx-discover.mjs (runtime census auto-discovery crawler)
+|   |   +-- analyzers/          # per-framework Element Census prompts (assets/*.md) + registry (select by framework) + schema (reconciliation gate) + census_merge.py (fuse discovered + source census = the COMBINED census) + census_lint.py + scenarios.py (build_scenario_guidance - NL intent/ticket acceptance-criteria guidance appended to the author_flow gate, SP3)
+|   |   +-- benchmark/          # benchmark harness: corpus registry, ground-truth loader, orchestrator, HTML scorecard, self-heal probe
+|   |   +-- analytics/          # run-history analytics: store.py (SQLite), compute.py (flakiness/trend/slowest/heals), record.py (opt-in hook), dashboard.py (HTML generator)
+|   |   +-- reporting/          # per-run human HTML report: session_report.py (render + write, incl the static-security section), index.py (reports.jsonl -> index.html)
+|   |   +-- security/           # native static security (no installer): scan_base.py (Finding + file walk + entropy), secrets.py (leaked-secret regexes), sast.py (python-AST + cross-lang regex sinks), sca.py (manifest + offline advisory), aggregate.py (run_static_security + fold_into_result)
+|   |   +-- devices/            # cross-browser + mobile device targets (Target, parse_targets, installed_engines) for UI replay
+|   |   +-- session_store.py    # session list/cancel/purge over the LangGraph checkpoint DB
 |   |   +-- classify.py         # per-file layer/testability classifier (path patterns + content signals)
 |   |   +-- compat.py           # per-mode compatibility verdicts + required changes
-|   |   +-- handlers.py         # pluggable TestModeHandler registry (ui/api/agent)
+|   |   +-- handlers.py         # TestModeHandler registry: per-type relevant_layers + compat
 |   |   +-- expand.py           # grep expander + graph/grep union ranking
-|   |   +-- auth.py             # per-(project,host) Magik session store + TTL/relogin
+|   |   +-- auth.py             # per-(project,host) session-intent store + TTL
 |   |   +-- apispec.py          # endpoint extraction + request-spec builder (api mode)
-|   |   +-- profile_gen.py      # Magik Project Profile markdown generator
 |   |   +-- rules.py            # durable per-gate rulebook (~/.icx/testing_rules) loader + section enforcement
 |   |   +-- rules_defaults/     # bundled default rule .md seeded into ~/.icx/testing_rules on first use
 |   |   \-- validate.py         # MCP input validators
 |   +-- memory/                 # local LanceDB + ONNX memory (see section 7)
+|   +-- skills/                 # learned-skill Markdown store (see section 7b)
+|   |   +-- __init__.py         # public exports: SkillEntry, SkillStorage
+|   |   +-- schema.py           # SkillEntry: frontmatter-as-JSON + body sections, hash-guard
+|   |   +-- storage.py          # SkillStorage: atomic read/write at ~/.icx/skills/, path-traversal guard
+|   |   +-- writer.py           # draft_skill_entry (agent-authored text -> SkillEntry), write_or_update (hash-guarded create/merge)
+|   |   \-- router.py           # rank_skills (free-text overlap), rank_skills_for_tags (structured tag overlap)
 |   \-- llm/
 |       +-- base.py             # LLMProvider ABC, SYSTEM_PROMPT, build_user_message,
 |       |                       # finalize(), _compute_completeness(), _compute_missing(),
@@ -486,7 +509,8 @@ Never skip `finalize()` - calling providers that omit it will produce incorrect 
 
 ### MCP tool architecture (`mcp_server.py`)
 
-ICX exposes 36 tools over MCP (workflow order):
+ICX exposes 34 tools over MCP (workflow order). Registration order == the agent's call order, so the
+tool list a human reads is the sequence:
 
 | # | Tool | Purpose |
 |---|------|---------|
@@ -510,11 +534,11 @@ ICX exposes 36 tools over MCP (workflow order):
 | 17 | `save_memory` | Save resolution after developer confirms fix is tested |
 | 18 | `reinforce_memory_usage` | Reinforce a memory entry that influenced the fix (call before `save_memory` when a `memory_search` result was used) |
 | 19 | `get_memory_audit` | Diagnostic - explain why a memory result ranks as it does |
-| 20 | `magik_health_check` | Verify Magik-AI is running before an automated testing session |
-| 21 | `start_testing_session` | Begin a Magik-AI testing session for confirmed UI files |
-| 22 | `resume_testing_session` | Advance the testing session at each gate |
-| 23 | `magik_test_status` | Poll the status of a running test |
-| 24 | `magik_test_results` | Fetch the report for a completed test |
+| 20 | `record_verification` | Record Definition-of-Done evidence (command + output per check) before done |
+| - | `lock_plan` | SPEC-LOCK before coding: submit files you will change; fuses graph+grep+semantic+memory, returns HIGH-signal files missed. Agent must not code until `ok` (include or justify each miss). Pure/deterministic, no LLM. `context_completeness.py`. |
+| 21 | `start_testing_session` | Begin the local testing session for confirmed files |
+| 22 | `resume_testing_session` | Advance the testing session at each human gate. A gate that triggers real browser work (the agent authoring/running/self-healing its own Playwright test) may return `{"status": "running"}` instead of blocking - see `get_testing_session_status`. |
+| 23 | `get_testing_session_status` | Poll a session whose last call returned `status: "running"`. Cheap, read-only, safe to call repeatedly. |
 
 `analyze_issue_fast` and `analyze_issue` both call `_handle_analyze_issue()` internally - the only difference is `skip_vision=True` vs `skip_vision=False`. The `_call_tool()` dispatcher sets this based on which tool name was called.
 
@@ -566,6 +590,10 @@ A path is only ever **used** if it is a registered ICX project, or it was resolv
 4. No match anywhere -> `graphs = []`. The instruction tells the agent to grep/glob and to **show the user how to create a graph** (`icx graph add ... ` then `icx graph build ...`) using generic placeholders - it must ask the user for the real path and never guess one. ICX never triggers a build itself.
 
 **No auto-register on lookup:** `GraphManager.resolve_project(project_path=...)` raises `GraphError` for an unregistered path - it does not silently create a registry entry. This guard is the reason a guessed path can never produce a junk project named after the path basename or a spurious `icx graph build <basename>` prompt. Explicit registration happens only through `GraphManager.register()` (`icx graph add`). The agent must never auto-detect the editor workspace root or guess a path; when uncertain, pass `[]` and let ICX resolve from the ticket. `find_projects_by_tracker_key()` in `storage.py` performs a case-insensitive scan of all registry entries for a `tracker_project_key` match. Project-key extraction is connector-specific (`ConnectorBase.extract_project_key()`/`extract_bare_key_from_ref()`), so any registered tracker can resolve a project.
+
+**Triviality guard (boost is for substantive turns, not every keystroke):** boost is mandatory, but a purely conversational / acknowledgement / continuation message ("thanks", "ok", "yes", "continue", "do it", "looks good") does not warrant it. `boost/classify.py:is_trivial(prompt)` is a conservative deterministic check - a message is trivial only when it is short AND made entirely of conversational words AND has no task verb or real question (`_TASK_HINT`); ANY task or question ("fix it", "add auth", "what is X", "test this screen") is NOT trivial and boosts normally. Two layers apply it: (1) the `icx_boost` tool self-guards - a trivial prompt returns a cheap `{skip: true, reason: ...}` WITHOUT building the heavy brief (no methodology/context - near-zero tokens), and this works in EVERY editor because it is in the tool; (2) the Claude Code hook (`icx-boost-gate.py`'s `_is_trivial`) stays silent on a trivial message so the boost flow is not even suggested, and the rule block tells rules-file editors to answer a bare acknowledgement directly. So a real request always boosts; "thanks"/"continue" costs nothing.
+
+**Ironclad tool-description contract:** EVERY MCP tool description must open with a strict directive - a `MANDATORY` / `MUST` / `ALWAYS` / `NEVER` / `CALL ...` / `USE WHEN ...` trigger line - so no agent can treat a tool as optional. The format is: a strict WHEN/trigger line, then what it gives + where it sits in the sequence, then `Input:` / params. This is enforced by `tests/test_mcp.py::test_every_tool_description_is_strict_and_substantial`, which fails if any tool's description lacks a strict keyword or is under 40 chars - so a newly added tool with a soft description breaks CI. The heavily-tuned testing descriptions (`_TESTING_START_DESCRIPTION`, `_TESTING_RESUME_DESCRIPTION`) carry embedded gate protocol locked by their own assertions; keep their bodies intact when editing.
 
 **ICX is the sole tracker interface:** RULE 0 in both tool descriptions (`_FAST_DESCRIPTION`, `_FULL_DESCRIPTION`) forbids the agent from connecting to, suggesting, or calling any other MCP server/integration for tracker, issue, PR, board, or sprint data - stated generically, with no single provider singled out. On an ICX tracker error the agent must reconfigure ICX and retry, never route around it. Because this lives in the MCP tool description, it reaches every MCP-capable editor identically (Claude Code, Codex, Cursor, Windsurf, Antigravity, etc.) - that is the cross-editor enforcement and it is editor-agnostic by construction, requiring no per-editor config file.
 
@@ -638,7 +666,29 @@ All statuses share a mandatory **STEP 0 vision gate** prepended to the instructi
 
 **Iteration rule (mandatory tail, all branches):** Every `_icx_next.instruction` ends with two rules: (1) if the user requests a different approach, re-present the confirmation format and wait for approval again before writing code; (2) **ITERATION RULE** - after EVERY code change, including fixes requested mid-iteration, the agent must stop and ask the user to test before making any further change or calling `reinforce_memory_usage`/`save_memory`. This applies to the 2nd, 3rd, and every subsequent fix - a prior "looks good"/"works" does not carry over to a new edit, each change needs its own fresh test confirmation. Implemented once in the shared `_MANDATORY_TAIL` constant so it covers every graph-status branch.
 
-**Senior-persona planning layer (prepended to `_icx_next.instruction`):** Every successful `_handle_analyze_issue` response also prepends a role-tuned preamble above the instruction so the connected agent plans like a senior specialist rather than a junior. The analysis LLM emits `recommended_persona` (one of 17 senior slugs: `cto`, `principal-engineer`, `solution-architect`, `system-architect`, and staff/principal domain roles). `_select_persona(analysis)` reconciles the LLM pick with a keyword heuristic over the ticket text: the LLM pick wins, except a UI-family pick with backend-only text (no UI vocabulary) is clamped to the keyword persona; with no LLM value it falls back to the keyword heuristic, then to `system-architect`. `_persona_preamble(slug, confidence, completeness)` builds the role identity plus a senior planning rubric (root cause before fix, two approaches, blast radius, test/verify strategy, risks) and a confidence gate that mandates clarifying questions when `confidence_score < _CONFIDENCE_GATE` (0.6) or `completeness_score < _COMPLETENESS_GATE` (0.5). `_apply_persona` is fully guarded - any failure returns the instruction unchanged, so persona can never break `analyze_issue`. The existing STEP/RULE flow is untouched; the chosen role is echoed in `response["persona"] = {"role", "source"}`.
+**Mandatory methodology (`methodology.py`) + `get_methodology`:** every agent working through ICX must follow one problem-solving discipline (intake -> context -> classify -> decompose -> plan -> execute -> self-check -> confidence -> fail-well -> verify), an ASCII-faithful distillation of the AI Problem-Solving Framework. `build_checklist(analysis)` returns the per-ticket MANDATORY checklist (archetype + intake + verification battery + gate sequence); `_apply_methodology` prepends the one-pager to the analyze instruction AND sets `response["methodology"]`, so the agent confronts it on EVERY ticket (unavoidable, not a doc it may skip). `full_text()` backs the `get_methodology` tool for the complete framework on demand. Pure + guarded. This is the intelligence/discipline layer; the context-completeness engine mechanizes its context + completeness steps, and `record_verification` its verify step.
+
+**Archetype/persona classification hardening (`methodology.classify_text` + `personas.py`):** two related deterministic-classifier bugs, fixed together. (1) `classify_text`'s "performance" signal included a bare "slow" token, prefix-matched via `_token_hit`'s `word.startswith(token)` - so a request mentioning "slowmo" (a real Playwright term, e.g. "run it in slowmo") misclassified as `performance` before ever checking for testing signals. Fixed by replacing the bare token with explicit non-colliding phrasings (`too slow`, `runs slow`, `slower`, `slowly`, `slowing down`, etc.) and adding a real `testing` archetype (checked earlier in `_ARCHETYPE_SIGNALS`, with its own `_ARCHETYPES` discipline/pitfalls entry: cover happy+edge+negative+security+a11y from real execution, verified only by the runner's own output). (2) `personas.keyword_persona` matched keywords against the RAW prompt text, so a pasted URL's own path words (e.g. `.../login#/users`) could fire a persona unrelated to the actual ask - "login" in a URL path fired `principal-security-architect` for a pure E2E-testing request. Fixed with `strip_urls(text)` (drops `https?://\S+` before matching, shared by both `classify_text` and `keyword_persona`) and by narrowing `principal-security-architect`'s keyword set to unambiguous exploit/vuln-specific terms only (dropped the overly generic `auth`/`login`/`token`/`password`/`permission`, kept `jwt`/`oauth`/`credential`/`secret`/`vulnerab`/`injection`/`xss`/`csrf`/`encrypt`/`exploit`). The single `staff-qa-architect` persona was retired in favor of three principal-tier, test-type-specific personas matching the testing module's own agent/api/unit split: `principal-qa-automation-architect` (e2e/UI/Playwright - the `testing` archetype's default), `principal-api-test-architect` (API/contract), `principal-unit-test-architect` (unit/mocking) - each with its own `PERSONA_KEYWORDS` entry and `PERSONA_PROFILE` title/focus. `boost/classify.py`'s `CODE_ARCHETYPES` and `boost/brief.py`'s `_COMPLETENESS_DIMS` / `boost/refine.py`'s `_default_deliverable` all gained a `testing` entry so a testing-classified request gets graph/grep context activation and testing-specific completeness dims/deliverable text instead of silently falling back to `coding`'s. `llm/base.py`'s `recommended_persona` catalog (the Jira-analysis LLM persona picker) was kept in sync with the same slug set.
+
+**Universal boost channel (`boost/`) + `icx_boost`:** boost is an ON-DEMAND channel, not a call the agent must make on every message - it fires when the user (or an MCP-prompt-capable editor's `icx-boost` prompt auto-surfacing) explicitly invokes `/icx-boost`. It generalizes the methodology + context-completeness beyond Jira to every task. `boost/classify.py` classifies the archetype (reusing `methodology.classify_text`, which word-boundary-matches signal tokens so 'orm' does not hit 'form'); `boost/router.py:plan_activation` decides which retrieval signals fire - methodology is ALWAYS applied, but graph/grep/semantic run only for a code archetype (coding/debugging/performance/database/security/testing) with a repo AND a built graph, memory only on continuation, and NOTHING for a doubt or a no-repo task (the honest `skipped` reason is returned). The `_call_tool` handler builds the env via `_boost_env` (repo dir exists? graph loadable?), then reuses `_context_signals` + `context_completeness.fan_out`/`fuse_rank` passing ONLY the activated signals, `methodology.build_checklist_for` supplies the mandatory scaffold, and `boost/brief.py` assembles the brief + a deterministic `boosted_prompt` (no LLM - the connected agent does the semantic work guided by it). The tool never raises: any internal failure degrades to a minimal methodology-only brief. Enforcement is instruction-based (the tool description says CALL FIRST; the brief carries a `mandatory_directive`; the user adds a global rule). **Auto-chained two-pass boost -> CTO-grade prompt (`boost/refine.py` + `icx_boost_refine`):** both passes now run in ONE call, so no second tool call is required. `mcp_server.py:_boosted(prompt, ...)` (used by both the `icx_boost` tool handler and the `icx-boost` MCP prompt handler, `_get_prompt`) calls `_run_boost_brief` (pass 1) then immediately `_auto_refine_brief` (pass 2 with an EMPTY spec - `refine.compose_cto_prompt(prompt, archetype, None, context)` degrades gracefully to archetype-default dims with no agent-drafted input needed), overwriting `boosted_prompt` with the CTO-grade result and setting `boost_meta.auto_refined = True` plus a `refine_note`. For a STRONGER spec than the auto-refined default, the agent may still optionally call `icx_boost_refine` itself afterwards - understand the request and draft a STRUCTURED professional spec (objective, requirements, constraints, deliverable, acceptance, dims) - but this is no longer required to reach the CTO-grade result. `icx_boost_refine` DETERMINISTICALLY assembles the final CTO-grade prompt via `refine.compose_cto_prompt`: a `# ROLE` (best-in-class persona chosen PER PROBLEM from `personas.select_persona` - security -> principal-security-architect, UI -> principal-ui-ux-architect, etc., reusing the same persona table as the analyze layer, never hardcoded), `# OBJECTIVE` (the agent's professional restatement), `# CONTEXT` (adaptive graph/memory files), `# REQUIREMENTS` (agent's + ICX base dims merged/deduped/capped via `merge_dims`), `# CONSTRAINTS`, `# DELIVERABLE` (agent's or an archetype default), `# ACCEPTANCE CRITERIA` (agent's + verify), `# APPROACH` (the senior planning rubric mirrored from the analyze layer - root-cause-with-evidence, 2+ approaches, blast radius + callers, risks/failure-modes/rollback, and a confidence gate to ask before guessing on an ambiguous ask), `# STANDARDS` (methodology one-liner), and the verbatim original request for reference. So whoever typed the request - junior or senior, vague or precise - the LLM always receives the same CTO-level spec. All spec fields are optional; ICX fills any gap from its deterministic templates. Persona data + selector live in the shared pure module `personas.py` (`select_persona(text, archetype)`, `persona_profile(slug)`), reused by both analyze and refine. The older dims-only `compose_refined_prompt` is retained for back-compat. MEASURED (live A/B, requirement coverage): a hand-drafted second pass beats the auto-refined default by +18% on underspecified prompts (raw 0.64 -> one-pass 0.77 -> two-pass 0.91) - these numbers predate the auto-chain and describe the ceiling a manual `icx_boost_refine` call can still reach. Additive + safe: skip the manual call and the auto-refined `boosted_prompt` from `icx_boost`/`icx-boost` is the floor (no longer the bare one-pass brief); `icx_boost_refine` never uses a metered model (the understanding is the agent's own turn).
+
+The orchestration is shared: `boost/service.py:build_boost_brief(prompt, repo_path, current_file, is_continuation, *, env_fn, signals_fn, connected_fn)` is the single source of truth (providers injected, so it is decoupled + unit-tested with fakes); the `icx_boost` MCP handler, the `icx boost brief` CLI, and editor hooks all call it. See `docs/superpowers/specs/2026-07-21-icx-universal-boost-channel-design.md`.
+
+**Editor hooks (`icx boost brief` + `docs/boost-editor-hooks.md`, P4) - superseded by the on-demand `/icx-boost` command:** the `UserPromptSubmit` hook (Claude Code) and the rules files (other editors) no longer inject a boost directive on every prompt - that blanket mandate proved unreliable in practice (it competed with everything else in context, every turn) and has been removed. Boost is now invoked explicitly via each editor's native `/icx-boost` command (see "MCP host discovery" below); the hook/rules files are still installed AUTOMATICALLY by `icx mcp setup`, but they now carry ONLY the narrower, high-precision ticket/testing/sonar routing directives. The `icx boost brief "<prompt>" --format hook|brief|json` CLI still produces the boosted brief headlessly (calling `build_boost_brief` with the same providers the MCP tool uses, from `mcp_server`, against the current directory) for scripts or a custom hook; `--format hook` emits Claude Code `UserPromptSubmit` `additionalContext` JSON. It degrades to a methodology-only brief on any error and never fails the hook path, so a hook can NEVER block the editor or the MCP server.
+
+**Link enrichment (`boost/links.py`, P2 - preserve + 3-tier, no ICX-builds-everything):** `extract_links` pulls http(s) URLs from the prompt (and any passed in); `classify_target` tags each (jira|sonarqube|figma|github|confluence|web); `build_link_plan(urls, icx_connected)` decides the enrichment TIER per link WITHOUT fetching - (1) `icx_tool`: the target is one ICX has a tool for (`ICX_TARGETS` = jira, sonarqube) AND it is connected -> instruct the agent to call that ICX tool (`analyze_issue_fast` / `sonar_report`); (2) `icx_connect_needed`: ICX has the tool but it is not connected -> tell the user to connect it (or use their own tool meanwhile); (3) `agent_fetch`: ICX has no connector (figma/github/confluence/web) -> instruct the agent to fetch with ITS own tool/MCP and use the content. Reuses ICX's own MCP tools AND the agent's connectors rather than ICX building a connector for everything (ICX cannot introspect the agent's other MCP servers). The `_call_tool` handler computes `_icx_connected()` from config (a `jira` connection + an active sonar connection), and `build_brief` folds every link's action into the `boosted_prompt`. Links are ALWAYS preserved verbatim.
+
+**Hostname-anchored domain matching (CodeQL "incomplete URL substring sanitization"):** `classify_target`'s four known-SaaS domains (`atlassian.net`, `figma.com`, `github.com`, `githubusercontent.com`) are matched against `urlparse(url).hostname` only (exact or a proper `.`-anchored subdomain, via `_host_matches`) - never a substring check against the whole URL. A plain `"atlassian.net" in url` check would wrongly classify an attacker-controlled lookalike like `https://evil.com/?x=atlassian.net` or `https://atlassian.net.evil.com` as trusted Jira. `jira`/`sonar`/`confluence`/`/browse/`/`/wiki/` deliberately stay broad substring checks - those tools are commonly self-hosted at an arbitrary internal domain with no fixed hostname to anchor to, so a keyword match is the only way to catch them; that is an intentional tradeoff, not the same defect CodeQL flagged.
+
+**Boost proof benchmark (`boost/benchmark/`) + `icx boost benchmark`:** measures the boost with real numbers (P3). `corpus.py` holds prompts across archetypes, each with a DETERMINISTIC rubric (an answer satisfies an item if it contains any of the item's substrings). `grader.py:grade` scores an output against a rubric (weighted, case-insensitive). `runner.py:run_benchmark(generate, boost, corpus)` runs each prompt through the injected model twice - raw and ICX-boosted - grades both, and aggregates `raw_avg`, `boosted_avg`, `lift_pct` (relative, valid only when raw>0) and `abs_gain_pts` (absolute points, always valid), plus per-archetype scores; `generate`/`boost` are injected so the harness is pure and unit-tested with a fake (no live model in tests). `report.py:render_scorecard` renders the HTML (shows relative lift when the raw baseline scored above 0, else the absolute gain - never a misleading 0%). The `icx boost benchmark` CLI wires the real ICX model via the new `LLMProvider.generate` (concrete default raises NotImplementedError; implemented for Google) and the real boost, writing the scorecard to `~/.icx/boost/benchmark.html`. The number in any doc is whatever this measures - not a claim.
+
+**How the boost wording was chosen (A/B, no fake tuning):** the corpus is requirement-coverage on 22 prompts tagged by `difficulty` (15 underspecified vague one-liners = the real-user case where a raw answer misses implicit requirements, 5 hard, 2 easy near-ceiling contrast). `run_benchmark(generate, boost, corpus, repeats)` averages `repeats` single-shot runs to cut model variance so the numbers are trustworthy. `boost/variants.py` holds candidate boosted-prompt wordings; they were A/B'd head-to-head on the real model (raw computed once and reused across variants; 429/empty retried with backoff so rate limits never score a false 0). The winner - variant `forgets` ("a rushed answer forgets the hard parts; do NOT skip any of these" + a per-archetype completeness checklist, leading with the task, not a process scaffold) - measured +34% requirement coverage on underspecified prompts vs +20% for the plain checklist and -10% for the old process-scaffold prepend. That wording is now `compose_boosted_prompt`. KEY LESSON: prepending a process scaffold to a single-shot answer HURTS (the model answers the scaffold, not the task); leading with the task + a "don't skip the hard parts" completeness checklist HELPS. The `hard`/`easy` classes sit near their coverage ceiling, so boost shows little/no lift there - reported honestly, never tuned to fake-positive.
+
+**Context-completeness engine (`context_completeness.py`) + `lock_plan` spec-lock:** to raise first-pass ticket accuracy, the agent must lock its file set BEFORE coding. `fan_out(seeds, graph=, grep=, semantic=, memory=)` gathers candidates from four injected signals (ICX makes no LLM call - the MCP layer wires real providers via `_context_signals`: graph blast-radius/co-change, `expand_via_grep`, graph `find_context`, memory `find_by_file`); each candidate records which signals hit it + why. `fuse_rank` scores by signal-agreement + centrality + recency + prior-fix and assigns tiers (high = >=2 signals OR a structural graph tie OR a prior-fix file; medium = semantic; low = grep-only). `miss_check(chosen, scored, justifications)` blocks on any HIGH-tier candidate the plan omitted and did not justify (medium/low advisory); `coverage` = high-tier covered / total. The `lock_plan` MCP tool runs this, stores the locked plan per session, and returns `{ok, coverage, blocking_missed, advisory_missed}`; the analyze descriptions carry RULE 3b ("do NOT write code until lock_plan returns ok") and the numbered sequence lists it at step 17, before testing. Pure + guarded: a missing graph / empty memory degrades to fewer signals, never an error. This is the highest-leverage lever against wrong-scope first attempts (missed callers/co-changes/prior-fix files). `expand.py:union_rank` remains for the testing flow; the engine generalizes the same idea with more signals + the miss-check.
+
+**Definition-of-Done verification gate (v0.4.1 Phase 1):** `analyze_issue` appends a DEFINITION OF DONE block to `_icx_next`: a checklist derived from the analysis (`verification.py:build_dod_checklist`) plus a recommended verification layer set from a risk tier (`compute_risk_tier` -> `recommend_layers`; RECOMMENDATION only - the user selects at the gate, human-in-loop). The agent must prove each item, then call `record_verification` with `{issue_key, dod_items:[{check, method, passed, command, output}], self_review_note, layers_run}`. `verification.py:validate_evidence` accepts only when every item has a non-empty command + output + `passed=true`; `build_confidence_report` returns a confidence score + dimensions + remaining risks. An accepted record is stored in the session. `save_memory` then REFUSES `outcome_verified=true` unless an accepted record exists, OR `verified_by_human=true` is passed (the manual override lane). All knobs have best-practice defaults (`DEFAULT_TIER=medium`, `DEFAULT_TIER_LAYERS`, `DEFAULT_PERF_THRESHOLDS`); the layer is fully guarded (`_apply_dod`) and degrades to prior behavior on any error. `response["dod"]` echoes the checklist + recommended layers. (Later phases add the runner engine that produces the evidence; Phase 1 works with agent run-and-observe.)
+
+**Senior-persona planning layer (prepended to `_icx_next.instruction`):** Every successful `_handle_analyze_issue` response also prepends a role-tuned preamble above the instruction so the connected agent plans like a senior specialist rather than a junior. The analysis LLM emits `recommended_persona` (one of 19 senior slugs: `cto`, `principal-engineer`, `solution-architect`, `system-architect`, staff/principal domain roles, and three testing-specific roles - `principal-qa-automation-architect` (e2e/UI/Playwright), `principal-api-test-architect` (API/contract), `principal-unit-test-architect` (unit)). `_select_persona(analysis)` reconciles the LLM pick with a keyword heuristic over the ticket text: the LLM pick wins, except a UI-family pick with backend-only text (no UI vocabulary) is clamped to the keyword persona; with no LLM value it falls back to the keyword heuristic, then to `system-architect`. `_persona_preamble(slug, confidence, completeness)` builds the role identity plus a senior planning rubric (root cause before fix, two approaches, blast radius, test/verify strategy, risks) and a confidence gate that mandates clarifying questions when `confidence_score < _CONFIDENCE_GATE` (0.6) or `completeness_score < _COMPLETENESS_GATE` (0.5). `_apply_persona` is fully guarded - any failure returns the instruction unchanged, so persona can never break `analyze_issue`. The existing STEP/RULE flow is untouched; the chosen role is echoed in `response["persona"] = {"role", "source"}`.
 
 **Attachment full-fidelity paths (MCP):** `analyze_issue` writes each processed non-image attachment to `~/.icx/temp/<key>/` as two files - `<name>.full.md` (the COMPLETE uncapped/unsummarized conversion; the model reads this for binary sources like xlsx/pdf it cannot parse) and `<name>` (the untouched original). Row-capped types (csv/xlsx/xls) are converted twice in parallel (capped inline + uncapped sidecar); other types once. `process_attachments` returns four maps (texts, images, full_texts, raw); `engine.run` carries full_texts/raw on the result via the excluded fields; `_write_attachment_files` (guarded) writes the files and returns `work_item.attachment_paths = {filename: {full_text, raw}}`. Cleanup: `sweep_stale_temp_dirs` (24h TTL) runs on every analyze call, on MCP startup, hourly via `_periodic_temp_sweep`, and immediately after `save_memory` confirms a fix.
 
@@ -648,28 +698,195 @@ MCP mode skips automatic memory enrichment in `engine.run()`. Memory runs inside
 
 ### MCP host discovery (`mcp_hosts.py`)
 
-`list_hosts()` returns 5 `MCPHost` entries with no `cwd` parameter - paths are resolved internally using a monkeypatchable helper:
+`list_hosts()` returns 6 `MCPHost` entries with no `cwd` parameter - paths are resolved internally using two module-level helpers (both monkeypatchable in tests):
 
-- `_home() -> Path` - wraps `Path.home()`, used for home-relative paths
+- `_home() -> Path` - wraps `Path.home()`, used for home-relative paths (5 of 6 hosts)
+- `Path.cwd()` - used directly for vscode, whose MCP config is workspace-scoped (see below)
 
 **Host registry:**
 
-| Name | Config path | Format | Detect path |
-|------|-------------|--------|-------------|
-| claude | `~/.claude/settings.json` | json | `~/.claude` |
-| cursor | `~/.cursor/mcp.json` | json | `~/.cursor` |
-| windsurf | `~/.codeium/windsurf/mcp_config.json` | json | `~/.codeium/windsurf` |
-| codex | `~/.codex/config.toml` | toml | `~/.codex` |
-| antigravity | `~/.gemini/antigravity/mcp_config.json` | json | `~/.gemini` |
+| Name | Config path | Format | Detect path | `mcp_key` | `entry_type` |
+|------|-------------|--------|-------------|-----------|--------------|
+| claude | `~/.claude/settings.json` | json | `~/.claude` | `mcpServers` | - |
+| cursor | `~/.cursor/mcp.json` | json | `~/.cursor` | `mcpServers` | - |
+| windsurf | `~/.codeium/windsurf/mcp_config.json` | json | `~/.codeium/windsurf` | `mcpServers` | - |
+| codex | `~/.codex/config.toml` | toml | `~/.codex` | `mcp_servers` | - |
+| antigravity | `~/.gemini/antigravity/mcp_config.json` | json | `~/.gemini` | `mcpServers` | - |
+| vscode | `<cwd>/.vscode/mcp.json` | json | `<cwd>/.vscode` | `servers` | `stdio` |
+
+VS Code has no stable, documented cross-platform path for a user-profile MCP config (unlike the other five hosts' home-relative globals) - its MCP mechanism is workspace-scoped (`.vscode/mcp.json`), so it is detected/written relative to the current project (`Path.cwd()`), and its JSON shape differs (`{"servers": {"icx": {"type": "stdio", ...}}}` instead of `{"mcpServers": {"icx": {...}}}`). `MCPHost.mcp_key` and `MCPHost.entry_type` carry this difference; `_write_json(path, mcp_key, entry_type)` / `_remove_json(path, mcp_key)` and `_make_icx_entry(entry_type)` are parameterized accordingly - `write_icx_entry`/`remove_icx_entry` pass `host.mcp_key`/`host.entry_type` through.
 
 `write_icx_entry(host) -> WriteResult` returns `WriteResult(path, fallback)`. When `host.detect_path` does not exist (tool not installed), it writes to `Path.cwd() / ".mcp.json"` and returns `fallback=True`. There is no `"manual"` config format - all hosts write automatically. The `MCPHost.config_path` field is always a `Path`, never `None`.
 
-**Test isolation:** Patch `icx_engine.mcp_hosts._home` in tests to redirect home-relative paths into `tmp_path`. All five hosts now use home-relative paths - `monkeypatch.chdir` is only needed if the test itself opens files relative to cwd.
+**Test isolation:** Patch `icx_engine.mcp_hosts._home` in tests to redirect home-relative paths into `tmp_path`. For vscode, also `monkeypatch.chdir(tmp_path)` (fixture `fake_cwd` in `tests/test_mcp_hosts.py`) since its paths are cwd-relative, not home-relative.
 
-**ICX-first ticket-routing enforcement (Claude Code):** `MCPHost.enforces` (True only for `claude`) gates a routing layer installed by `install_enforcement(host)` on `icx mcp setup` and torn down by `remove_enforcement(host)` on `icx mcp remove`. Non-enforcing hosts return `[]` (no-op). Two idempotent, merge-safe layers, so a bare ticket reference the user types (`ABC-123`, or a Jira/GitHub/Linear/GitLab issue URL - no "use icx" needed) is routed through `mcp__icx__analyze_issue_fast` before any other tracker or a repo read:
-- **UserPromptSubmit hook:** a standalone pure-stdlib detector (`_HOOK_SCRIPT`) is written to `~/.icx/hooks/icx-ticket-gate.py`; a keyed group (identified by the `icx-ticket-gate.py` command substring, via `_is_icx_hook_group`) is merged into `~/.claude/settings.json` UserPromptSubmit, preserving all other hooks. On a ticket match it emits `hookSpecificOutput.additionalContext` with a CONDITIONAL directive (self-neutralizes when the match is not a real ticket or ICX is not connected). The command uses `sys.executable` so a working Python is guaranteed at hook time.
-- **CLAUDE.md rule:** a marker-delimited block (`_RULE_START`/`_RULE_END`) inserted into `~/.claude/CLAUDE.md`, replaced in place on re-run, stripped on remove; surrounding user content is preserved.
-Both layers are guarded per-step - a failure installing enforcement warns but never aborts MCP registration.
+**Native `/icx-boost` command file (all 6 hosts) - the on-demand replacement for the old every-message boost mandate:** `MCPHost.command_path` / `MCPHost.command_content` hold a per-editor command/skill/workflow file, installed by `install_boost_command(host)` on `icx mcp setup` and removed by `remove_boost_command(host)` on `icx mcp remove`. This file is the ONLY place boost is triggered from now - it fires exclusively when the user (or an MCP-prompt-capable editor's own auto-surfacing) explicitly invokes `/icx-boost`, never on every message. Because `icx_boost`'s tool handler now auto-applies the refine pass itself (`mcp_server.py:_boosted`, see "Auto-chained two-pass boost" above), every host's command body is IDENTICAL in substance - call `icx_boost` once, work from `boosted_prompt`, optionally enrich with `icx_boost_refine` - only the wrapping frontmatter differs per editor's native format:
+
+| Host | Command file | Mechanism |
+|------|--------------|-----------|
+| claude | `~/.claude/skills/icx-boost/SKILL.md` | Claude Code Skill, short name `/icx-boost`, `$ARGUMENTS` substitution |
+| vscode | `<cwd>/.github/prompts/icx-boost.prompt.md` | VS Code prompt file (`/icx-boost`); an MCP prompt (below) also auto-surfaces as `/icx.icx-boost` |
+| cursor | `~/.cursor/commands/icx-boost.md` | Cursor custom command (MCP-prompt auto-surfacing there is confirmed buggy per editor research - do not rely on it) |
+| windsurf | `~/.codeium/windsurf/global_workflows/icx-boost.md` | Windsurf global workflow |
+| codex | `~/.codex/prompts/icx-boost.md` | Codex custom prompt (deprecated in favor of Agent Skills upstream, but still functional; Codex has no MCP-prompts support at all - openai/codex#8342 open) |
+| antigravity | `~/.gemini/antigravity/global_workflows/icx-boost.md` | Antigravity global workflow (frontmatter beyond `description` is undocumented upstream, so only that field is used) |
+
+The file is fully ICX-owned (never merged with user content, unlike the rules files below) - `install_boost_command` does a plain atomic overwrite, which is idempotent by construction. `install_boost_command`/`remove_boost_command` return `None`/`False` for a host with no `command_path` configured (none currently - all 6 have one).
+
+**MCP prompts primitive (`mcp_server.py`) - native auto-surfacing where the MCP spec's `prompts` capability is supported:** `@server.list_prompts()` / `@server.get_prompt()` expose a single prompt named `icx-boost` (see `_list_prompts`/`_get_prompt`), which calls the same `_boosted()` helper as the `icx_boost` tool and returns the auto-refined brief as the prompt's message content - so invoking the prompt runs the SAME deterministic code the tool runs, not a model-discretionary suggestion. Editor research (2026): Claude Code and VS Code Copilot Chat auto-surface a server's declared prompts as slash commands (`/mcp__icx__icx-boost`, `/icx.icx-boost` respectively) - confirmed working; Cursor lists them but parameterized prompts are confirmed buggy (forum-reported, unresolved); Windsurf's support is doc-claimed but unconfirmed; Codex and Aider/Zed do not support the MCP `prompts` primitive at all. This is why the native command file above (not the MCP prompt) is the primary, uniform `/icx-boost` entry point across all 6 hosts - the MCP prompt is a free bonus surface where the editor happens to support it.
+
+**ICX enforcement (all editors) - ticket/testing/sonar routing, NOT boost:** `MCPHost.enforces` (True for every supported host) gates the enforcement installed by `install_enforcement(host)` on `icx mcp setup` and torn down by `remove_enforcement(host)` on `icx mcp remove`. This is now a SEPARATE, narrower concern from boost (see the command-file section above) - it covers only the three high-precision, always-on triggers: a work-tracker ticket reference -> `analyze_issue_fast`, a testing request -> `start_testing_session`, a Sonar/code-quality request -> the `sonar_*` tools. `MCPHost.enforce_kind` picks the mechanism per editor (verified against each editor's 2026 docs): `"hook"` for Claude Code (a hard pre-agent `UserPromptSubmit` hook + CLAUDE.md); `"rules"` for the rest, which write the ICX rule into that editor's documented global-rules file - Windsurf `~/.codeium/windsurf/memories/global_rules.md`, Codex `~/.codex/AGENTS.md`, Antigravity `~/.gemini/GEMINI.md` (fixed from an earlier incorrect `AGENTS.md` assumption - Antigravity's own global rules file is GEMINI.md), Cursor `~/.cursor/rules/icx.mdc`, VS Code `<cwd>/.github/copilot-instructions.md`. The rules-file path is instruction-based. HONEST caveat surfaced for Cursor: it does not natively guarantee global file-rules (official: feature request, no ETA 2026), so `MCPHost.rules_note` tells the user to add a one-line User Rule in Settings if the file is not picked up. This is where ALL MCP-related setup lives - there is no separate hook command. For Claude Code specifically, two idempotent, merge-safe layers so a ticket/testing/sonar request is always routed correctly, with no "use icx" needed:
+- **UserPromptSubmit hook:** a standalone pure-stdlib detector (`_HOOK_SCRIPT`) is written to `~/.icx/hooks/icx-boost-gate.py`; a keyed group (identified via `_is_icx_hook_group`, which matches the current filename AND the legacy `icx-ticket-gate.py` for clean migration) is merged into `~/.claude/settings.json` UserPromptSubmit, preserving all other hooks. It stays SILENT unless the prompt matches one of three patterns: a work-tracker ticket (`_is_ticket` -> `mcp__icx__analyze_issue_fast`), a testing request (`_TESTING_RE`: test/qa/coverage/e2e/check-a-screen -> `mcp__icx__start_testing_session`), or a code-quality request (`_SONAR_RE`: sonar/quality-gate/code-smell/vulnerability -> the `mcp__icx__sonar_*` tools) - it no longer injects any boost directive (that was the old, retired every-message mandate). Each directive self-neutralizes if the match is a false positive or ICX is not connected. Pure stdlib, no ICX import, no per-prompt subprocess to ICX. The command uses `sys.executable` so a working Python is guaranteed at hook time. `_write_hook_script` deletes any legacy hook file, and `remove_enforcement` deletes both current and legacy - so an existing install migrates cleanly on the next `icx mcp setup`/`icx mcp remove`.
+- **CLAUDE.md / global-rules block:** a marker-delimited block (`_RULE_START`/`_RULE_END`, `_RULE_BLOCK`) mandating ICX as the single channel for THREE always-on jobs - (1) work-tracker ticket -> `analyze_issue_fast`, (2) testing an app/screen/UI/API -> `start_testing_session`, (3) code quality / SonarQube -> `sonar_*` tools - plus a fourth item covering any OTHER pasted/ticket-embedded URL (use ICX's connector if it has one, else the agent's own connector, else tell the user), inserted into the editor's rules file (`~/.claude/CLAUDE.md` for Claude, the global-rules file for the others), replaced in place on re-run, stripped on remove; surrounding user content is preserved. The block also POINTS to `/icx-boost` as the separate, on-demand way to boost a request - it no longer mandates calling it on every message.
+Both layers are guarded per-step - a failure installing enforcement warns but never aborts MCP registration. The `icx boost brief` CLI (P4) remains available for a custom/non-standard hook.
+
+**Graceful fallback when an ICX integration is not connected (`_ICX_FALLBACK`):** routing is mandatory but never a dead end. When the agent routes a ticket to `analyze_issue_fast` or a code-quality request to a `sonar_*` tool and the integration is not configured, the tool returns a structured error PLUS a `fallback` instruction (from `_ICX_FALLBACK(kind, connect_cmd)`) that encodes the same 3-tier intelligence as the boost link handling: (1) tell the user it is not enabled and to connect ICX (`icx connection --add` / `icx sonar --add`) - the preferred path; (2) if the agent has its own connector/MCP for that target, use it meanwhile; (3) otherwise proceed with the normal flow and note the ICX integration is off - never fabricate the data. So ICX stays the preferred channel, but a missing connector degrades cleanly to the agent's own tools or the normal flow rather than blocking. Link enrichment in the boost brief already applies the same tiers per link (`boost/links.py`: `icx_tool` when ICX has a connected connector, `icx_connect_needed` when ICX has it but it is off, `agent_fetch` when ICX has none - e.g. Figma).
+
+### Runtime Manager (`runtime_manager.py`) - v0.4.1 Phase 2
+
+Per-repo runtime detection + isolation as a REGISTRY, not an installer. Model: Discover -> Ask ->
+Remember -> Reuse. ICX NEVER installs/downloads SDKs, NEVER modifies global PATH, NEVER overwrites or
+removes user software. The only file written is `~/.icx/runtimes.json` (validated, user-approved
+runtime PATHS).
+
+- Per-language detectors read REPO config (repo overrides machine): `detect_java` (.java-version,
+  .sdkmanrc, Maven compiler release/target/source, Gradle toolchain), `detect_node` (.nvmrc,
+  .node-version, package.json volta/engines), `detect_python` (.python-version, pyproject
+  requires-python, runtime.txt, Pipfile), `detect_dotnet` (global.json, *.csproj TargetFramework),
+  `detect_go` (go.mod toolchain/go), `detect_rust` (rust-toolchain.toml, Cargo.toml rust-version),
+  `detect_php` (composer.json), `detect_ruby` (.ruby-version, Gemfile). `detect_required_runtime(lang,
+  repo)` dispatches; returns None when undetectable.
+- Registry: `lookup_runtime(lang, version)` (prunes stale/missing paths), `remember_runtime(lang,
+  version, path)`, atomic write.
+- Discovery/validation (monkeypatchable): `discover_runtimes(lang)` enumerates EVERY installed
+  version - the PATH one (`which`) PLUS every version-manager install via home-dir globs
+  (`_VM_EXE_GLOBS`: nvm/volta/fnm/asdf for node, sdkman/jabba for java, pyenv for python, rbenv/rvm
+  for ruby, goenv for go; incl. nvm-windows/Volta-Windows layouts), de-duplicated by real path. So a
+  machine with node 14/16/18 side by side is fully discoverable, not just the active one.
+  `validate_runtime(lang, path)` runs the version command (Java prints to stderr, handled);
+  `detect_version_manager(lang)` reports nvm/pyenv/sdkman/rustup/goenv markers.
+- `resolve_runtime(lang, repo) -> Resolution` orchestrates: detect -> `not_required` if none ->
+  registry reuse -> discover+validate matches -> 1 match remember+`resolved`, >1 `choose`, 0 `ask`.
+- `resolve_harness_node(min_major=18) -> str | None`: resolves a MODERN node for the UI harness
+  (Playwright), DECOUPLED from the app's node. ICX does not run the app (it is already
+  serving at the confirmed URL on its own node); the harness is a separate browser-driver process, so
+  it only needs any discovered node >= 18. Picks the highest modern node, remembers it under the
+  registry key `("node","harness")`, reuses it for every UI run - so a node-14/16 project still gets
+  UI testing on a discovered node-18+. Returns None when no modern node exists (the UI adapter then
+  falls back to PATH `node`). Override: `ICX_HARNESS_NODE=<path>` forces a specific harness node
+  (pinned / air-gapped) and wins over discovery; the app's node is never touched.
+  `node_local_run._runtime_resolver` routes `ui`/`agent` layers here and every other layer through
+  `resolve_runtime`. Full provisioning + offline guide: `docs/testing-setup.md`.
+  Never installs. The interactive ask/choose is surfaced by the caller (CLI prompt / MCP gate); the
+  module never blocks on stdin. Testing adapters pull the resolved runtime from here
+  so every verification layer executes on the identical, repo-correct runtime.
+
+### Testing runners (`testing/runners/`) - v0.4.1 Phase 3
+
+The polyglot unit-test layer, plugin-registered (mirrors `register_connector`/`register_provider`):
+- `base.py` - normalized `TestCase`/`TestReport` (`.ok` = ran + zero failures/errors) + `RunSpec`
+  (command/cwd/report_path/env/note) + `UnitRunner` protocol + `register_runner`/`get_runner`/
+  `detect_runners(repo)`/`list_runners`. Adding a language = register an adapter, no core change.
+- `junit.py` - `parse_junit_xml(text_or_path) -> TestReport`. JUnit XML is the universal spine;
+  counts are recomputed from cases for internal consistency; malformed XML -> empty report. Invalid
+  XML 1.0 control chars (C0 controls except tab/LF/CR - e.g. the ANSI escape `0x1B` that Playwright,
+  pytest and jest embed in failure text) are STRIPPED before parsing; left raw they make the whole
+  document not-well-formed and the parse yields zero cases - the root cause of a run that had
+  real failures being reported as "0 tests ran". This matters even more now that agent-type reports
+  come from Playwright's own JUnit reporter, which ICX does not control the write side of.
+- `unit.py` - Wave-1 adapters (registered on import): pytest, vitest, jest, junit-maven,
+  junit-gradle (covers Java AND Kotlin), go (gotestsum bridge), cargo (nextest bridge). Each does
+  `detect(repo)` + `build_command(repo, runtime_path) -> RunSpec` emitting JUnit XML. Runtime path
+  comes from `runtime_manager.resolve_runtime`. Adapters decide WHAT to run; the executor (later
+  phase) runs it. `RunSpec.note` records any required JUnit-XML bridge tool.
+- `ephemeral.py` - `run_ephemeral_repro(lang, code, runtime_path) -> (passed, output)` for repos
+  with NO test framework: writes a throwaway script under `~/.icx` temp (0o700, sanitized), runs it
+  via the runtime (python/node), returns pass/fail by exit code, deletes it. Repo never mutated.
+  This is the DoD "reproduce -> confirm resolved" path for pure-logic changes.
+
+Wave 2 (c#/php/ruby/elixir/scala/swift) and Wave 3 (c/c++ + remainder) are added later as more
+registered adapters. UI/API layers (Phases 4-5) are language-agnostic.
+
+**API layer + security (v0.4.1 Phase 4):**
+- `api.py` - `schemathesis` (schema-driven fuzz from OpenAPI/Swagger, deterministic, no AI) and
+  `hurl` (scripted `*.hurl` HTTP) adapters, registered with `category="api"`. They test through the
+  HTTP interface so they are identical across every backend language. `detect_runners(repo,
+  category="api")` filters them; unit adapters (no explicit category) default to "unit" via getattr,
+  so nothing existing changed. Adapters build the base command + JUnit-XML report path; the executor
+  injects the user-confirmed target base URL and runs it.
+- `security.py` - deterministic, evidence-based (no AI verdicts). `build_security_plan(analysis)`
+  returns which checks apply (authentication/authorization/sql_injection/xss/csrf/ssrf/
+  insecure_headers/privilege_escalation) from change signals; `check_security_headers(headers)`
+  audits required response headers (CSP/X-Content-Type-Options=nosniff/X-Frame-Options/HSTS/
+  Referrer-Policy) returning SecurityFinding per header. Findings feed the Definition-of-Done record.
+  Broader probes execute via Schemathesis + targeted deterministic requests in the executor phase.
+
+**UI/agent layer - retired as a runner plugin:** the earlier `ui.py` runner-plugin adapter
+(`category="ui"`, cached `UiFlow`/`UiStep` replay via a custom flow interpreter) has been removed. ICX
+no longer executes, generates, or interprets any browser-test content for the `agent` test type - the
+connected editor agent hand-writes and runs its own Playwright test file directly, against ICX's own
+pinned Playwright install. See "Agent-authored Playwright testing" under the Testing module section
+below for the full design; `node_local_run` reads the JUnit report the agent's own run produced
+instead of invoking any runner plugin for this type.
+
+**Runner-install manager (`runners/install.py`):** ICX brings its OWN test-runner tooling (Playwright, Schemathesis, mutmut, Stryker, Hurl, gotestsum, nextest, jest-junit) - distinct from the user's language SDKs (those go through `runtime_manager` as a discover/ask/remember registry). Same discipline as `graph/parser/lsp_manager.py`: `RUNNER_SPECS` pins every tool to a deliberate version (never "latest"); tooling installs under `~/.icx/testing/<name>/<version>/` (version-namespaced, reuse-if-present, no reinstall thrash). The `playwright` spec (`kind="ui-bundle"`) installs Playwright itself plus a Chromium download - this is the ONE pinned install the connected agent is also handed (never a bare `npx`/global install) for its own hand-written test at the `author_flow` gate. `ensure_runner(name, approve=...)` returns the install path, installing only when missing AND approved - `approve(name)->bool`, or `ICX_AUTO_INSTALL_RUNNERS=1`; default is OFF so nothing installs silently. Runners that need an ICX-owned tool declare a `requires` attribute (e.g. `playwright`, `schemathesis`, `hurl`, `gotestsum`, `nextest`, `jest-junit`); `local_executor` gates each such runner on `ensure_runner(requires, approve)` BEFORE building its command - missing + not approved -> that runner is skipped as unavailable (recorded in the result's `unavailable` list, and the layer reports a clean not-ok reason), never a silent install or a crash. User-SDK runners (pytest/vitest/maven/gradle) have no `requires` and are never gated. `is_installed`/`installed_path` check the pinned home; `auth_harness_path()`/`discover_harness_path()` return the packaged `assets/icx-auth.mjs`/`assets/icx-discover.mjs` (ship with ICX, not installed) - the only two Node harnesses ICX itself still runs; binary specs fail closed when `ICX_REQUIRE_RUNNER_CHECKSUM=1` and no checksum is pinned.
+
+**Safe archive extraction (CodeQL "arbitrary file write during tarfile extraction"):** `_install_binary`'s downloaded release archive (e.g. hurl) is never handed straight to `zipfile.ZipFile.extractall`/`tarfile.TarFile.extractall` - `_safe_extract_zip`/`_safe_extract_tar` validate EVERY member's resolved path stays within `extract_dir` (`_is_within_directory`) before extracting anything, and `_safe_extract_tar` additionally rejects any symlink/hardlink member outright (a link's target can point outside `extract_dir` regardless of what the member's own name looks like). Either check failing rejects the WHOLE archive - `extractall` never runs at all, so a malicious archive can never partially write files before being caught. HTTPS-only download from the official release host and optional sha256 verification (`spec.checksum`) were already in place; this closes the remaining gap for a compromised/MITM'd download or a future caller reusing this function against a less-trusted source. Guarded exactly like the rest of `_install_binary` - returns `False`, never raises.
+
+**Executor + intelligence (v0.4.1 Phase 6):**
+- `runners/executor.py` - `run_spec(spec, timeout)` runs a RunSpec (async subprocess, resolved-runtime
+  env, stdout/stderr to DEVNULL - the JUnit file is the result, nothing is buffered), then parses its
+  JUnit XML (`report_path`; a directory of `*.xml` for Surefire/Gradle is merged) into a normalized
+  TestReport. Guarded - never raises except a genuine cancellation, which is re-raised after cleanup.
+  The JUnit XML is the source of truth for pass/fail, not the exit code. Hardened for continuous local
+  use: (1) our own report file (basename `.icx-*`) is deleted BEFORE the run so a crashed/absent runner
+  can never be scored against a previous run's XML, and again AFTER parse so nothing litters the user's
+  repo (Surefire/Gradle dirs are the user's build output - read-only, never deleted); (2) each runner
+  is spawned in its own session (`start_new_session=True`, POSIX) and, on timeout OR cancellation, the
+  FULL process tree is killed via the shared `icx_engine._proc.kill_tree` - POSIX process-GROUP kill
+  (`os.killpg`, reaps even reparented children that `psutil.children` can miss), else psutil recursive,
+  else `taskkill /F /T` (Windows) / `os.kill`; a genuine `CancelledError` is re-raised after the kill
+  so cooperative shutdown (Ctrl+C, `icx test cancel`) works end to end. Structured logs
+  (`icx.testing.executor`) record each runner's command, wall duration, counts, and any
+  timeout/cancel/unavailable event. `run_plan(specs, parallel=True, max_parallel=4)` runs independent
+  specs concurrently but bounded by a semaphore so a polyglot repo never spawns an unbounded process
+  fleet.
+- `runners/junit.py` - report XML is UNTRUSTED (produced by a runner in the user's repo); parsed with
+  `defusedxml` so a malicious report cannot mount XXE, external-entity, or billion-laughs attacks
+  (falls back to stdlib only if defusedxml is absent). Counts are recomputed from cases, not trusted
+  from suite attributes.
+- `perf.py` - `compare_performance(before, after, thresholds=DEFAULT_PERF_THRESHOLDS)` -> PerfFinding
+  per metric (latency/memory/cpu/sql_query_count/response_time/payload_size); a metric fails when its
+  percent increase exceeds its threshold (sql_query_count default 0% = any increase flagged). A
+  ticket can fail verification on perf even when functional tests pass.
+- `regression.py` - `select_regression_targets(changed_files, candidate_tests, graph_impacted)` maps
+  changed (+ graph-impacted) source stems to related test files (test_auth.py / auth.test.ts /
+  auth_test.go), so only relevant tests run. Empty result -> caller decides full-suite fallback.
+
+**Mutation filter (v0.4.1 Phase 7):** `mutation.py` gates AI-DRAFTED unit tests so a draft that
+asserts nothing ("coverage lies") is rejected. `select_mutation_tool(lang)` (mutmut/Stryker/PIT/
+Infection), `build_mutation_command`, per-tool parsers (`parse_mutmut`/`parse_stryker`/`parse_pit`)
+-> normalized `MutationResult` (killed/survived/score/meaningful), and `evaluate_mutation(result,
+min_score=DEFAULT_MIN_MUTATION_SCORE=0.6)`. Hard floor: killed==0 -> rejected (verifies nothing);
+plus a configurable score minimum. Only mutation-killing drafts count as DoD evidence; drafts still
+pass through the human gate.
+
+**Local verification backend:** `local_executor.py`
+`run_local_verification(repo, test_type, target_url, runtime_resolver)` is the execution path for
+`unit`/`api` only - the LangGraph `local_run` node awaits it for those two types. (`agent` never
+reaches this function - `node_local_run` reads the agent's own JUnit report instead, see
+`_agent_report_result` under "Agent-authored Playwright testing".) It detects the runner plugins for
+the layer, builds their commands with the repo-correct runtime (Runtime Manager), runs them
+via the async DAG executor (`run_plan`), and returns one normalized suite result (`ok`, per-runner
+reports, aggregate summary). Fully local and async - no external tester, no blocking - and guarded
+(never raises). ICX-owned runners are gated on `ensure_runner` via `asyncio.to_thread` (a blocking
+install never stalls the event loop). The Runtime-Manager resolver (`node_local_run._runtime_resolver`)
+is memoized per (lang) for the run, so several same-language runners trigger only one runtime
+resolution (a registry miss spawns a version-probe subprocess - resolved once, reused). The user-confirmed target URL is delivered two ways: as
+`ICX_TARGET_URL` in the env (read by ICX's own Node harnesses) AND, for third-party CLIs that read
+flags not env, appended as the correct argv flag (`_URL_FLAG`: schemathesis `--base-url=`, hurl
+`--variable base=`). The prior Magik path (client, submit/poll/report nodes, and the `magik_*` MCP/CLI
+surface) has been removed entirely; `local_run` is the only executor.
 
 ### Service layer (`services/`)
 
@@ -677,15 +894,21 @@ Platform-specific authentication flows live in `services/connection_service.py`,
 
 ### Testing module
 
-The module integrates with Magik-AI Tester via a LangGraph state machine. The editor agent provides changed `file_paths`; ICX classifies and expands them, runs a compatibility remediation loop, then orchestrates submit-poll-report with human confirmation at each gate. ICX makes zero LLM calls of its own - the editor agent reasons at gate interrupts. ICX is a funnel - it decides what is next and orchestrates the loop; the agent reads source, detects compatibility, and generates the spec/profile; classify.py/compat.py/profile_gen.py remain as fallbacks for headless/no-agent runs.
+The module runs verification with a fully in-process, async, local engine (v0.4.2) - there is no external tester. A LangGraph state machine drives human-in-the-loop gates; the editor agent provides changed `file_paths`; ICX classifies and expands them, runs a compatibility remediation loop, then verifies, with human confirmation at each gate. ICX makes zero LLM calls of its own - the editor agent reasons at gate interrupts. ICX is a funnel - it decides what is next and orchestrates the loop; the agent reads source and detects compatibility; classify.py/compat.py remain as headless fallbacks. There are exactly three test types now: `agent`, `api`, `unit`. For `unit`/`api`, execution is `node_local_run` awaiting `run_local_verification` over the local runner suite (`testing/runners` + `local_executor.py`) on the repo-correct runtime. For `agent`, ICX runs nothing itself - the connected agent hand-writes and runs a real Playwright test file against ICX's own pinned Playwright install, and `node_local_run` reads the JUnit report the agent's own run produced (see "Agent-authored Playwright testing" below). ICX never generates, executes, or interprets browser-test content.
 
-State persists in `~/.icx/testing_sessions.db` (SQLite, WAL, `0o600`). Secrets and the Magik `sessionId` are NEVER written to this checkpoint.
+State persists in `~/.icx/testing_sessions.db` (SQLite, WAL, `0o600`). Secrets are NEVER written to this checkpoint.
+
+**Session done-detection (start/resume handlers):** a session is DONE only when `snapshot.next` is empty AND no interrupt is pending (`not snapshot.tasks[0].interrupts`). This matters because a single node may call `interrupt()` more than once (`expand_files`: expand_scan then expand; `review`: gate 4 then gate 5) - when paused at the LATER interrupt LangGraph reports `snapshot.next == ()` while a gate is still waiting. Testing `not snapshot.next` alone would wrongly report the session done mid-flow, so the agent would stop during file expansion and zero tests would run. The handlers also echo `status` (and `error` when done) so an error-termination is never mistaken for a clean finish. Note: `Command(resume={})` (an empty dict) is a no-op in this LangGraph version - the gate silently re-interrupts; every gate must be resumed with a non-empty payload. Regression: `tests/testing/test_graph.py:test_multi_interrupt_node_not_reported_done_midflow`.
+
+**Async job/poll pattern (opacity fix):** a gate that triggers real browser work (the agent authoring, running, and self-healing its own Playwright test at `author_flow`) can take minutes; the naive `await graph.ainvoke(...)` blocking the whole MCP call made a legitimate multi-minute wait indistinguishable from a hang. `start_testing_session`/`resume_testing_session` now run `graph.ainvoke` as a tracked `asyncio.Task` (`_testing_invoke_tracked` in `mcp_server.py`) and `wait_for` it with a short quick-timeout (`_TESTING_QUICK_TIMEOUT`, 20s). A gate that answers within that window behaves exactly as before (inline `{done, gate}` result, zero contract change for the ~90% of gates that are instant human-in-loop round trips). A gate still running past the timeout returns `{"status": "running", "done": false, "gate": null}` immediately - the task keeps executing in the background (`asyncio.shield` means the `wait_for` timeout never cancels it) - and the caller polls the new `get_testing_session_status(session_id)` tool instead. The task is tracked in module-level `_TESTING_RUNNING`/`_TESTING_ERRORS` dicts keyed by `session_id`; a `resume_testing_session` call while a task is still running for that session is rejected (points the caller at the status tool) rather than double-invoking `ainvoke` on the same LangGraph thread. Best-effort tracking only: an MCP server restart drops `_TESTING_RUNNING`, but `get_testing_session_status` still falls back to a plain `graph.aget_state` read in that case.
 
 Architecture:
-- Pluggable mode handlers (`handlers.py`): `TestModeHandler` ABC + registry; `UiHandler`/`AgentHandler`/`ApiHandler`. Graph nodes never branch on the mode string - they call `get_handler(test_type)`. A new mode is a new handler.
+- Pluggable mode handlers (`handlers.py`): `TestModeHandler` ABC + registry; `AgentHandler`/`ApiHandler`. Graph nodes never branch on the mode string - they call `get_handler(test_type)`. A new mode is a new handler.
 - Classification (`classify.py`): `classify_file(path, content)` -> `FileClass{layer, role, artifacts, testability, ...}` from path-pattern rules + content-signal regex.
-- Compatibility (`compat.py`): `check_compat(fc, mode)` -> `CompatVerdict{compatible, reasons, required_changes}`. This is a coarse heuristic used ONLY as the headless / no-agent fallback (ui/agent block backend files + missing stable selectors; api blocks frontend files + missing endpoint/schema; a missing route is advisory). When an agent is present it does the real assessment at the `compat_scan` gate - ICX neither judges nor verifies it (see compat gate mandate below).
-- Rulebook (`rules.py` + `rules_defaults/`): the mandatory per-gate rules the driving agent must follow, kept as editable Markdown in `~/.icx/testing_rules/`. `ensure_seeded()` copies bundled defaults in on first use and never overwrites user edits; `load_gate_rules(gate)` returns `_common.md` + `<gate>.md` (falling back to the bundled copy if the user deleted a file). Every relevant gate node injects `rules` (full text) and `rules_path` into its interrupt payload, so the agent confronts the current rules fresh at every gate, every session, with no dependency on it reaching the filesystem - the MCP `RULEBOOK RULE` tells it gate.rules is binding and overrides its assumptions. For gate 2b, `required_sections(gate)` parses a `<!-- REQUIRED_SECTIONS: ... -->` marker in the md (user-owned) and `missing_sections(gate, spec)` reports absent/empty top-level keys; `_run_gate_2b()` re-asks the agent naming exactly what is missing until the spec is complete (bounded by `_SPEC_MAX_REASK`, never silently submitting - the agent may resume with `accept_incomplete:true` only after the user knowingly accepts). `icx test rules` prints the rulebook dir and enforced sections; `--reset` re-seeds missing files.
+- Compatibility (`compat.py`): `check_compat(fc, mode)` -> `CompatVerdict{compatible, reasons, required_changes}`. This is a coarse heuristic used ONLY as the headless / no-agent fallback (agent blocks backend files + missing stable selectors; api blocks frontend files + missing endpoint/schema; a missing route is advisory). When an agent is present it does the real assessment at the `compat_scan` gate - ICX neither judges nor verifies it (see compat gate mandate below).
+- Rulebook (`rules.py` + `rules_defaults/`): the mandatory per-gate rules the driving agent must follow, kept as editable Markdown in `~/.icx/testing_rules/`. `ensure_seeded()` copies bundled defaults in on first use and never overwrites user edits; `load_gate_rules(gate)` returns `_common.md` + `<gate>.md` (falling back to the bundled copy if the user deleted a file). Every relevant gate node injects `rules` (full text) and `rules_path` into its interrupt payload, so the agent confronts the current rules fresh at every gate, every session, with no dependency on it reaching the filesystem - the MCP `RULEBOOK RULE` tells it gate.rules is binding and overrides its assumptions. `rules_defaults/author_flow.md` is the standing checklist for agent-type runs (both-sources mandate, CRUD lifecycle on the one record the agent created, no-create-step functionalities like export/upload, validation, security, accessibility/error-handling, generic no-tool-branding data, non-native dropdowns) - a durable, user-editable floor the agent's hand-written Playwright test must cover; refine it directly as real usage surfaces gaps, the same way every other gate's rules file is refined. For gate 2b, `required_sections(gate)` parses a `<!-- REQUIRED_SECTIONS: ... -->` marker in the md (user-owned) and `missing_sections(gate, spec)` reports absent/empty top-level keys; `_run_gate_2b()` re-asks the agent naming exactly what is missing until the spec is complete (bounded by `_SPEC_MAX_REASK`, never silently submitting - the agent may resume with `accept_incomplete:true` only after the user knowingly accepts). `icx test rules` prints the rulebook dir and enforced sections; `--reset` calls `refresh_stale()`.
+
+**Pristine-tracking (`refresh_stale()`) - the gap plain `ensure_seeded()` cannot close:** "the file exists" alone cannot tell a stale untouched copy apart from a genuine user customization, so `ensure_seeded()`/the old `--reset` could only ever seed a MISSING file - a bundled rule fix (like the compat_scan shallow-undefined-check clause) could never reach anyone who already had that gate's file, forever, even after `--reset`. `ensure_seeded()` now also writes a pristine marker (`~/.icx/testing_rules/.pristine/<gate>.md.sha256` - a sha256 of exactly what ICX just wrote) whenever it seeds a file. `refresh_stale()` is the real fix: for each bundled default, a missing local file is seeded (+ marked, as before); an existing file whose content hash still matches its pristine marker - i.e. NOTHING has touched it since ICX itself last wrote it - is safely overwritten with the current bundled content and re-marked; anything else (no marker at all - an install from before this mechanism existed - or a marker that no longer matches, meaning it WAS edited since) is left completely alone, conservatively assumed customized. Returns `{"seeded", "refreshed", "skipped", "up_to_date"}` (file name lists) for `icx test rules --reset` to report exactly what happened to each file. A file with no marker (pre-existing installs) still needs one manual delete to get onto the tracked path - from then on, `--reset` picks up every future bundled improvement automatically.
 - Expansion (`expand.py`): `expand_via_grep` (dependency-free walk) unioned with the graph expander (`union_rank`), filtered to the chosen mode's relevant layers; off-type files are excluded by default and shown separately.
 
 Gate flow (v2, in order):
@@ -693,18 +916,18 @@ Gate flow (v2, in order):
 | Gate | Who acts | What happens |
 |---|---|---|
 | mode | User | automated or manual |
-| pick_type | User | agent / ui / api (drives file selection; never auto-picked) |
+| pick_type | User | agent / api / unit (drives file selection; never auto-picked) |
+| known_screen | User | agent-type only, appears ONLY when a provably-fresh cached clearance of this exact screen exists; `fast_path` skips straight to config_gate, anything else (incl. no cache / stale) proceeds to expand_scan exactly as normal |
 | expand_scan | AI editor | greps the repo for files related to the seeds (importers/callers/same-feature/route); ICX greps as fallback, graph expansion stays ICX |
-| expand | User | confirm graph + agent-grep expanded files (off-type excluded by default) |
+| expand | User | confirm graph + agent-grep expanded files (off-type excluded by default); `confirmed_files` here is the file set for the WHOLE session - every later gate only ever sees what was confirmed |
 | compat_scan | AI editor | reads the files itself and reports per-file compatibility {all_compatible, findings}; open-ended mandate, ICX does not verify (see compat mandate below) |
 | compat_check | User | review the agent findings; approve (agent applies required_changes, then re-scan), or per-file drop / manual / accept-as-is |
 | 2a | User | confirm URL + detected fields (auto_detect) |
 | 2b | AI editor | generate JSON spec (AGENT-GENERATE); ICX enforces presence of every section in `~/.icx/testing_rules/2b.md` and re-asks until complete (or user accepts incomplete) |
 | api_manual | User | manual endpoint entry when api auto-spec fails |
-| 3 | User | agent_provider, headless, url, profile_screen (test_type is NOT chosen here - it was picked at pick_type) |
-| auth_gate | User | public / capture / reuse / inline (ui/agent only) |
-| profile_push | User | choose how to push a Project Profile: agent (generate) / file (provide a .md) / no |
-| profile_gen | AI editor | reads source + Magik profile-creation prompt, generates the Project Profile markdown (only when profile_push = agent) |
+| 3 | User | select verification layers (shown with a risk-tier recommendation) + confirm target URL (test_type is NOT chosen here - it was picked at pick_type) |
+| auth_gate | User | public / capture / reuse / inline (agent only) |
+| author_flow | AI editor | AGENT-GENERATE: write a real Playwright test file against the Element Census + checklist rulebook, run it yourself against ICX's pinned Playwright, read Playwright's own failures, fix and re-run until covered; resume with `{report_path, test_file, covered, findings}` (agent only) |
 | 4 | AI editor | review the full report |
 | 5 | User | approve THIS fix iteration (per-iteration approval) or stop |
 | error | User | retry / skip / end |
@@ -716,29 +939,117 @@ Sonar is a distinct feature, not a testing gate - it runs via the `icx sonar` co
 
 Every gate is governed by the durable rulebook in `~/.icx/testing_rules/` (see Rulebook above): ICX injects the gate's rules text into the interrupt payload so the agent always follows the current, user-editable rules - this is what makes a rule stick across every future session instead of living only in the agent's fading context.
 
-Compat gate mandate: ICX is a pure router here - it does NOT judge compatibility and does NOT verify the agent's answer. Completeness is the agent's own responsibility, enforced entirely by the gate instruction (`_COMPAT_MANDATE` in `nodes.py`, mirrored in the `resume_testing_session` tool description). The mandate is open-ended by design - no hardcoded blocker taxonomy: (a) COMPLETENESS - the agent reasons from first principles about everything a test physically must do (reach, locate, see, interact, observe) and examines every element, working from no fixed list; (b) FORBIDDEN DEFERRAL - the agent may NOT pass anything by assuming the test tool / browser-use agent / Playwright will "work around it" or be "less robust but fine" (this rationalization is the exact failure the mandate exists to stop); (c) REPORT, DON'T DECIDE - every concern becomes a finding shown to the user, and the agent never silently accepts, skips, or drops anything. `all_compatible:true` is legitimate only when the agent genuinely found nothing by inspection.
+Compat gate mandate: ICX is a pure router here - it does NOT judge compatibility and does NOT verify the agent's answer. Completeness is the agent's own responsibility, enforced entirely by the gate instruction (`_COMPAT_MANDATE` in `nodes.py`, mirrored in the `resume_testing_session` tool description). The mandate is open-ended by design - no hardcoded blocker taxonomy: (a) COMPLETENESS - the agent reasons from first principles about everything a test physically must do (reach, locate, see, interact, observe) and examines every element, working from no fixed list; (b) FORBIDDEN DEFERRAL - the agent may NOT pass anything by assuming the test tool / browser-use agent / Playwright will "work around it" or be "less robust but fine" (this rationalization is the exact failure the mandate exists to stop); (c) FORBIDDEN SHALLOW UNDEFINED-CHECK - before flagging any identifier as undefined, the agent must grep the WHOLE repo for its definition and check index.html/public HTML for a classic `<script src=...>` global (a legitimate no-import pattern) - a real false-positive this closed was flagging a global like `IS_VALID_USERNAME` loaded via a script tag as undefined because only the current file's own imports were checked. This clause lives in BOTH places compat_scan guidance is carried: the hardcoded `_COMPAT_MANDATE` (always injected into `instruction`) AND `rules_defaults/compat_scan.md` (the durable, user-editable file `gate.rules` serves) - the two are separate texts and a fix to one alone leaves the other stale; (d) REPORT, DON'T DECIDE - every concern becomes a finding shown to the user, and the agent never silently accepts, skips, or drops anything. `all_compatible:true` is legitimate only when the agent genuinely found nothing by inspection.
 
 Compat-check remediation loop: every finding goes to the user, who decides each one. The agent applies the edits and resumes with `{"decision":"approve"}` to re-check; or the user rejects with `{"decision":"reject","resolution":{path:"drop"|"manual"|"accept"}}` - `drop` removes the file, `manual` keeps it for hand-testing, `accept` keeps it in the automated run unchanged (the user knowingly accepts the finding). Loops until clean or `max_compat_iterations`.
 
-Auth isolation: Magik sessions are in-memory in Magik (opaque `sessionId`, 1-hour TTL). ICX keys auth by (project, host) in `~/.icx/testing_auth.json` (`0o600`), storing only `{session_id, captured_at, expires_at}` - never a credential. The `project` part of the key is the graph `project_id` (a path hash, collision-proof), not the human name, so two projects with the same name never share a session; when no graph project matches, ICX falls back to a hash of the resolved project root so the key is still unique and stable. `host` is the netloc of the run URL. `node_submit` resolves the sessionId transiently and never returns it into checkpointed state; if an authenticated run (capture/reuse/inline) finds its stored session expired or missing at submit time, it routes to relogin (auth_error -> auth_gate) rather than silently running unauthenticated. Relogin also fires on a mid-run login-redirect or the Magik `auth_required` SSE event, re-entering `auth_gate` and resuming from the checkpoint. The four `magik_login_*`/`magik_logout` MCP tools drive capture/inline login.
+Auth (local): real Playwright session capture, no credentials in chat. At `auth_gate` the user picks `public` / `reuse` / `capture` / `inline`:
+- `capture` -> the agent calls the `ui_auth_capture` MCP tool; ICX opens a HEADED Chromium at the login URL (`testing/ui_auth.py` -> packaged `assets/icx-auth.mjs`), the user logs in BY HAND, and on reaching `success_url` (or closing the window) ICX saves the Playwright `storageState` (cookies + localStorage). The agent is instructed NEVER to ask for the username/password in chat for capture.
+- `inline` -> the agent calls `ui_auth_inline` with the APP credentials; they go straight to ICX's browser process (never chat history, never persisted beyond the resulting session), which drives the login form and saves the `storageState`.
+- `reuse` -> load the stored session. `public` -> no auth. **Reuse validity guard:** `load_session` only checks TTL expiry - a record can exist (not TTL-expired) while its `storage_state` file was deleted, never written, or is corrupt. `node_auth_gate`'s `_valid_stored_session` additionally requires the file to exist and parse as JSON with actual `cookies` or `origins`; if not, `reuse` falls back to `public` (same downgrade as no-record-at-all) instead of silently proceeding as if authenticated.
 
-Live streaming: `node_poll` consumes the Magik SSE stream when `magik_use_streaming` is set (default true), returning on `done` or routing to relogin on `auth_required`; it falls back to the interval poll otherwise.
+**Dev-server port drift (`auth.list_sessions_for_project`):** sessions are keyed `project::host` where `project` is the graph's `project_id` (a stable hash of the resolved repo path, independent of the URL) - so two different local apps on the same `localhost:3000` never collide; that part is already automatic. What IS a real gap: a dev server auto-incrementing past a taken port (Vite/CRA/webpack-dev-server - 3000 taken -> 3001) breaks the EXACT host match for what is genuinely the same app/session, and plain `reuse` gave no visibility at all that a session existed elsewhere - it just silently fell back to `public`. `node_auth_gate` now computes `other_sessions` via `list_sessions_for_project(project)` whenever the exact host has no valid session, filtered to the SAME hostname (only the port differs, via `auth.hostname_of`) and still `_valid_stored_session`-valid; these surface as `gate.other_host_sessions` with an explicit caveat in the gate message (cookie auth transfers across a port change; localStorage/sessionStorage auth - origin-scoped INCLUDING port - does not, so the agent is told to be ready to fall back to capture if the app still looks logged out). The user explicitly opts in with `{"auth_mode":"reuse","reuse_host":"<host>"}` - ICX never auto-matches a session across hosts on its own. On confirmation, `node_auth_gate` ALIASES the other host's record under the CURRENT host key (`save_session(project, host, ...)` with the SAME `storage_state` path) rather than threading a separate override through state - `_session_storage` re-derives `host` from `state["url"]` at use time regardless of what gate resolved it, so aliasing under the current host key is what makes the reused `storageState` actually get picked up downstream, with zero changes needed to `_session_storage` itself. A different HOSTNAME entirely (not just a different port) is never offered - only same-hostname port drift is treated as "likely the same app."
 
-Config fields on `AppConfig`: `magik_base_url`, `magik_api_key` (`exclude=True`, keyring), `magik_max_iterations`, `magik_use_streaming` (default true), `magik_agent_max_steps` (default 50, agent-run step budget), `magik_agent_step_cap` (default 60, the clamp ceiling enforced at the config gate), `sonar_project_key`, `sonar_token` (`exclude=True`, keyring). These step fields are set via `icx test configure` or by editing `~/.icx/config.json`; fields absent from an existing config fall back to the model defaults (50/60) at load - no migration needed.
+**sessionStorage companion (critical for SPA auth):** Playwright `storageState` captures cookies + localStorage but NOT sessionStorage, yet many SPAs gate authenticated routes on a value in sessionStorage - so a localStorage-only restore lands the test back on the login page. The capture harness therefore also snapshots `window.sessionStorage` (tracked on every `framenavigated` so it survives the user closing the window) and writes a companion file `<storageState>.session`. Restoring the session is now the AGENT's job, not ICX's: `node_author_flow` hands the agent `storage_state` (the base path) in the gate payload, and `rules_defaults/author_flow.md` instructs it to load that path via `browser.newContext({ storageState })` and, if `<storage_state>.session` also exists, read its JSON and replay those keys into `sessionStorage` (via `context.addInitScript` or by setting it before first navigation) so the app boots already logged in.
 
-Gate posture (single source of truth in `_MAGIK_RESUME_DESCRIPTION`): AGENT-GENERATE gates are `2b`, `compat_scan`, `profile_gen`, `expand_scan`; all others are USER-DECISION. The agent reads code and generates at those four; ICX orchestrates the rest. Every AGENT-GENERATE gate (2b, compat_scan, profile_gen, expand_scan) carries a mandatory full re-read instruction (earlier reads/memory are stale) and requires a per-file read_receipt ({path, line_count, last_line}) recorded in TestingState.read_receipts for audit; ICX records but does not re-read to validate.
+The `storageState` file lives at `~/.icx/testing/sessions/<project>/<host>.json` (`0o700` dir; the sessionStorage companion sits beside it as `<host>.json.session`), and the per-(project, host) record in `~/.icx/testing_auth.json` (`0o600`) stores `{session_id, captured_at, expires_at, storage_state}` - the path, never a credential. The `project` part of the key is the graph `project_id` (a path hash, collision-proof); `host` is the netloc of the run URL. Because a restored session logs the app in, `node_author_flow` is auth-aware: for capture/inline/reuse it instructs the agent NOT to author login steps (goto the URL directly, waitfor a post-login element first); only `public` apps get login steps authored.
 
-**Port auto-discovery:** Magik writes its active port to `%APPDATA%\Magik-AI Tester\magik.port` on startup (tries 7646-7650 in order, OS-assigned fallback). ICX reads this file to resolve the actual port. `magik_base_url` in config is the override when the file is absent.
+UI tooling bootstrap: approving the `playwright` runner installs BOTH `playwright` (the browser-automation API + browser installer) AND `@playwright/test` (npm) - the actual test-runner package that provides the `playwright test` CLI, `test()`/`expect()`, and `--reporter=junit` - into `~/.icx/testing/playwright/<ver>/` via `install._install_ui_bundle`, pinned to the same version, then `playwright install chromium` with `PLAYWRIGHT_BROWSERS_PATH` pointed at `<install>/browsers`. Without `@playwright/test`, the agent cannot run the `playwright test` command the gate tells it to use and has to hand-roll its own step-tracking/report writing instead - `is_installed("playwright")` therefore also checks for `node_modules/@playwright/test`, so a pre-fix partial install is detected as incomplete and reinstalled with both packages on the next `ensure_runner` call. Everything (both packages + the Chromium binary) lives under `~/.icx/testing`, never global, never in the user's repo, never a bare `npx`/global install. The auth-capture harness (`icx-auth.mjs`) and the census-discovery harness (`icx-discover.mjs`) set `NODE_PATH` + `PLAYWRIGHT_BROWSERS_PATH` to that install and run on the modern harness node (`resolve_harness_node`, >= 18), decoupled from the app's node. `node_author_flow`'s `_playwright_env()` resolves the same node + `NODE_PATH`/`PLAYWRIGHT_BROWSERS_PATH` env and hands them to the agent in the gate payload (`playwright.node`, `playwright.env`) so the agent's own `npx playwright test` run uses this exact pinned install, never a bare/global one.
 
-**Report parser (`parse_report` in `nodes.py`):** Handles two shapes - UI/API test reports extract `results[]` where `status` in `("fail","error")`; agent run reports extract `verdict.success=False` as a goal-not-met issue plus any `history[]` steps with errors. Returns a flat list of issue dicts.
+Config fields on `AppConfig`: `test_max_iterations` (default 3, re-test loops before the limit gate; clamped to 1-100), `harness_node_path`, `sonar_project_key`, `sonar_token` (`exclude=True`, keyring). The clamp is a `field_validator` that never raises - a hand-edited `~/.icx/config.json` can neither crash load nor drive an unbounded loop. (`agent_max_steps` was retired with the Magik removal - the deterministic replay has no browser-step budget; old keys are ignored on load.) Set via `icx test configure` or by editing the file; absent fields fall back to model defaults at load - no migration needed. Legacy `magik_*` keys from pre-cutover config files are silently ignored on load (pydantic `extra="ignore"`).
 
-**Error handling:** `health_check()` converts `httpx.HTTPStatusError` (e.g. 404 on wrong port) to `MagikUnreachable` so CLI commands always show a clean error message rather than a raw traceback. Loop after review routes to `submit` directly, not back to `expand_files` (file list stays fixed for the session).
+Resource + lifecycle: each runner subprocess can be capped with opt-in POSIX limits - set `ICX_TEST_RLIMIT_MEM_MB` and/or `ICX_TEST_RLIMIT_CPU_S` and the executor applies `RLIMIT_AS`/`RLIMIT_CPU` in the child via `preexec_fn` (default OFF, since a hard cap can break JVM/node suites that reserve huge virtual memory). On MCP server shutdown, `_serve()`'s `finally` cancels the background temp-sweep task and calls `testing.graph.close_testing_graph()` to release the SQLite checkpoint connection (and its aiosqlite thread) - no task or WAL connection lingers past exit.
+
+Gate posture (single source of truth in the `resume_testing_session` description): AGENT-GENERATE gates are `2b`, `compat_scan`, `author_flow`, `expand_scan`; all others are USER-DECISION. The agent reads code and generates at those four; ICX orchestrates the rest. Every AGENT-GENERATE gate carries a mandatory full re-read instruction (earlier reads/memory are stale) and requires a per-file read_receipt ({path, line_count, last_line}) recorded in TestingState.read_receipts for audit; ICX records but does not re-read to validate.
+
+Definition of Done (`verification.py`, pure module - no I/O, reusable by CLI/MCP/tests): `build_dod_checklist(analysis)` turns an IssueContext-shaped dict into explicit checks (bug -> reproduce-then-confirm-resolved from reproduction_steps + expected/actual; story/task -> one per acceptance_criterion; always at least one run-and-observe item). `compute_risk_tier(analysis, graphs)` -> low/medium/high/critical from change signals (security tokens -> critical; DB/public-API/UI/epic multi-signal -> high; single -> medium; default medium). `recommend_layers(tier)` maps the tier to layers via `DEFAULT_TIER_LAYERS` (low=[unit]; medium=[unit,api]; high=[unit,api,agent,regression]; critical=[unit,mutation,api,agent,regression,performance,security]) - the recommendation shown at gate 3, where the user chooses. `validate_evidence(items)` accepts only when every item has a non-empty command AND output AND passed. `build_confidence_report(items, tier, layers_run)` -> confidence_score (fraction of DoD items with complete, passing evidence) + dimensions + remaining_risks (recommended layers not yet run). `node_local_run` surfaces this into `full_report` (`confidence`, `dod_items`) after every local run, so the agent always sees how far the run closes the DoD, not just pass/fail. Defaults are best-practice; callers never need to configure to get the recommended path.
+
+Visible browser + slowmo (agent): gate 3 offers `visible:true` -> `node_config_gate` sets `state["headless"]=False` (the MCP gate-3 rule tells the agent to ASK the user when visible); `slowmo:<ms>` sets `state["slowmo"]` (0 when headless, `1000` default when visible, or the user's value). ICX does not launch or configure any browser itself for agent-type runs - `node_author_flow` passes `headless`/`slowmo` straight through in the `author_flow` gate payload, and `rules_defaults/author_flow.md` instructs the agent to launch its own Chromium accordingly (headed + `slowMo: <ms>` when visible is requested, headless otherwise) when it writes its Playwright test. Auth capture is a separate, ICX-driven code path and is always headed (the user logs in by hand) regardless of this setting.
+
+ICX makes no LLM calls anywhere in the agent-type path: the authoring, running, and self-healing intelligence lives entirely in the connected editor agent at the `author_flow` gate. `icx model` is the analysis LLM and is unrelated to testing.
+
+**Analyzer-driven Element Census (comprehensive, zero-miss authoring):** `testing/analyzers/` ships one census prompt per framework (`assets/*.md` - React/Angular/Vue/Svelte + JSP/JSF for UI; Python/Java/Kotlin/C#/Node/PHP/Ruby/Go/Rust/Scala/Elixir/GraphQL for backend/API; C/C++, SQL, gRPC, and Terraform for systems/data), user-overridable under `~/.icx/testing_analyzers/` (rulebook pattern). Families (`AnalyzerSpec.family`): `ui` (Playwright), `backend` (schemathesis+hurl, materialized from the census by `to_api_spec`), `cpp` (ctest), `sql` (utPLSQL/tSQLt/pgTAP), `grpc` (own runner, endpoint-shaped census, no openapi materialize), `iac` (Terraform testableUnits). The runner adapters for cpp/sql/grpc/terraform live in `runners/systems.py`. `registry.select_analyzer(framework, language, file_paths)` picks one by the graph-detected framework -> language -> file extension; `schema.validate_census(family, model)` runs the reconciliation gate (every census category's `mapped + unmapped == total`, so "nothing missed" is arithmetic, not aspirational). The `analyze_screen` node (automated path: `expand -> analyze_screen -> compat_scan`) injects the selected prompt + confirmed files, the agent returns the strict-JSON `screen_model`, ICX validates + bounded-re-asks if the counts do not reconcile, and stores `state["screen_model"]` + `census_coverage`. Unknown framework -> the node returns `{}` and authoring proceeds free-form (never breaks a session). `author_flow` hands the census, plus the `rules_defaults/author_flow.md` checklist, to the agent, which writes its own Playwright assertions covering every functionality + every validation (each validation triggered and its inline/toast message asserted) - ICX no longer generates scenarios itself. `census_coverage` is surfaced as a Definition-of-Done dimension in `node_local_run`.
+
+**COMBINED census (the ONLY UI census method, `analyzers/census_merge.py` + `run_ui_discovery`):** the census that drives UI generation is ALWAYS a fusion of two halves, never one alone - there is no discovery-only / source-only / mode toggle. (1) The agent's SOURCE census (`analyze_screen` gate) carries the JS-hidden constraints the DOM never exposes - a maxLength/regex/format enforced only in submit-time JS, a per-country/config rule - and fields a crawler cannot reach. (2) At authoring time `node_author_flow` calls `_combined_census`, which runs `run_ui_discovery` (harness `icx-discover.mjs`, `local_executor`) to CRAWL the live logged-in screen and build a runtime census from the rendered DOM - real selectors, real control kinds (native vs react-select), real wizard-step structure; it can never name a selector that does not exist. `merge_census(discovered, source)` keeps discovery's live-verified structure + selectors and layers source's constraints on top, appends source-only fields (react-selects the crawler skipped) per flat form AND per wizard step, appends source-only functionalities (a download the crawl missed), and keeps the more-specific of the two triggers. The merged model replaces `state["screen_model"]` so coverage/memory/api-spec all see it. Degrades to the source census ONLY when the live app/session is physically unavailable (tooling absent, app down, empty crawl) - a fallback, never a user choice. Live 3-way comparison on the demo (Team/CardBucket/Users): COMBINED is never worse than the better of the two halves and fixes each one's blind spot (discovery's missing JS constraints + missed react-selects; source's wrong live selectors + wizard-nav) - so it is the default and the only path. The connected agent still only produces the source census; the crawl + merge are automatic and agent-independent.
+
+**Non-CRUD archetype coverage (dashboards / analytics / reports) - `discoverWidgets`/`discoverReport`:** a screen with no create/edit/rows (a dashboard, a KPI screen, a report) still needs real coverage. `run_ui_discovery`'s crawler (`icx-discover.mjs`) detects non-CRUD content: charts (library-agnostic - recharts/highcharts/amCharts v4/v5/apex/echarts/nvd3/plotly/chartjs, plus any sizeable `svg`/`canvas` resolved to its stable classed ancestor), data grids that carry rows, and KPI/stat/summary/segment cards; and, for a report, page-level filters (date-range + dropdowns) with a Generate/Apply/Run button and a result region. These are folded into the census as a `render` functionality (carrying the widget list) and a `report` functionality, so the agent sees them at authoring time and writes assertions for them per the checklist (assert each widget is present/rendered, exercise report filters and check the result region, without hard-failing on an empty-data chart). Over-capture guards live in the crawler itself: grids are de-duplicated to the outermost container and widgets are capped per kind (6 charts / 3 grids / 4 cards).
+
+**Robustness across arbitrary screens (overlays, bespoke forms, generality):** the crawler (`icx-discover.mjs`) is hardened, agent-independent of the app it points at. (1) **Force-click fallback** - the crawler's create-open tries a normal click first, then retries with `{force:true}` when an overlay (an empty content iframe, a sticky header, a transparent layer) intercepts pointer events; without it a create button sitting under an invisible iframe never opens. (2) **Bespoke-form degradation** - a "create" that opens a modal but exposes NO fillable form (a dual-list privilege matrix, an AND/OR rule tree) is flagged `create_writable=False` in the census, so the agent (per the checklist) covers it structurally (open/close) instead of forcing a full write-verify chain a bespoke builder cannot support without screen-specific logic. (3) **Generality** - the crawler's own selectors are library-class names (recharts/highcharts/amcharts/react-bs-table/ant/MUI/`.card`) and generic chooser-button text (Manual/Build/Continue/Get Started), never app-specific class names or screen names; the whole testing module is free of demo/app keywords. Data-safety practice (only ever touch records the agent itself created, row-scoped deletes, no first-row/unscoped mutation) is now a checklist mandate in `rules_defaults/author_flow.md` rather than generated code.
+
+**`submitButtons[]` (per-step) must never feed the cross-mode duplicate-submit check:** `census_lint.py`'s "create and edit share the SAME submit selector" rule is meant to catch a copy-paste of the TERMINAL action (`submitButton`, singular - Save vs Update). It was previously also scanning `submitButtons[]` (plural, `{label, step, selectors}` - one entry per WIZARD STEP, per the analyzer prompt schema) into the same duplicate check. `submitButtons[]` entries are per-step NEXT-button markup, not the real terminal action (the census schema always keeps the singular `submitButton` for that, wizard or not) - and its per-step entries are commonly IDENTICAL step-navigation markup (the same NEXT button) across create/edit, which is normal, not a defect. Live false positive: a census with correctly DISTINCT `submitButton`s (Create vs Update) and NEXT modeled only in `steps[].nextButton` + `submitButtons[]` was still rejected, because the shared NEXT selector in `submitButtons[]` collided in the same check. Fixed: the cross-mode check now uses `_terminal_submit_selectors()` (singular `submitButton` only); `_submit_selectors()` (both singular + plural) remains unchanged for the separate "has any submit at all" / "view must not have a submit" checks, where including `submitButtons[]` is still correct.
+
+**Agent-authored Playwright testing - the current consistency mechanism:** ICX no longer generates any flow or test content itself (the earlier `analyzers/to_flow.py` deterministic-generator design, and its `icx-replay.mjs` interpreter, have been removed entirely). At `author_flow`, `node_author_flow` gives the connected agent the COMBINED census (structured + reconciliation-verified + live-DOM-fused, so every selector in it already resolves on the real page), the target URL, the restored auth session, the pinned Playwright node/env, a JUnit report path, and the `rules_defaults/author_flow.md` checklist. The agent writes a real Playwright test file covering every census functionality per the checklist, runs it itself (its own Bash tool) against ICX's pinned install with a JUnit reporter, reads Playwright's own failures - real stack traces, real selector mismatches, real timeouts - fixes its own script, and re-runs until the checklist is covered or it has confirmed a genuine application bug (reported as a finding, never forced to a false pass). It resumes with `{report_path, test_file, covered, discovered, findings}`. Consistency across agents of varying skill is enforced by three things that do NOT depend on agent skill: the COMBINED census (every selector already verified live, so authoring can't start from a wrong selector), `census_lint.py`'s structural hard-fail + re-ask at `analyze_screen` (a broken census is rejected before it ever reaches authoring), and Playwright's own battle-tested runner + reporter as the pass/fail signal (no custom interpreter to silently swallow a crash into a `total:0` report).
+
+**The census is a floor, not a ceiling - both sources, always:** the agent is the one actually reading this app's source code, so it must never be bound only to what ICX's census/crawl found. The gate message and the checklist both mandate: (1) if the agent discovers a functionality/field/tag the census never listed (an upload control, an export/report action, a feature-flagged control), test it too and report it via `discovered`, don't skip it for lack of a census entry; (2) for a functionality with no create-step (export/download/upload/report), exercise it against whatever real data already exists rather than skipping it for lack of a record to create; (3) if the live app or source disagrees with what the census says, trust what is actually there and explain the deviation in `findings`/`discovered`. `_agent_report_result` folds `agent_discovered` into the effective-covered set (so an agent-found-and-tested item closes a coverage gap the same as a census item would) and surfaces it as its own `discovered` list in the result, so what the agent added on top of the census stays visible rather than silently disappearing into `covered`.
+
+**Self-fix budget (inner loop) is communicated, not enforced by ICX:** the agent's own write-run-read-failure-fix-rerun cycle happens entirely inside a single `author_flow` interrupt, before ICX ever sees it - by design (this is the "agent self-heals, ICX just checks" model). `node_author_flow` still tells the agent its budget: the gate message states `state["max_iterations"]` as the number of self-fix rounds it gets before it must stop and resume with whatever it has, marking the rest as findings, rather than looping indefinitely. This reuses the existing `max_iterations` field (also used by the OUTER gate-4/gate-5 "propose one more full iteration, user approves" loop) rather than adding a second config knob - the two loops are conceptually distinct (inner = unsupervised script fixing within one visit; outer = a fully new `author_flow` visit the user explicitly approves) but share the same numeric budget.
+
+**Generic test data, no tool branding:** `writes_line` in `node_author_flow` and the checklist both mandate a generic tag (a `Test`/`QA` prefix + a run-unique timestamp token) and explicitly forbid embedding a tool/vendor name (e.g. "ICX") in any data value - test data is meant to look like plausible app data, not tooling exhaust.
+
+**Known-screen fast path (`testing/screen_cache.py`, agent-type only):** re-testing the SAME screen later re-runs the full `expand_files -> analyze_screen -> compat_scan -> compat_check` pipeline by default - expensive when nothing relevant changed. `node_known_screen_check` (a new node between `pick_type` and `expand_files`) checks for a prior cleared run of this exact screen (keyed by `project_id` + a hash of `original_seeds` - the file_paths as given at session start, preserved in `TestingState.original_seeds` and never overwritten by expansion, unlike `file_paths` itself) and, ONLY when it is PROVABLY fresh, offers the user a `known_screen` gate to skip straight to `config_gate`. "Provably fresh" is deliberately conservative and has two independent checks, both of which must pass before the gate is even shown (never mind before fast-path is chosen): (1) `screen_cache.freshness(entry)` - every cached `confirmed_files` path still exists with a byte-identical sha256 hash to what was cached; a changed OR missing file fails this outright; (2) `_deterministic_candidates(seeds)` - a cheap, ICX-local re-discovery (the SAME graph-expansion + `expand_via_grep` fallback `node_expand_files` itself uses, no agent call) over the original seeds must find nothing outside the cache's `all_candidates` set - a genuinely NEW related file (one that didn't exist or wasn't discoverable last time) fails this too. Either check failing means NO gate is shown at all - the session falls through to `expand_files` exactly as if there had been no cache; there is no override, no "force fast-path anyway" path. The `all_candidates` set (the full pre-exclusion candidate list, stored separately from `confirmed_files`) is what makes this correct against a deliberate exclusion: a file the user excluded last time (e.g. an unrelated `Reports.jsx`) is still in `all_candidates`, so re-discovering that SAME file again is not mistaken for "something new appeared" - only a file absent from BOTH sets trips the check. When the user does confirm `{"decision":"fast_path"}`, `file_paths`/`all_candidate_files`/`screen_model`/`census_coverage`/`analyzer_id`/`analyzer_family`/`compat_resolution` (and `url`, if not already set) are restored from the cache entry directly into state, and `route_after_known_screen_check` sends the graph straight to `config_gate` - `expand_files`/`analyze_screen`/`compat_scan`/`compat_check` never run for that session. The cache itself is written (or refreshed) by `_save_known_screen`, called at the top of `node_config_gate` (guarded, best-effort, agent-type + a settled `screen_model` only) - a full rescan writes the new clearance, a fast-path reuse just bumps `cached_at`. Storage mirrors `auth.py`'s pattern exactly: a single `~/.icx/testing_screens.json` (`0o700` dir, `0o600` file), keyed `"<project>::<seed_hash>"`.
+
+**Built-in security cases (`analyzers/security_cases.py`):** for `api`, security is not a separate runner - `to_api_spec.materialize_api_spec` writes the OWASP/nuclei-style cases directly into the generated hurl spec, per endpoint: 8 injection classes (SQLi/NoSQL/command/template/path/LDAP/XPath/CRLF - each asserts `status < 500` AND `body not contains` a set of engine-error leak markers), mass-assignment (privilege fields like `isAdmin`/`role:admin` merged into the body must not 500), broken-auth (auth-gated endpoint without credentials must be 401/403), object-level robustness (`sec_objid` - for a path with an id token, an out-of-band id `999999999` must not 500/leak, IDOR-adjacent), plus one app-wide response-header audit (`X-Content-Type-Options`/`X-Frame-Options`/`Content-Security-Policy`/`Strict-Transport-Security`/`Referrer-Policy` must exist). For `agent`, the equivalent cases (XSS injection into every free-text field including search/filter boxes, SQLi-shaped probes, reflected XSS via URL params) are no longer ICX-generated - they are a mandatory "Security" section in `rules_defaults/author_flow.md` that the agent's own Playwright test must cover.
+
+**Native static security (`testing/security/`, always-on, no external scanner, no extra installer):** in addition to the runtime DAST above, `node_local_run` runs a deterministic static scan of the repo source via `fold_into_result(res, repo)` and attaches it to `res['security']` (guarded - a scan failure never affects the run). Three scanners: `secrets.py` (regex ruleset for cloud keys / private keys / tokens + a high-entropy hardcoded-credential heuristic, with the secret value masked out of the report snippet so it is never re-leaked); `sast.py` (SAST-lite - real Python `ast` rules for `eval`/`exec`/`shell=True`/`verify=False`/weak-hash/`pickle.loads`/unsafe-`yaml.load`/`DEBUG=True`, plus a cross-language regex sink set for `innerHTML`/`dangerouslySetInnerHTML`/`document.write`/`eval`, wildcard CORS, SQL string-concat, PHP `system/exec`, Java `Runtime.exec`, cleartext HTTP); `sca.py` (parses requirements.txt/package.json/pom.xml/go.mod, flags unpinned/wildcard versions, and matches each dependency against an OPTIONAL offline advisory file - `ICX_SCA_ADVISORY` env or `.icx-advisories.json`). Findings are severity-graded (critical/high/medium/low), sorted most-severe-first, deduped, and rendered as their own "Security scan" section in the human report. Honest ceiling (documented in the report): rule/AST matching, not full taint-flow; offline/manifest dependency checks, not a live CVE feed.
+
+**Test-quality advisory (`testing/quality_advisory.py`, always-on, wired in `node_local_run` via `fold_quality(res, repo)`):** surfaces the three quality layers (`perf.py`/`regression.py`/`mutation.py`) onto `res['quality']` for the report, for every test type including `agent`. Each block reports REAL data when its inputs exist, else an honest `{"status": "skipped", "reason": ...}` - never a faked number. `regression` always runs on a git repo: `git diff --name-only HEAD` (read-only) x discovered test files -> `select_regression_targets` -> the test files relevant to the change. `perf` runs `compare_performance` only when `ICX_PERF_BEFORE`/`ICX_PERF_AFTER` (inline JSON or a file path) are provided, flagging any metric past its threshold. `mutation` is opt-in (a real mutation run needs the tool installed and takes minutes-hours) - the advisory parses + gates a report given via `ICX_MUTATION_REPORT` (+ `ICX_MUTATION_LANG`), else it is skipped with that reason. The report renders a "Test quality" section (`_quality_section`) with one card per layer, real numbers or the not-run reason. Fully guarded; a failure never affects the run. All generated hurl (`api`) is validated against the real hurl binary.
+
+**Census completeness is MANDATORY (hard-enforced, `analyzers/census_lint.py`):** the census is the sole structured input the agent authors from, so `census_lint` HARD-fails (and `node_analyze_screen` re-asks until fixed) on any incompleteness it can detect: a create/edit with neither fields nor steps, a form with BOTH fields and steps, a form/wizard with no submit, a missing trigger, a wizard step (except the last) with no nextButton, a wizard-step field with no selector, a download with no trigger, create/edit sharing a submit selector, duplicate ids. The `analyze_screen` gate carries a MANDATORY completeness checklist (every functionality incl download/export, every field + its code-read constraints, distinct create/edit submits, wizard `steps` for multi-step forms, confirm-dialog selectors). Completeness is not best-effort - a census that omits these is rejected and re-asked. Soft advisories (a text field with no captured length/format constraint; a create with no search to verify against) are recorded in `census_warnings`, non-blocking. This is agent-independent: the lint runs the same structural checks regardless of which agent produced the census, so a wrong census cannot silently reach authoring - and the agent's own Playwright run against the COMBINED census's live-verified selectors is the runtime fail-loud signal in place of a generated harness's assertions.
+
+**Non-native dropdowns, constraint checks, accessibility, error-handling, security, and state cleanup (duplicate/delete-verify)** are no longer ICX-generated flow content - they are checklist mandates in `rules_defaults/author_flow.md` that the agent's own hand-written Playwright test must cover (see "Agent-authored Playwright testing" above). `test_writes` (default ON, set at gate 3) tells the agent, via the `author_flow` gate payload, whether it may actually Save/Delete with test-tagged data as part of its own test.
+
+`perf.py` / `regression.py` / `mutation.py` are built + unit-tested DoD helpers (the `verification.recommend_layers` set names performance/mutation/regression) but are NOT yet wired into `node_local_run` - they are pending integration, not dead code.
+
+**Error handling:** `node_local_run` is guarded - a runner crash or missing runner yields a not-ok result, never an unhandled exception. The review loop routes back to `local_run` directly, not to `expand_files` (the file list stays fixed for the session).
+
+### Run-history analytics dashboard (Ultimate Testing SP4)
+
+The `testing/analytics/` module records and analyzes long-term test run quality. It consists of: `store.py` (SQLite run history with `RunRecord` - app, run_id, timestamp, pass/fail/skip counts, total duration, heal count), `compute.py` (flakiness scores per test, suite-wide flakiness, pass-rate trend over time, slowest tests, heals per run), `record.py` (opt-in recording hook - gated by `analytics_enabled()`, default OFF, enabled with `ICX_TEST_ANALYTICS=1`, wrapped in try-except so a record failure never breaks a test), and `dashboard.py` (HTML generator - `dashboard_html(store, last_n=10)` returns self-contained ASCII HTML, `render_dashboard(store, out_path, last_n=10)` writes the file). Recording is OFF by default so there is zero runtime cost when not in use. The database lives at `~/.icx/testing/analytics.db` (overridable via `ICX_ANALYTICS_DB` env var). `icx test analytics [--out PATH] [--last N]` renders/writes the dashboard HTML, reading the default store location and rendering the last N runs (default 10). The dashboard displays: flakiness per test (percentage) with suite-wide flakiness summary, pass-rate trend line over recent runs, heals logged per run, and slowest tests (mean duration). All tables are self-contained ASCII HTML (border=1, simple table markup) with no external assets, stylesheets, or JavaScript - the page works offline and renders uniformly in all browsers. Flakiness and slowest-test analyses use all `last_n` run data; pass-rate and heals use up to the last 50 runs (for trend context without visual clutter).
+
+### Per-run human HTML report (`testing/reporting/`)
+
+After every `node_local_run`, ICX writes a self-contained, browser-viewable HTML report of that run -
+the human-readable mirror of the structured result the MCP agent receives. `testing/reporting/session_report.py`
+holds `render_session_report(res, meta)` (pure string builder) and `write_session_report(res, meta,
+reports_dir=None) -> Path` (renders, writes the file, appends a `reports.jsonl` ledger row, and refreshes
+the index). The report is written to `~/.icx/testing/reports/<app>-<ts>.html` (overridable with the
+`ICX_TEST_REPORTS_DIR` env var) and includes: a summary bar (verdict, pass rate, passed/failed/skipped
+counts, census coverage when available), a category breakdown table (functional/security/accessibility/
+visual/dataflow/heal/constraint/render, via `categorize(name)`), and a full per-test table with status,
+duration, and the failure/detail message for every case. All dynamic text (test names, messages, app/url
+values) is passed through `html.escape` before being placed in the page, so a failure message containing
+`<`, `&`, or quotes cannot break the HTML or inject markup. `testing/reporting/index.py:update_index(reports_dir)`
+rewrites `index.html` from `reports.jsonl` on every write, listing all runs newest-first (app, test type,
+pass rate, timestamp) as a landing page for the reports directory. The write is invoked from `node_local_run`
+in `nodes.py` right after the analytics hook, in a `try/except` that swallows any failure - a report-write
+problem never affects the node's returned result, and it runs for both the pass and fail return branches.
+Recording is always on (unlike the opt-in analytics hook above) since it only writes a local file outside
+the repo and carries no runtime cost of consequence.
+
+### NL intent + ticket-driven scenario authoring (Ultimate Testing SP3)
+
+`start_testing_session` optionally takes `nl_intent` (a plain-English scenario request, e.g. "test
+duplicate email error") and `acceptance_criteria` (a list of strings, typically a ticket's acceptance
+criteria) - both default to unset/empty so a caller that omits them sees no behavior change.
+`state.py` carries them (`nl_intent: str | None`, `acceptance_criteria: list[str]`, wired through
+`make_initial_state`). `testing/analyzers/scenarios.py:build_scenario_guidance(nl_intent,
+acceptance_criteria)` is a pure text builder - it returns "" when neither input is set, otherwise a
+"REQUESTED scenarios" block naming the intent and each criterion, instructing the agent to author and
+assert a scenario for each. `node_author_flow` appends this guidance to the `author_flow` gate
+message (agent `test_type` only - `api`/`unit` never reach this gate) so the connected agent
+authors the extra scenarios into its Playwright test, using the same interrupt mechanism and
+no metered LLM call. Because `_guidance` is `""` by default, the gate message is byte-for-byte
+unchanged when neither input is supplied. The testing module never imports `connectors/` - the caller
+that holds the ticket's `IssueContext` passes `acceptance_criteria` in directly, keeping the module
+free of a connector/engine dependency (a deliberate simplification of a "criteria bridge from an issue
+object" into "criteria passed in").
+
 
 ### Sonar module (code quality)
 
 Sonar is a first-class ICX feature, DISTINCT from the testing LangGraph flow and never wired into the testing state machine. It has its own contracts (`models/sonar.py`), its own client/parse/service (`sonar/`), its own CLI group (`icx sonar`), and its own MCP tools. It mirrors the `analyze` flow's discipline: raw SonarQube Web API JSON is normalized into typed models before being returned. No LLM is involved - the report is a faithful structured projection of SonarQube data that the MCP agent reasons over directly.
 
-**Architecture:** ICX talks to the SonarQube server DIRECTLY over its documented Web API - no Magik, no proxy. `sonar/client.py:SonarClient` is a read-only async client (GET only; it has no POST/PUT/DELETE method and physically cannot mutate the server). Authentication uses a SonarQube user token sent as HTTP Basic (`base64("<token>:")`), accepted by every SonarQube version. `sonar/service.py` assembles reports; `sonar/parse.py` turns a pasted dashboard URL into its base URL.
+**Architecture:** ICX talks to the SonarQube server DIRECTLY over its documented Web API - no proxy. `sonar/client.py:SonarClient` is a read-only async client (GET only; it has no POST/PUT/DELETE method and physically cannot mutate the server). Authentication uses a SonarQube user token sent as HTTP Basic (`base64("<token>:")`), accepted by every SonarQube version. `sonar/service.py` assembles reports; `sonar/parse.py` turns a pasted dashboard URL into its base URL.
 
 **Layer parallel with `analyze`:** `RawIssueData` -> `SonarClient` normalizers; `IssueContext` -> `SonarReport`; `connector.parse_input` -> `sonar/parse.py`; `engine.run` -> `service.report`; connection narrowing -> `SonarScope`.
 
@@ -1249,10 +1560,10 @@ field is stored in the OS keyring under `integration_secret:<name>:<field>`
 (with D-Lock/env-var fallbacks), exactly like connector and LLM secrets - no
 per-integration code in `config_manager`.
 
-The existing **Magik-AI (`magik_*`) and Sonar (`sonar_*`) settings remain inline
-on `AppConfig`** for backward compatibility with existing config files and
-stored secrets. New integrations must use the registry, not new `AppConfig`
-fields.
+The existing **testing (`test_max_iterations`, `agent_max_steps`) and Sonar
+(`sonar_*`) settings remain inline on `AppConfig`** for backward compatibility
+with existing config files and stored secrets. New integrations must use the
+registry, not new `AppConfig` fields.
 
 ---
 
@@ -1922,6 +2233,95 @@ Modules log via `logging.getLogger(__name__)`. No handler is attached by default
 
 ---
 
+## 7b. Skills Module
+
+The skills module lives at `src/icx_engine/skills/` and captures learned, reproducible solutions to recurring problems. Unlike memory entries (which are work items + fixes), skills are distilled into standalone, human-readable procedures that can apply across projects.
+
+### Module files
+
+| File | Responsibility |
+|---|---|
+| `skills/__init__.py` | Public exports: `SkillEntry`, `SkillStorage` (`__all__`) |
+| `skills/schema.py` | SkillEntry (dataclass): frontmatter-as-JSON design, body sections (When to Use, Procedure, Pitfalls, Verification), hash-guarded update contract |
+| `skills/storage.py` | SkillStorage: atomic read/write, global scope (`~/.icx/skills/`), `_SAFE_NAME_RE` path-traversal guard on skill names, `list_all()` with corruption tolerance |
+| `skills/writer.py` | `draft_skill_entry()` builds a SkillEntry from agent-authored text (no fallback to raw memory-entry fields); `write_or_update()` idempotent hash-guarded create/merge |
+| `skills/router.py` | `rank_skills()`: tag/keyword overlap against a free-text boost prompt (top 5, no LLM); `rank_skills_for_tags()`: same overlap scoring against structured tags/root_cause_pattern, called right after `save_memory` |
+
+### SkillEntry - frontmatter-as-JSON rationale
+
+SKILL.md files store frontmatter as a JSON object (not YAML), delimited by `---`. This design avoids adding a YAML dependency - any valid JSON document is also valid YAML 1.2, so files remain parseable by tools expecting YAML frontmatter (agentskills.io, Claude Code Skills) without extra libraries. The body sections (## When to Use, ## Procedure, ## Pitfalls, ## Verification) are Markdown, extracted by exact header matching.
+
+### Creation - agent-authored, two paths
+
+**Agent path (`draft_skill` MCP tool):** the sole path for creating or refining a skill from a memory entry. It is MANDATORY immediately after every `save_memory` call - the dynamic per-issue-type STEP-sequence instructions embedded in `analyze_issue_fast`/`analyze_issue`'s response text (`mcp_server.py`) tell the agent to call `draft_skill` right after `save_memory`, every time, deciding for itself whether the fix is skill-worthy. `skill_worthy=false` is a valid, expected answer - it returns `{"status": "skipped"}` immediately with no `SkillStorage` access. When `skill_worthy=true`, the agent must also supply `skill_name`, `description`, `when_to_use`, `procedure`, `verification` (all agent-authored, full-context text written for this call - no fallback to raw memory-entry fields); `pitfalls`/`tags` are optional. The tool re-checks `outcome_verified` on the referenced `issue_key`'s memory entry server-side - it never trusts the agent's earlier claim, so a skill can only ever be drafted from a genuinely verified fix.
+
+`save_memory`'s own response carries an optional `related_skills` array (via `rank_skills_for_tags`, scored against the entry's tags/root_cause_pattern) whenever anything scores - this is the agent's create-vs-refine signal. If one of those names already covers the fix, the agent reuses that `skill_name` in the following `draft_skill` call to refine it (the fresh text replaces the stale text via `write_or_update()`'s hash-guarded merge) instead of creating a near-duplicate.
+
+**Human path (CLI):** `icx skills create` prompts interactively for name, description, when_to_use, procedure, pitfalls, verification, and an optional project tie - no ticket/issue_key is required, so a pure general-purpose skill with no work item behind it is fully supported. `icx skills delete <name>` removes one skill after a `typer.confirm()` prompt, mirroring the `memory_delete` single-entry confirmation style.
+
+There is no statistical or emergent trigger for skill creation. `memory/patterns.py:detect_patterns()` is unchanged and still serves `memory_get_patterns` for its own five pattern types (`frequent_file`, `dominant_tag`, `top_work_item_type`, `citation_hub`, `semantic_signal`) - it has no connection to skill creation.
+
+### Hash-guarded update and user-edit detection
+
+Each SkillEntry stores an `icx_hash` field - the SHA-256 of its body text (title + four sections). When an update is triggered, `write_or_update()` checks whether the existing hash matches `compute_hash()` on the stored entry:
+
+- **Hash matches:** body is unchanged. Safe to merge/update. New tags and origin metadata accumulate; the fresh draft's text wins whenever it is non-empty, falling back to the existing entry's text only when the draft left a section blank.
+- **Hash differs:** a human hand-edited the skill. The update is skipped ('skipped_user_edited'), and the entry is left as-is - ICX never overwrites human edits.
+
+Frontmatter fields (timestamps, origin lists) are explicitly excluded from the hash so metadata-only updates never appear as user edits.
+
+### Global scope and scope_hint promotion
+
+Skills are stored globally (not per-project) at `~/.icx/skills/<skill-name>/SKILL.md`. When the same skill is reinforced from a second distinct project, its `scope_hint` is promoted from `"repo-specific"` to `"generic"` - signaling that this procedure applies broadly, not just to one codebase.
+
+### Discovery - three ways an agent finds a skill
+
+- **`rank_skills(prompt, archetype)`** - called from `/icx-boost`'s brief build (`mcp_server.py:_run_boost_brief()` calls it immediately after `build_boost_brief(...)` succeeds, guarded by its own try/except so a ranking failure can never degrade the rest of the brief). Deterministic tag/keyword overlap against the free-text prompt, top 5, attached to the response as `skills: {index: [...]}` only when non-empty.
+- **`rank_skills_for_tags(tags, root_cause_pattern)`** - called right after a successful `save_memory`, scored against the entry's structured tags/root_cause_pattern instead of free text, attached as `related_skills` only when non-empty. This is the signal the agent uses to decide create-vs-refine before calling `draft_skill`.
+- **`icx_skills_index` MCP tool** - the full unfiltered catalog: every stored skill's `name` and `description`, unranked, uncapped, no keyword filtering. A safety net for when the two scored rankers above miss something relevant - the agent scans the complete list itself and decides what it needs.
+
+Whichever way a name is surfaced, `icx_skill_get {name}` fetches that skill's complete Markdown body (frontmatter + When to Use/Procedure/Pitfalls/Verification) via `SkillEntry.to_markdown()`.
+
+### MCP tool: draft_skill
+
+Input schema:
+
+| Field | Type | Description |
+|---|---|---|
+| `issue_key` | `str` | Required. Must reference an already-saved memory entry; the server re-checks `outcome_verified` itself |
+| `skill_worthy` | `bool` | Required. The agent's own judgment - `false` is valid and returns `{"status": "skipped"}` with no storage access |
+| `skill_name` | `str` | Required when `skill_worthy=true`. Reuse a name from `related_skills` to refine an existing skill, or a new one to create |
+| `description` | `str` | Required when `skill_worthy=true`. Third person - states what the skill does and when to use it |
+| `when_to_use` | `str` | Required when `skill_worthy=true` |
+| `procedure` | `str` | Required when `skill_worthy=true` |
+| `verification` | `str` | Required when `skill_worthy=true` |
+| `pitfalls` | `str` | Optional |
+| `tags` | `list[str]` | Optional. Merged with the originating memory entry's own tags |
+
+Returns `{"status": "skipped"}`, or `{"status": "created"|"updated", "name": ...}` from `write_or_update()`, or `{"error": ...}` when the `issue_key` entry is missing or not verified, or when a required field is empty.
+
+### MCP tool: icx_skill_get
+
+Schema: `{name: str}` - a skill name, from `skills.index` in the boost brief, `related_skills` in a `save_memory` response, or `icx_skills_index`.
+Returns: `{body: str}` - the complete Markdown (frontmatter + body) from `SkillEntry.to_markdown()` - or `{error: str}` for an unknown/invalid name. Never raises.
+
+### MCP tool: icx_skills_index
+
+Schema: no input.
+Returns: `{"skills": [{"name": ..., "description": ...}, ...]}` - every stored skill, unranked and uncapped.
+
+### save_memory has no skill fields
+
+`save_memory`'s own MCP schema carries no skill-related fields at all - skill authoring is fully decoupled into the separate `draft_skill` tool call described above. The only thing `save_memory` itself does that touches skills is compute the optional `related_skills` hint in its response.
+
+### What NOT to touch
+
+- `skills/schema.py:to_markdown()` and `from_markdown()` - the frontmatter-as-JSON design is foundational. Any change breaks SkillEntry round-trip serialisation.
+- `skills/storage.py:_root` location (`~/.icx/skills/`) - changing it breaks global scope guarantees and multi-project skill reuse.
+- `skills/writer.py:draft_skill_entry()` - do not add a fallback path to raw memory-entry text; the agent-authored-only contract is intentional.
+
+---
+
 ## 8. Extending the CLI
 
 The CLI uses [Typer](https://typer.tiangolo.com/) with `rich_markup_mode="rich"`.
@@ -1930,9 +2330,9 @@ The CLI uses [Typer](https://typer.tiangolo.com/) with `rich_markup_mode="rich"`
 - Group commands under `rich_help_panel` for the help output
 - Always use `err_console.print(...)` for errors, `console.print(...)` for success
 - Always raise `typer.Exit(1)` on error, not `sys.exit()`
-- The `--debug` flag is on every command via `DebugOpt` - propagate it to inner calls
-- The `--traceback` flag is on `analyze` via `TracebackOpt` - pass it to `render_icx_error()` as `show_traceback=traceback`
-- All errors in `analyze` are routed through `render_icx_error(exc, err_console, show_traceback=traceback)` - never use `err_console.print(str(exc))` directly
+- MANDATORY CLI convention: EVERY user-facing command exposes BOTH `--debug` (`DebugOpt`) and `--traceback` (`TracebackOpt`) - no exceptions. A new command MUST add both params and the `@_guarded` decorator (between `@x_app.command(...)` and `def`), which wraps the body in `try/except -> render_icx_error(exc, err_console, show_traceback=traceback or debug)` and passes `typer.Exit` through. `_guarded` is signature-preserving (`functools.wraps`) so Typer still builds the options. The shared `DebugOpt`/`TracebackOpt`/`_guarded` block is defined right after `console = Console(...)`, above the first command. Propagate `debug` to inner calls where they support it.
+- All errors are routed through `render_icx_error(exc, err_console, show_traceback=...)` (via `_guarded` or an explicit try/except) - never use `err_console.print(str(exc))` directly.
+- Consistency is enforceable: introspect `typer.main.get_command(app)`, walk the groups, and assert every leaf command's params include both `debug` and `traceback` (44/44 as of 2026-07-21).
 - **Authentication flows belong in `services/connection_service.py`**, not inline in `cli.py`
 
 The REPL (`_start_repl`) re-enters Typer for each line - do not add state that persists between REPL iterations.
@@ -2010,11 +2410,14 @@ texts, images = await process_attachments(raw, downloader, llm_config)
 
 #### Testing module tests
 
-- `tests/testing/test_client.py` - MagikClient HTTP calls, use respx for all mocks
+- `tests/testing/test_runners.py` - runner registry, JUnit parse, unit/api/ui adapters, ephemeral repro, async executor
+- `tests/testing/test_local_executor.py` - run_local_verification + node_local_run
+- `tests/testing/test_intelligence.py` - perf-regression comparison + regression selection
+- `tests/testing/test_mutation.py` - mutation-filter tool selection, parsers, gate
 - `tests/testing/test_state.py` - TypedDict field assertions, make_initial_state factory
-- `tests/testing/test_nodes.py` - node functions with mocked client and GraphQuerier
-- `tests/testing/test_session_store.py` - bg task registry and session store operations
-- `tests/testing/test_graph.py` - graph compilation and node membership
+- `tests/testing/test_nodes.py` - node functions with mocked GraphQuerier
+- `tests/testing/test_session_store.py` - session list/cancel/purge operations
+- `tests/testing/test_graph.py` - graph compilation and node membership (local-only path)
 
 ### Fixtures available in `conftest.py`
 
@@ -2073,7 +2476,7 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 - **D-Lock threshold:** Never raise `_DLOCK_THRESHOLD` above 512. Windows Credential Manager rejects credential blobs above this size, causing silent plaintext fallback. D-Lock exists precisely to handle values that exceed this limit.
 - **Master Key:** `"icx_master_key"` lives in the OS keyring like any other secret. Never write it to `config.json` or log it.
 
-**Testing credential isolation:** Testing credentials and the Magik `sessionId` are never written to the LangGraph checkpoint DB; `sessionId` lives only in `~/.icx/testing_auth.json` (`0o600`) keyed by (project_id, host) and is injected transiently at submit. `sonar_token` uses `Field(exclude=True)`.
+**Testing credential isolation:** No credential is ever written to the LangGraph checkpoint DB. `capture`/`inline` auth run through ICX's own Playwright process only (`icx-auth.mjs`) and never pass a credential through chat; a restored session is loaded by the agent from `storageState`, never re-authored as login steps. `~/.icx/testing_auth.json` (`0o600`, keyed by project_id+host) holds only non-secret session intent `{session_id, captured_at, expires_at}`. `sonar_token` uses `Field(exclude=True)`.
 
 ---
 
@@ -2160,7 +2563,7 @@ icx analyze PROJ-123 --debug
 Use `icx uninstall` instead of bare `pip uninstall`. It removes everything in order:
 
 1. All API keys and tokens from the system keyring
-2. ICX entry from all detected AI editor configs (Claude Code, Cursor, Windsurf, Codex)
+2. ICX entry (+ native /icx-boost command file) from all detected AI editor configs (Claude Code, Cursor, Windsurf, Codex, Antigravity, VS Code)
 3. `~/.icx/` directory - config, memory database, embedding model (~110 MB)
 4. The `icx-engine` package via pip or pipx (auto-detected)
 

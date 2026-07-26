@@ -103,7 +103,8 @@ RULES:
   staff-backend-engineer, staff-frontend-engineer, principal-ui-ux-architect,
   principal-data-architect, principal-database-architect, staff-devops-sre,
   principal-security-architect, staff-performance-engineer, principal-ml-engineer,
-  staff-mobile-engineer, principal-integration-architect, staff-qa-architect.
+  staff-mobile-engineer, principal-integration-architect, principal-qa-automation-architect,
+  principal-api-test-architect, principal-unit-test-architect.
 - persona_rationale: one short phrase (<= 12 words) explaining the persona choice. "" if none.\
 """
 
@@ -249,6 +250,13 @@ def finalize(context: IssueContext, raw: RawIssueData) -> IssueContext:
 class LLMProvider(ABC):
     @abstractmethod
     async def analyze(self, raw: RawIssueData) -> IssueContext: ...
+
+    async def generate(self, prompt: str) -> str:
+        """Optional generic text generation (used by the boost benchmark). Providers that support a
+        plain completion override this; the default signals it is unavailable."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support generic generation; configure a provider that does "
+            f"(e.g. google) as the ICX model for the boost benchmark.")
 
 
 _PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {}

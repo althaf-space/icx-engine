@@ -11,19 +11,19 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from icx_engine.testing.state import TestingState
 from icx_engine.testing.nodes import (
     node_expand_files,
+    node_analyze_screen,
+    node_known_screen_check,
+    node_unit_author,
     node_mode_select,
     node_mode_gate,
     node_pick_type,
     node_compat_scan,
     node_compat_check,
-    node_generate_context,
     node_config_gate,
     node_auth_gate,
-    node_profile_push,
-    node_submit,
-    node_poll,
-    node_error_gate,
-    node_parse_report,
+    node_author_flow,
+    route_after_auth,
+    node_local_run,
     node_review,
     node_limit_gate,
     node_manual_wait,
@@ -32,11 +32,10 @@ from icx_engine.testing.nodes import (
     node_memory_save,
     route_after_mode_select,
     route_after_check_issues,
-    route_after_poll,
-    route_after_error_gate,
     route_after_expand,
     route_after_scan,
     route_after_compat,
+    route_after_known_screen_check,
 )
 
 
@@ -44,7 +43,11 @@ def get_db_path() -> Path:
     return Path.home() / ".icx" / "testing_sessions.db"
 
 
+_CHECKPOINT_CONN = None  # aiosqlite conn backing the cached graph, closed on graceful shutdown
+
+
 async def _make_checkpointer() -> AsyncSqliteSaver:
+    global _CHECKPOINT_CONN
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
     conn = await aiosqlite.connect(str(db_path))
@@ -54,7 +57,21 @@ async def _make_checkpointer() -> AsyncSqliteSaver:
         db_path.chmod(0o600)
     saver = AsyncSqliteSaver(conn)
     await saver.setup()
+    _CHECKPOINT_CONN = conn
     return saver
+
+
+async def close_testing_graph() -> None:
+    """Release the cached graph's SQLite connection. Called on MCP server shutdown so the WAL
+    connection + its aiosqlite thread do not linger. Idempotent and guarded - safe to call when
+    no graph was ever built."""
+    global _GRAPH_INSTANCE, _CHECKPOINT_CONN
+    conn, _CHECKPOINT_CONN, _GRAPH_INSTANCE = _CHECKPOINT_CONN, None, None
+    if conn is not None:
+        try:
+            await conn.close()
+        except Exception:
+            pass
 
 
 def _purge_old_sessions(db_path: Path) -> None:
@@ -68,7 +85,7 @@ _GRAPH_INSTANCE = None
 def _limit_gate_route(state: TestingState) -> str:
     if state["status"] == "cancelled":
         return "ui_check"
-    return "submit"
+    return "local_run"
 
 
 async def get_testing_graph(checkpointer: Any | None = None) -> Any:
@@ -86,18 +103,17 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
 
     # -- nodes ------------------------------------------------------------
     builder.add_node("expand_files",    node_expand_files)
+    builder.add_node("known_screen_check", node_known_screen_check)
+    builder.add_node("analyze_screen",  node_analyze_screen)
     builder.add_node("mode_select",     node_mode_select)
     builder.add_node("pick_type",       node_pick_type)
     builder.add_node("compat_scan",     node_compat_scan)
     builder.add_node("compat_check",    node_compat_check)
-    builder.add_node("generate_context", node_generate_context)
     builder.add_node("config_gate",     node_config_gate)
     builder.add_node("auth_gate",       node_auth_gate)
-    builder.add_node("profile_push",    node_profile_push)
-    builder.add_node("submit",          node_submit)
-    builder.add_node("poll",            node_poll)
-    builder.add_node("error_gate",      node_error_gate)
-    builder.add_node("parse_report",    node_parse_report)
+    builder.add_node("author_flow",     node_author_flow)
+    builder.add_node("unit_author",     node_unit_author)
+    builder.add_node("local_run",       node_local_run)
     builder.add_node("review",          node_review)
     builder.add_node("limit_gate",      node_limit_gate)
     builder.add_node("manual_wait",     node_manual_wait)
@@ -113,46 +129,47 @@ async def get_testing_graph(checkpointer: Any | None = None) -> Any:
         "pick_type":    "pick_type",
         "expand_files": "expand_files",
     })
-    builder.add_edge("pick_type", "expand_files")
+    # known_screen_check silently falls through to expand_files unless a provably-fresh cached
+    # clearance exists AND the user opts into the fast path - see node_known_screen_check.
+    builder.add_edge("pick_type", "known_screen_check")
+    builder.add_conditional_edges("known_screen_check", route_after_known_screen_check, {
+        "expand_files": "expand_files",
+        "config_gate":  "config_gate",
+    })
+    # automated path runs the Element Census (analyze_screen) BEFORE compatibility; manual skips it.
     builder.add_conditional_edges("expand_files", route_after_expand, {
-        "compat_scan": "compat_scan",
+        "compat_scan": "analyze_screen",
         "manual_wait": "manual_wait",
     })
+    builder.add_edge("analyze_screen", "compat_scan")
     builder.add_conditional_edges("compat_scan", route_after_scan, {
-        "compat_check":     "compat_check",
-        "generate_context": "generate_context",
+        "compat_check": "compat_check",
+        "config_gate":  "config_gate",
     })
     builder.add_conditional_edges("compat_check", route_after_compat, {
-        "compat_scan":      "compat_scan",
-        "generate_context": "generate_context",
-        "ui_check":         "ui_check",
+        "compat_scan": "compat_scan",
+        "config_gate": "config_gate",
+        "ui_check":    "ui_check",
     })
 
-    # -- automated path ----------------------------------------------------
-    builder.add_edge("generate_context", "config_gate")
-    builder.add_edge("config_gate",      "auth_gate")
-    builder.add_edge("auth_gate",        "profile_push")
-    builder.add_edge("profile_push",     "submit")
-    builder.add_edge("submit",           "poll")
-    builder.add_conditional_edges("poll", route_after_poll, {
-        "error_gate":   "error_gate",
-        "parse_report": "parse_report",
+    # -- automated path (local engine) ------------------------------------
+    builder.add_edge("config_gate", "auth_gate")
+    builder.add_conditional_edges("auth_gate", route_after_auth, {
+        "author_flow": "author_flow",
+        "unit_author": "unit_author",
+        "local_run":   "local_run",
     })
-    builder.add_conditional_edges("error_gate", route_after_error_gate, {
-        "ui_check":     "ui_check",
-        "parse_report": "parse_report",
-        "submit":       "submit",
-        "auth_gate":    "auth_gate",
-    })
-    builder.add_edge("parse_report", "review")
+    builder.add_edge("author_flow", "local_run")
+    builder.add_edge("unit_author", "local_run")
+    builder.add_edge("local_run",   "review")
     builder.add_conditional_edges("review", route_after_check_issues, {
         "ui_check":   "ui_check",
-        "loop":       "submit",
+        "loop":       "local_run",
         "limit_gate": "limit_gate",
     })
     builder.add_conditional_edges("limit_gate", _limit_gate_route, {
-        "ui_check": "ui_check",
-        "submit":   "submit",
+        "ui_check":  "ui_check",
+        "local_run": "local_run",
     })
 
     # -- manual path -------------------------------------------------------

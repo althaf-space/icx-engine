@@ -7,25 +7,27 @@ _DEFAULT_MAX_ITERATIONS = 3
 
 class TestingState(TypedDict):
     # Input
+    session_id: str | None                # MCP session id (thread_id) - set post-construction by the
+                                           # MCP handler; used as the browser-daemon registry key
     file_paths: list[str]
+    original_seeds: list[str]             # the file_paths as given at session start, never overwritten
+                                           # by expansion - the stable key for the known-screen cache
     context: str | None
+    nl_intent: str | None                 # plain-English scenario request (SP3 NL authoring)
+    acceptance_criteria: list[str]        # ticket acceptance criteria to author scenarios from (SP3)
 
     # Detection (Gate 2)
     detection_mode: str | None          # "auto_detect" | "json_spec"
     url: str | None                     # target URL
-    json_creation_prompt: str | None    # fetched from Magik /prompt/json-creation
     json_spec: str | None               # AI-generated JSON spec
     spec_warnings: list[str]            # required sections still missing after re-asks (2b)
     merge_files: bool                   # merge root + modal files into one spec
     scope: str                          # "ticket" | "full"
 
     # Submit config (Gate 3)
-    test_type: str | None               # "agent" | "ui" | "api" - set at pick_type, never auto-picked
-    agent_provider: str                 # "openai" | "claude"
-    headless: bool
-    profile_screen: str | None
-    slow_mo: int
-    agent_max_steps: int                # max browser steps for agent runs (Magik cap: 60)
+    test_type: str | None               # "agent" | "api" | "unit" - set at pick_type
+    headless: bool                      # agent-type: hidden by default; visible when False
+    slowmo: int                         # agent-type: ms slowdown+pause per step (0 headless; 1000 default headed)
 
     # API test extras
     api_endpoint: str | None
@@ -33,6 +35,28 @@ class TestingState(TypedDict):
     api_payload: str | None
     api_payload_type: str | None
     api_headers: dict[str, str] | None
+
+    # Analyzer-driven census (per-framework Element Census -> comprehensive, zero-miss authoring)
+    analyzer_id: str | None               # selected analyzer prompt id (e.g. "react", "java")
+    analyzer_family: str | None           # "ui" | "backend" | "cpp" | "sql"
+    screen_model: dict | None             # the census/functionality model the agent produced
+    census_coverage: float                # reconciliation coverage (1.0 = fully reconciled)
+    census_warnings: list[str]            # advisory census-lint findings (non-blocking)
+    test_writes: bool                     # allow real Save/Delete against the live app (default True)
+
+    # Agent-authored Playwright test (author_flow gate, agent-type only) - the agent writes and runs
+    # its own test; ICX only reads what it reports back.
+    agent_report_path: str | None         # JUnit report path the agent's own Playwright run wrote to
+    agent_test_file: str | None           # path to the Playwright test file the agent wrote
+    agent_covered: list[str]              # census functionality names/ids the agent self-reports covering
+    agent_findings: list[str]             # genuine app bugs the agent found (distinct from test failures)
+    agent_discovered: list[str]           # functionality/tags the agent found by reading code that the
+                                           # census never listed, and tested anyway (census is a floor)
+
+    # Known-screen fast path (skip expand/census/compat when a prior cleared run is provably fresh)
+    known_screen_available: bool          # set by node_known_screen_check when a fast-path was taken
+    all_candidate_files: list[str]        # full pre-exclusion candidate set from expand (or the cache,
+                                           # on fast-path) - used to detect a genuinely NEW file next run
 
     # Classification + compatibility
     classified: list[dict[str, Any]]
@@ -48,14 +72,12 @@ class TestingState(TypedDict):
     project: str | None
     host: str | None
     auto_auth_recover: bool
-    profile_pushed: bool
 
     # Coverage
     full_report: dict | None
 
     # Funnel - agent-driven detection/generation
     compat_findings: list[dict[str, Any]]
-    profile_markdown: str | None
 
     # Audit - per-gate re-read receipts
     read_receipts: list[dict[str, Any]]
@@ -63,6 +85,7 @@ class TestingState(TypedDict):
     # Mode selection (Gate "mode")
     test_mode: str | None              # "automated" | "manual"
     manual_result: dict[str, Any] | None  # manual path: user-reported result
+    engine: str                        # "local" (in-process runner suite)
 
     # Runtime
     run_id: str | None
@@ -80,28 +103,44 @@ def make_initial_state(
     context: str | None = None,
     max_iterations: int | None = None,
     test_mode: str | None = None,
+    engine: str = "local",
+    nl_intent: str | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> TestingState:
     return TestingState(
+        session_id=None,
         file_paths=list(file_paths),
+        original_seeds=list(file_paths),
         context=context,
+        nl_intent=nl_intent,
+        acceptance_criteria=list(acceptance_criteria or []),
         detection_mode=None,
         url=None,
-        json_creation_prompt=None,
         json_spec=None,
         spec_warnings=[],
         merge_files=len(file_paths) > 1,
         scope="ticket",
         test_type=None,
-        agent_provider="openai",
         headless=True,
-        profile_screen=None,
-        slow_mo=0,
-        agent_max_steps=50,
+        slowmo=0,
+        analyzer_id=None,
+        analyzer_family=None,
+        screen_model=None,
+        census_coverage=0.0,
+        census_warnings=[],
+        test_writes=True,
+        agent_report_path=None,
+        agent_test_file=None,
+        agent_covered=[],
+        agent_findings=[],
+        agent_discovered=[],
         api_endpoint=None,
         api_method=None,
         api_payload=None,
         api_payload_type=None,
         api_headers=None,
+        known_screen_available=False,
+        all_candidate_files=[],
         classified=[],
         file_sources={},
         compat_iteration=0,
@@ -109,17 +148,16 @@ def make_initial_state(
         compat_resolution={},
         edited_files=[],
         compat_findings=[],
-        profile_markdown=None,
         read_receipts=[],
         auth_mode=None,
         auth_ref=None,
         project=None,
         host=None,
         auto_auth_recover=True,
-        profile_pushed=False,
         full_report=None,
         test_mode=test_mode,
         manual_result=None,
+        engine=engine,
         run_id=None,
         iteration=0,
         max_iterations=max_iterations if max_iterations is not None else _DEFAULT_MAX_ITERATIONS,

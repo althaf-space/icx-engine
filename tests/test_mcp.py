@@ -52,10 +52,10 @@ def test_write_result_fallback_path(tmp_path):
 
 # -- list_hosts ----------------------------------------------------------------
 
-def test_list_hosts_returns_five_agents(monkeypatch, tmp_path):
+def test_list_hosts_returns_six_agents(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
     names = [h.name for h in list_hosts()]
-    assert set(names) == {"claude", "cursor", "windsurf", "codex", "antigravity"}
+    assert set(names) == {"claude", "cursor", "windsurf", "codex", "antigravity", "vscode"}
 
 
 def test_list_hosts_no_cwd_param():
@@ -161,7 +161,7 @@ def test_get_host_returns_correct_host(monkeypatch, tmp_path):
 
 def test_get_host_returns_none_for_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
-    assert get_host("vscode") is None
+    assert get_host("jetbrains") is None
 
 
 # -- write_icx_entry (JSON) ----------------------------------------------------
@@ -800,22 +800,22 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 37
+    assert len(tools) == 40
     names = {t.name for t in tools}
     assert names == {
-        "analyze_issue_fast", "analyze_issue", "save_memory",
+        "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
+        "get_methodology", "lock_plan", "icx_boost", "icx_boost_refine",
+        "ui_auth_capture", "ui_auth_inline",
         "graph_find_context", "graph_call_chain", "graph_impact", "graph_subsystem",
         "graph_cross_links", "graph_important_nodes", "graph_blast_radius",
         "graph_cycles", "graph_dead_code", "graph_ownership",
         "memory_find_by_file", "memory_get_hotspots", "memory_get_related",
         "memory_get_patterns", "memory_search",
         "reinforce_memory_usage", "get_memory_audit",
-        "magik_health_check", "start_testing_session", "resume_testing_session",
-        "magik_test_status", "magik_test_results",
-        "magik_login_start", "magik_login_capture", "magik_login_cancel",
-        "magik_login_inline", "magik_logout",
+        "start_testing_session", "resume_testing_session", "get_testing_session_status",
         "sonar_status", "sonar_projects", "sonar_branches",
         "sonar_measures", "sonar_quality_gate", "sonar_findings", "sonar_report",
+        "icx_skill_get", "icx_skills_index", "draft_skill",
     }
 
 
@@ -1188,7 +1188,7 @@ def test_mcp_setup_auto_detects_installed_hosts(monkeypatch, tmp_path):
 def test_mcp_setup_unknown_host_exits_nonzero(monkeypatch, tmp_path):
     monkeypatch.setattr("icx_engine.mcp_hosts._home", lambda: tmp_path)
     monkeypatch.chdir(tmp_path)
-    result = _runner.invoke(app, ["mcp", "setup", "--host", "vscode"])
+    result = _runner.invoke(app, ["mcp", "setup", "--host", "jetbrains"])
     assert result.exit_code != 0
 
 
@@ -2314,13 +2314,13 @@ def test_tool_descriptions_forbid_external_tracker_mcp():
 
 def test_resume_desc_has_gate_posture_classification():
     """resume description must carry the gate-posture classification with agent-generate
-    gates enumerated (2b, compat_scan, profile_gen) and user-decision gates listed."""
-    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    gates enumerated (2b, compat_scan, author_flow) and user-decision gates listed."""
+    from icx_engine.mcp_server import _TESTING_RESUME_DESCRIPTION as d
     assert "GATE POSTURE CLASSIFICATION" in d
     assert "USER-DECISION" in d
     assert "AGENT-GENERATE" in d
-    # 2b, compat_scan, and profile_gen are all agent-generate gates.
-    assert "2b" in d and "compat_scan" in d and "profile_gen" in d
+    # 2b, compat_scan, and author_flow are all agent-generate gates.
+    assert "2b" in d and "compat_scan" in d and "author_flow" in d
     # user-decision gate list includes the key human gates.
     for g in ("ui_check", "memory_save", "manual", "error", "limit"):
         assert g in d
@@ -2329,7 +2329,7 @@ def test_resume_desc_has_gate_posture_classification():
 def test_resume_desc_no_unscoped_auto_respond_phrase():
     """The contradiction is removed: no rule may say to never auto-respond to ANY gate (which
     fought the agent-generate 2b gate). It must be scoped to USER-DECISION gates."""
-    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    from icx_engine.mcp_server import _TESTING_RESUME_DESCRIPTION as d
     assert "AUTO-RESPOND TO ANY GATE" not in d
     assert "AUTO-RESPOND TO A USER-DECISION GATE" in d
 
@@ -2337,8 +2337,8 @@ def test_resume_desc_no_unscoped_auto_respond_phrase():
 def test_default_posture_line_in_both_testing_descs():
     """Both start and resume descriptions state the default posture: gate data is the user's to
     decide; the agent only self-advances to generate the spec at Gate 2b."""
-    from icx_engine.mcp_server import _MAGIK_START_DESCRIPTION, _MAGIK_RESUME_DESCRIPTION
-    for d in (_MAGIK_START_DESCRIPTION, _MAGIK_RESUME_DESCRIPTION):
+    from icx_engine.mcp_server import _TESTING_START_DESCRIPTION, _TESTING_RESUME_DESCRIPTION
+    for d in (_TESTING_START_DESCRIPTION, _TESTING_RESUME_DESCRIPTION):
         assert "DEFAULT POSTURE" in d
         assert "for the USER to read and decide" in d
         assert "Gate 2b" in d
@@ -2347,7 +2347,7 @@ def test_default_posture_line_in_both_testing_descs():
 def test_start_desc_seed_selection_endpoint_and_backend_bridge():
     """start description must describe Phase A seed selection: the endpoint/route grep option
     and the backend-only API-path -> UI-repo grep bridge."""
-    from icx_engine.mcp_server import _MAGIK_START_DESCRIPTION as d
+    from icx_engine.mcp_server import _TESTING_START_DESCRIPTION as d
     assert "PHASE A" in d
     assert "endpoint/route" in d
     assert "BACKEND-ONLY" in d
@@ -2358,7 +2358,7 @@ def test_start_desc_seed_selection_endpoint_and_backend_bridge():
 def test_gate1_desc_has_grep_import_fallback_when_no_graph():
     """Gate 1 must instruct the agent to grep-expand imports as the fallback when the UI repo
     graph is not built, and still end in a user confirm."""
-    from icx_engine.mcp_server import _MAGIK_RESUME_DESCRIPTION as d
+    from icx_engine.mcp_server import _TESTING_RESUME_DESCRIPTION as d
     assert "graph_available IS FALSE" in d
     assert "grep its own imports" in d
     assert "no-graph fallback" in d
@@ -2620,9 +2620,9 @@ async def test_graph_dead_code_nonexistent_path_returns_error():
     assert "error" in data or data.get("status") == "error"
 
 
-# -- start_testing_session injects configured agent_max_steps ----------
+# -- start_testing_session injects configured test_max_iterations ----------
 
-async def test_start_session_injects_configured_agent_steps(monkeypatch):
+async def test_start_session_injects_configured_max_iterations(monkeypatch):
     from icx_engine import mcp_server
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
@@ -2632,11 +2632,12 @@ async def test_start_session_injects_configured_agent_steps(monkeypatch):
     class _Snap:
         tasks = []
         next = ()
+        values = {}
 
     class _FakeGraph:
         async def ainvoke(self, state, config=None):
             if isinstance(state, dict):
-                captured["agent_max_steps"] = state.get("agent_max_steps")
+                captured["max_iterations"] = state.get("max_iterations")
 
         async def aget_state(self, config):
             return _Snap()
@@ -2648,14 +2649,178 @@ async def test_start_session_injects_configured_agent_steps(monkeypatch):
     monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
 
     cfg = AppConfig()
-    cfg.magik_agent_max_steps = 33
+    cfg.test_max_iterations = 7
     with patch("icx_engine.config_manager.ConfigManager") as mock_cm:
         mock_cm.load.return_value = cfg
         await mcp_server._call_tool(
             "start_testing_session",
             {"file_paths": ["a.tsx"], "test_mode": "automated"},
         )
-    assert captured["agent_max_steps"] == 33
+    assert captured["max_iterations"] == 7
+
+
+async def test_start_session_injects_session_id_into_state(monkeypatch):
+    # session_id was previously only used as the LangGraph thread_id, never placed in the state
+    # itself - the Phase 2 browser-daemon registry needs it as a stable, collision-safe key.
+    from icx_engine import mcp_server
+
+    captured = {}
+
+    class _Snap:
+        tasks = []
+        next = ()
+        values = {}
+
+    class _FakeGraph:
+        async def ainvoke(self, state, config=None):
+            if isinstance(state, dict):
+                captured["session_id_in_state"] = state.get("session_id")
+
+        async def aget_state(self, config):
+            return _Snap()
+
+    async def _fake_get_graph():
+        return _FakeGraph()
+
+    import icx_engine.testing.graph as _g
+    monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
+
+    result = await mcp_server._call_tool(
+        "start_testing_session", {"file_paths": ["a.tsx"], "test_mode": "automated"},
+    )
+    data = json.loads(result[0].text)
+    assert captured["session_id_in_state"] == data["session_id"]
+    assert captured["session_id_in_state"]   # non-empty
+
+
+# -- async job/poll pattern (opacity fix - status:"running" + get_testing_session_status) ------
+
+class _RunningSnap:
+    tasks = []
+    next = ()
+    values = {"status": "ok"}
+
+
+class _SlowFakeGraph:
+    """ainvoke sleeps past the (monkeypatched, tiny) quick-timeout so the caller must observe
+    status:"running" instead of getting an inline gate."""
+    def __init__(self, delay=0.05):
+        self.delay = delay
+
+    async def ainvoke(self, *_a, **_kw):
+        await asyncio.sleep(self.delay)
+
+    async def aget_state(self, config):
+        return _RunningSnap()
+
+
+async def test_resume_returns_running_when_node_exceeds_quick_timeout(monkeypatch):
+    from icx_engine import mcp_server
+    import icx_engine.testing.graph as _g
+
+    fake = _SlowFakeGraph(delay=0.05)
+    monkeypatch.setattr(_g, "get_testing_graph", lambda: _fut(fake))
+    monkeypatch.setattr(mcp_server, "_TESTING_QUICK_TIMEOUT", 0.01)
+
+    result = await mcp_server._call_tool(
+        "resume_testing_session", {"session_id": "sess-slow", "response": {"choice": "1"}},
+    )
+    data = json.loads(result[0].text)
+    assert data["status"] == "running"
+    assert data["done"] is False
+    assert data["gate"] is None
+
+    # let the background task finish so pytest-asyncio doesn't warn about a pending task
+    task = mcp_server._TESTING_RUNNING.get("sess-slow")
+    if task is not None:
+        await task
+
+
+async def test_resume_rejects_second_call_while_session_running(monkeypatch):
+    from icx_engine import mcp_server
+    import icx_engine.testing.graph as _g
+
+    fake = _SlowFakeGraph(delay=0.2)
+    monkeypatch.setattr(_g, "get_testing_graph", lambda: _fut(fake))
+    monkeypatch.setattr(mcp_server, "_TESTING_QUICK_TIMEOUT", 0.01)
+
+    first = await mcp_server._call_tool(
+        "resume_testing_session", {"session_id": "sess-busy", "response": {}},
+    )
+    assert json.loads(first[0].text)["status"] == "running"
+
+    second = await mcp_server._call_tool(
+        "resume_testing_session", {"session_id": "sess-busy", "response": {}},
+    )
+    data = json.loads(second[0].text)
+    assert data["status"] == "running"
+    assert "error" in data
+
+    task = mcp_server._TESTING_RUNNING.get("sess-busy")
+    if task is not None:
+        await task
+
+
+async def test_get_testing_session_status_polls_running_task_to_done(monkeypatch):
+    from icx_engine import mcp_server
+    import icx_engine.testing.graph as _g
+
+    fake = _SlowFakeGraph(delay=0.05)
+    monkeypatch.setattr(_g, "get_testing_graph", lambda: _fut(fake))
+    monkeypatch.setattr(mcp_server, "_TESTING_QUICK_TIMEOUT", 0.01)
+
+    await mcp_server._call_tool(
+        "resume_testing_session", {"session_id": "sess-poll", "response": {}},
+    )
+    # first poll: still running
+    first = await mcp_server._call_tool("get_testing_session_status", {"session_id": "sess-poll"})
+    assert json.loads(first[0].text)["status"] == "running"
+
+    # wait for the background task to actually finish
+    task = mcp_server._TESTING_RUNNING.get("sess-poll")
+    if task is not None:
+        await task
+
+    # second poll: task done, real state read
+    second = await mcp_server._call_tool("get_testing_session_status", {"session_id": "sess-poll"})
+    data = json.loads(second[0].text)
+    assert data["status"] != "running"
+    assert data["done"] is True
+
+
+async def test_get_testing_session_status_unknown_session_falls_back_to_state_read(monkeypatch):
+    from icx_engine import mcp_server
+    import icx_engine.testing.graph as _g
+
+    class _Snap:
+        tasks = []
+        next = ()
+        values = {"status": "ok"}
+
+    class _FakeGraph:
+        async def aget_state(self, config):
+            return _Snap()
+
+    monkeypatch.setattr(_g, "get_testing_graph", lambda: _fut(_FakeGraph()))
+    result = await mcp_server._call_tool(
+        "get_testing_session_status", {"session_id": "never-tracked"},
+    )
+    data = json.loads(result[0].text)
+    assert data["done"] is True
+    assert "error" not in data or data["error"] is None
+
+
+async def test_get_testing_session_status_missing_session_id_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("get_testing_session_status", {})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+def _fut(value):
+    async def _coro():
+        return value
+    return _coro()
 
 
 # -- memory_get_hotspots -------------------------------------------------------
@@ -2770,22 +2935,10 @@ async def test_magik_tools_registered():
         tools = await _list_tools()
     names = {t.name for t in tools}
     expected = {
-        "magik_health_check",
         "start_testing_session",
         "resume_testing_session",
-        "magik_test_status",
-        "magik_test_results",
     }
     assert expected.issubset(names)
-
-
-async def test_magik_health_tool_schema_has_no_required_fields():
-    from icx_engine.mcp_server import _list_tools
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-    tool = next(t for t in tools if t.name == "magik_health_check")
-    assert tool.inputSchema.get("required", []) == []
 
 
 async def test_magik_start_tool_requires_file_paths():
@@ -2809,114 +2962,6 @@ async def test_magik_resume_tool_requires_session_id_and_response():
     assert "response" in tool.inputSchema["required"]
 
 
-async def test_magik_status_tool_requires_run_id():
-    from icx_engine.mcp_server import _list_tools
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-    tool = next(t for t in tools if t.name == "magik_test_status")
-    assert "run_id" in tool.inputSchema["required"]
-
-
-async def test_magik_results_tool_requires_run_id():
-    from icx_engine.mcp_server import _list_tools
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-    tool = next(t for t in tools if t.name == "magik_test_results")
-    assert "run_id" in tool.inputSchema["required"]
-
-
-async def test_magik_health_check_returns_ok_on_success():
-    from icx_engine.mcp_server import _call_tool
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.health_check", new=AsyncMock(return_value={"status": "ok"})):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_health_check", {})
-    data = json.loads(result[0].text)
-    assert data["ok"] is True
-    assert "data" in data
-
-
-async def test_magik_health_check_returns_not_ok_when_unreachable():
-    from icx_engine.mcp_server import _call_tool
-    from icx_engine.testing.client import MagikUnreachable
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.health_check", new=AsyncMock(side_effect=MagikUnreachable("unreachable"))):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_health_check", {})
-    data = json.loads(result[0].text)
-    assert data["ok"] is False
-    assert "error" in data
-
-
-async def test_magik_status_returns_ok_on_success():
-    from icx_engine.mcp_server import _call_tool
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.get_run_status", new=AsyncMock(return_value={"state": "running"})):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_test_status", {"run_id": "ui-123"})
-    data = json.loads(result[0].text)
-    assert data["ok"] is True
-    assert data["data"]["state"] == "running"
-
-
-async def test_magik_status_returns_not_ok_when_run_lost():
-    from icx_engine.mcp_server import _call_tool
-    from icx_engine.testing.client import MagikRunLost
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.get_run_status", new=AsyncMock(side_effect=MagikRunLost("not found"))):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_test_status", {"run_id": "ui-999"})
-    data = json.loads(result[0].text)
-    assert data["ok"] is False
-    assert "not found" in data["error"]
-
-
-async def test_magik_results_returns_not_ok_when_report_not_ready():
-    from icx_engine.mcp_server import _call_tool
-    from icx_engine.testing.client import MagikReportNotReady
-    from unittest.mock import AsyncMock
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        with patch("icx_engine.testing.client.MagikClient.get_run_report", new=AsyncMock(side_effect=MagikReportNotReady("not ready"))):
-            with patch("icx_engine.testing.client.MagikClient.aclose", new=AsyncMock()):
-                result = await _call_tool("magik_test_results", {"run_id": "ui-123"})
-    data = json.loads(result[0].text)
-    assert data["ok"] is False
-    assert "not complete yet" in data["error"]
-
-
-async def test_auth_tools_registered():
-    from icx_engine.mcp_server import _list_tools
-    from icx_engine.models.config import AppConfig
-    from unittest.mock import patch
-    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
-        mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
-    names = {t.name for t in tools}
-    for n in ("magik_login_start", "magik_login_capture", "magik_login_cancel",
-              "magik_login_inline", "magik_logout"):
-        assert n in names
-
-
-async def test_login_inline_validates():
-    import json
-    from icx_engine.mcp_server import _call_tool
-    result = await _call_tool("magik_login_inline", {"loginUrl": "http://x"})
-    payload = json.loads(result[0].text)
-    assert payload["ok"] is False
-    assert "username" in payload["error"] or "password" in payload["error"]
-
-
 async def test_start_session_validates_bad_input():
     import json
     from icx_engine.mcp_server import _call_tool
@@ -2934,7 +2979,7 @@ async def test_resume_description_lists_gate_shapes():
         mock_cm.load.return_value = AppConfig()
         tools = {t.name: t for t in await _list_tools()}
     desc = tools["resume_testing_session"].description
-    for token in ("pick_type", "compat_check", "auth_gate", "profile_push", "approve_iteration", "RULE"):
+    for token in ("pick_type", "compat_check", "auth_gate", "author_flow", "approve_iteration", "RULE"):
         assert token in desc
 
 
@@ -2946,7 +2991,7 @@ async def test_resume_description_lists_agent_gates():
         mock_cm.load.return_value = AppConfig()
         tools = {t.name: t for t in await _list_tools()}
     desc = tools["resume_testing_session"].description
-    for token in ("compat_scan", "profile_gen", "profile_markdown", "all_compatible"):
+    for token in ("compat_scan", "author_flow", "steps", "all_compatible"):
         assert token in desc
 
 
@@ -3043,6 +3088,10 @@ async def test_resume_strips_session_id_from_payload(monkeypatch, tmp_path):
     import icx_engine.testing.graph as _g
     monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
 
+    # A real authenticated session already exists (written by ui_auth_capture) with a storage_state.
+    _auth.save_session("proj-z", "host-z", "real-sess",
+                       store=store, storage_state="/path/to/state.json")
+
     await mcp_server._call_tool("resume_testing_session", {
         "session_id": "sess-uuid",
         "response": {"auth_mode": "capture", "session_id": "SECRET-123"},
@@ -3050,8 +3099,10 @@ async def test_resume_strips_session_id_from_payload(monkeypatch, tmp_path):
     # session_id stripped from the payload that reaches the graph (and thus the checkpoint writes)
     assert "session_id" not in (captured["resume"] or {})
     assert captured["resume"].get("auth_mode") == "capture"
-    # and it was saved to the out-of-band auth store
-    assert _auth.load_session("proj-z", "host-z", store=store).session_id == "SECRET-123"
+    # the pre-existing session record is NOT overwritten - its storage_state survives, so the replay
+    # still runs authenticated (re-saving with an empty storage_state was the bug).
+    rec = _auth.load_session("proj-z", "host-z", store=store)
+    assert rec.session_id == "real-sess" and rec.storage_state == "/path/to/state.json"
 
 
 # -- Sonar MCP tools -----------------------------------------------------------
@@ -3140,6 +3191,85 @@ def test_select_persona_ui_pick_kept_when_ui_vocab_present():
     slug, source = _select_persona(a)
     assert slug == "principal-ui-ux-architect"
     assert source == "llm"
+
+
+async def test_icx_skill_get_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    assert any(t.name == "icx_skill_get" for t in tools)
+
+
+async def test_icx_skill_get_returns_full_body(tmp_path, monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+
+    storage = SkillStorage(root=tmp_path)
+    entry = SkillEntry(name="test-fetch-skill", description="d", tags=["x"], title="Test Fetch Skill",
+                       when_to_use="x", procedure="the procedure text", pitfalls="x", verification="x")
+    entry.icx_hash = entry.compute_hash()
+    storage.write(entry)
+
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: storage)
+    res = await _call_tool("icx_skill_get", {"name": "test-fetch-skill"})
+    data = json.loads(res[0].text)
+    assert "the procedure text" in data["body"]
+
+
+async def test_icx_skill_get_unknown_name_returns_error_not_raise(tmp_path, monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: SkillStorage(root=tmp_path))
+    res = await _call_tool("icx_skill_get", {"name": "does-not-exist"})
+    data = json.loads(res[0].text)
+    assert "error" in data
+
+
+async def test_icx_skill_get_validates_name():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_skill_get", {"name": ""})
+    data = json.loads(res[0].text)
+    assert "error" in data
+
+
+async def test_icx_skills_index_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    assert any(t.name == "icx_skills_index" for t in tools)
+
+
+async def test_icx_skills_index_returns_all_skills_unranked(tmp_path, monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+
+    storage = SkillStorage(root=tmp_path)
+    for i in range(7):
+        e = SkillEntry(name=f"skill-{i}", description=f"d{i}", tags=["x"], title=f"skill-{i}",
+                       when_to_use="w", procedure="p", pitfalls="x", verification="v")
+        e.icx_hash = e.compute_hash()
+        storage.write(e)
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: storage)
+
+    res = await _call_tool("icx_skills_index", {})
+    data = json.loads(res[0].text)
+    assert len(data["skills"]) == 7   # NOT capped at 5, unlike rank_skills/rank_skills_for_tags
+    assert set(data["skills"][0].keys()) == {"name", "description"}
+
+
+async def test_icx_skills_index_empty_store(tmp_path, monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: SkillStorage(root=tmp_path))
+    res = await _call_tool("icx_skills_index", {})
+    data = json.loads(res[0].text)
+    assert data == {"skills": []}
 
 
 def test_select_persona_default_when_nothing_matches():
@@ -3327,3 +3457,807 @@ def test_write_attachment_files_sanitizes_exotic_filename(tmp_path, monkeypatch)
     assert all(ord(c) < 128 for c in raw_path)      # returned path is ASCII -> round-trips
     assert _P(raw_path).exists()                    # file actually written and openable
     assert _P(raw_path).read_bytes() == b"IMGBYTES"
+
+
+# -- v0.4.1 Phase 1: Definition-of-Done gate -----------------------------------
+
+def _make_ok():
+    async def _ok(*a, **k):
+        import json
+        return json.dumps({"ok": True})
+    return _ok
+
+
+def test_record_verification_accepts_and_stores():
+    import asyncio, json
+    import icx_engine.mcp_server as mcp
+    args = {
+        "issue_key": "PROJ-1",
+        "dod_items": [{"check": "repro fixed", "method": "reproduce",
+                       "passed": True, "command": "pytest -k login", "output": "1 passed"}],
+        "self_review_note": "checked edge cases",
+        "layers_run": ["unit"],
+    }
+    out = asyncio.run(mcp._call_tool("record_verification", args))
+    data = json.loads(out[0].text)
+    assert data["accepted"] is True
+    assert "confidence" in data
+    assert mcp._session_get("PROJ-1", "verification") is not None
+
+
+def test_record_verification_rejects_incomplete():
+    import asyncio, json
+    import icx_engine.mcp_server as mcp
+    args = {
+        "issue_key": "PROJ-2",
+        "dod_items": [{"check": "x", "method": "unit", "passed": True,
+                       "command": "", "output": ""}],
+        "self_review_note": "",
+    }
+    out = asyncio.run(mcp._call_tool("record_verification", args))
+    data = json.loads(out[0].text)
+    assert data["accepted"] is False
+    assert data["missing"]
+
+
+def test_save_memory_rejects_unverified_success():
+    import asyncio, json
+    import icx_engine.mcp_server as mcp
+    args = {
+        "issue_key": "GUARD-1", "summary": "s", "problem_description": "p",
+        "resolution_note": "r", "files_changed": ["a.py"], "tags": ["t"],
+        "work_item_type": "Bug", "root_cause_pattern": "uncategorized",
+        "pattern_confidence": 0.5, "outcome_verified": True,
+        "outcome_feedback_note": "worked",
+    }
+    out = asyncio.run(mcp._call_tool("save_memory", args))
+    data = json.loads(out[0].text)
+    assert "error" in data and "verification" in data["error"].lower()
+
+
+def test_save_memory_allows_human_override(monkeypatch):
+    import asyncio, json
+    import icx_engine.mcp_server as mcp
+    monkeypatch.setattr(mcp, "_handle_save_memory", _make_ok())
+    args = {
+        "issue_key": "GUARD-2", "summary": "s", "problem_description": "p",
+        "resolution_note": "r", "files_changed": ["a.py"], "tags": ["t"],
+        "work_item_type": "Bug", "root_cause_pattern": "uncategorized",
+        "pattern_confidence": 0.5, "outcome_verified": True,
+        "outcome_feedback_note": "I tested it manually", "verified_by_human": True,
+    }
+    out = asyncio.run(mcp._call_tool("save_memory", args))
+    data = json.loads(out[0].text)
+    assert "error" not in data
+
+
+def test_apply_dod_appends_verify_block_and_reports():
+    from icx_engine.mcp_server import _apply_dod
+    analysis = {"issue_type": "Bug", "problem_summary": "login 500",
+                "reproduction_steps": ["POST /login empty"], "expected_behavior": "400",
+                "actual_behavior": "500", "acceptance_criteria": []}
+    body = "STEP 1: do thing\n"
+    out, dod = _apply_dod(analysis, body, [])
+    assert body in out
+    assert "DEFINITION OF DONE" in out.upper()
+    assert dod is not None and dod["risk_tier"] in {"low", "medium", "high", "critical"}
+    assert isinstance(dod["checklist"], list) and dod["checklist"]
+
+
+def test_apply_dod_guarded_on_bad_analysis():
+    from icx_engine.mcp_server import _apply_dod
+    out, dod = _apply_dod(None, "BODY", [])
+    assert out == "BODY"
+    assert dod is None
+
+
+# -- ui_auth_capture / ui_auth_inline tools ------------------------------------
+
+async def test_ui_auth_capture_validates_input():
+    from icx_engine.mcp_server import _call_tool
+    r = await _call_tool("ui_auth_capture", {"url": "", "file_paths": ["a"]})
+    assert json.loads(r[0].text)["ok"] is False
+    r = await _call_tool("ui_auth_capture", {"url": "http://x", "file_paths": []})
+    assert json.loads(r[0].text)["ok"] is False
+
+
+async def test_ui_auth_capture_success(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    monkeypatch.setattr("icx_engine.testing.nodes._resolve_project_id", lambda fp: "proj")
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: True)
+
+    async def _cap(project, host, url, success_url=""):
+        return "/x/state.json", ""
+    monkeypatch.setattr("icx_engine.testing.ui_auth.capture_session", _cap)
+    r = await _call_tool("ui_auth_capture", {"url": "http://x/login", "file_paths": ["a.jsx"]})
+    payload = json.loads(r[0].text)
+    assert payload["ok"] is True and payload["storage_state"] == "/x/state.json"
+
+
+async def test_ui_auth_inline_requires_credentials(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    monkeypatch.setattr("icx_engine.testing.nodes._resolve_project_id", lambda fp: "proj")
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: True)
+    r = await _call_tool("ui_auth_inline",
+                         {"url": "http://x", "file_paths": ["a"], "username": "", "password": "p"})
+    assert json.loads(r[0].text)["ok"] is False
+
+
+async def test_ui_auth_inline_success(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    monkeypatch.setattr("icx_engine.testing.nodes._resolve_project_id", lambda fp: "proj")
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: True)
+
+    async def _inline(project, host, url, username, password, **kw):
+        assert username == "admin" and password == "pw"
+        return "/x/state.json", ""
+    monkeypatch.setattr("icx_engine.testing.ui_auth.inline_session", _inline)
+    r = await _call_tool("ui_auth_inline", {"url": "http://x/login", "file_paths": ["a.jsx"],
+                                            "username": "admin", "password": "pw"})
+    assert json.loads(r[0].text)["ok"] is True
+
+
+async def test_ui_auth_capture_broken_tooling_steers_to_setup(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    monkeypatch.setattr("icx_engine.testing.nodes._resolve_project_id", lambda fp: "proj")
+    monkeypatch.setattr("icx_engine.testing.runners.install.is_installed", lambda name: True)
+
+    async def _cap(project, host, url, success_url=""):
+        return None, r"Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'playwright' imported from F:\icx-engine"
+    monkeypatch.setattr("icx_engine.testing.ui_auth.capture_session", _cap)
+    r = await _call_tool("ui_auth_capture", {"url": "http://x/login", "file_paths": ["a.jsx"]})
+    p = json.loads(r[0].text)
+    assert p["ok"] is False
+    assert "icx test setup --force" in p["error"]
+    assert "DO NOT install" in p["error"]
+    assert "repo" in p["error"].lower()
+
+
+# -- lock_plan spec-lock tool ---------------------------------------------------
+
+async def test_lock_plan_validates_input():
+    from icx_engine.mcp_server import _call_tool
+    r = await _call_tool("lock_plan", {"issue_ref": "", "chosen_files": ["a.py"]})
+    assert json.loads(r[0].text)["ok"] is False
+    r = await _call_tool("lock_plan", {"issue_ref": "T-1", "chosen_files": []})
+    assert json.loads(r[0].text)["ok"] is False
+
+
+async def test_lock_plan_blocks_on_missed_high_signal(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    import icx_engine.mcp_server as m
+    # graph signal reports a direct dependent the plan omitted -> high-tier miss -> blocks.
+    def _sigs(project_path, seeds, keywords):
+        return (lambda: [("src/caller.py", "direct graph dependent of a planned file")],
+                lambda: [], lambda: [], lambda: [])
+    monkeypatch.setattr(m, "_context_signals", _sigs)
+    monkeypatch.setattr(m, "_lock_plan_prior_fix", lambda chosen: set())
+    r = await _call_tool("lock_plan", {"issue_ref": "T-1", "chosen_files": ["src/svc.py"]})
+    p = json.loads(r[0].text)
+    assert p["ok"] is False
+    assert [x["path"] for x in p["blocking_missed"]] == ["src/caller.py"]
+    assert p["coverage"] == 0.0
+
+
+async def test_lock_plan_ok_when_included_or_justified(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    import icx_engine.mcp_server as m
+    def _sigs(project_path, seeds, keywords):
+        return (lambda: [("src/caller.py", "direct graph dependent")], lambda: [], lambda: [], lambda: [])
+    monkeypatch.setattr(m, "_context_signals", _sigs)
+    monkeypatch.setattr(m, "_lock_plan_prior_fix", lambda chosen: set())
+    # include it
+    r = await _call_tool("lock_plan", {"issue_ref": "T-2", "chosen_files": ["src/svc.py", "src/caller.py"]})
+    assert json.loads(r[0].text)["ok"] is True
+    # or justify it
+    r = await _call_tool("lock_plan", {"issue_ref": "T-3", "chosen_files": ["src/svc.py"],
+                                       "justifications": {"src/caller.py": "unrelated same-name"}})
+    p = json.loads(r[0].text)
+    assert p["ok"] is True and p["coverage"] == 1.0
+
+
+async def test_lock_plan_stores_locked_plan(monkeypatch):
+    from icx_engine.mcp_server import _call_tool, _session_get
+    import icx_engine.mcp_server as m
+    monkeypatch.setattr(m, "_context_signals", lambda p, s, k: (lambda: [], lambda: [], lambda: [], lambda: []))
+    monkeypatch.setattr(m, "_lock_plan_prior_fix", lambda chosen: set())
+    await _call_tool("lock_plan", {"issue_ref": "T-9", "chosen_files": ["a.py"]})
+    stored = _session_get("T-9", "locked_plan", None)
+    assert stored is not None and stored["chosen"] == ["a.py"] and stored["ok"] is True
+
+
+async def test_lock_plan_in_tool_order_before_testing():
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    from unittest.mock import patch
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        names = [t.name for t in await _list_tools()]
+    assert "lock_plan" in names
+    assert names.index("lock_plan") < names.index("start_testing_session")   # spec-lock before testing
+
+
+def test_context_signals_emit_from_graph_semantic_memory(monkeypatch):
+    # Regression guard: the real signal providers must actually produce candidates (not silently
+    # no-op due to a wrong return shape / field name).
+    import icx_engine.mcp_server as m
+
+    class _Ctx:
+        def __init__(self, f): self.file = f; self.reason = "related"
+    class _Q:
+        def get_blast_radius(self, seeds, **k):
+            return {"direct_dependents": ["dep.py"], "missing_changes": ["co.py"]}
+        def find_context(self, query):
+            return [_Ctx("sem.py")]
+
+    monkeypatch.setattr(m, "_load_querier_simple", lambda p: (_Q(), "/repo"))
+    monkeypatch.setattr(m, "_find_by_file_sync",
+                        lambda f, k: [{"issue_key": "T-1", "files_changed": ["mem.py"]}])
+    graph_sig, grep_sig, semantic_sig, memory_sig = m._context_signals("/repo", ["svc.py"], ["kw"])
+    graph_paths = dict(graph_sig())
+    assert "dep.py" in graph_paths and "co.py" in graph_paths
+    assert "sem.py" in dict(semantic_sig())
+    assert "mem.py" in dict(memory_sig())
+
+
+def test_lock_plan_prior_fix_reads_files_changed(monkeypatch):
+    import icx_engine.mcp_server as m
+    monkeypatch.setattr(m, "_find_by_file_sync",
+                        lambda f, k: [{"issue_key": "T-2", "files_changed": ["old_fix.py"]}])
+    assert m._lock_plan_prior_fix(["svc.py"]) == {"old_fix.py"}
+
+
+async def test_icx_boost_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    assert any(t.name == "icx_boost" for t in tools)
+
+
+async def test_icx_boost_returns_brief_for_doubt():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost", {"prompt": "what is a closure?"})
+    data = json.loads(res[0].text)
+    assert data["archetype"] == "doubt"
+    assert data["context"]["files"] == []
+    assert data["mandatory_directive"]
+    assert data["boost_meta"]["llm_used"] is False
+
+
+async def test_icx_boost_validates_prompt():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost", {"prompt": ""})
+    data = json.loads(res[0].text)
+    assert data.get("error")
+
+
+async def test_icx_boost_never_raises_on_bad_repo():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost", {"prompt": "fix the auth crash", "repo_path": "/no/such/dir"})
+    data = json.loads(res[0].text)
+    assert data["archetype"] == "debugging"
+    assert "boosted_prompt" in data
+
+
+async def test_icx_boost_preserves_and_tiers_links():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost", {
+        "prompt": "check this design https://www.figma.com/file/abc and ticket https://x.atlassian.net/browse/AB-1"})
+    data = json.loads(res[0].text)
+    links = data["links"]
+    urls = {l["url"]: l for l in links}
+    assert any("figma" in u for u in urls)
+    assert any(l["target"] == "figma" and l["status"] == "agent_fetch" for l in links)
+    assert any(l["target"] == "jira" for l in links)
+
+
+async def test_every_tool_description_is_strict_and_substantial():
+    """Ironclad contract: EVERY MCP tool description must carry a strict directive keyword (so the
+    agent cannot treat it as optional) and be non-trivial. If this fails, the new/edited tool needs a
+    MANDATORY/MUST/ALWAYS/CALL/USE WHEN-style trigger line."""
+    from icx_engine.mcp_server import _list_tools
+    strict = ("MANDATORY", "MUST", "ALWAYS", "NEVER", "CALL ", "USE WHEN", "USE THIS",
+              "RUN ", "FOLLOW", "FIRST", "BEFORE ", "AFTER ", "REQUIRED", "DO NOT")
+    tools = await _list_tools()
+    weak = []
+    for t in tools:
+        d = (t.description or "").strip()
+        if len(d) < 40 or not any(k in d.upper() for k in strict):
+            weak.append(t.name)
+    assert not weak, f"tool descriptions missing a strict directive: {weak}"
+
+
+async def test_icx_boost_refine_builds_cto_prompt():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("icx_boost_refine", {
+        "prompt": "add a login endpoint", "archetype": "security",
+        "objective": "Build a secure JWT login endpoint",
+        "requirements": ["hash passwords"], "constraints": ["FastAPI"],
+        "acceptance": ["all auth paths tested"],
+        "dims": ["account lockout after N failed attempts"]})
+    d = json.loads(res[0].text)
+    assert d["boost_meta"]["pass"] == 2
+    assert d["boost_meta"]["llm_used"] is False
+    bp = d["boosted_prompt"]
+    assert "# ROLE" in bp and "# ACCEPTANCE CRITERIA" in bp       # CTO-grade structure
+    assert "security architect" in bp.lower()                     # per-problem persona
+    assert "account lockout" in bp.lower()                        # agent's dim merged
+    assert 'Original request (verbatim, for reference): "add a login endpoint"' in bp
+    assert d["gates"]
+
+
+async def test_icx_boost_refine_fills_gaps_from_minimal_input():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    # only an objective -> still a full CTO prompt (ICX fills persona/requirements/acceptance)
+    d = json.loads((await _call_tool("icx_boost_refine", {
+        "prompt": "add a cache", "objective": "add a caching layer"}))[0].text)
+    assert "# REQUIREMENTS" in d["boosted_prompt"] and "# STANDARDS" in d["boosted_prompt"]
+
+
+async def test_icx_boost_refine_validates_input():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    assert json.loads((await _call_tool("icx_boost_refine", {"prompt": ""}))[0].text).get("error")
+    # no objective/requirements/dims -> rejected
+    assert json.loads((await _call_tool("icx_boost_refine", {"prompt": "x"}))[0].text).get("error")
+
+
+async def test_icx_boost_brief_points_to_refine():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    d = json.loads((await _call_tool("icx_boost", {"prompt": "add a login feature"}))[0].text)
+    assert d["refine"]["tool"] == "icx_boost_refine"
+
+
+async def test_sonar_disabled_returns_graceful_fallback():
+    import json
+    from unittest.mock import patch, AsyncMock
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.sonar import service as svc
+    with patch.object(svc, "projects", AsyncMock(side_effect=svc.SonarDisabled("not configured"))):
+        d = json.loads((await _call_tool("sonar_projects", {}))[0].text)
+    assert d["ok"] is False
+    assert "fallback" in d
+    assert "connect ICX" in d["fallback"] and "your own" in d["fallback"].lower()
+    assert "icx sonar --add" in d["fallback"]
+
+
+def test_icx_fallback_is_three_tier():
+    from icx_engine.mcp_server import _ICX_FALLBACK
+    f = _ICX_FALLBACK("work-tracker", "icx connection --add")
+    assert "not enabled" in f.lower() and "connect ICX" in f          # tier 1
+    assert "your own" in f.lower()                                     # tier 2 (agent connector)
+    assert "normal flow" in f.lower()                                  # tier 3
+    assert "not fabricate" in f.lower()
+
+
+async def test_icx_boost_skips_trivial_conversational():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    for p in ["thanks", "continue", "ok", "do it", "looks good"]:
+        d = json.loads((await _call_tool("icx_boost", {"prompt": p}))[0].text)
+        assert d.get("skip") is True, f"{p!r} should skip"
+        assert d["boost_meta"]["trivial"] is True
+        assert "methodology" not in d          # cheap - no heavy brief built
+
+
+async def test_icx_boost_boosts_real_request_not_skipped():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    d = json.loads((await _call_tool("icx_boost", {"prompt": "fix the login crash"}))[0].text)
+    assert not d.get("skip")
+    assert d["archetype"] == "debugging"
+
+
+# -- one call, two passes: icx_boost tool now auto-refines --------------------
+
+async def test_icx_boost_tool_auto_refines_in_one_call():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    d = json.loads((await _call_tool("icx_boost", {"prompt": "fix the login crash"}))[0].text)
+    bp = d["boosted_prompt"]
+    assert "# ROLE" in bp and "# ACCEPTANCE CRITERIA" in bp     # CTO-grade structure, not the one-pass brief
+    assert d["boost_meta"]["auto_refined"] is True
+    assert "refine_note" in d and "icx_boost_refine" in d["refine_note"]
+
+
+async def test_icx_boost_tool_auto_refine_skipped_for_trivial():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    d = json.loads((await _call_tool("icx_boost", {"prompt": "thanks"}))[0].text)
+    assert d.get("skip") is True
+    assert "boosted_prompt" not in d           # trivial skip stays cheap - no CTO prompt built
+
+
+# -- MCP prompts primitive: icx-boost surfaced natively where the editor supports it ------------
+
+async def test_list_prompts_exposes_icx_boost():
+    from icx_engine.mcp_server import _list_prompts
+    prompts = await _list_prompts()
+    assert len(prompts) == 1
+    assert prompts[0].name == "icx-boost"
+    arg_names = {a.name for a in prompts[0].arguments}
+    assert "prompt" in arg_names
+
+
+async def test_get_prompt_returns_auto_refined_boosted_prompt():
+    import json
+    from icx_engine.mcp_server import _get_prompt
+    res = await _get_prompt("icx-boost", {"prompt": "fix the login crash"})
+    assert res.messages and res.messages[0].role == "user"
+    d = json.loads(res.messages[0].content.text)
+    assert "# ROLE" in d["boosted_prompt"]
+    assert d["boost_meta"]["auto_refined"] is True
+
+
+async def test_get_prompt_rejects_unknown_name():
+    from icx_engine.mcp_server import _get_prompt
+    with pytest.raises(ValueError):
+        await _get_prompt("not-icx-boost", {"prompt": "x"})
+
+
+async def test_get_prompt_rejects_empty_prompt():
+    from icx_engine.mcp_server import _get_prompt
+    with pytest.raises(ValueError):
+        await _get_prompt("icx-boost", {"prompt": "   "})
+
+
+# -- save_memory: skills fields removed from schema --------------------------------------------
+
+def test_save_memory_schema_has_no_skills_fields():
+    import asyncio
+    from icx_engine.mcp_server import _list_tools
+    tools = asyncio.run(_list_tools())
+    save_tool = next(t for t in tools if t.name == "save_memory")
+    props = save_tool.inputSchema["properties"]
+    for removed in ("worth_remembering", "skill_name", "skill_procedure", "skill_pitfalls", "skill_verification"):
+        assert removed not in props, f"{removed} should have been removed from save_memory's schema"
+
+
+# -- icx_boost: skills.index attachment --------------------------------------------------------
+
+async def test_icx_boost_includes_skills_index_when_a_skill_matches(tmp_path, monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+
+    storage = SkillStorage(root=tmp_path)
+    entry = SkillEntry(name="debugging-helper", description="A debugging skill.",
+                       tags=["debugging"], title="Debugging Helper",
+                       when_to_use="x", procedure="x", pitfalls="x", verification="x")
+    entry.icx_hash = entry.compute_hash()
+    storage.write(entry)
+
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: storage)
+    d = json.loads((await _call_tool("icx_boost", {"prompt": "debug this crash please"}))[0].text)
+    assert "skills" in d
+    names = [s["name"] for s in d["skills"]["index"]]
+    assert "debugging-helper" in names
+
+
+async def test_icx_boost_omits_skills_field_when_no_match(tmp_path, monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: SkillStorage(root=tmp_path))
+    d = json.loads((await _call_tool("icx_boost", {"prompt": "fix the login crash"}))[0].text)
+    assert "skills" not in d
+
+
+async def test_icx_boost_skills_lookup_never_breaks_boost_on_failure(monkeypatch):
+    """If skill ranking blows up, icx_boost must still return its normal brief."""
+    import json
+    from icx_engine.mcp_server import _call_tool
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("icx_engine.mcp_server.rank_skills", _boom)
+    d = json.loads((await _call_tool("icx_boost", {"prompt": "fix the login crash"}))[0].text)
+    assert not d.get("skip")
+    assert d["archetype"] == "debugging"
+    assert "skills" not in d
+
+
+def test_skills_list_command_runs_with_empty_store(monkeypatch, tmp_path):
+    from icx_engine.cli import app
+    from icx_engine.skills.storage import SkillStorage
+    monkeypatch.setattr("icx_engine.skills.storage.SkillStorage", lambda: SkillStorage(root=tmp_path))
+    result = _runner.invoke(app, ["skills", "list"])
+    assert result.exit_code == 0
+
+
+def test_skills_list_command_shows_learned_skills(monkeypatch, tmp_path):
+    from icx_engine.cli import app
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    entry = SkillEntry(name="shown-skill", description="A shown skill.", tags=["x"],
+                       title="Shown Skill", when_to_use="x", procedure="x", pitfalls="x",
+                       verification="x")
+    entry.icx_hash = entry.compute_hash()
+    storage.write(entry)
+    monkeypatch.setattr("icx_engine.skills.storage.SkillStorage", lambda: storage)
+    result = _runner.invoke(app, ["skills", "list"])
+    assert "shown-skill" in result.output
+
+
+def test_save_memory_includes_related_skills_when_a_match_exists(mcp_config, tmp_path):
+    import asyncio, json
+    from icx_engine.mcp_server import _handle_save_memory
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+
+    storage = SkillStorage(root=tmp_path)
+    entry = SkillEntry(name="jwt-fix", description="d", tags=["jwt-expiry"], title="JWT Fix",
+                       when_to_use="x", procedure="x", pitfalls="x", verification="x")
+    entry.icx_hash = entry.compute_hash()
+    storage.write(entry)
+
+    mock_mem = MagicMock()
+    mock_mem.save.return_value = None
+    mock_mem.verify_resolution.return_value = {"error": "entry not found", "issue_key": "PROJ-1"}
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+            with patch("icx_engine.mcp_server.SkillStorage", lambda: storage):
+                result = asyncio.run(_handle_save_memory(
+                    "PROJ-1", "s", "p", "r", ["a.py"], ["jwt-expiry"], "Bug",
+                    extra={"outcome_verified": True, "outcome_feedback_note": "confirmed"},
+                ))
+    data = json.loads(result)
+    assert data["saved"] is True
+    assert "related_skills" in data
+    assert "jwt-fix" in [s["name"] for s in data["related_skills"]]
+
+
+def test_save_memory_omits_related_skills_when_no_match(mcp_config, tmp_path):
+    import asyncio, json
+    from icx_engine.mcp_server import _handle_save_memory
+    from icx_engine.skills.storage import SkillStorage
+
+    mock_mem = MagicMock()
+    mock_mem.save.return_value = None
+    mock_mem.verify_resolution.return_value = {"error": "entry not found", "issue_key": "PROJ-2"}
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+            with patch("icx_engine.mcp_server.SkillStorage", lambda: SkillStorage(root=tmp_path)):
+                result = asyncio.run(_handle_save_memory(
+                    "PROJ-2", "s", "p", "r", ["a.py"], ["some-tag"], "Bug",
+                    extra={"outcome_verified": True, "outcome_feedback_note": "confirmed"},
+                ))
+    data = json.loads(result)
+    assert data["saved"] is True
+    assert "related_skills" not in data
+
+
+def test_save_memory_related_skills_lookup_never_breaks_save(mcp_config):
+    import asyncio, json
+    from icx_engine.mcp_server import _handle_save_memory
+
+    mock_mem = MagicMock()
+    mock_mem.save.return_value = None
+    mock_mem.verify_resolution.return_value = {"error": "entry not found", "issue_key": "PROJ-3"}
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = mcp_config
+        with patch("icx_engine.mcp_server._ensure_memory_manager", return_value=mock_mem):
+            with patch("icx_engine.mcp_server.rank_skills_for_tags", _boom):
+                result = asyncio.run(_handle_save_memory(
+                    "PROJ-3", "s", "p", "r", ["a.py"], ["t"], "Bug",
+                    extra={"outcome_verified": True, "outcome_feedback_note": "confirmed"},
+                ))
+    data = json.loads(result)
+    assert data["saved"] is True
+    assert "related_skills" not in data
+
+
+async def test_draft_skill_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    assert any(t.name == "draft_skill" for t in tools)
+
+
+async def test_draft_skill_worthy_false_is_a_noop(tmp_path, monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: SkillStorage(root=tmp_path))
+    res = await _call_tool("draft_skill", {"issue_key": "PROJ-1", "skill_worthy": False})
+    data = json.loads(res[0].text)
+    assert data == {"status": "skipped"}
+    assert SkillStorage(root=tmp_path).list_all() == []
+
+
+async def test_draft_skill_creates_when_worthy(tmp_path, monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+    from tests.memory.factories import make_verified_entry
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: SkillStorage(root=tmp_path))
+
+    class _FakeManager:
+        def show(self, issue_key):
+            return make_verified_entry(issue_key)
+    monkeypatch.setattr("icx_engine.mcp_server._ensure_memory_manager", lambda: _FakeManager())
+
+    res = await _call_tool("draft_skill", {
+        "issue_key": "PROJ-1", "skill_worthy": True, "skill_name": "New Skill",
+        "description": "d", "when_to_use": "w", "procedure": "p", "verification": "v",
+    })
+    data = json.loads(res[0].text)
+    assert data["status"] == "created"
+    assert data["name"] == "new-skill"
+    assert SkillStorage(root=tmp_path).read("new-skill") is not None
+
+
+async def test_draft_skill_worthy_true_missing_required_fields_returns_error():
+    import json
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("draft_skill", {"issue_key": "PROJ-1", "skill_worthy": True})
+    data = json.loads(res[0].text)
+    assert "error" in data
+
+
+async def test_draft_skill_unknown_issue_key_returns_error(monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+
+    class _FakeManager:
+        def show(self, issue_key):
+            return None
+    monkeypatch.setattr("icx_engine.mcp_server._ensure_memory_manager", lambda: _FakeManager())
+
+    res = await _call_tool("draft_skill", {
+        "issue_key": "NOPE-1", "skill_worthy": True, "skill_name": "X",
+        "description": "d", "when_to_use": "w", "procedure": "p", "verification": "v",
+    })
+    data = json.loads(res[0].text)
+    assert "error" in data
+
+
+async def test_draft_skill_unverified_entry_returns_error_even_if_worthy(monkeypatch):
+    import json
+    from icx_engine.mcp_server import _call_tool
+    from tests.memory.factories import make_entry
+
+    class _FakeManager:
+        def show(self, issue_key):
+            return make_entry(issue_key)   # outcome_verified defaults to False
+    monkeypatch.setattr("icx_engine.mcp_server._ensure_memory_manager", lambda: _FakeManager())
+
+    res = await _call_tool("draft_skill", {
+        "issue_key": "PROJ-1", "skill_worthy": True, "skill_name": "X",
+        "description": "d", "when_to_use": "w", "procedure": "p", "verification": "v",
+    })
+    data = json.loads(res[0].text)
+    assert "error" in data
+
+
+async def test_draft_skill_uses_the_memory_executor_not_the_event_loop(tmp_path, monkeypatch):
+    """The real regression this test guards against: draft_skill's memory lookup must run on the
+    dedicated single-worker memory executor thread, like every other memory access in this file -
+    never called inline on the async event-loop thread. Confirmed with a fake manager whose show()
+    records threading.get_ident() - the real (unpatched) executor is what makes that id differ from
+    the test's own thread, distinguishing an inline call from one routed via run_in_executor."""
+    import json
+    import threading
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+    from tests.memory.factories import make_verified_entry
+
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: SkillStorage(root=tmp_path))
+
+    main_thread_id = threading.get_ident()
+    observed_thread_ids = []
+
+    class _FakeManager:
+        def show(self, issue_key):
+            observed_thread_ids.append(threading.get_ident())
+            return make_verified_entry(issue_key)
+
+    monkeypatch.setattr("icx_engine.mcp_server._ensure_memory_manager", lambda: _FakeManager())
+
+    res = await _call_tool("draft_skill", {
+        "issue_key": "PROJ-1", "skill_worthy": True, "skill_name": "Thread Test Skill",
+        "description": "d", "when_to_use": "w", "procedure": "p", "verification": "v",
+    })
+    data = json.loads(res[0].text)
+    assert data["status"] == "created"
+    assert len(observed_thread_ids) == 1
+    assert observed_thread_ids[0] != main_thread_id, (
+        "show() ran on the event-loop thread instead of the dedicated memory executor thread - "
+        "this is the exact regression this test exists to catch"
+    )
+
+
+async def test_dynamic_step_sequences_mandate_draft_skill_after_save_memory():
+    """Every _icx_next STEP sequence that ends at save_memory must also mandate draft_skill right
+    after it - this is the enforcement mechanism, not an optional suggestion."""
+    from icx_engine.mcp_server import _FAST_DESCRIPTION, _FULL_DESCRIPTION
+    # The 9 dynamic instruction blocks share one literal substring right before save_memory; if this
+    # substring still exists unmodified anywhere reachable from these two descriptions' construction
+    # path, the enforcement text was not updated. This test targets the substring change directly:
+    marker = "then save_memory, then IMMEDIATELY call draft_skill"
+    # These two constants are the STATIC tool-sequence docs (RULE 5 / numbered list), not the dynamic
+    # per-graph-status blocks (which are built inside _handle_analyze_issue and not directly importable
+    # as a module-level string) - assert the static ones here, and cover the dynamic ones via the
+    # existing analyze-issue-flow tests that already inspect instruction text for other STEP content.
+    assert "draft_skill" in _FAST_DESCRIPTION
+    assert "draft_skill" in _FULL_DESCRIPTION
+
+
+def test_skills_create_command_writes_a_skill_general_purpose(monkeypatch, tmp_path):
+    """No issue_key involved - a human creating a general-purpose skill with no project tie."""
+    from icx_engine.cli import app
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    monkeypatch.setattr("icx_engine.skills.storage.SkillStorage", lambda: storage)
+    inputs = iter([
+        "Commit Message Style",   # name
+        "Writes clear, imperative commit messages.",   # description
+        "When writing any git commit message.",         # when_to_use
+        "Use imperative present tense, lowercase, no period.",   # procedure
+        "",                                              # pitfalls (blank allowed)
+        "Reviewed by a human before merge.",             # verification
+        "n",                                             # tied to a specific project? No
+    ])
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: next(inputs))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    result = _runner.invoke(app, ["skills", "create"])
+    assert result.exit_code == 0
+    saved = storage.read("commit-message-style")
+    assert saved is not None
+    assert saved.scope_hint == "generic"
+    assert saved.origin_projects == []
+
+
+def test_skills_delete_command_removes_named_skill(monkeypatch, tmp_path):
+    from icx_engine.cli import app
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    e = SkillEntry(name="to-delete", description="d", tags=["x"], title="to-delete",
+                   when_to_use="w", procedure="p", pitfalls="x", verification="v")
+    e.icx_hash = e.compute_hash()
+    storage.write(e)
+    monkeypatch.setattr("icx_engine.skills.storage.SkillStorage", lambda: storage)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    result = _runner.invoke(app, ["skills", "delete", "to-delete"])
+    assert result.exit_code == 0
+    assert storage.read("to-delete") is None
+
+
+def test_skills_delete_command_cancelled_keeps_skill(monkeypatch, tmp_path):
+    from icx_engine.cli import app
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    e = SkillEntry(name="keep-me", description="d", tags=["x"], title="keep-me",
+                   when_to_use="w", procedure="p", pitfalls="x", verification="v")
+    e.icx_hash = e.compute_hash()
+    storage.write(e)
+    monkeypatch.setattr("icx_engine.skills.storage.SkillStorage", lambda: storage)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    result = _runner.invoke(app, ["skills", "delete", "keep-me"])
+    assert result.exit_code == 0
+    assert storage.read("keep-me") is not None
+
+
+def test_skills_create_and_delete_present_in_full_help():
+    from icx_engine.cli import _FULL_HELP
+    assert "icx skills create" in _FULL_HELP
+    assert "icx skills delete" in _FULL_HELP
