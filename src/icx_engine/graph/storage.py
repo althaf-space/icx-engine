@@ -370,7 +370,13 @@ def read_meta(project_id: str) -> ProjectInfo | None:
 
 def write_meta(info: ProjectInfo) -> None:
     path = _meta_path(info.project_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            try:
+                path.parent.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
     tmp = path.with_suffix(".tmp")
     data = asdict(info)
     try:
@@ -400,7 +406,13 @@ def write_manifest(
     """Write build_manifest.json for staleness checking."""
     from datetime import datetime, timezone
     path = manifest_path(project_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            try:
+                path.parent.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
     tmp = path.with_suffix(".tmp")
     data = {
         "built_at": datetime.now(timezone.utc).isoformat(),

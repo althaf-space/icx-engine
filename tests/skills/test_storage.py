@@ -39,6 +39,16 @@ def test_read_returns_none_for_missing(tmp_path):
     assert storage.read("does-not-exist") is None
 
 
+def test_write_creates_dir_owner_only_perms_posix(tmp_path):
+    import sys, stat
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    storage.write(_entry())
+    d = tmp_path / "test-skill"
+    if sys.platform != "win32":
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+
 def test_list_all_returns_every_written_skill(tmp_path):
     from icx_engine.skills.storage import SkillStorage
     storage = SkillStorage(root=tmp_path)

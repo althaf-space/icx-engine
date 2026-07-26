@@ -118,11 +118,66 @@ flowchart LR
     D --> E([Editor AI analyses\nall content directly])
 ```
 
+### Testing - agent-driven local verification
+
+```mermaid
+flowchart TD
+    A([Agent: files changed]) --> B[start_testing_session\nclassify + expand files]
+    B --> C[Gate: confirm file list]
+    C --> D[Gate: author test flow\nagent writes the test - unit/api/ui]
+    D --> E[Gate: confirm URL + layer]
+    E --> F[ICX runs local verification\nunit/api/ui - no external tester]
+    F --> G{Issues found?}
+    G -- yes --> H[Gate: show issues,\npropose fixes]
+    H --> I[Gate: user confirms\nfixes applied]
+    I --> F
+    G -- no --> J[Gate: UI check - MANDATORY]
+    J --> K[Gate: memory_save - MANDATORY]
+    K --> L([Session done])
+```
+
+### Sonar - code-quality lookup
+
+```mermaid
+flowchart LR
+    A([Agent: quality question\nor working on a file]) --> B[sonar_status\nconfirm connection]
+    B --> C[sonar_projects / sonar_branches\nresolve project + branch]
+    C --> D[sonar_findings\nscoped to the developer's\nworking files]
+    D --> E([Findings shown\nseverity-graded, in context])
+```
+
+### Boost - methodology-driven prompt
+
+```mermaid
+flowchart LR
+    A([/icx-boost your request]) --> B[icx_boost\nclassify + methodology\n+ adaptive context]
+    B --> C{skills.index\npopulated?}
+    C -- yes --> D[icx_skill_get\nfetch matching skill]
+    C -- no --> E([boosted_prompt\nready to use])
+    D --> E
+    E --> F{Want an even\nstronger result?}
+    F -- optional --> G[icx_boost_refine\nstructured spec ->\nCTO-grade prompt]
+    F -- no --> H([Agent proceeds])
+    G --> H
+```
+
+### Skills - learned procedures, reused across projects
+
+```mermaid
+flowchart LR
+    A([Fix verified\nsave_memory called]) --> B{Agent judges:\nskill-worthy?}
+    B -- no --> Z([Skipped - normal,\nexpected outcome])
+    B -- yes --> C[draft_skill\nnew skill, or refine\nan existing one]
+    C --> D([Stored globally\n~/.icx/skills/])
+    D --> E[Surfaced later via\nicx_boost skills.index\nor icx_skills_index]
+    E --> F([icx_skill_get\nfull procedure retrieved])
+```
+
 ---
 
 ## Install
 
-**Version:** 0.3.9 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
+**Version:** 0.4.3 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
 
 ```
 pipx install icx-engine
@@ -242,6 +297,12 @@ icx memory patterns --project PROJ
 ```
 
 ### Skills
+
+Skills are learned, reusable procedures - distilled from your verified fixes, not tied to any one ticket. Memory answers "have we seen this exact ticket before"; skills answer "do we already know how to do this kind of thing" - when to use the approach, the step-by-step procedure, pitfalls to avoid, and how to verify it worked. Because skills are stored globally (`~/.icx/skills/`), not per-project, a skill learned fixing an OAuth bug in one repo shows up again the next time a different repo hits the same class of problem.
+
+Skills are created automatically: after every `icx memory save` (or the MCP equivalent, `save_memory`), the connected agent judges for itself whether the fix is skill-worthy and, if so, drafts one - or refines an existing skill covering the same ground, so near-duplicates don't pile up. `skill_worthy=false` is a normal, expected outcome for a one-off fix. You can also write one by hand with `icx skills create` for a general procedure you already know, no ticket required.
+
+ICX surfaces relevant skills back to the agent on its own - during `/icx-boost` (as `skills.index`), right after a memory save (as `related_skills`), and via the full unfiltered `icx_skills_index` catalog as a safety net - so a skill learned once keeps paying off without anyone having to remember it exists or re-discover the fix from scratch.
 
 ```sh
 icx skills list                       # list every skill ICX has learned from verified fixes

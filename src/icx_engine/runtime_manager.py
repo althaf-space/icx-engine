@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -216,7 +217,7 @@ def _load_registry() -> dict:
 
 def _save_registry(reg: dict) -> None:
     p = _registry_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
     tmp = p.parent / f"{p.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
     tmp.write_text(json.dumps(reg, indent=2), encoding="utf-8")
     tmp.replace(p)

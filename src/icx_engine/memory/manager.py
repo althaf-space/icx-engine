@@ -20,6 +20,20 @@ from icx_engine.exceptions import ICXMemoryError
 
 _SAFE_KEY_RE = re.compile(r'^[A-Z][A-Z0-9]*-[0-9]+$')
 _BARE_KEY_RE = re.compile(r'[A-Z][A-Z0-9]*-[0-9]+')
+
+
+def _normalize_project_key_filter(project_key: str | None) -> str | None:
+    """Shared by list_entries() and _lean_link_candidates() so both filter identically.
+
+    A value that looks like a full issue key (e.g. "PROJ-123") is reduced to its
+    project prefix ("PROJ") - callers may pass either form.
+    """
+    if not project_key:
+        return None
+    pk = project_key.upper()
+    if _SAFE_KEY_RE.match(pk):
+        pk = pk.split("-", 1)[0]
+    return pk
 from icx_engine.memory.embeddings import EmbeddingsManager, VECTOR_DIM, EMBEDDING_MODEL
 from icx_engine.memory.patterns import PatternManager
 from icx_engine.memory.relations import RelationManager
@@ -406,18 +420,27 @@ class MemoryManager:
             row["vector"] = vector
         return row
 
-    def _recompute_boost(self, entry: MemoryEntry) -> float:
-        """Recalculate cross_reference_boost for an entry."""
+    def _recompute_boost(self, entry: MemoryEntry, _pattern_pool: list[dict] | None = None) -> float:
+        """Recalculate cross_reference_boost for an entry.
+
+        _pattern_pool, when given, is every row already fetched for entry's root_cause_pattern
+        (self included) - callers that already have it (e.g. reinforce_usage) pass it to skip
+        a redundant table scan; siblings are derived from it by excluding entry.id in Python,
+        identical to the WHERE-clause exclusion below.
+        """
         base = min(1.0, entry.usage_count * 0.15)
         pattern_cluster_bonus = 0.0
         try:
-            table = self._get_table()
-            safe_pattern = _sq(entry.root_cause_pattern or "uncategorized")
-            safe_id = _sq(entry.id)
-            siblings = table.search().where(
-                f"root_cause_pattern = '{safe_pattern}' AND id != '{safe_id}'",
-                prefilter=True,
-            ).to_list()
+            safe_id = entry.id
+            if _pattern_pool is not None:
+                siblings = [s for s in _pattern_pool if s.get("id") != safe_id]
+            else:
+                table = self._get_table()
+                safe_pattern = _sq(entry.root_cause_pattern or "uncategorized")
+                siblings = table.search().where(
+                    f"root_cause_pattern = '{safe_pattern}' AND id != '{_sq(safe_id)}'",
+                    prefilter=True,
+                ).to_list()
             entry_citations = set(entry.used_by_tickets)
             if entry_citations:
                 pattern_cluster_bonus = sum(
@@ -460,16 +483,24 @@ class MemoryManager:
         entry.temporal_decay_factor = round(combined, 4)
         return entry.temporal_decay_factor
 
-    def _recalculate_sibling_boosts(self, entry: MemoryEntry, used_by_key: str) -> int:
-        """Recalculate cross_reference_boost for siblings sharing pattern + citation."""
+    def _recalculate_sibling_boosts(
+        self, entry: MemoryEntry, used_by_key: str, _pattern_pool: list[dict] | None = None,
+    ) -> int:
+        """Recalculate cross_reference_boost for siblings sharing pattern + citation.
+
+        _pattern_pool, when given, skips the table scan (see _recompute_boost docstring).
+        """
         try:
-            table = self._get_table()
-            safe_pattern = _sq(entry.root_cause_pattern or "uncategorized")
-            safe_id = _sq(entry.id)
-            siblings = table.search().where(
-                f"root_cause_pattern = '{safe_pattern}' AND id != '{safe_id}'",
-                prefilter=True,
-            ).to_list()
+            if _pattern_pool is not None:
+                siblings = [s for s in _pattern_pool if s.get("id") != entry.id]
+            else:
+                table = self._get_table()
+                safe_pattern = _sq(entry.root_cause_pattern or "uncategorized")
+                safe_id = _sq(entry.id)
+                siblings = table.search().where(
+                    f"root_cause_pattern = '{safe_pattern}' AND id != '{safe_id}'",
+                    prefilter=True,
+                ).to_list()
         except Exception:
             return 0
 
@@ -477,7 +508,7 @@ class MemoryManager:
         for s_dict in siblings:
             if used_by_key in (s_dict.get("used_by_tickets") or []):
                 s_entry = _row_to_entry(s_dict)
-                new_boost = self._recompute_boost(s_entry)
+                new_boost = self._recompute_boost(s_entry, _pattern_pool=_pattern_pool)
                 if abs(new_boost - s_entry.cross_reference_boost) > 0.001:
                     s_entry.cross_reference_boost = new_boost
                     self._upsert_entry(s_entry)
@@ -499,8 +530,27 @@ class MemoryManager:
         elif entry.usage_count >= 5:
             entry.memory_confidence = max(entry.memory_confidence, 0.75)
 
+        # Single scan for the whole call: _recompute_boost(entry) and
+        # _recalculate_sibling_boosts() both need "every row sharing entry's
+        # root_cause_pattern" - fetch it once and pass it to both instead of
+        # re-scanning the table for each. Patch entry's own row in the pool with
+        # its just-appended used_by_key so siblings computed below see the same
+        # citation the original per-call fresh queries would have seen post-upsert.
+        try:
+            table = self._get_table()
+            safe_pattern = _sq(entry.root_cause_pattern or "uncategorized")
+            pattern_pool = table.search().where(
+                f"root_cause_pattern = '{safe_pattern}'", prefilter=True,
+            ).to_list()
+            for row in pattern_pool:
+                if row.get("id") == entry.id:
+                    row["used_by_tickets"] = list(entry.used_by_tickets)
+                    break
+        except Exception:
+            pattern_pool = None
+
         before_boost = entry.cross_reference_boost
-        entry.cross_reference_boost = self._recompute_boost(entry)
+        entry.cross_reference_boost = self._recompute_boost(entry, _pattern_pool=pattern_pool)
         self._upsert_entry(entry)
         try:
             self._log_audit(MemoryAuditEvent(
@@ -513,7 +563,7 @@ class MemoryManager:
         except Exception:
             pass
 
-        siblings_updated = self._recalculate_sibling_boosts(entry, used_by_key)
+        siblings_updated = self._recalculate_sibling_boosts(entry, used_by_key, _pattern_pool=pattern_pool)
         return {
             "source_key": source_key,
             "usage_count": entry.usage_count,
@@ -698,8 +748,8 @@ class MemoryManager:
         except Exception as exc:
             _log.warning("Pattern refresh failed after save of %s: %s", entry.issue_key, exc)
 
-    def _lean_link_candidates(self) -> list:
-        """Candidate entries for auto_link: issue_key + files_changed only.
+    def _lean_link_candidates(self, project_key: str | None = None) -> list:
+        """Candidate entries for auto_link / get_related: issue_key + files_changed only.
 
         Uses a column-projected scan so the 768-dim vector and JSON columns are
         never hydrated. Returns the same rows list_entries() would (identical
@@ -713,17 +763,20 @@ class MemoryManager:
                 return []
             rows = (
                 table.search()
-                .select(["issue_key", "files_changed"])
+                .select(["issue_key", "project_key", "files_changed"])
                 .limit(total)
                 .to_list()
             )
+            _pk = _normalize_project_key_filter(project_key)
+            if _pk:
+                rows = [r for r in rows if (r.get("project_key") or "").upper() == _pk]
             return [
                 _LinkCandidate(r["issue_key"], list(r.get("files_changed") or []))
                 for r in rows
             ]
         except Exception as exc:
             _log.debug("[memory] lean candidate scan failed (%s); using full load", exc)
-            return self.list_entries()
+            return self.list_entries(project_key=project_key)
 
     def list_entries(
         self,
@@ -738,10 +791,8 @@ class MemoryManager:
             _log.debug("[memory] list_entries failed: %s", exc)
             return []
         entries = [_row_to_entry(r) for r in rows]
-        if project_key:
-            _pk = project_key.upper()
-            if _SAFE_KEY_RE.match(_pk):
-                _pk = _pk.split("-", 1)[0]
+        _pk = _normalize_project_key_filter(project_key)
+        if _pk:
             entries = [e for e in entries if e.project_key.upper() == _pk]
         if source_type:
             entries = [e for e in entries if e.source_type == source_type]
@@ -1012,8 +1063,15 @@ class MemoryManager:
         """Return a stats dict including new Phase 1-7 metrics."""
         try:
             table = self._get_table()
-            rows = table.to_arrow().to_pylist()
-            entry_count = len(rows)
+            total = table.count_rows()
+            rows = (
+                table.search()
+                .select(["outcome_verified", "negated", "cross_reference_boost", "temporal_decay_factor"])
+                .limit(total)
+                .to_list()
+                if total else []
+            )
+            entry_count = total
         except Exception:
             rows = []
             entry_count = 0
@@ -1087,11 +1145,11 @@ class MemoryManager:
         if issue_key:
             related = self._relations.get_related(issue_key)
             if project_key:
-                in_project = {e.issue_key for e in self.list_entries(project_key=project_key)}
+                in_project = {c.issue_key for c in self._lean_link_candidates(project_key=project_key)}
                 related = [r for r in related if r["issue_key"] in in_project]
         if not related and files:
-            all_entries = self.list_entries(project_key=project_key)
-            related = self._relations.get_related_by_files(files, all_entries, exclude_key=issue_key)
+            candidates = self._lean_link_candidates(project_key=project_key)
+            related = self._relations.get_related_by_files(files, candidates, exclude_key=issue_key)
         return related
 
     def get_patterns(self, project_key: str | None = None) -> list[dict]:

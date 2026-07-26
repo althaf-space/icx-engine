@@ -111,6 +111,17 @@ def test_registry_prunes_stale_path(fake_home):
     assert rm.lookup_runtime("java", "17") is None  # path missing -> pruned
 
 
+def test_save_registry_creates_icx_dir_owner_only_perms_posix(fake_home):
+    import sys, stat
+    real = fake_home / "jdk17"
+    real.mkdir()
+    rm.remember_runtime("java", "17", str(real))
+    icx_dir = fake_home / ".icx"
+    assert icx_dir.exists()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(icx_dir.stat().st_mode) == 0o700
+
+
 # -- Task 3/4: discovery, validation, resolution -------------------------------
 
 def test_resolve_not_required(fake_home, tmp_path):

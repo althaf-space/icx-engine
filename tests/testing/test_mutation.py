@@ -1,4 +1,6 @@
 """Tests for the mutation-testing filter (rejects AI-draft tests that verify nothing)."""
+from pathlib import Path
+
 from icx_engine.testing.mutation import (
     select_mutation_tool, build_mutation_command,
     parse_mutmut, parse_stryker, parse_pit,
@@ -30,6 +32,18 @@ def test_build_command_pit_sets_java_home(tmp_path):
 
 def test_build_command_unsupported():
     assert build_mutation_command("cobol", "/x", None) is None
+
+
+def test_build_command_stryker_report_path_is_pathlib_joined(tmp_path):
+    spec = build_mutation_command("javascript", tmp_path, None)
+    assert spec is not None
+    assert Path(spec.report_path) == tmp_path / "reports" / "mutation" / "mutation-report.json"
+
+
+def test_build_command_infection_report_path_is_pathlib_joined(tmp_path):
+    spec = build_mutation_command("php", tmp_path, None)
+    assert spec is not None
+    assert Path(spec.report_path) == tmp_path / "infection.json"
 
 
 def test_parse_mutmut():

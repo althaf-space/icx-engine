@@ -1476,4 +1476,15 @@ async def test_runtime_resolver_ui_uses_harness_node(monkeypatch):
     assert await resolver("agent") == "/opt/node20"
 
 
+def test_save_test_record_creates_history_dir_owner_only_perms_posix(tmp_path, monkeypatch):
+    import sys, stat
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    state = _base_state()
+    nodes._save_test_record(state)
+    history_dir = tmp_path / ".icx"
+    assert (history_dir / "testing_history.json").exists()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(history_dir.stat().st_mode) == 0o700
+
+
 

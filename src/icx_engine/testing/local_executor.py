@@ -32,9 +32,9 @@ def _prepend_tool_env(spec, install_path: str) -> None:
     """Prepend an ICX-installed tool's dir (and its bin/Scripts) to the spec's PATH so a bare command
     resolves to the pinned binary; expose it on PYTHONPATH too for pip --target packages."""
     import os
-    parts = [install_path, os.path.join(install_path, "bin")]
+    parts = [install_path, str(Path(install_path) / "bin")]
     if os.name == "nt":
-        parts.append(os.path.join(install_path, "Scripts"))
+        parts.append(str(Path(install_path) / "Scripts"))
     env = dict(spec.env or {})
     cur_path = env.get("PATH", os.environ.get("PATH", ""))
     env["PATH"] = os.pathsep.join(parts) + (os.pathsep + cur_path if cur_path else "")
@@ -237,7 +237,7 @@ async def run_ui_discovery(
     if ui_headed:
         env["ICX_UI_HEADED"] = "1"
 
-    out = os.path.join(tempfile.gettempdir(), f".icx-discover-{os.getpid()}-{id(target_url)}.json")
+    out = str(Path(tempfile.gettempdir()) / f".icx-discover-{os.getpid()}-{id(target_url)}.json")
     cmd = [node, harness, "--url", target_url, "--out", out, "--timeout", str(int(timeout * 1000))]
     if storage_state:
         cmd += ["--state", storage_state]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -1662,7 +1663,7 @@ async def node_ui_check(state: TestingState) -> dict:
 def _save_test_record(state: TestingState) -> None:
     import json as _json
     history_path = Path.home() / ".icx" / "testing_history.json"
-    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
     try:
         records: list[dict[str, Any]] = _json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
     except Exception:

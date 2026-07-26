@@ -3750,7 +3750,8 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         justifications = args.get("justifications") if isinstance(args.get("justifications"), dict) else {}
         justifications = {str(k): str(v) for k, v in justifications.items()}
         keywords = [str(k) for k in (args.get("keywords") or [])]
-        project_path = args.get("project_path") or _lock_plan_repo(chosen)
+        from icx_engine.testing.nodes import _local_repo_root
+        project_path = args.get("project_path") or _local_repo_root({"file_paths": chosen})
 
         from icx_engine.context_completeness import fan_out, fuse_rank, miss_check
         graph_sig, grep_sig, semantic_sig, memory_sig = _context_signals(project_path, chosen, keywords)
@@ -4282,6 +4283,9 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
 # path + mtime_ns so any rebuild (atomic write -> new mtime) invalidates the entry. Bounded
 # by the number of distinct projects; no eviction needed.
 _QUERIER_CACHE: dict = {}
+# Tool handlers run via loop.run_in_executor -> worker threads, so concurrent calls for the
+# same project can race on the check-then-store below without this.
+_QUERIER_CACHE_LOCK = _threading.Lock()
 
 
 def _cached_querier(graph_json_path):
@@ -4293,12 +4297,13 @@ def _cached_querier(graph_json_path):
         mtime = graph_json_path.stat().st_mtime_ns
     except OSError:
         return GraphQuerier(graph_json_path)
-    cached = _QUERIER_CACHE.get(key)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
-    q = GraphQuerier(graph_json_path)
-    _QUERIER_CACHE[key] = (mtime, q)
-    return q
+    with _QUERIER_CACHE_LOCK:
+        cached = _QUERIER_CACHE.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        q = GraphQuerier(graph_json_path)
+        _QUERIER_CACHE[key] = (mtime, q)
+        return q
 
 
 def _degraded_graph_response(code: str, project_path, warn_user: str, extra: dict | None = None) -> dict:
@@ -4326,18 +4331,6 @@ def _degraded_graph_response(code: str, project_path, warn_user: str, extra: dic
     if extra:
         resp.update(extra)
     return resp
-
-
-def _lock_plan_repo(chosen: list[str]) -> str:
-    """Best-effort repo root for lock_plan when project_path is not given: common dir of chosen files."""
-    import os
-    dirs = [os.path.dirname(p) for p in chosen if p]
-    if not dirs:
-        return os.getcwd()
-    try:
-        return os.path.commonpath(dirs) if len(dirs) > 1 else (dirs[0] or os.getcwd())
-    except ValueError:
-        return dirs[0] or os.getcwd()
 
 
 def _lock_plan_prior_fix(chosen: list[str]) -> set:

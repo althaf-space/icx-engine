@@ -400,6 +400,62 @@ def test_status_returns_dict(tmp_path):
     assert "model" in stats
 
 
+def test_status_metrics_correct_with_mixed_entries(tmp_path):
+    """Regression test for the status() projection fix: switching from full
+    to_arrow().to_pylist() to a column-projected scan must not drop any field
+    the computed metrics need."""
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-1", id="id-1"))
+        mgr.save(_make_entry(issue_key="PROJ-2", id="id-2"))
+        mgr.negate_resolution("PROJ-2", "wrong fix")
+        stats = mgr.status()
+
+    assert stats["entry_count"] == 2
+    assert stats["negated"] == 1
+    assert stats["outcome_verified"] == 0
+    assert 0.0 <= stats["avg_cross_reference_boost"] <= 1.0
+    assert 0.0 <= stats["avg_temporal_decay_factor"] <= 1.0
+
+
+def test_get_related_project_key_filter_excludes_other_projects(tmp_path):
+    """Regression test for switching get_related()'s project_key path from
+    list_entries() to the lean _lean_link_candidates() projection."""
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-1", id="id-1", project_key="PROJ", files_changed=["src/a.py"]))
+        mgr.save(_make_entry(issue_key="OTHER-1", id="id-2", project_key="OTHER", files_changed=["src/a.py"]))
+        result = mgr.get_related(None, "PROJ", files=["src/a.py"])
+
+    keys = {r["issue_key"] for r in result}
+    assert "PROJ-1" in keys
+    assert "OTHER-1" not in keys
+
+
+def test_lean_link_candidates_matches_list_entries_for_project_filter(tmp_path):
+    """_lean_link_candidates(project_key=...) must select exactly the same rows
+    list_entries(project_key=...) would, just without full hydration."""
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-1", id="id-1", project_key="PROJ"))
+        mgr.save(_make_entry(issue_key="PROJ-2", id="id-2", project_key="PROJ"))
+        mgr.save(_make_entry(issue_key="OTHER-1", id="id-3", project_key="OTHER"))
+
+        full = {e.issue_key for e in mgr.list_entries(project_key="PROJ")}
+        lean = {c.issue_key for c in mgr._lean_link_candidates(project_key="PROJ")}
+        # A full issue key as the filter should split to its project prefix, same as list_entries.
+        lean_via_issue_key = {c.issue_key for c in mgr._lean_link_candidates(project_key="PROJ-1")}
+
+    assert full == lean == {"PROJ-1", "PROJ-2"}
+    assert lean_via_issue_key == {"PROJ-1", "PROJ-2"}
+
+
 def test_dimension_mismatch_raises_memory_error(tmp_path):
     import lancedb
     import pyarrow as pa

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 from icx_engine.skills.schema import SkillEntry
@@ -34,7 +35,7 @@ class SkillStorage:
 
     def write(self, entry: SkillEntry) -> None:
         path = self._path(entry.name)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
         tmp = path.parent / f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
         try:
             tmp.write_text(entry.to_markdown(), encoding="utf-8")

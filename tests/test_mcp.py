@@ -4261,3 +4261,56 @@ def test_skills_create_and_delete_present_in_full_help():
     from icx_engine.cli import _FULL_HELP
     assert "icx skills create" in _FULL_HELP
     assert "icx skills delete" in _FULL_HELP
+
+
+def test_cached_querier_reuses_instance_for_unchanged_mtime(tmp_path, monkeypatch):
+    from icx_engine import mcp_server
+
+    build_count = {"n": 0}
+
+    class _FakeQuerier:
+        def __init__(self, path):
+            build_count["n"] += 1
+
+    monkeypatch.setattr("icx_engine.graph.query.GraphQuerier", _FakeQuerier)
+    monkeypatch.setattr(mcp_server, "_QUERIER_CACHE", {})
+    graph_json = tmp_path / "graph.json"
+    graph_json.write_text("{}", encoding="utf-8")
+
+    first = mcp_server._cached_querier(graph_json)
+    second = mcp_server._cached_querier(graph_json)
+    assert first is second
+    assert build_count["n"] == 1
+
+
+def test_cached_querier_concurrent_calls_construct_once(tmp_path, monkeypatch):
+    """Regression test for the _QUERIER_CACHE race: concurrent misses on the same
+    unchanged graph.json must not each construct their own GraphQuerier."""
+    import threading
+    from icx_engine import mcp_server
+
+    build_count = {"n": 0}
+    build_lock = threading.Lock()
+
+    class _SlowFakeQuerier:
+        def __init__(self, path):
+            import time
+            with build_lock:
+                build_count["n"] += 1
+            time.sleep(0.05)  # widen the race window
+
+    monkeypatch.setattr("icx_engine.graph.query.GraphQuerier", _SlowFakeQuerier)
+    monkeypatch.setattr(mcp_server, "_QUERIER_CACHE", {})
+    graph_json = tmp_path / "graph.json"
+    graph_json.write_text("{}", encoding="utf-8")
+
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(mcp_server._cached_querier(graph_json)))
+               for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert build_count["n"] == 1
+    assert len({id(r) for r in results}) == 1

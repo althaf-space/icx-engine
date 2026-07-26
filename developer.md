@@ -1876,6 +1876,7 @@ CLI commands: `icx memory by-file <PATH> [--project PROJ]` and `icx memory hotsp
 - `memory/embeddings.py:EMBEDDING_MODEL` - changing this string invalidates all existing stored vectors. Use `icx memory migrate` to re-embed; never change without a migration path.
 - `memory/manager.py:_RRF_K` - the RRF constant (60) is standard. Do not change without re-tuning thresholds.
 - `memory/schema.py:MemoryEntry` - adding fields requires a LanceDB schema migration. Add a migration path before changing.
+- `memory/stack_fingerprint.py` imports from `graph/parser/detect.py`, and `graph/parser/llm_embedding_filter.py` has a deferred, try/except-guarded import back from `memory/embeddings.py`. This is a known, accepted bidirectional coupling between the two modules, not a bug - both imports are one-directional per call site and the guard prevents an import-time circular crash. Do not "fix" this by removing the guard or by blindly enforcing one-way module dependency; untangling it (deciding which module should own the shared logic) is a deliberate design decision, not a drive-by refactor.
 
 ---
 
@@ -2153,6 +2154,9 @@ Agents can instantiate `GraphQuerier(graph_json_path)` directly from the path re
 - `graph/querier.py` cluster file write strategy - must use write-in-place + stale-file removal, NOT `shutil.rmtree` + `mkdir`. The rmtree pattern has a TOCTOU window where a symlink can be inserted between delete and recreate, redirecting all subsequent file writes to an attacker-controlled path.
 - `cli.py` memory commands - must call `check_ready()` (raises `ICXMemoryError` if model absent), never `ensure_ready()`. Graph and other commands must not touch the embedding model at all - the graph pipeline uses the LLM API directly, not the embedding model.
 - `~/.icx/graphs/` layout - tools and tests both rely on this exact directory structure.
+- `graph/parser/resolvers/*.py` literal `"/"` concatenation (e.g. `if src_file.startswith(project_str + "/")`) - this is intentional, not a hardcoded-separator bug. `project_str`/`root_posix`-style variables are explicitly POSIX-normalized (`str(x).replace("\\", "/")`) upstream to build stable, cross-platform graph node keys - they are not filesystem paths and pathlib is the wrong tool here. Do not "fix" these into `pathlib.Path` joins; doing so silently breaks graph node-key identity across resolvers.
+- `memory/stack_fingerprint.py` <-> `graph/parser/llm_embedding_filter.py` coupling - see the memory module's "What NOT to touch" (Section 7) for details; the same guarded, accepted dependency shows up from this side too.
+- New git-workflow lifecycle code (branch/sync/commit/MR tooling) lands in its own module (e.g. `git/`), with its own CLI command group and its own MCP tool registration point - not appended into `mcp_server.py`'s or `cli.py`'s existing bodies. Both files are already large; new feature areas should not add to that growth.
 
 ---
 
