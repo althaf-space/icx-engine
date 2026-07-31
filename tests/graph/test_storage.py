@@ -22,6 +22,8 @@ from icx_engine.graph.storage import (
     remove_project,
     read_meta,
     write_meta,
+    write_manifest,
+    manifest_path,
     set_build_status,
     ProjectInfo,
     _is_relative_to,
@@ -544,3 +546,33 @@ def test_find_project_by_tracker_key_returns_first_match(tmp_path, monkeypatch):
     result = find_project_by_tracker_key("MYAPP")
     assert result is not None
     assert result.name in {"app-svc", "app-ui"}
+
+
+# ---------------------------------------------------------------------------
+# write_meta / write_manifest - parent dir perms when project dir doesn't
+# already exist (e.g. meta written before the project dir was ever created)
+# ---------------------------------------------------------------------------
+
+def test_write_meta_creates_missing_parent_owner_only_perms_posix():
+    import sys, stat
+    info = ProjectInfo(
+        name="freshproj", path="/tmp/freshproj", project_id="freshproj",
+        last_built=None, git_commit=None, file_count=0, build_status="not_built",
+    )
+    write_meta(info)
+    parent = _project_dir_path("freshproj")
+    assert parent.exists()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+
+
+def test_write_manifest_creates_missing_parent_owner_only_perms_posix():
+    import sys, stat
+    write_manifest(
+        "freshproj2", project_root="/tmp/freshproj2",
+        total_files=1, git_commit=None, file_mtimes={},
+    )
+    parent = manifest_path("freshproj2").parent
+    assert parent.exists()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(parent.stat().st_mode) == 0o700

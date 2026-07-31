@@ -19,6 +19,24 @@ def test_grep_skips_vendor_dirs(tmp_path: Path):
     assert not any("node_modules" in p for p in found)
 
 
+def test_grep_prunes_node_modules_without_descending(tmp_path: Path):
+    # Real match outside node_modules must still be found (behavior preserved), while a file inside
+    # node_modules with a matching import must never surface - proving os.walk pruning actually skips
+    # descending into the directory, not just filtering results after the fact.
+    (tmp_path / "Button.tsx").write_text("export default function Button(){return <button/>;}", encoding="utf-8")
+    (tmp_path / "Form.tsx").write_text("import Button from './Button';\n", encoding="utf-8")
+    vendor = tmp_path / "node_modules" / "some_pkg"
+    vendor.mkdir(parents=True)
+    (vendor / "index.js").write_text("import Button from './Button';\n", encoding="utf-8")
+
+    found = expand_via_grep([str(tmp_path / "Button.tsx")], tmp_path)
+    rel = {Path(p).relative_to(tmp_path).as_posix() for p in found}
+
+    assert "Form.tsx" in rel
+    assert not any("node_modules" in p for p in rel)
+    assert not any(p.endswith("index.js") for p in rel)
+
+
 def test_union_rank_orders_and_tags():
     ranked = union_rank(
         seeds=["a.tsx"],

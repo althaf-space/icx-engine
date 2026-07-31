@@ -1,4 +1,4 @@
-"""Tests for graph/querier.py - generate_graph_report, _role_tag, _sanitize_cluster_filename."""
+"""Tests for graph/report.py - generate_graph_report, _role_tag, _sanitize_cluster_filename."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from icx_engine.graph.querier import generate_graph_report, _role_tag, _sanitize_cluster_filename
+from icx_engine.graph.report import generate_graph_report, _role_tag, _sanitize_cluster_filename
 
 
 # ---------------------------------------------------------------------------

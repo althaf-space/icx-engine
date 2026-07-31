@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path, PurePosixPath
 
@@ -27,23 +28,26 @@ def expand_via_grep(file_paths: list[str], project_root: Path, max_files: int = 
     )
     found: set[str] = set()
     scanned = 0
-    for path in project_root.rglob("*"):
+    for dirpath, dirnames, filenames in os.walk(project_root):
         if scanned >= max_files:
             break
-        if not path.is_file() or path.suffix.lower() not in _SOURCE_EXT:
-            continue
-        if any(part in _SKIP_DIRS for part in path.parts):
-            continue
-        p_norm = _norm(str(path))
-        if p_norm in seeds_norm:
-            continue
-        scanned += 1
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if import_re.search(text):
-            found.add(str(path))
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for filename in filenames:
+            if scanned >= max_files:
+                break
+            path = Path(dirpath) / filename
+            if path.suffix.lower() not in _SOURCE_EXT:
+                continue
+            p_norm = _norm(str(path))
+            if p_norm in seeds_norm:
+                continue
+            scanned += 1
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if import_re.search(text):
+                found.add(str(path))
     return sorted(found)
 
 

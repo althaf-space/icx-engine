@@ -10,6 +10,7 @@ Files are supplied by the caller only - ICX never derives them.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -20,11 +21,13 @@ from icx_engine.models.sonar import (
     SonarScope,
     SonarTestGap,
 )
-from icx_engine.sonar import rules
+from icx_engine.sonar import rules as _selection_rules
 from icx_engine.sonar.client import SonarClient, _BRANCH_LIST_CAP, _PROJECT_LIST_CAP
 from icx_engine.sonar.parse import parse_sonar_url
 
 _log = logging.getLogger(__name__)
+
+_MAX_CONCURRENT_FILE_FETCHES = 8  # bound per-file HTTP fan-out so a large scope doesn't hammer Sonar
 
 DISABLED_MSG = "No active SonarQube connection. Run `icx sonar add` to add one."
 NOT_CONFIGURED_MSG = "The active SonarQube connection has no stored token. Run `icx sonar add` to reconfigure it."
@@ -68,6 +71,8 @@ def _build_scope(
     assignee: str | None,
     new_code_only: bool,
     limit: int,
+    rules: list[str] | None = None,
+    tags: list[str] | None = None,
 ) -> SonarScope:
     return SonarScope(
         project=project,
@@ -76,6 +81,8 @@ def _build_scope(
         types=list(types or []),
         severities=list(severities or []),
         statuses=list(statuses or []),
+        rules=list(rules or []),
+        tags=list(tags or []),
         author=author,
         assignee=assignee,
         new_code_only=bool(new_code_only),
@@ -206,7 +213,7 @@ def _selection_instructions(kind: str, total: int, shown: int, truncated: bool, 
         )
     else:
         status = f"{total} {kind}(s) returned. Ask the user which one, or let them paste the exact {kind}."
-    body = rules.selection_rules()
+    body = _selection_rules.selection_rules()
     return f"{status}\n\n{body}" if body else status
 
 
@@ -265,6 +272,162 @@ async def quality_gate(project: str, branch: str | None = None, cfg: Any | None 
         return (await client.quality_gate(project, branch)).model_dump()
 
 
+async def top_files(
+    project: str, metric: str, branch: str | None = None, limit: int = 20,
+    ascending: bool = False, qualifiers: list[str] | None = None, cfg: Any | None = None,
+) -> dict:
+    """Rank files (or directories) in `project` by `metric` - answers
+    'top N files by X'. `ascending=True` for 'worst is lowest' metrics like coverage."""
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        rows, total = await client.component_tree(
+            project, [metric], branch=branch, sort_metric=metric, ascending=ascending,
+            qualifiers=qualifiers or ["FIL"], page_size=min(limit, 500), max_pages=1,
+        )
+    shown = rows[:limit]
+    return {
+        "project": project, "branch": branch, "metric": metric, "total": total,
+        "returned": len(shown), "files": [r.model_dump() for r in shown],
+    }
+
+
+async def metric_history(
+    project: str, metrics: list[str], branch: str | None = None,
+    date_from: str | None = None, date_to: str | None = None, cfg: Any | None = None,
+) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        history = await client.search_history(project, metrics, branch=branch, date_from=date_from, date_to=date_to)
+    return {
+        "project": project, "branch": branch,
+        "history": {k: [p.model_dump() for p in v] for k, v in history.items()},
+    }
+
+
+async def analyses(
+    project: str, branch: str | None = None,
+    date_from: str | None = None, date_to: str | None = None, cfg: Any | None = None,
+) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        items = await client.project_analyses(project, branch=branch, date_from=date_from, date_to=date_to)
+    return {"project": project, "branch": branch, "analyses": [a.model_dump() for a in items]}
+
+
+async def rule(rule_key: str, cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        return (await client.rule_show(rule_key)).model_dump()
+
+
+async def rules(
+    language: str | None = None, tags: list[str] | None = None,
+    repositories: list[str] | None = None, query: str | None = None,
+    page_size: int = 50, cfg: Any | None = None,
+) -> dict:
+    """Browse/search rules by language/tag/repository - answers 'what rules
+    exist for this language' or 'list all rules tagged X', complementing
+    rule() which fetches one specific rule by key."""
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        items, total = await client.rules_search(
+            language=language, tags=tags, repositories=repositories, query=query, page_size=page_size,
+        )
+    return {
+        "total": total, "returned": len(items),
+        "rules": [r.model_dump() for r in items],
+    }
+
+
+async def hotspot(hotspot_key: str, cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        return (await client.hotspot_show(hotspot_key)).model_dump()
+
+
+async def source_lines(
+    project: str, path: str, branch: str | None = None,
+    from_line: int | None = None, to_line: int | None = None, cfg: Any | None = None,
+) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        lines = await client.sources_lines(f"{project}:{path}", branch=branch, from_line=from_line, to_line=to_line)
+    return {"project": project, "path": path, "branch": branch, "lines": [l.model_dump() for l in lines]}
+
+
+async def metrics(page_size: int = 100, cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        items, total = await client.metrics_search(page_size=page_size)
+    return {"total": total, "returned": len(items), "metrics": [m.model_dump() for m in items]}
+
+
+async def quality_gate_definition(project: str | None = None, gate_name: str | None = None, cfg: Any | None = None) -> dict:
+    if not project and not gate_name:
+        raise ValueError("Either project or gate_name is required.")
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        gate = await client.qualitygates_get_by_project(project) if project else await client.qualitygates_show(name=gate_name)
+    return gate.model_dump()
+
+
+async def quality_profiles(language: str | None = None, project: str | None = None, cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        items = await client.quality_profiles_search(language=language, project=project)
+    return {"profiles": [p.model_dump() for p in items]}
+
+
+async def issue_authors(project: str | None = None, query: str | None = None, cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        authors = await client.issues_authors(project=project, query=query)
+    return {"authors": authors}
+
+
+async def issue_tags(project: str | None = None, query: str | None = None, cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        tags = await client.issues_tags(project=project, query=query)
+    return {"tags": tags}
+
+
+async def issue_changelog(issue_key: str, cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        entries = await client.issues_changelog(issue_key)
+    return {"issue": issue_key, "changelog": [e.model_dump() for e in entries]}
+
+
+async def system_health(cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        health = await client.system_health()
+    return health.model_dump()
+
+
+async def languages(query: str | None = None, cfg: Any | None = None) -> dict:
+    cfg = cfg or ConfigManager.load()
+    _require_enabled(cfg)
+    async with _make_client(cfg) as client:
+        items = await client.languages_list(query=query)
+    return {"languages": items}
+
+
 def _summarize(findings: list) -> dict:
     by_type: dict[str, int] = {}
     by_severity: dict[str, int] = {}
@@ -285,12 +448,14 @@ async def findings(
     assignee: str | None = None,
     new_code_only: bool = False,
     limit: int = 1000,
+    rules: list[str] | None = None,
+    tags: list[str] | None = None,
     cfg: Any | None = None,
 ) -> dict:
     cfg = cfg or ConfigManager.load()
     _require_enabled(cfg)
     scope = _build_scope(project, branch, files, types, severities, statuses,
-                         author, assignee, new_code_only, limit)
+                         author, assignee, new_code_only, limit, rules, tags)
     async with _make_client(cfg) as client:
         issues, total, truncated = await client.issues(scope)
         want_hotspots = (not scope.types) or ("SECURITY_HOTSPOT" in scope.types)
@@ -317,12 +482,14 @@ async def report(
     assignee: str | None = None,
     new_code_only: bool = False,
     limit: int = 1000,
+    rules: list[str] | None = None,
+    tags: list[str] | None = None,
     cfg: Any | None = None,
 ) -> dict:
     cfg = cfg or ConfigManager.load()
     _require_enabled(cfg)
     scope = _build_scope(project, branch, files, types, severities, statuses,
-                         author, assignee, new_code_only, limit)
+                         author, assignee, new_code_only, limit, rules, tags)
 
     _active = cfg.active_sonar_connection()
     server_url = _active.url if _active else ""
@@ -334,12 +501,19 @@ async def report(
         hotspots = await client.hotspots(scope) if want_hotspots else []
 
         file_measures: dict = {}
-        for path in scope.files:
-            try:
-                fm = await client.measures(f"{project}:{path}", branch)
-                file_measures[path] = fm
-            except Exception as exc:
-                _log.debug("[sonar] per-file measures failed for %s: %s", path, exc)
+        if scope.files:
+            sem = asyncio.Semaphore(_MAX_CONCURRENT_FILE_FETCHES)
+
+            async def _fetch_measures(path: str) -> tuple[str, Any]:
+                async with sem:
+                    try:
+                        return path, await client.measures(f"{project}:{path}", branch)
+                    except Exception as exc:
+                        _log.debug("[sonar] per-file measures failed for %s: %s", path, exc)
+                        return path, None
+
+            results = await asyncio.gather(*(_fetch_measures(path) for path in scope.files))
+            file_measures = {path: fm for path, fm in results if fm is not None}
 
         duplications = await client.duplications(project, scope.files, branch) if scope.files else []
 

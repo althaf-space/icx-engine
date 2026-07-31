@@ -3,6 +3,7 @@ the rubric, and aggregate the lift overall, per difficulty class, and per archet
 injected so the harness is pure and testable; a generator failure scores 0 for that run (never crashes)."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from icx_engine.boost.benchmark.corpus import load_corpus
@@ -28,14 +29,15 @@ def _safe_gen(generate, prompt: str) -> str:
         return ""
 
 
-def _avg_fraction(generate, grade_fn, prompt: str, rubric, repeats: int) -> tuple:
-    """Average coverage fraction over `repeats` single-shot runs (reduces model variance). Returns
-    (avg_fraction, avg_covered_count) rounded. repeats<=1 is a single run."""
-    n = max(1, int(repeats))
+def _avg_fraction_from_outputs(grade_fn, outputs: list, rubric) -> tuple:
+    """Average coverage fraction over already-generated `outputs` (reduces model variance). Returns
+    (avg_fraction, avg_covered_count) rounded. Grading itself is cheap/local, so it stays on the
+    calling thread; only the (already-collected) generate() outputs were run concurrently."""
+    n = len(outputs) or 1
     fracs = []
     covered = []
-    for _ in range(n):
-        g = grade_fn(_safe_gen(generate, prompt), rubric)
+    for out in outputs:
+        g = grade_fn(out, rubric)
         fracs.append(g.fraction)
         covered.append(len(g.hits))
     return round(sum(fracs) / n, 4), round(sum(covered) / n, 2)
@@ -64,13 +66,41 @@ def _group_stats(rows: list, key: str) -> dict:
 
 def run_benchmark(generate, boost, corpus=None, repeats: int = 1) -> BenchReport:
     """Run each prompt raw vs boosted, grade requirement coverage, aggregate. `repeats` averages each
-    single-shot run to reduce model variance (repeats=1 is a single run)."""
+    single-shot run to reduce model variance (repeats=1 is a single run).
+
+    Every (prompt x raw/boosted x repeat) `generate`/`boost` call is independent, so they run
+    concurrently on a thread pool (`generate`/`boost` are synchronous callables, not async) instead of
+    the equivalent nested-sequential loop. Two waves preserve the one real dependency - a prompt's
+    boosted-generate calls need that prompt's `boost()` output first:
+      wave 1 (concurrent): every prompt's `boost()` call + every prompt's raw `generate()` calls.
+      wave 2 (concurrent): every prompt's boosted `generate()` calls, using wave 1's boost output.
+    Results are collected back into per-prompt lists indexed by corpus position (not completion
+    order), so `rep.rows` order and every value are identical to the old sequential code."""
     corpus = corpus if corpus is not None else load_corpus()
+    items = list(corpus)
+    n_repeats = max(1, int(repeats))
     rep = BenchReport()
+    if not items:
+        rep.by_difficulty = _group_stats(rep.rows, "difficulty")
+        rep.by_archetype = _group_stats(rep.rows, "archetype")
+        return rep
+
+    max_workers = min(32, len(items) * (2 * n_repeats + 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        boost_futures = [pool.submit(boost, p.prompt) for p in items]
+        raw_futures = [[pool.submit(_safe_gen, generate, p.prompt) for _ in range(n_repeats)]
+                       for p in items]
+        boosted_prompts = [f.result() for f in boost_futures]
+        raw_outputs = [[f.result() for f in fs] for fs in raw_futures]
+
+        boosted_futures = [[pool.submit(_safe_gen, generate, bp) for _ in range(n_repeats)]
+                           for bp in boosted_prompts]
+        boosted_outputs = [[f.result() for f in fs] for fs in boosted_futures]
+
     raw_total = boosted_total = 0.0
-    for p in corpus:
-        raw, raw_cov = _avg_fraction(generate, grade, p.prompt, p.rubric, repeats)
-        boosted, boost_cov = _avg_fraction(generate, grade, boost(p.prompt), p.rubric, repeats)
+    for p, raw_out, boosted_out in zip(items, raw_outputs, boosted_outputs):
+        raw, raw_cov = _avg_fraction_from_outputs(grade, raw_out, p.rubric)
+        boosted, boost_cov = _avg_fraction_from_outputs(grade, boosted_out, p.rubric)
         req_total = len(p.rubric)
         rep.rows.append({
             "id": p.id, "archetype": p.archetype,
@@ -81,7 +111,7 @@ def run_benchmark(generate, boost, corpus=None, repeats: int = 1) -> BenchReport
         })
         raw_total += raw
         boosted_total += boosted
-    n = len(corpus) or 1
+    n = len(items) or 1
     rep.raw_avg = round(raw_total / n, 4)
     rep.boosted_avg = round(boosted_total / n, 4)
     rep.lift_pct = round((rep.boosted_avg - rep.raw_avg) / rep.raw_avg * 100, 1) if rep.raw_avg else 0.0

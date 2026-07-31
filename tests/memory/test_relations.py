@@ -39,6 +39,25 @@ def _mock_embeddings():
 
 # -- RelationManager unit tests ------------------------------------------------
 
+def test_get_related_uses_where_filter_not_full_table_scan(tmp_path):
+    # Perf fix: get_related must push the filter down via .search().where(...)
+    # instead of pulling the whole table into Python and filtering there.
+    from icx_engine.memory.relations import RelationManager
+
+    rel = RelationManager(db_path=tmp_path)
+    e1 = _make_entry(issue_key="PROJ-1", files_changed=["src/auth/token.py"])
+    e2 = _make_entry(issue_key="PROJ-2", id=str(uuid.uuid4()), files_changed=["src/auth/token.py"])
+    rel.auto_link(e1, [e2])
+
+    real_table = rel._get_table()
+    with patch.object(type(real_table), "to_arrow", side_effect=AssertionError(
+        "get_related must not call to_arrow() - it should filter via .where() instead"
+    )), patch.object(rel, "_get_table", return_value=real_table):
+        related = rel.get_related("PROJ-1")
+
+    assert any(r["issue_key"] == "PROJ-2" for r in related)
+
+
 def test_shares_file_edge_created(tmp_path):
     from icx_engine.memory.relations import RelationManager
 
@@ -95,6 +114,24 @@ def test_strength_proportional_to_overlap(tmp_path):
     related = rel.get_related("PROJ-1")
     assert len(related) == 1
     assert related[0]["strength"] == pytest.approx(0.5, abs=0.01)
+
+
+def test_add_relation_logs_stale_edge_delete_failure(tmp_path, caplog):
+    # Regression: a failed stale-edge delete must not vanish silently - it's still
+    # best-effort (never blocks the upsert), but now traceable via debug log.
+    import logging
+    from icx_engine.memory.relations import RelationManager
+
+    rel = RelationManager(db_path=tmp_path)
+    real_table = rel._get_table()
+    with patch.object(type(real_table), "delete", side_effect=RuntimeError("boom")), \
+         patch.object(rel, "_get_table", return_value=real_table), \
+         caplog.at_level(logging.DEBUG, logger="icx_engine.memory.relations"):
+        rel.add_relation("PROJ-1", "PROJ-2", "shares_file", 0.5)
+
+    assert any("stale edge delete failed" in r.message for r in caplog.records)
+    # The insert below the failed delete must still run - failure is non-fatal.
+    assert any(r["issue_key"] == "PROJ-2" for r in rel.get_related("PROJ-1"))
 
 
 def test_delete_for_removes_edges(tmp_path):

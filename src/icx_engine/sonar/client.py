@@ -16,6 +16,7 @@ Security:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from urllib.parse import urljoin, urlparse
 
@@ -24,13 +25,26 @@ import httpx
 from icx_engine.exceptions import AuthError, RateLimited, SourceUnavailable
 from icx_engine.models.sonar import (
     MEASURE_METRIC_KEYS,
+    AnalysisEvent,
+    ComponentMeasure,
+    IssueChangelogEntry,
+    MetricHistoryPoint,
+    MetricInfo,
+    QualityGateConditionDef,
+    QualityGateDefinition,
+    QualityProfile,
+    SonarAnalysis,
     SonarDuplication,
     SonarDupBlock,
     SonarFinding,
     SonarGateCondition,
+    SonarHotspotDetail,
     SonarMeasures,
     SonarQualityGate,
+    SonarRule,
     SonarScope,
+    SourceLine,
+    SystemHealth,
     rating_letter,
 )
 
@@ -43,6 +57,7 @@ _MAX_PAGES = 20           # hard ceiling: 20 * 500 = 10000 findings (SonarQube c
 _ABS_MAX_FINDINGS = 10000
 _PROJECT_LIST_CAP = 50    # discovery: never hand back more than this without a query
 _BRANCH_LIST_CAP = 50
+_MAX_CONCURRENT_FILE_FETCHES = 8  # bound per-file HTTP fan-out so a large scope doesn't hammer Sonar
 
 
 def _sonar_error_text(resp: httpx.Response) -> str:
@@ -187,6 +202,103 @@ class SonarClient:
         comp = data.get("component", {})
         return _parse_measures(comp.get("key", component), comp.get("measures", []))
 
+    async def component_tree(
+        self, component: str, metric_keys: list[str], branch: str | None = None,
+        sort_metric: str | None = None, ascending: bool = False,
+        qualifiers: list[str] | None = None, page_size: int = 100, max_pages: int = 5,
+    ) -> tuple[list["ComponentMeasure"], int]:
+        """Rank/list files or directories under `component` by one or more
+        metrics - the endpoint that answers 'top N files by metric X'.
+        `sort_metric` should be one of `metric_keys`; results are then sorted
+        server-side by that metric. Paginates up to `max_pages` (bounded, since
+        a project can have thousands of files - callers wanting "top 20" pass
+        a small page_size and max_pages=1)."""
+        params: dict = {
+            "component": component,
+            "metricKeys": ",".join(metric_keys),
+            "ps": min(max(page_size, 1), _PAGE_SIZE),
+        }
+        if branch:
+            params["branch"] = branch
+        if qualifiers:
+            params["qualifiers"] = ",".join(qualifiers)
+        if sort_metric:
+            params["s"] = "metric"
+            params["metricSort"] = sort_metric
+            params["asc"] = "true" if ascending else "false"
+
+        rows: list[ComponentMeasure] = []
+        total = 0
+        page = 1
+        while page <= max(max_pages, 1):
+            params["p"] = page
+            data = await self._get_json("/api/measures/component_tree", dict(params))
+            total = int(data.get("paging", {}).get("total", 0))
+            comps = data.get("components", [])
+            for comp in comps:
+                path = comp.get("path") or _strip_project(comp.get("key"), component) or comp.get("key", "")
+                for m in comp.get("measures", []):
+                    rows.append(ComponentMeasure(
+                        key=comp.get("key", ""), path=path, qualifier=comp.get("qualifier", ""),
+                        metric=m.get("metric", ""), value=m.get("value"), language=comp.get("language"),
+                    ))
+            if not comps or page * params["ps"] >= total:
+                break
+            page += 1
+        return rows, total
+
+    async def search_history(
+        self, component: str, metric_keys: list[str], branch: str | None = None,
+        date_from: str | None = None, date_to: str | None = None,
+    ) -> dict[str, list["MetricHistoryPoint"]]:
+        """Chronological history of one or more metrics for `component` -
+        answers 'has this metric improved or degraded over time'."""
+        params: dict = {"component": component, "metrics": ",".join(metric_keys), "ps": 1000}
+        if branch:
+            params["branch"] = branch
+        if date_from:
+            params["from"] = date_from
+        if date_to:
+            params["to"] = date_to
+        data = await self._get_json("/api/measures/search_history", params)
+        out: dict[str, list[MetricHistoryPoint]] = {}
+        for m in data.get("measures", []):
+            metric = m.get("metric", "")
+            out[metric] = [
+                MetricHistoryPoint(date=h.get("date", ""), value=h.get("value"))
+                for h in m.get("history", [])
+            ]
+        return out
+
+    async def project_analyses(
+        self, project: str, branch: str | None = None,
+        date_from: str | None = None, date_to: str | None = None, page_size: int = 20,
+    ) -> list["SonarAnalysis"]:
+        """Analysis history for `project` - when scans ran, at what project
+        version, and any VERSION/QUALITY_GATE/OTHER events attached to them."""
+        params: dict = {"project": project, "ps": min(max(page_size, 1), _PAGE_SIZE)}
+        if branch:
+            params["branch"] = branch
+        if date_from:
+            params["from"] = date_from
+        if date_to:
+            params["to"] = date_to
+        data = await self._get_json("/api/project_analyses/search", params)
+        out: list[SonarAnalysis] = []
+        for raw in data.get("analyses", []):
+            events = [
+                AnalysisEvent(
+                    key=e.get("key", ""), category=e.get("category", ""),
+                    name=e.get("name", ""), description=e.get("description", ""),
+                )
+                for e in raw.get("events", [])
+            ]
+            out.append(SonarAnalysis(
+                key=raw.get("key", ""), date=raw.get("date", ""),
+                project_version=raw.get("projectVersion", ""), events=events,
+            ))
+        return out
+
     # -- quality gate ------------------------------------------------------
 
     async def quality_gate(self, project: str, branch: str | None = None) -> SonarQualityGate:
@@ -264,6 +376,7 @@ class SonarClient:
         if scope.new_code_only:
             params["inNewCodePeriod"] = "true"
         file_set = set(scope.files)
+        cap = min(scope.limit if scope.limit > 0 else _ABS_MAX_FINDINGS, _ABS_MAX_FINDINGS)
         out: list[SonarFinding] = []
         page = 1
         while page <= _MAX_PAGES:
@@ -275,27 +388,230 @@ class SonarClient:
                 if file_set and (finding.file not in file_set):
                     continue
                 out.append(finding)
+                if len(out) >= cap:
+                    break
             total = int(data.get("paging", {}).get("total", 0))
-            if page * _PAGE_SIZE >= total or not hotspots:
+            if len(out) >= cap or page * _PAGE_SIZE >= total or not hotspots:
                 break
             page += 1
         return out
 
+    async def rule_show(self, rule_key: str) -> "SonarRule":
+        """Full detail for one rule key (e.g. from a SonarFinding.rule) -
+        answers 'why was this flagged and how do I fix it'."""
+        data = await self._get_json("/api/rules/show", {"key": rule_key})
+        raw = data.get("rule", {})
+        return _parse_rule(raw)
+
+    async def rules_search(
+        self, language: str | None = None, tags: list[str] | None = None,
+        repositories: list[str] | None = None, query: str | None = None, page_size: int = 50,
+    ) -> tuple[list["SonarRule"], int]:
+        params: dict = {"ps": min(max(page_size, 1), _PAGE_SIZE)}
+        if language:
+            params["languages"] = language
+        if tags:
+            params["tags"] = ",".join(tags)
+        if repositories:
+            params["repositories"] = ",".join(repositories)
+        if query:
+            params["q"] = query
+        data = await self._get_json("/api/rules/search", params)
+        total = int(data.get("total", 0))
+        rules = [_parse_rule(r) for r in data.get("rules", [])]
+        return rules, total
+
+    async def hotspot_show(self, hotspot_key: str) -> "SonarHotspotDetail":
+        """Full detail for one security hotspot key - the risk/fix guidance
+        that hotspots/search's summary rows do not include. The riskDescription/
+        vulnerabilityDescription/fixRecommendations fields are nested under the
+        response's `rule` object (confirmed against SonarQube's ws-hotspots.proto)
+        and are marked deprecated as of SonarQube 9.5+, but still returned for
+        backward compatibility - no replacement field exists, so this is the
+        correct and only way to get this content."""
+        data = await self._get_json("/api/hotspots/show", {"hotspot": hotspot_key})
+        component_key = (data.get("component") or {}).get("key")
+        rule_detail = data.get("rule") or {}
+        return SonarHotspotDetail(
+            key=data.get("key", ""), rule_key=rule_detail.get("key", ""),
+            message=data.get("message", ""), file=_strip_project(component_key, ""),
+            line=data.get("line"), status=data.get("status", ""), resolution=data.get("resolution"),
+            vulnerability_probability=rule_detail.get("vulnerabilityProbability", ""),
+            security_category=rule_detail.get("securityCategory", ""), author=data.get("author", ""),
+            creation_date=data.get("creationDate", ""), update_date=data.get("updateDate", ""),
+            risk_description=rule_detail.get("riskDescription", ""),
+            vulnerability_description=rule_detail.get("vulnerabilityDescription", ""),
+            fix_recommendations=rule_detail.get("fixRecommendations", ""),
+        )
+
+    async def sources_lines(
+        self, component: str, branch: str | None = None,
+        from_line: int | None = None, to_line: int | None = None,
+    ) -> list["SourceLine"]:
+        """Source code lines with per-line coverage/duplication/SCM
+        annotations - lets a caller see exactly what Sonar flagged without a
+        separate file read."""
+        params: dict = {"key": component}
+        if branch:
+            params["branch"] = branch
+        if from_line is not None:
+            params["from"] = from_line
+        if to_line is not None:
+            params["to"] = to_line
+        data = await self._get_json("/api/sources/lines", params)
+        out: list[SourceLine] = []
+        for raw in data.get("sources", []):
+            line_hits = raw.get("lineHits")
+            out.append(SourceLine(
+                line=raw.get("line", 0), code=raw.get("code", ""),
+                covered=(line_hits is not None and line_hits > 0) if line_hits is not None else None,
+                line_hits=line_hits, duplicated=bool(raw.get("duplicated")),
+                scm_author=raw.get("scmAuthor", ""), scm_revision=raw.get("scmRevision", ""),
+                scm_date=raw.get("scmDate", ""),
+            ))
+        return out
+
+    async def sources_raw(self, component: str, branch: str | None = None) -> str:
+        """Plain source text (no annotations) - the raw file content passthrough."""
+        assert self._client is not None, "SonarClient must be used as an async context manager"
+        params: dict = {"key": component}
+        if branch:
+            params["branch"] = branch
+        current = self._base + "/api/sources/raw"
+        resp = await self._client.get(current, params=params, auth=self._auth)
+        _raise_for_sonar(resp)
+        return resp.text
+
+    # -- metric catalog / quality gate definitions --------------------------
+
+    async def metrics_search(self, page_size: int = 100) -> tuple[list["MetricInfo"], int]:
+        """The full metric catalog - what metric keys exist and what they mean."""
+        data = await self._get_json("/api/metrics/search", {"ps": min(max(page_size, 1), _PAGE_SIZE)})
+        total = int(data.get("total", 0))
+        metrics = [
+            MetricInfo(
+                key=m.get("key", ""), name=m.get("name", ""), description=m.get("description", ""),
+                domain=m.get("domain", ""), type=m.get("type", ""),
+                direction=int(m.get("direction", 0) or 0), qualitative=bool(m.get("qualitative")),
+            )
+            for m in data.get("metrics", [])
+        ]
+        return metrics, total
+
+    async def qualitygates_list(self) -> list["QualityGateDefinition"]:
+        data = await self._get_json("/api/qualitygates/list")
+        return [
+            QualityGateDefinition(id=str(g.get("id", "")), name=g.get("name", ""), is_default=bool(g.get("isDefault")))
+            for g in data.get("qualitygates", [])
+        ]
+
+    async def qualitygates_show(self, gate_id: str | None = None, name: str | None = None) -> "QualityGateDefinition":
+        """Full authored configuration for one quality gate - name/default
+        flag/every configured threshold, independent of any specific
+        analysis (unlike quality_gate(), which reports a pass/fail RESULT)."""
+        params: dict = {}
+        if gate_id:
+            params["id"] = gate_id
+        if name:
+            params["name"] = name
+        data = await self._get_json("/api/qualitygates/show", params)
+        conditions = [
+            QualityGateConditionDef(
+                metric=c.get("metric", ""), comparator=c.get("op", ""), error_threshold=str(c.get("error", "")),
+            )
+            for c in data.get("conditions", [])
+        ]
+        return QualityGateDefinition(
+            id=str(data.get("id", "")), name=data.get("name", ""),
+            is_default=bool(data.get("isDefault")), conditions=conditions,
+        )
+
+    async def qualitygates_get_by_project(self, project: str) -> "QualityGateDefinition":
+        """Resolve which quality gate is assigned to `project`, then fetch its full definition."""
+        data = await self._get_json("/api/qualitygates/get_by_project", {"project": project})
+        gate = data.get("qualityGate", {})
+        return await self.qualitygates_show(gate_id=str(gate.get("id", "")) or None, name=gate.get("name") or None)
+
+    # -- issue lifecycle -----------------------------------------------------
+
+    async def issues_authors(self, project: str | None = None, query: str | None = None) -> list[str]:
+        params: dict = {}
+        if project:
+            params["project"] = project
+        if query:
+            params["q"] = query
+        data = await self._get_json("/api/issues/authors", params)
+        return list(data.get("authors", []))
+
+    async def issues_tags(self, project: str | None = None, query: str | None = None) -> list[str]:
+        params: dict = {}
+        if project:
+            params["project"] = project
+        if query:
+            params["q"] = query
+        data = await self._get_json("/api/issues/tags", params)
+        return list(data.get("tags", []))
+
+    async def issues_changelog(self, issue_key: str) -> list["IssueChangelogEntry"]:
+        data = await self._get_json("/api/issues/changelog", {"issue": issue_key})
+        out: list[IssueChangelogEntry] = []
+        for raw in data.get("changelog", []):
+            changes = [
+                {"key": d.get("key", ""), "old_value": d.get("oldValue", ""), "new_value": d.get("newValue", "")}
+                for d in raw.get("diffs", [])
+            ]
+            out.append(IssueChangelogEntry(
+                creation_date=raw.get("creationDate", ""), user=raw.get("user", ""), changes=changes,
+            ))
+        return out
+
+    async def quality_profiles_search(self, language: str | None = None, project: str | None = None) -> list["QualityProfile"]:
+        params: dict = {}
+        if language:
+            params["language"] = language
+        if project:
+            params["project"] = project
+        data = await self._get_json("/api/qualityprofiles/search", params)
+        return [
+            QualityProfile(
+                key=p.get("key", ""), name=p.get("name", ""), language=p.get("language", ""),
+                is_default=bool(p.get("isDefault")), active_rule_count=int(p.get("activeRuleCount", 0) or 0),
+            )
+            for p in data.get("profiles", [])
+        ]
+
+    async def system_health(self) -> "SystemHealth":
+        """Server health beyond mere liveness - GREEN/YELLOW/RED plus causes
+        if degraded. Distinct from validate()'s system/status, which only
+        confirms the server responds and reports its version."""
+        data = await self._get_json("/api/system/health")
+        causes = [c.get("message", "") if isinstance(c, dict) else str(c) for c in data.get("causes", [])]
+        return SystemHealth(health=data.get("health", ""), causes=causes)
+
+    async def languages_list(self, query: str | None = None) -> list[dict]:
+        params: dict = {}
+        if query:
+            params["q"] = query
+        data = await self._get_json("/api/languages/list", params)
+        return [{"key": lang.get("key", ""), "name": lang.get("name", "")} for lang in data.get("languages", [])]
+
     # -- duplications ------------------------------------------------------
 
     async def duplications(self, project: str, files: list[str], branch: str | None = None) -> list[SonarDuplication]:
-        out: list[SonarDuplication] = []
-        for path in files:
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_FILE_FETCHES)
+
+        async def _fetch_one(path: str) -> SonarDuplication | None:
             params: dict = {"key": f"{project}:{path}"}
             if branch:
                 params["branch"] = branch
-            try:
-                data = await self._get_json("/api/duplications/show", params)
-            except Exception as exc:
-                # A missing/unanalyzed file (404) or any per-file error must not
-                # abort the whole report - skip this file and continue.
-                _log.debug("[sonar] duplications lookup failed for %s: %s", path, exc)
-                continue
+            async with sem:
+                try:
+                    data = await self._get_json("/api/duplications/show", params)
+                except Exception as exc:
+                    # A missing/unanalyzed file (404) or any per-file error must not
+                    # abort the whole report - skip this file and continue.
+                    _log.debug("[sonar] duplications lookup failed for %s: %s", path, exc)
+                    return None
             file_refs = data.get("files", {})
             blocks: list[SonarDupBlock] = []
             for dup in data.get("duplications", []):
@@ -308,9 +624,10 @@ class SonarClient:
                         size=int(block.get("size", 0)),
                         ref_file=ref_path,
                     ))
-            if blocks:
-                out.append(SonarDuplication(file=path, blocks=blocks))
-        return out
+            return SonarDuplication(file=path, blocks=blocks) if blocks else None
+
+        results = await asyncio.gather(*(_fetch_one(path) for path in files))
+        return [dup for dup in results if dup is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +715,15 @@ def _parse_hotspot(raw: dict, project: str) -> SonarFinding:
         new_code=bool(raw.get("inNewCodePeriod")),
         creation_date=raw.get("creationDate", ""),
         update_date=raw.get("updateDate", ""),
+    )
+
+
+def _parse_rule(raw: dict) -> SonarRule:
+    return SonarRule(
+        key=raw.get("key", ""), name=raw.get("name", ""), language=raw.get("lang", ""),
+        type=raw.get("type", ""), severity=raw.get("severity", ""), status=raw.get("status", ""),
+        html_description=raw.get("htmlDesc", ""), remediation_function=raw.get("remFnBaseEffort", ""),
+        tags=list(raw.get("tags", []) or []), repository=raw.get("repo", ""),
     )
 
 

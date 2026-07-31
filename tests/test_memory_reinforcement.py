@@ -77,6 +77,27 @@ class TestReinforceUsage:
         assert isinstance(result, dict)
         assert "usage_count" in result
 
+    def test_reinforce_usage_scans_pattern_pool_once_not_per_sibling(self, tmp_path):
+        """Regression test for the scan-sharing fix: entry's own boost recompute and the
+        sibling recalculation must share one table scan, not one scan each."""
+        mgr = _make_manager(tmp_path)
+        _save_entry(mgr, "PROJ-A", root_cause_pattern="shared_pattern")
+        _save_entry(mgr, "PROJ-B", root_cause_pattern="shared_pattern")
+        _save_entry(mgr, "PROJ-C", root_cause_pattern="shared_pattern")
+        mgr.reinforce_usage("PROJ-A", "PROJ-COMMON")
+        mgr.reinforce_usage("PROJ-B", "PROJ-COMMON")
+
+        table = mgr._get_table()
+        with patch.object(table, "search", wraps=table.search) as spy:
+            mgr.reinforce_usage("PROJ-C", "PROJ-COMMON")
+
+        # 1 call to find PROJ-C by key (unrelated to this fix) + 1 shared pattern-pool
+        # scan reused by both the entry's own boost recompute and the sibling
+        # recalculation (which here updates 2 siblings: PROJ-A and PROJ-B). Before the
+        # fix this was 1 (find) + 1 (entry boost) + 1 (siblings fetch) + 2 (one recompute
+        # scan per updated sibling) = 5.
+        assert spy.call_count == 2
+
     def test_negated_entry_boost_reduced_by_04(self, tmp_path):
         mgr = _make_manager(tmp_path)
         _save_entry(mgr, "PROJ-1")

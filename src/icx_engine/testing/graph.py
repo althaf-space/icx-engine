@@ -15,7 +15,6 @@ from icx_engine.testing.nodes import (
     node_known_screen_check,
     node_unit_author,
     node_mode_select,
-    node_mode_gate,
     node_pick_type,
     node_compat_scan,
     node_compat_check,

@@ -110,3 +110,77 @@ def test_rank_skills_for_tags_empty_store_returns_empty_list(tmp_path):
     from icx_engine.skills.storage import SkillStorage
     storage = SkillStorage(root=tmp_path)
     assert rank_skills_for_tags(["anything"], "uncategorized", storage=storage) == []
+
+
+def _write_full(storage, name, tags, description, when_to_use="x"):
+    from icx_engine.skills.schema import SkillEntry
+    e = SkillEntry(name=name, description=description, tags=tags, title=name,
+                    when_to_use=when_to_use, procedure="x", pitfalls="x", verification="x")
+    e.icx_hash = e.compute_hash()
+    storage.write(e)
+
+
+def test_rank_skills_text_fallback_surfaces_hand_created_skill_with_no_tags(tmp_path):
+    from icx_engine.skills.router import rank_skills
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    _write_full(storage, "text-fallback-skill", tags=[],
+                description="Handles the payment webhook retries with exponential backoff.")
+    results = rank_skills("the payment webhook retries are failing", "debugging", storage=storage)
+    assert "text-fallback-skill" in [r["name"] for r in results]
+
+
+def test_rank_skills_tag_match_outranks_text_fallback_match(tmp_path):
+    from icx_engine.skills.router import rank_skills
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    _write_full(storage, "tagged-skill", tags=["retries"], description="Handles retries.")
+    _write_full(storage, "text-fallback-skill", tags=["unrelated"],
+                description="Mentions retries in passing only.")
+    results = rank_skills("fix the retries logic", "debugging", storage=storage)
+    names = [r["name"] for r in results]
+    assert "tagged-skill" in names and "text-fallback-skill" in names
+    assert names.index("tagged-skill") < names.index("text-fallback-skill")
+
+
+def test_rank_skills_zero_overlap_skill_never_appears(tmp_path):
+    from icx_engine.skills.router import rank_skills
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    _write_full(storage, "zero-overlap-skill", tags=["totally-unrelated"],
+                description="Nothing to do with any of this.", when_to_use="nothing at all")
+    results = rank_skills("fix the retries logic", "debugging", storage=storage)
+    assert "zero-overlap-skill" not in [r["name"] for r in results]
+
+
+def test_rank_skills_for_tags_text_fallback_surfaces_hand_created_skill_with_no_tags(tmp_path):
+    from icx_engine.skills.router import rank_skills_for_tags
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    _write_full(storage, "text-fallback-skill", tags=[],
+                description="Handles the payment webhook retries with backoff.")
+    results = rank_skills_for_tags(["webhook", "retries"], "uncategorized", storage=storage)
+    assert "text-fallback-skill" in [r["name"] for r in results]
+
+
+def test_rank_skills_for_tags_tag_match_outranks_text_fallback_match(tmp_path):
+    from icx_engine.skills.router import rank_skills_for_tags
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    _write_full(storage, "tagged-skill", tags=["retries"], description="Handles retries.")
+    _write_full(storage, "text-fallback-skill", tags=["unrelated"],
+                description="Mentions retries in passing only.")
+    results = rank_skills_for_tags(["retries"], "uncategorized", storage=storage)
+    names = [r["name"] for r in results]
+    assert "tagged-skill" in names and "text-fallback-skill" in names
+    assert names.index("tagged-skill") < names.index("text-fallback-skill")
+
+
+def test_rank_skills_for_tags_zero_overlap_skill_never_appears(tmp_path):
+    from icx_engine.skills.router import rank_skills_for_tags
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    _write_full(storage, "zero-overlap-skill", tags=["nope"],
+                description="Nothing relevant.", when_to_use="nothing at all")
+    results = rank_skills_for_tags(["retries"], "uncategorized", storage=storage)
+    assert "zero-overlap-skill" not in [r["name"] for r in results]

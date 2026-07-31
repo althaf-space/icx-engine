@@ -29,8 +29,9 @@ ICX is an early-stage product. The core pipeline (fetch -> process -> analyse ->
 | LLM providers | Anthropic, OpenAI, Google, Ollama, NIM, xAI | Provider-level prompt caching |
 | Attachments | PDF (incl. scanned/OCR), DOCX, XLSX, XLS, PPTX, CSV, ZIP, code/text/config files, images via OCR + vision, audio (MP3/WAV/M4A/OGG/FLAC/AAC/Opus) + video (MP4/MOV/AVI/MKV/WebM, full-duration frame sampling) via local Whisper or LLM-native transcription | Speaker diarisation, language hints |
 | Memory | Local LanceDB + ONNX embeddings (BAAI/bge-base-en-v1.5, 768-dim, no PyTorch) | Team-shared memory, conflict resolution |
-| MCP tools | `icx_boost`, `icx_boost_refine`, `icx_skill_get`, `icx_skills_index`, `draft_skill`, `analyze_issue_fast`, `analyze_issue`, `memory_search`, 10 graph tools, 4 historical memory tools, `save_memory`, `record_verification`, `reinforce_memory_usage`, `get_memory_audit`, 3 testing tools (`start_testing_session`, `resume_testing_session`, `get_testing_session_status`), 1 methodology tool (`get_methodology`), 1 spec-lock tool (`lock_plan`), 2 UI-auth tools (`ui_auth_capture`, `ui_auth_inline`), 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`) (40 total) | Batch analysis, project-level summary |
+| MCP tools | `icx_boost`, `icx_boost_refine`, `icx_skill_get`, `icx_skills_index`, `draft_skill`, `create_skill`, `analyze_issue_fast`, `analyze_issue`, `memory_search`, `memory_delete`, `memory_update`, 4 historical memory tools, `save_memory`, `record_verification`, `reinforce_memory_usage`, `get_memory_audit`, 3 testing tools (`start_testing_session`, `resume_testing_session`, `get_testing_session_status`), 1 methodology tool (`get_methodology`), 1 spec-lock tool (`lock_plan`), 2 UI-auth tools (`ui_auth_capture`, `ui_auth_inline`), 22 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`, `sonar_top_files`, `sonar_history`, `sonar_analyses`, `sonar_rule`, `sonar_rules`, `sonar_hotspot`, `sonar_source`, `sonar_metrics`, `sonar_quality_gate_definition`, `sonar_quality_profiles`, `sonar_issue_authors`, `sonar_issue_tags`, `sonar_issue_changelog`, `sonar_system_health`, `sonar_languages`), 16 git-workflow tools (`git_repo_status`, `git_start_branch`, `git_blame`, `git_log`, `git_show_commit`, `git_diff`, `git_stage_and_commit`, `git_push`, `git_reverse_merge`, `git_get_conflict`, `git_complete_resolution`, `git_adopt_resolution`, `git_discard_scratch`, `git_create_mr`, `git_finish_ticket`, `git_create_tag`), 4 GitLab tools (`gitlab_list_merge_requests`, `gitlab_mr_changes`, `gitlab_list_commits`, `gitlab_compare`), 23 Jira write-back tools (`jira_get_close_requirements`, `jira_apply_update`, `jira_create_issue`, `jira_delete_issue`, `jira_comment_list`, `jira_comment_add`, `jira_comment_edit`, `jira_comment_delete`, `jira_search`, `jira_get_issue`, `jira_link_types`, `jira_link_create`, `jira_link_delete`, `jira_set_assignee`, `jira_attachment_upload`, `jira_attachment_delete`, `jira_get_current_user`, `jira_list_watchers`, `jira_list_worklogs`, `jira_set_watcher`, `jira_worklog_add`, `jira_worklog_edit`, `jira_worklog_delete`) (101 total) | Batch analysis, project-level summary |
 | Codebase graph | Project registration, AST + semantic build, LSP-powered edge resolution (Pyright, TypeScript, Jedi, Java symbols), JSP/Servlet, Go, C#, PHP, Rust, C++, Swift, Elixir, Scala, Rails, Angular, gRPC/Protobuf, Terraform/HCL, event broker detection (Kafka, RabbitMQ, Redis, SQS, SNS, NATS), co-change history, gopls/kotlin-language-server/rust-analyzer/OmniSharp/intelephense/clangd compiler-grade edges, incremental rebuild (SHA-256 hashing), multi-source edge fusion, PageRank + betweenness centrality, blast radius, cycle detection, dead code, CODEOWNERS integration, staleness detection, .icxignore exclusions, compact index + per-cluster files + role tags + LLM descriptions, GraphQuerier API | Multi-project graph, team-shared graph cache |
+| Default skills | 14 pre-installed best-practice skills (debugging, TDD, planning, minimal-diff discipline, verification, code review, UI/UX accessibility, comprehensive test authoring, plus one per major ICX tool - Sonar, tickets, git, graph, testing, memory), seeded automatically into `~/.icx/skills/` on first MCP connection or `icx setup`/`icx update` - reachable from any connected AI coding agent, no per-editor setup | Community-contributed default skills |
 
 If something does not work as expected, [open an issue](https://github.com/althaf-space/icx-engine/issues). Fixes ship fast.
 
@@ -118,11 +119,111 @@ flowchart LR
     D --> E([Editor AI analyses\nall content directly])
 ```
 
+### Testing - agent-driven local verification
+
+```mermaid
+flowchart TD
+    A([Agent: files changed]) --> B[start_testing_session\nclassify + expand files]
+    B --> C[Gate: confirm file list]
+    C --> D[Gate: author test flow\nagent writes the test - unit/api/ui]
+    D --> E[Gate: confirm URL + layer]
+    E --> F[ICX runs local verification\nunit/api/ui - no external tester]
+    F --> G{Issues found?}
+    G -- yes --> H[Gate: show issues,\npropose fixes]
+    H --> I[Gate: user confirms\nfixes applied]
+    I --> F
+    G -- no --> J[Gate: UI check - MANDATORY]
+    J --> K[Gate: memory_save - MANDATORY]
+    K --> L([Session done])
+```
+
+### Sonar - code-quality lookup
+
+```mermaid
+flowchart LR
+    A([Agent: quality question\nor working on a file]) --> B[sonar_status\nconfirm connection]
+    B --> C[sonar_projects / sonar_branches\nresolve project + branch]
+    C --> D[sonar_findings\nscoped to the developer's\nworking files]
+    D --> E([Findings shown\nseverity-graded, in context])
+```
+
+### Boost - methodology-driven prompt
+
+```mermaid
+flowchart LR
+    A([/icx-boost your request]) --> B[icx_boost\nclassify + methodology\n+ adaptive context]
+    B --> C{skills.index\npopulated?}
+    C -- yes --> D[icx_skill_get\nfetch matching skill]
+    C -- no --> E([boosted_prompt\nready to use])
+    D --> E
+    E --> F{Want an even\nstronger result?}
+    F -- optional --> G[icx_boost_refine\nstructured spec ->\nCTO-grade prompt]
+    F -- no --> H([Agent proceeds])
+    G --> H
+```
+
+### Skills - learned procedures, reused across projects
+
+```mermaid
+flowchart LR
+    A([Fix verified\nsave_memory called]) --> B{Agent judges:\nskill-worthy?}
+    B -- no --> Z([Skipped - normal,\nexpected outcome])
+    B -- yes --> C[draft_skill\nnew skill, or refine\nan existing one]
+    C --> D([Stored globally\n~/.icx/skills/])
+    D --> E[Surfaced later via\nicx_boost skills.index\nor icx_skills_index]
+    E --> F([icx_skill_get\nfull procedure retrieved])
+```
+
+**Default skills, seeded automatically.** Alongside skills you or your team learn over time, ICX ships 14 curated best-practice skills - debugging, TDD, planning, minimal-diff discipline, verification, code review, UI/UX accessibility, comprehensive test authoring, and one per major ICX tool (Sonar, tickets, git, graph, testing, memory). They're seeded into `~/.icx/skills/` the first time your MCP client connects (or via `icx setup`/`icx update`), and never overwritten once you customize one. They reach the agent two ways: ranked in every `icx_boost` call, and attached directly to `start_testing_session`, `sonar_status`, `analyze_issue_fast`, and `git_repo_status` responses - so the matching skill shows up even when an agent never calls `icx_boost` at all.
+
+### Git workflow - branch to merge
+
+```mermaid
+flowchart LR
+    Z([icx git branch\n--ticket --name --parent\ncreate or switch to it]) --> A([icx git status\ncheck branch + dirty tree]) --> B[icx git sync\n--parent --ticket\nreverse-merge parent in]
+    B --> C{Conflict?}
+    C -- yes --> D[Quarantined on a\ndisposable scratch branch\nfeature branch untouched]
+    D --> E[Resolve on scratch branch]
+    E --> B
+    C -- no --> F[icx git mr\n--parent --ticket --summary\npushes branch automatically,\nthen creates/reuses MR]
+    F --> G{Merge conflict?}
+    G -- yes --> D
+    G -- no --> H([icx git finish\npost-merge cleanup])
+    B -.-> P([icx git push\noptional: share progress\nwithout opening an MR yet])
+```
+
+`icx git tag` is deliberately not part of this lifecycle diagram - tagging always asks which branch to tag from, every time, since it's an occasional, higher-stakes action rather than a step in the ticket-to-merge loop above. `icx git push` is likewise shown as an optional side path, not a required step - `icx git mr` already pushes the feature branch automatically before creating the MR.
+
+### Jira write-back - closing out a ticket
+
+```mermaid
+flowchart LR
+    A([icx jira update KEY]) --> B[Fetch available\ntransitions + editable fields]
+    B --> C[Prompt: pick a transition\nor a field-only update]
+    C --> D[Prompt for any\nrequired fields still missing]
+    D --> E[Show summary,\nconfirm]
+    E --> F{Jira validator\nneeds more fields?}
+    F -- yes --> G[Prompt for those,\nretry once]
+    G --> H([Submitted])
+    F -- no --> H
+```
+
+### Git & GitLab - history and blame
+
+```mermaid
+flowchart LR
+    A{Need repo\nhistory or blame?}
+    A -- local git log/blame --> B[icx git blame/log/show/diff]
+    B --> C([Answered from your\nlocal .git - no GitLab needed])
+    A -- MR/PR or GitLab-side history --> D[icx gitlab mrs/commits/compare]
+    D --> E([Answered via the\nGitLab REST API])
+```
+
 ---
 
 ## Install
 
-**Version:** 0.3.9 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
+**Version:** 0.5.0 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
 
 ```
 pipx install icx-engine
@@ -202,6 +303,8 @@ icx connection --active DOMAIN             # set default connection
 icx connection --active INDEX              # set default by index
 ```
 
+**If you connected Jira via OAuth before this version:** re-run `icx connection --add` -> Jira -> OAuth PKCE and re-consent. ICX now requests the `write:jira-work` scope (needed for `icx jira update` / `jira_apply_update`) in addition to the existing read scopes, and an already-issued access/refresh token pair keeps whatever scope it was originally granted - it will not gain write access on its own. This only affects OAuth connections; API-token (email + token) connections are unaffected.
+
 ### LLM profiles
 
 ```sh
@@ -224,6 +327,7 @@ icx memory list
 icx memory list --project PROJ
 icx memory list --source jira
 icx memory show <KEY>
+icx memory update <KEY>
 icx memory delete <KEY>
 icx memory export
 icx memory export --output backup.json
@@ -243,11 +347,19 @@ icx memory patterns --project PROJ
 
 ### Skills
 
+Skills are learned, reusable procedures - distilled from your verified fixes, not tied to any one ticket. Memory answers "have we seen this exact ticket before"; skills answer "do we already know how to do this kind of thing" - when to use the approach, the step-by-step procedure, pitfalls to avoid, and how to verify it worked. Because skills are stored globally (`~/.icx/skills/`), not per-project, a skill learned fixing an OAuth bug in one repo shows up again the next time a different repo hits the same class of problem.
+
+Skills are created automatically: after every `icx memory save` (or the MCP equivalent, `save_memory`), the connected agent judges for itself whether the fix is skill-worthy and, if so, drafts one via `draft_skill` - or refines an existing skill covering the same ground, so near-duplicates don't pile up. `skill_worthy=false` is a normal, expected outcome for a one-off fix. For a general-purpose skill that isn't following up a verified fix, write one by hand with `icx skills create`, or ask a connected agent to call the MCP-equivalent `create_skill` tool directly - neither requires a ticket or a memory entry.
+
+ICX surfaces relevant skills back to the agent on its own - during `/icx-boost` (as `skills.index`), right after a memory save (as `related_skills`), and via the full unfiltered `icx_skills_index` catalog as a safety net - so a skill learned once keeps paying off without anyone having to remember it exists or re-discover the fix from scratch.
+
 ```sh
 icx skills list                       # list every skill ICX has learned from verified fixes
 icx skills create                     # create a skill by hand - no ticket required
 icx skills delete <NAME>              # delete one skill
 ```
+
+Alongside skills you learn yourself, ICX also ships 14 pre-installed default skills - agent-agnostic engineering practices (debugging, TDD, planning, minimal-diff discipline, verification, code review), a UI/UX accessibility baseline, a comprehensive test-authoring skill, and one skill per major ICX tool (Sonar, tickets, git, graph, testing, memory). These are seeded automatically into `~/.icx/skills/` on first MCP connection and by `icx setup`/`icx update` - no manual step required, and a customized default is never overwritten by a later ICX update.
 
 ### Codebase graph
 
@@ -263,6 +375,94 @@ icx graph remove NAME --keep-cache # remove project but keep cached graph files
 ```
 
 Graph data (including build cache) is stored in `~/.icx/graphs/` - nothing is written inside your project directories.
+
+### Git workflow
+
+```sh
+icx git status                        # current branch, dirty files, leftover state from an interrupted run
+icx git branch --ticket ABC-123 --name "Fix login timeout" --parent main  # create a feature branch (or switch to it if it already exists)
+icx git sync --parent main --ticket ABC-123  # reverse-merge parent in; quarantines conflicts on a scratch branch, never your feature branch
+icx git push --remote origin   # plain push of the current branch, no force, no rebase - prompts to confirm before pushing; `icx git mr` already does this automatically
+icx git mr --parent main --ticket ABC-123 --summary "Fix login timeout"   # create/reuse MR, attempt immediate merge
+icx git finish --parent main --feature feature/fix-login-timeout-ABC-123 --ticket ABC-123 --mr-iid 5   # post-merge cleanup
+icx git tag --env qa --branch main   # shows previous tag for 'qa', proposes the next one, hard-gates approval before creating
+icx git blame src/app.py --from-line 10 --to-line 20   # per-line commit sha, author, content (both line flags optional, must be given together)
+icx git log --file src/app.py --author althaf --since "2 weeks ago" --limit 10   # commit history, newest first
+icx git show a1b2c3d4   # full commit detail - message plus changed files
+icx git diff main feature/x-ABC-1   # per-file status plus insertions/deletions between two refs
+```
+
+Ticket-to-merge lifecycle helper - branch setup, safe daily sync, explicit staged commits, and (once you're on a feature branch) opening the merge request. Feature branches are shared: no rebase, no force-push, ever - reconciliation always happens by merge. A conflicted merge never lands on your parent branch; conflicts are resolved on a disposable scratch branch, never on your real feature branch. `--parent` is optional on `branch`/`sync`/`mr`/`finish` - it is confirmed every time when omitted, never silently reused from a prior call; a repo's last-confirmed parent branch is offered as a fast one-tap default so re-confirming it is a single prompt, not a blind re-pick, and rejecting the default prompts for a new branch. `--parent` explicitly passed always wins and updates the remembered value. `icx git tag`'s `--branch` follows the same "always ask, saved value only as a default" rule and always did, since tagging is a deliberate, occasional, higher-stakes action. Full design: [docs/superpowers/specs/2026-07-26-icx-git-workflow-design.md](docs/superpowers/specs/2026-07-26-icx-git-workflow-design.md).
+
+### Jira write-back
+
+```sh
+icx jira update <KEY>            # discover available transitions/required fields, prompt, confirm, apply
+icx jira create                  # interactively create a new issue (project, issue type, summary, required fields)
+icx jira delete <KEY>             # permanently delete an issue - shows an explicit no-undo/no-trash warning first
+icx jira delete <KEY> --delete-subtasks  # also delete the issue's subtasks
+icx jira comment list <KEY>      # list comments on an issue
+icx jira comment add <KEY> <TEXT>    # add a plain-text comment
+icx jira comment edit <KEY> <COMMENT_ID> <TEXT>  # edit an existing comment
+icx jira comment delete <KEY> <COMMENT_ID>       # permanently delete a comment - explicit no-undo warning first
+icx jira search <JQL>            # search issues by JQL, print matching keys/summaries (lightweight, raw)
+icx jira get <KEY>                # print an issue's raw fields (lightweight, raw - not full LLM analysis)
+icx jira link types               # list link types available for linking two issues (e.g. Blocks, Relates to)
+icx jira link create <TYPE> <INWARD_KEY> <OUTWARD_KEY>  # link two issues together
+icx jira link delete <ISSUE_KEY> <LINK_ID>  # remove a link - dependency-visibility warning, not a false permanence claim
+icx jira assign <KEY> <ACCOUNT_ID>   # assign an issue to an account
+icx jira assign <KEY> --unassign      # clear the assignee
+icx jira assign <KEY> --default       # assign the project's default assignee
+icx jira attach add <KEY> <FILE_PATH>          # upload a local file as an attachment
+icx jira attach remove <ISSUE_KEY> <ATTACHMENT_ID>  # permanently delete an attachment - explicit no-undo warning first
+icx jira whoami                       # print your own Jira identity (accountId, displayName)
+icx jira watch add <KEY> [ACCOUNT_ID]     # add a watcher - self is immediate, another user asks to confirm first
+icx jira watch remove <KEY> [ACCOUNT_ID]  # remove a watcher - self is immediate, another user asks to confirm first
+icx jira worklog list <KEY>           # list worklog entries on an issue
+icx jira worklog add <KEY> <SECONDS> <STARTED>  # log time against an issue - always logged as yourself
+icx jira worklog edit <KEY> <WORKLOG_ID>        # edit a worklog entry - own is immediate, someone else's asks to confirm first
+icx jira worklog delete <KEY> <WORKLOG_ID>      # delete a worklog entry - own is immediate, someone else's asks to confirm first
+```
+
+Interactively closes out or updates a Jira issue: fetches available workflow transitions and editable fields for the ticket, lets you pick a transition (or a field-only update), prompts for anything required that you haven't already given, shows a summary, and confirms before submitting. If Jira comes back asking for more fields (a workflow validator not visible in the initial requirements), you're prompted for those and it retries once. Requires an OAuth connection with the `write:jira-work` scope, or an API-token connection (token connections have no scope concept - Jira enforces permissions server-side per user).
+
+`icx jira create` prompts for a project key, lists the issue types available for creation in that project, prompts for a summary, then fetches that issue type's create-time required fields and prompts for anything still missing before confirming and creating.
+
+`icx jira delete <KEY>` always shows an explicit warning before asking for confirmation: Jira Cloud has no recycle bin for issues, so a deletion is permanent and cannot be undone. Pass `--delete-subtasks` if the issue has subtasks - Jira rejects the delete otherwise.
+
+`icx jira comment delete` carries the same no-undo warning style as `icx jira delete` - Jira has no recovery mechanism for a deleted comment either.
+
+`icx jira search`/`icx jira get` are lightweight, raw reads with no LLM analysis - not a replacement for `icx analyze`. Search is server-side cost-capped (`max_results` clamped to 100, a small default `fields` set when omitted).
+
+`icx jira link delete` shows a warning too, but a deliberately different one from delete/comment-delete: a Jira issue link CAN be recreated after deletion, so the risk described is losing visibility of a real dependency between issues until someone notices and re-adds it - not permanent data loss.
+
+`icx jira assign` sends Jira's raw `accountId` by default; `--unassign` sends `null` and `--default` sends Jira's `"-1"` default-assignee sentinel, so you never need to know that magic string yourself.
+
+`icx jira attach remove` carries the same permanent/no-undo warning style as `icx jira delete`/`icx jira comment delete` - verified, Jira Cloud has no recycle bin for attachments either.
+
+**Watchers and worklog carry a real self-vs-other permission check, not just a warning.** `icx jira watch add/remove` and `icx jira worklog edit/delete` first look up your own Jira identity (`GET .../myself`, exposed directly as `icx jira whoami`) and compare it against the target: acting on your own identity - watching an issue yourself, editing your own worklog entry - executes immediately, no confirmation needed. Acting on a DIFFERENT user's identity (an explicit `account_id` on watch, or someone else's worklog entry) shows an explicit warning and asks for confirmation first, the same way any destructive action does elsewhere in this CLI - even though the underlying Jira call is technically no more dangerous either way. `icx jira worklog add` is the one exception with no self-vs-other branch at all: Jira's worklog creation endpoint has no author-override field, a new entry is always attributed to the authenticated caller, so there is no "on behalf of someone else" case to check for.
+
+### GitLab
+
+ICX connects to GitLab to create and merge your ticket's MR once your feature branch is ready. Separate from your work tracker (Jira) - GitLab is where your code review happens, Jira is where the ticket lives. You can register multiple servers with one active, exactly like AI profiles and Sonar connections.
+
+```sh
+icx gitlab --add               # add a server connection (name, URL, token, TLS verify); first becomes active; validates live
+icx gitlab --list              # list connections and which is active (bare `icx gitlab` also lists)
+icx gitlab --active <name>     # set the active connection
+icx gitlab --remove <name>     # remove a connection (clears its keyring token)
+icx gitlab verify              # re-check the active connection, list a few accessible projects
+icx gitlab status              # show the active connection status
+icx gitlab mrs --state merged --target-branch main --limit 10   # list merge requests; --project optional, derived from the current repo's origin remote
+icx gitlab commits --ref main --path src/app.py --since 2026-07-01   # commit history for a GitLab project
+icx gitlab compare development feature/x-ABC-1   # file-level diff summary between two refs
+```
+
+`icx gitlab mrs`/`icx gitlab commits`/`icx gitlab compare` all accept `--project <namespace/project>` explicitly, or derive it automatically from the current directory's git origin remote when omitted.
+
+Connections also show up in `icx status`.
+
+ICX never overrides your team's merge/approval/pipeline rules - it attempts one immediate merge after creating the MR, and if GitLab's own protection rules refuse it, ICX reports the exact reason and stops. A human finishes the review in GitLab's own UI when that happens.
 
 ### Testing
 
@@ -383,6 +583,8 @@ After setup, restart your editor. ICX will appear in its list of available tools
 
 For every editor, `icx mcp setup` also installs ICX-first routing for the narrow, high-precision cases: a work-tracker ticket reference (a key like `ABC-123`, or a Jira/GitHub/Linear/GitLab issue URL), a testing request, or a SonarQube/code-quality request. On Claude Code it's a `UserPromptSubmit` hook plus a `CLAUDE.md` rule; on the other editors, an instruction written into that editor's global-rules file. All of it is removed by `icx mcp remove`.
 
+**Windsurf users:** Windsurf was renamed Devin Desktop (Cognition, June 2026) and moved its MCP config file to a new location. `icx mcp setup --host windsurf` writes to the new location automatically and keeps the old `~/.codeium/windsurf/mcp_config.json` in sync too (some tooling still reads it); `icx mcp remove` cleans up both, including a stale entry left over from before this fix if you ran setup on an older ICX version.
+
 ### The MCP tools
 
 **`/icx-boost` - on demand, one call, two passes.** Boost is not something the agent calls on every message - it runs only when you (or your editor's MCP-prompt auto-surfacing) explicitly invoke `/icx-boost <your request>`. One call classifies the task, applies the mandatory ICX methodology, gathers only the codebase context the problem needs (graph/grep/memory - skipped for a plain question or when no repo is connected), and auto-refines the result into a CTO-grade prompt in the same call - no second tool call needed. For a work-tracker ticket, `analyze_issue_fast` remains the ticket entrypoint, and that routing stays always-on (see above), independent of whether boost was invoked.
@@ -423,6 +625,8 @@ For every editor, `icx mcp setup` also installs ICX-first routing for the narrow
 | `memory_find_by_file` | Before editing a file - surface all past work items that touched it. Input: `file_path`. |
 | `memory_get_related` | Find work items that touched the same files. Primary: pass `files` from `graph_find_context` (works for new tickets, computes overlap on-the-fly). Secondary: pass `issue_key` for reopened tickets with prior history (uses pre-stored edges). |
 | `memory_get_patterns` | Return auto-detected statistical patterns: `frequent_file`, `dominant_tag`, `top_work_item_type`, `citation_hub`, `semantic_signal`. Recomputed every 5 saves. |
+| `memory_delete` | Permanently delete one saved memory entry. CONFIRMATION-GATED, same token pattern as `git_stage_and_commit`. Input: `issue_key`, optional `confirm_token`. Returns `{ok: true, issue_key}` or `{ok: false, error}`. |
+| `memory_update` | Update a small allowlist of fields (`summary`, `problem_description`, `impact`, `resolution_note`, `files_changed`, `tags`) on an existing entry. UNGATED - pass only the fields you want to change. Input: `issue_key` plus any allowlisted fields. Returns `{ok: true, issue_key, updated_fields}` or `{ok: false, error}`. |
 | `start_testing_session` | Begin the local AI testing loop for changed files (in-process polyglot runner suite - no external tester). |
 | `resume_testing_session` | Continue at any human gate. At the `compat_scan` gate the agent assesses testability from first principles; every concern it finds is shown to the user at `compat_check`, who decides each one (apply change / drop / manual / accept-as-is). Verification runs locally via the runner plugins (unit/api/ui) on the repo-correct runtime. For UI/agent, a captured/reused login session (cookies + localStorage + sessionStorage) is restored before the flow runs, so the agent authors the test against the already-logged-in screen (no login steps re-authored). A gate that triggers real browser work (live-DOM verify/heal, scored execution) can return `{"status": "running"}` instead of a gate if it is still in progress past a short quick-timeout - poll `get_testing_session_status` rather than calling this tool again. |
 | `get_testing_session_status` | Poll a session that returned `status: "running"`. Cheap, read-only. Returns `running` while the background gate is still executing, or the normal `{done, gate}` shape once it finishes. Input: `session_id`. |
@@ -431,13 +635,72 @@ For every editor, `icx mcp setup` also installs ICX-first routing for the narrow
 | `sonar_branches` | Discover branches for a project; input: `{project, query?}` - same guarded selection protocol (requires `sonar_enabled`) |
 | `sonar_measures` | Project measures (bugs, vulnerabilities, code smells, hotspots, coverage, duplication, debt, ratings, tests); input: `{project, branch?}` (requires `sonar_enabled`) |
 | `sonar_quality_gate` | Quality gate status + failing conditions; input: `{project, branch?}` (requires `sonar_enabled`) |
-| `sonar_findings` | Scoped findings (issues + security hotspots); input: `{project, branch?, files?, types?, severities?, statuses?, author?, assignee?, new_code_only?, limit?}` - pass user-supplied `files` to scope to a developer's working set (requires `sonar_enabled`) |
+| `sonar_findings` | Scoped findings (issues + security hotspots); input: `{project, branch?, files?, types?, severities?, statuses?, rules?, tags?, author?, assignee?, new_code_only?, limit?}` - pass user-supplied `files` to scope to a developer's working set (requires `sonar_enabled`) |
 | `sonar_report` | Full report: gate + project/per-file measures + findings + duplication blocks + test-coverage gaps; same input as `sonar_findings` (requires `sonar_enabled`) |
+| `sonar_top_files` | Rank files by a single metric (worst duplication, lowest coverage, most bugs); input: `{project, metric, branch?, limit?, ascending?}` (requires `sonar_enabled`) |
+| `sonar_history` | Chronological history for one or more metrics, to answer "is this improving or degrading"; input: `{project, metrics, branch?, date_from?, date_to?}` (requires `sonar_enabled`) |
+| `sonar_analyses` | Analysis/scan history - when scans ran, version and quality-gate events; input: `{project, branch?, date_from?, date_to?}` (requires `sonar_enabled`) |
+| `sonar_rule` | Full description of a rule key - why it fires, how to fix it; input: `{rule_key}` (requires `sonar_enabled`) |
+| `sonar_rules` | Browse/search rules by language, tag, or repository; input: `{language?, tags?, repositories?, query?, page_size?}` (requires `sonar_enabled`) |
+| `sonar_hotspot` | Full risk/fix detail for one security hotspot key; input: `{hotspot_key}` (requires `sonar_enabled`) |
+| `sonar_source` | Annotated source lines (with coverage/duplication context) for a flagged file, instead of reading the file with no Sonar context; input: `{project, path, branch?, from_line?, to_line?}` (requires `sonar_enabled`) |
+| `sonar_metrics` | Metric catalog - what a metric key means and which metrics exist; input: `{page_size?}` (requires `sonar_enabled`) |
+| `sonar_quality_gate_definition` | The gate's own authored definition (assigned gate + configured thresholds), not just pass/fail for the last analysis; input: `{project?, gate_name?}` - one of the two is required (requires `sonar_enabled`) |
+| `sonar_quality_profiles` | Which quality profile is applied to a project or language, and how many rules it enables; input: `{language?, project?}` (requires `sonar_enabled`) |
+| `sonar_issue_authors` | List of issue authors, to filter/scope by author; input: `{project?, query?}` (requires `sonar_enabled`) |
+| `sonar_issue_tags` | List of issue tags, to filter/scope by tag; input: `{project?, query?}` (requires `sonar_enabled`) |
+| `sonar_issue_changelog` | An issue's history - when assigned/resolved and by whom; input: `{issue_key}` (requires `sonar_enabled`) |
+| `sonar_system_health` | Whether the Sonar server itself is healthy (not just reachable); input: `{}` (requires `sonar_enabled`) |
+| `sonar_languages` | Languages this Sonar server analyzes; input: `{query?}` (requires `sonar_enabled`) |
 | `save_memory` | After the developer confirms the fix is tested and working. Required fields: `root_cause_pattern` (from 21-value enum, use `"uncategorized"` if none fits), `pattern_confidence`. Optional: `outcome_verified`, `outcome_feedback_note`, `negate`, `negation_reason`, `graph_cluster`, `files_agent_opened`, `prior_resolution_used`, `root_cause_confirmed`, `diagnosis_steps`. Routes to `verify_resolution()` or `negate_resolution()` when those flags are set. Response may include `related_skills` (existing skills scored against this entry's tags) - call `draft_skill` next. |
-| `draft_skill` | MANDATORY immediately after every `save_memory` call, even when the honest judgment is `skill_worthy=false`. Server re-checks `outcome_verified` on `issue_key` itself. When `skill_worthy=true`, requires agent-authored `skill_name`, `description`, `when_to_use`, `procedure`, `verification` (optional `pitfalls`, `tags`) - reuse a name from `related_skills` to refine, or pick a new one to create. Returns `{status: skipped}` or `{status: created\|updated, name}`. |
+| `draft_skill` | MANDATORY immediately after every `save_memory` call, even when the honest judgment is `skill_worthy=false`. Requires a prior, verified memory entry - server re-checks `outcome_verified` on `issue_key` itself. When `skill_worthy=true`, requires agent-authored `skill_name`, `description`, `when_to_use`, `procedure`, `verification` (optional `pitfalls`, `tags`) - reuse a name from `related_skills` to refine, or pick a new one to create. Returns `{status: skipped}` or `{status: created\|updated, name}`. |
+| `create_skill` | Memory-free alternative to `draft_skill` - use when the user directly asks for a general-purpose skill, not a follow-up to a verified fix. No `issue_key`/memory dependency; works even when memory is unavailable. Input: `name`, `description`, `when_to_use`, `procedure`, `verification`, optional `pitfalls`, `tags`, `project_key` (ties the skill to that project). Returns `{status: created\|updated\|skipped_user_edited, name}`. |
 | `reinforce_memory_usage` | Call immediately after using a past `memory_search` result to solve a new ticket. Records the citation, auto-elevates entries cited 5+ times. Required: `source_key`, `new_ticket_key`. |
 | `get_memory_audit` | Retrieve the full audit trail for a memory entry in reverse chronological order. Shows every reinforcement, verification, negation, and hub detection event. Required: `issue_key`. |
 | `record_verification` | Record Definition-of-Done evidence (exact command + output per check) before a ticket is done. Required for `save_memory` to record a verified success on the automated path, unless the fix was verified manually (`verified_by_human=true`). Returns `{accepted, missing, confidence}`. |
+| `git_repo_status` | ALWAYS call first before any other `git_*` tool. Reports current branch, working-tree dirtiness, and leftover state from an interrupted prior run. git resolves the repo root upward automatically - call even if no `.git` is visible directly in `repo_path`'s own listing (e.g. a `ui/`/`svc/` subdirectory inside a larger repo is fine). Input: `repo_path`. |
+| `git_start_branch` | Create a feature branch (or switch to it if it already exists - `switched_to_existing`/`created` report which). NOT confirmation-gated - not destructive. If `parent_branch` is omitted and none is confirmed yet for this repo, returns `status: needs_confirmation`/`needs_manual_pick` the same way `git_reverse_merge` does - ask the human, then call again with `parent_branch` set. Input: `repo_path`, `summary_or_preferred_name`, optional `ticket_key` (null for a ticketless branch), `parent_branch`. |
+| `git_blame` | Per-line commit sha, author, and timestamp for one file. Read-only, UNGATED. `line_start`/`line_end` narrow to a range and must be given together. Input: `repo_path`, `relpath`, optional `line_start`/`line_end`. |
+| `git_log` | Commit history newest first, optionally scoped to one file. Read-only, UNGATED. Input: `repo_path`, optional `relpath`, `limit` (default 20), `author`, `since`. |
+| `git_show_commit` | One commit's author, date, message, and changed files. Read-only, UNGATED. Input: `repo_path`, `sha`. |
+| `git_diff` | Per-file status plus insertion/deletion counts between two refs. Read-only, UNGATED. Input: `repo_path`, `ref_a`, `ref_b`. |
+| `git_stage_and_commit` | Stage exactly the given files (never a wildcard) and commit. CONFIRMATION-GATED: the first call (no `confirm_token`) returns `pending_confirmation` plus a one-time token - show the exact files and message to the human and get explicit agreement before calling again with `confirm_token` set. If the current branch is this repo's confirmed parent/shared branch, the response sets `on_parent_branch: true` and strengthens the instruction to warn the human before committing there directly - it never blocks the commit, only the warning. Input: `repo_path`, `files`, `message`, `ticket_key`, optional `confirm_token`. |
+| `git_reverse_merge` | Reverse-merge the parent branch into the current feature branch before opening an MR. Clean merges complete automatically (`status: clean`). A conflict quarantines onto a disposable scratch branch (`status: conflict`, plus `scratch_branch` and `conflicted_files`) - the real feature branch is left untouched. Input: `repo_path`, `parent_branch`, `ticket_key`. |
+| `git_get_conflict` | Get the ours/theirs content for one conflicted file after `git_reverse_merge` reports a conflict. Call once per file in `conflicted_files`. Input: `repo_path`, `file`. |
+| `git_complete_resolution` | Complete conflict resolution on the scratch branch: validates every listed file has no remaining conflict markers, then stages and commits them (hard-blocks if any marker remains). CONFIRMATION-GATED, same token pattern as `git_stage_and_commit`. Input: `repo_path`, `files`, `message`, optional `confirm_token`. |
+| `git_adopt_resolution` | Atomically adopt the resolved scratch branch onto the real feature branch (a fast-forward, never conflict-capable) and delete the scratch branch. Call only after `git_complete_resolution` succeeded. CONFIRMATION-GATED, same token pattern as `git_stage_and_commit`. Input: `repo_path`, `feature_branch`, `scratch_branch`, optional `confirm_token`. |
+| `git_discard_scratch` | Abandon an interrupted or unwanted conflict-resolution attempt: switches back to the feature branch and force-deletes the scratch branch, permanently discarding any resolution work on it. Confirmation-gated. Input: `repo_path`, `feature_branch`, `scratch_branch`. |
+| `git_push` | Push the current branch to the remote without opening an MR yet - e.g. sharing progress with another developer on the same feature branch. Plain push only - no force, no rebase, no history rewrite. CONFIRMATION-GATED: the first call (no `confirm_token`) returns `pending_confirmation` plus a one-time token - show the exact branch and remote to the human and get explicit agreement before calling again with `confirm_token` set. `git_create_mr` already pushes automatically, so use this only when an MR should not be opened yet. Input: `repo_path`, optional `remote` (default `origin`), `confirm_token`. |
+| `git_create_mr` | Create/reuse an MR for the current feature branch and attempt one immediate merge. Pushes the feature branch to origin first. CONFIRMATION-GATED. Input: `repo_path`, `parent_branch`, `ticket_key`, `ticket_summary`, optional `confirm_token`. |
+| `git_finish_ticket` | Post-merge cleanup - re-verifies the MR actually merged before doing anything. CONFIRMATION-GATED. Input: `repo_path`, `parent_branch`, `feature_branch`, `ticket_key`, `mr_iid`, optional `delete_backups`/`confirm_token`. |
+| `git_create_tag` | Create a GitLab tag for a chosen environment. CONFIRMATION-GATED hard gate - shows previous_tag/proposed_tag before creating, accepts tag_name_override. Input: `repo_path`, `environment`, `branch`, optional `tag_name_override`/`confirm_token`. |
+| `gitlab_list_merge_requests` | List merge requests for a GitLab project - who merged what, and when. Read-only, UNGATED. Input: either `project` or `repo_path` (derives the project from that local checkout's origin remote), optional `state` (default `merged`), `target_branch`, `limit` (default 20). |
+| `gitlab_mr_changes` | File-level diffs for one specific merge request by its iid. Read-only, UNGATED. Input: `mr_iid` (required), either `project` or `repo_path`. |
+| `gitlab_list_commits` | Commit history for a GitLab project, optionally scoped to a ref/path/since date. Read-only, UNGATED. Input: either `project` or `repo_path`, optional `ref`, `path`, `since`, `limit` (default 20). |
+| `gitlab_compare` | Compare two refs (branches, tags, or commits) on a GitLab project - commits plus per-file diffs. Read-only, UNGATED. Input: `from_ref`, `to_ref` (required), either `project` or `repo_path`. |
+| `jira_get_close_requirements` | Call first, before `jira_apply_update`: discover what a Jira issue actually needs to close out or update - available workflow transitions (with per-transition required fields) and the fields currently editable on the issue. Transitions/required fields vary per project/workflow - never guess them. Input: `issue_key`. |
+| `jira_apply_update` | Submit a transition and/or field update, optionally with a comment attached to a transition. CONFIRMATION-GATED, same token pattern as `git_stage_and_commit` - the first call (no `confirm_token`) returns `pending_confirmation` plus a one-time token after showing the exact `issue_key`/`transition_id`/`fields`/`comment` that will be submitted. A 400 validation response comes back as `needs_fields` (not a bare failure) - relay those field messages to the human and retry with them filled in. Input: `issue_key`, optional `transition_id`, `fields`, `comment`, `confirm_token`. Requires a connection with the `write:jira-work` scope (OAuth) or an API token. |
+| `jira_create_issue` | Create a new Jira issue. CONFIRMATION-GATED, same token pattern as `git_stage_and_commit` - the first call (no `confirm_token`) returns `pending_confirmation` plus a one-time token after showing the exact `project`/`issuetype`/`summary`/`fields` that will be submitted. Input: `project`, `issuetype`, `summary` (required), optional `fields`, `domain` (pass only when multiple Jira connections are configured and none is set as default), `confirm_token`. |
+| `jira_delete_issue` | Permanently delete a Jira issue. WARNING: no undo, no trash - Jira Cloud has no recycle bin for issues. CONFIRMATION-GATED, same token pattern as `git_stage_and_commit` - the first call (no `confirm_token`) returns `pending_confirmation` plus a one-time token after showing the exact `issue_key` (and whether subtasks are also deleted) that will be permanently removed. Input: `issue_key` (required), optional `delete_subtasks`, `confirm_token`. |
+| `jira_comment_list` | List all comments on a Jira issue. Read-only, UNGATED. Input: `issue_key` (required). |
+| `jira_comment_add` | Add a plain-text comment to a Jira issue (wrapped into ADF automatically). Additive and reversible via `jira_comment_delete`, so UNGATED - executes immediately. Input: `issue_key`, `comment` (required). |
+| `jira_comment_edit` | Change the text of an existing comment on a Jira issue. UNGATED - executes immediately. Input: `issue_key`, `comment_id`, `comment` (required). |
+| `jira_comment_delete` | Permanently delete a comment from a Jira issue. WARNING: no undo - Jira has no recovery mechanism for a deleted comment. CONFIRMATION-GATED, same token pattern as `git_stage_and_commit`. Input: `issue_key`, `comment_id` (required), optional `confirm_token`. |
+| `jira_search` | Find Jira issues matching a JQL query. LIGHTWEIGHT, RAW - bare Jira issue fields, no LLM analysis; distinct from `analyze_issue_fast`/`analyze_issue`. UNGATED, read-only. Cost-capped server-side: `max_results` clamped to 100, `fields` defaults to `summary`/`status`/`issuetype` when omitted. Pagination is token-based (`next_page_token`/`page_token`). Input: `jql` (required), optional `fields`, `max_results`, `page_token`, `domain`. |
+| `jira_get_issue` | A cheap, raw look at a single Jira issue's current fields - e.g. a quick status check before deciding an action. LIGHTWEIGHT, RAW - not a replacement for `analyze_issue_fast`/`analyze_issue`. UNGATED, read-only. Input: `issue_key` (required), optional `fields`. |
+| `jira_link_types` | List the link types available for linking Jira issues together (e.g. `Blocks`, `Relates to`) - typically called before `jira_link_create` so the exact name is known, not guessed. A global, connection-level lookup with no `issue_key`. UNGATED, read-only. Input: optional `domain` (pass only when multiple Jira connections are configured and none is set as default). |
+| `jira_link_create` | Link two Jira issues together. Additive and reversible via `jira_link_delete`, so UNGATED - executes immediately. Input: `link_type_name`, `inward_key`, `outward_key` (required). |
+| `jira_link_delete` | Remove a link between two Jira issues. WARNING: removing a link can hide real dependency information between issues - a link of the same type CAN be recreated afterward if the relationship still applies (not the same permanence class as deleting an issue/comment), but anyone relying on the link in the meantime sees an incomplete picture. CONFIRMATION-GATED, same token pattern as `git_stage_and_commit`. Input: `issue_key`, `link_id` (required; `issue_key` is used only to resolve which Jira connection to call - Jira's link-delete endpoint itself is global), optional `confirm_token`. |
+| `jira_set_assignee` | Assign, unassign, or reset the assignee of a Jira issue. Reversible at any time, so UNGATED - executes immediately. Input: `issue_key` (required), optional `account_id` (omit or pass `null` to unassign; pass `"-1"` for the project's default assignee; any other string assigns that account). |
+| `jira_attachment_upload` | Upload a file attachment to a Jira issue. Pass exactly one of `file_path` (an absolute local path - ICX reads the file directly, same as `icx jira attach add`; `filename` is derived from the path unless overridden - the reliable option for binary files) or `content_base64` (base64-encoded content, `filename` required, for when the content only exists in-memory). Additive and reversible via `jira_attachment_delete`, so UNGATED - executes immediately. Input: `issue_key` (required), one of `file_path`/`content_base64` (required), optional `filename`, `content_type`. |
+| `jira_attachment_delete` | Permanently delete an attachment from a Jira issue. WARNING: no undo, no trash - Jira Cloud has no recycle bin for attachments. CONFIRMATION-GATED, same token pattern as `git_stage_and_commit`. Input: `issue_key`, `attachment_id` (required; `issue_key` is used only to resolve which Jira connection to call), optional `confirm_token`. |
+| `jira_get_current_user` | The caller's own Jira identity (`accountId`, `displayName`) via `GET .../myself`. Read-only, UNGATED, executes immediately. No required arguments. Pass `issue_key` to resolve the same Jira connection a subsequent watcher/worklog call on that issue would use; omit it (optionally with `domain`) for a standalone lookup against the default/single connection. |
+| `jira_list_watchers` | List the watchers on a Jira issue. Read-only, UNGATED. Input: `issue_key` (required). |
+| `jira_list_worklogs` | List the worklog entries on a Jira issue (author, time spent, start time). Read-only, UNGATED. Call before `jira_worklog_edit`/`jira_worklog_delete` to find a `worklog_id` and its author. Input: `issue_key` (required). |
+| `jira_set_watcher` | Add or remove a watcher on a Jira issue, direction controlled by `watching`. SELF-VS-OTHER GATING: first looks up the caller's own accountId via `jira_get_current_user`. If `account_id` is omitted or matches the caller's own identity, this executes IMMEDIATELY, UNGATED. If `account_id` differs from the caller's own identity, this becomes CONFIRMATION-GATED exactly like any other destructive tool, same token pattern as `git_stage_and_commit`. Input: `issue_key`, `watching` (required), optional `account_id`, `confirm_token`. |
+| `jira_worklog_add` | Log time against a Jira issue. UNGATED, always executes immediately - Jira's worklog creation endpoint has no author-override field, so a new entry is always attributed to the authenticated caller and there is no "on behalf of someone else" case to gate. `started` accepts a plain ISO 8601 string, reformatted to Jira's required wire format automatically; `comment` is plain text, wrapped into ADF automatically. Input: `issue_key`, `time_spent_seconds`, `started` (required), optional `comment`. |
+| `jira_worklog_edit` | Change an existing worklog entry's time spent, start time, and/or comment (only the fields given are changed). SELF-VS-OTHER GATING: first fetches the worklog via `jira_list_worklogs` to find its author, then compares to the caller's own accountId via `jira_get_current_user`. Editing your own worklog executes IMMEDIATELY, UNGATED; editing someone else's becomes CONFIRMATION-GATED, same token pattern as `git_stage_and_commit`. Input: `issue_key`, `worklog_id` (required, plus at least one of `time_spent_seconds`/`started`/`comment`), optional `confirm_token`. |
+| `jira_worklog_delete` | Delete a worklog entry from a Jira issue. SELF-VS-OTHER GATING: same lookup-then-compare as `jira_worklog_edit` - deleting your own worklog executes IMMEDIATELY, UNGATED; deleting someone else's becomes CONFIRMATION-GATED. Input: `issue_key`, `worklog_id` (required), optional `confirm_token`. |
 
 **Definition-of-Done gate:** analyze responses now carry a `dod` block (a checklist derived from the ticket + a recommended verification layer set by risk tier - you choose which layers run). ICX refuses to record a success in memory without verification evidence (`record_verification`) or an explicit manual confirmation (`verified_by_human=true`). This is what makes ICX responsible for the outcome, not just the plan.
 

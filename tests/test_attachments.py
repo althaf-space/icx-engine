@@ -208,6 +208,99 @@ async def test_vision_enrich_raises_clear_error_when_model_is_text_only():
             await vision_enrich(config, fake_bytes, "ocr fallback text")
 
 
+# -- Client cache reuse (process_attachments batches share one SDK client) ----
+
+async def test_vision_enrich_anthropic_reuses_cached_client_across_calls():
+    config = ChannelConfig(provider="anthropic", model="claude-3-haiku-20240307", api_key="sk-ant-test")
+    fake_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock()]
+    mock_response.content[0].text = "result"
+
+    with patch("anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        cache: dict = {}
+        await vision_enrich(config, fake_bytes, "ocr", _client_cache=cache)
+        await vision_enrich(config, fake_bytes, "ocr", _client_cache=cache)
+
+    assert mock_cls.call_count == 1
+
+
+async def test_vision_enrich_openai_reuses_cached_client_across_calls():
+    config = ChannelConfig(provider="openai", model="gpt-4o", api_key="sk-test")
+    fake_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "result"
+
+    with patch("openai.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+        cache: dict = {}
+        await vision_enrich(config, fake_bytes, "ocr", _client_cache=cache)
+        await vision_enrich(config, fake_bytes, "ocr", _client_cache=cache)
+
+    assert mock_cls.call_count == 1
+
+
+async def test_vision_enrich_google_reuses_cached_client_across_calls():
+    config = ChannelConfig(provider="google", model="gemini-1.5-flash", api_key="goog-test")
+    fake_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+    mock_response = MagicMock()
+    mock_response.text = "result"
+    mock_client = MagicMock()
+    mock_client.aio = MagicMock()
+    mock_client.aio.models = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+    with patch("google.genai.Client", return_value=mock_client) as mock_cls:
+        cache: dict = {}
+        await vision_enrich(config, fake_bytes, "ocr", _client_cache=cache)
+        await vision_enrich(config, fake_bytes, "ocr", _client_cache=cache)
+
+    assert mock_cls.call_count == 1
+
+
+async def test_vision_enrich_without_cache_builds_fresh_client_each_call():
+    """Default behavior (no cache passed) is unaffected by the caching fix."""
+    config = ChannelConfig(provider="anthropic", model="claude-3-haiku-20240307", api_key="sk-ant-test")
+    fake_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock()]
+    mock_response.content[0].text = "result"
+
+    with patch("anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        await vision_enrich(config, fake_bytes, "ocr")
+        await vision_enrich(config, fake_bytes, "ocr")
+
+    assert mock_cls.call_count == 2
+
+
+async def test_summarize_content_reuses_cached_client_across_chunk_calls():
+    """Map-reduce summarization issues multiple sequential _llm_summarize_chunk calls -
+    they must share one client via the cache instead of one client per chunk."""
+    config = ChannelConfig(provider="openai", model="gpt-4o", api_key="sk-test")
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "chunk summary"
+    long_content = "word " * 20000  # > _SINGLE_CALL_LIMIT, forces map-reduce (multiple chunks)
+
+    with patch("openai.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+        cache: dict = {}
+        await _summarize_content(config, "big.txt", long_content, _client_cache=cache)
+
+    assert mock_cls.call_count == 1
+
+
 # -- SDK timeout parameters ----------------------------------------------------
 
 async def test_vision_enrich_anthropic_passes_timeout_90s():
@@ -582,6 +675,39 @@ async def test_process_attachments_calls_vision_when_llm_config_provided():
     mock_vision.assert_called_once()
     assert texts == {"screenshot.png": "vision refined"}
     assert "screenshot.png" in images  # Base64 always captured regardless of vision model
+
+
+@respx.mock
+async def test_process_attachments_multiple_images_share_one_vision_client():
+    """Integration-level check for the client-cache fix: N images processed concurrently
+    via asyncio.gather in one process_attachments() call must build the SDK client once,
+    not once per image."""
+    url1 = "https://test.atlassian.net/rest/api/3/attachment/content/10001"
+    url2 = "https://test.atlassian.net/rest/api/3/attachment/content/10002"
+    url3 = "https://test.atlassian.net/rest/api/3/attachment/content/10003"
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+    respx.get(url1).mock(return_value=httpx.Response(200, content=fake_png))
+    respx.get(url2).mock(return_value=httpx.Response(200, content=fake_png))
+    respx.get(url3).mock(return_value=httpx.Response(200, content=fake_png))
+
+    raw = _make_raw({"a.png": url1, "b.png": url2, "c.png": url3})
+    client = JiraClient(JIRA_BASE_URL, JIRA_AUTH_HEADER, JIRA_ALLOWED_HOSTS)
+    llm = LLMConfig(text_config=ChannelConfig(provider="openai", model="gpt-4o", api_key="k"),
+                    image_config=ChannelConfig(provider="openai", model="gpt-4o", api_key="k"))
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "vision result"
+
+    with patch("icx_engine.connectors.attachments.ocr_image", return_value="raw ocr"):
+        with patch("openai.AsyncOpenAI") as mock_cls:
+            mock_sdk_client = MagicMock()
+            mock_cls.return_value = mock_sdk_client
+            mock_sdk_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            texts, images, _ft, _rb = await process_attachments(raw, client, llm_config=llm)
+
+    assert mock_cls.call_count == 1
+    assert texts == {"a.png": "vision result", "b.png": "vision result", "c.png": "vision result"}
 
 
 @respx.mock

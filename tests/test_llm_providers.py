@@ -259,6 +259,32 @@ def test_gemini_server_error_raises_source_unavailable():
             asyncio.run(provider.analyze(_raw()))
 
 
+def test_gemini_timeout_raises_source_unavailable():
+    provider = _make_gemini_provider()
+
+    with patch("google.genai.Client", return_value=_gemini_mock_client(asyncio.TimeoutError())):
+        with pytest.raises(SourceUnavailable):
+            asyncio.run(provider.analyze(_raw()))
+
+
+def test_gemini_generate_timeout_returns_empty_string():
+    provider = _make_gemini_provider()
+
+    with patch("google.genai.Client", return_value=_gemini_mock_client(asyncio.TimeoutError())):
+        result = asyncio.run(provider.generate("prompt"))
+    assert result == ""
+
+
+def test_gemini_generate_happy_path_returns_text():
+    mock_response = MagicMock()
+    mock_response.text = "generated text"
+    provider = _make_gemini_provider()
+
+    with patch("google.genai.Client", return_value=_gemini_mock_client(mock_response)):
+        result = asyncio.run(provider.generate("prompt"))
+    assert result == "generated text"
+
+
 def test_gemini_malformed_json_raises_context_build_error():
     mock_response = MagicMock()
     mock_response.text = "not valid json"

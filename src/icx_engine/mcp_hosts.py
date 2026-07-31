@@ -45,6 +45,23 @@ def _home() -> Path:
     return Path.home()
 
 
+def _devin_config_dir() -> Path:
+    """Devin Desktop (formerly Windsurf - Cognition's June 2026 rename) moved its MCP config out of
+    ~/.codeium/windsurf/ to a dedicated per-app config dir. Windows path confirmed directly from a
+    live Devin Desktop migration prompt (2026-07: "...AppData\\Roaming\\devin\\mcp_config.json");
+    macOS/Linux derived from the same single-app-name config-dir convention (matches Python's
+    platformdirs.user_config_dir("devin")) - not independently confirmed on those platforms, revisit
+    if a Mac/Linux user reports a different actual path. Derived from _home() (not a raw os.environ
+    read) so the existing fake_home test fixture can redirect this too, same as every other host path
+    in this file."""
+    home = _home()
+    if sys.platform == "win32":
+        return home / "AppData" / "Roaming" / "devin"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "devin"
+    return home / ".config" / "devin"
+
+
 # -- Data models ---------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -178,10 +195,18 @@ def list_hosts() -> list[MCPHost]:
             command_content=_CURSOR_COMMAND_CONTENT,
         ),
         MCPHost(
+            # Devin Desktop (formerly Windsurf) moved its MCP config to _devin_config_dir() - see that
+            # function's docstring. The old ~/.codeium/windsurf/mcp_config.json is kept as an extra
+            # write/remove target (not the primary) so an install that still reads the old path (e.g.
+            # Devin CLI, which per its own docs reads ~/.codeium/<channel>/mcp_config.json) stays in
+            # sync, and so a stale pre-migration entry there gets cleaned up on `icx mcp remove`.
+            # rules_path/command_path (global_rules.md/global_workflows) are UNCHANGED - only the MCP
+            # server config file itself is confirmed to have moved.
             "windsurf", "Windsurf",
-            home / ".codeium" / "windsurf" / "mcp_config.json",
+            _devin_config_dir() / "mcp_config.json",
             home / ".codeium" / "windsurf",
             "json",
+            extra_config_paths=(home / ".codeium" / "windsurf" / "mcp_config.json",),
             enforces=True, enforce_kind="rules",
             rules_path=home / ".codeium" / "windsurf" / "memories" / "global_rules.md",
             command_path=home / ".codeium" / "windsurf" / "global_workflows" / "icx-boost.md",
@@ -261,16 +286,19 @@ def write_icx_entry(host: MCPHost) -> WriteResult:
 
 
 def remove_icx_entry(host: MCPHost) -> bool:
-    """Remove ICX entry from host config. Returns True if entry was present."""
-    if not host.config_path.exists():
-        return False
-    if host.config_format == "toml":
-        removed = _remove_toml(host.config_path)
-    else:
-        removed = _remove_json(host.config_path, mcp_key=host.mcp_key)
+    """Remove ICX entry from host config (and every extra_config_paths location, e.g. a stale
+    pre-migration path kept in sync for Windsurf/Devin Desktop). Returns True if the entry was
+    present anywhere. The primary config_path missing must not short-circuit cleanup of an extra
+    path that still has a stale entry - each location is checked independently."""
+    removed = False
+    if host.config_path.exists():
+        if host.config_format == "toml":
+            removed = _remove_toml(host.config_path) or removed
+        else:
+            removed = _remove_json(host.config_path, mcp_key=host.mcp_key) or removed
     for extra in host.extra_config_paths:
         if extra.exists():
-            _remove_json(extra, mcp_key=host.mcp_key)
+            removed = _remove_json(extra, mcp_key=host.mcp_key) or removed
     return removed
 
 
@@ -393,21 +421,33 @@ _RULE_START = "<!-- ICX-ROUTING:START (managed by `icx mcp setup`) -->"
 _RULE_END = "<!-- ICX-ROUTING:END -->"
 
 _RULE_BLOCK = f"""{_RULE_START}
-## ICX ROUTING RULE: tracker, testing, and code-quality requests always go through ICX
+## ICX ROUTING RULE: tracker, testing, git, and code-quality requests always go through ICX
 
 When the ICX MCP server is connected (any `mcp__icx__*` tool is available), route these request
 types through ICX - this applies on every message, independent of whether /icx-boost was invoked:
 
-1. WORK-TRACKER ISSUE (`ABC-123`, or a Jira/GitHub/Linear/GitLab issue URL): call
-   `mcp__icx__analyze_issue_fast` FIRST for the ticket, before any other tracker MCP. ICX is
-   the sole tracker interface.
+1. ANY WORK-TRACKER ACTION - analyzing an existing ticket, searching, creating, updating,
+   commenting, linking, attaching, assigning, watching, logging work, or looking up a
+   project/user/field (Jira/GitHub/Linear/GitLab) - goes through ICX's own tools, never a
+   separate or native tracker connector (e.g. a built-in Atlassian/Jira integration), even if
+   one is also available in the same session. For an existing ticket key (`ABC-123`) or issue
+   URL, call `mcp__icx__analyze_issue_fast` FIRST, before any other tracker tool. ICX is the
+   sole tracker interface for every action above, not analysis alone.
 2. TESTING an app/screen/UI/API/endpoint ("test this", "write tests", "check this
    screen/flow", QA, coverage): call `mcp__icx__start_testing_session` FIRST; drive testing
    through ICX, never hand-roll tests.
 3. CODE QUALITY / SonarQube ("sonar", "quality gate", "code smells", "vulnerabilities",
    "coverage report"): call the ICX `mcp__icx__sonar_*` tools (start with sonar_status /
    sonar_report) - do not fetch Sonar data another way.
-4. ANY OTHER URL pasted by the user, or found inside a ticket (Figma, Slack, docs, etc.):
+4. ANY GIT OPERATION - checking status, creating a branch, staging/committing, syncing/
+   merging, pushing, opening or finishing a merge request, tagging - goes through ICX's own
+   `mcp__icx__git_*`/`mcp__icx__gitlab_*` tools, never raw `git`/`gh`/`glab` commands or another
+   git integration, even if one is also available in the same session. Call
+   `mcp__icx__git_repo_status` FIRST, before any other git tool. ICX is the sole git-workflow
+   interface for every action above - this is what enforces the "no rebase, no force-push"
+   safety doctrine and the "no commit/branch without going through ICX" mandate; bypassing it
+   with a raw git command defeats both.
+5. ANY OTHER URL pasted by the user, or found inside a ticket (Figma, Slack, docs, etc.):
    if ICX has a connector for it, use ICX. If ICX does not but you have your own connector/
    tool for it, use that. If neither is available, tell the user to fetch/paste it
    themselves - never fabricate its content.

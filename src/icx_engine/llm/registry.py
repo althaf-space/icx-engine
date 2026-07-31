@@ -28,6 +28,8 @@ class ProviderSpec:
     default_text_model: str
     default_image_model: str
     cli_label: str
+    prompts_for_base_url: bool = False   # CLI connect flow: ask for a custom base URL
+    prompts_for_api_key: bool = True     # CLI connect flow: ask for an API key
 
 
 # Insertion order defines the CLI provider menu order.
@@ -36,11 +38,13 @@ PROVIDERS: dict[str, ProviderSpec] = {
         "ollama", "openai", "http://localhost:11434/v1",
         "llama3", "llava",
         "Ollama / LM Studio  (local, free, no API key needed)",
+        prompts_for_base_url=True, prompts_for_api_key=False,
     ),
     "nim": ProviderSpec(
         "nim", "openai", "https://integrate.api.nvidia.com/v1",
         "deepseek-ai/deepseek-v3", "meta/llama-3.2-11b-vision-instruct",
         "Nvidia NIM          (cloud, free tier at build.nvidia.com)",
+        prompts_for_base_url=True, prompts_for_api_key=True,
     ),
     "openai": ProviderSpec(
         "openai", "openai", None,

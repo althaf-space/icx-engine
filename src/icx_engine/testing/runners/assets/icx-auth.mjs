@@ -15,10 +15,11 @@
 //            reaches --success-url (or the user closes the window) the session is saved.
 //              node icx-auth.mjs --mode capture --url <loginUrl> --out <state.json> \
 //                [--success-url <glob>] [--timeout <sec>]
-//   inline:  drive the login form with credentials passed to THIS process (never via chat), then
-//            save the session.
-//              node icx-auth.mjs --mode inline --url <loginUrl> --out <state.json> \
-//                --user <u> --pass <p> [--user-selector <s>] [--pass-selector <s>] \
+//   inline:  drive the login form with credentials passed to THIS process via env vars (never via
+//            chat, never via argv - argv is visible to other local users through process listing),
+//            then save the session.
+//              ICX_AUTH_USER=<u> ICX_AUTH_PASS=<p> node icx-auth.mjs --mode inline \
+//                --url <loginUrl> --out <state.json> [--user-selector <s>] [--pass-selector <s>] \
 //                [--submit-selector <s>] [--success-url <glob>] [--timeout <sec>] [--headless]
 //
 // Playwright + its Chromium are installed by ICX under ~/.icx/testing (runner-install manager).
@@ -79,8 +80,8 @@ async function main() {
       const userSel = arg("--user-selector", "input[type=email], input[name=username], input[type=text]");
       const passSel = arg("--pass-selector", "input[type=password]");
       const submitSel = arg("--submit-selector", "button[type=submit], input[type=submit]");
-      await page.locator(userSel).first().fill(arg("--user", ""));
-      await page.locator(passSel).first().fill(arg("--pass", ""));
+      await page.locator(userSel).first().fill(process.env.ICX_AUTH_USER || "");
+      await page.locator(passSel).first().fill(process.env.ICX_AUTH_PASS || "");
       await page.locator(submitSel).first().click();
       if (successUrl) {
         await page.waitForURL(successUrl, { timeout: timeoutMs });

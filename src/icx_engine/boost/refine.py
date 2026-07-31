@@ -11,7 +11,6 @@ from __future__ import annotations
 import re
 
 from icx_engine.boost.brief import _COMPLETENESS_DIMS, _context_lines
-from icx_engine.methodology import _GATE_SEQUENCE
 from icx_engine.personas import persona_profile, select_persona
 
 _MAX_DIMS = 12           # bound the merged requirements list so the prompt cannot bloat unboundedly

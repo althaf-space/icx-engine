@@ -9,6 +9,7 @@ _MIN_SKILL_SCORE = 1
 
 
 _PUNCT = ".,;:!?()[]{}\"'"
+_TEXT_FALLBACK_WEIGHT = 0.5
 
 
 def _keywords(prompt: str, archetype: str) -> set:
@@ -26,6 +27,28 @@ def _keywords(prompt: str, archetype: str) -> set:
     return words
 
 
+def _text_overlap(kw: set, skill) -> int:
+    """Fallback for skills with no tag overlap: same tokenizer as _keywords, run over the skill's
+    own description/title/when_to_use, so hand-created skills with tags=[] (icx skills create,
+    pre-tag-prompt) can still surface. Returns the raw shared-word count - the caller applies
+    _TEXT_FALLBACK_WEIGHT so tag matches never rank below a text-fallback match with the same
+    raw overlap count, while the floor check below still uses the raw count like a tag match."""
+    text = f"{skill.description} {skill.title} {skill.when_to_use}"
+    words = {w.strip(_PUNCT).lower() for w in text.split()}
+    words = {w for w in words if len(w) >= 2}
+    return len(kw & words)
+
+
+def _score_skill(kw: set, tags: set, skill) -> float:
+    tag_score = len(kw & tags)
+    if tag_score >= _MIN_SKILL_SCORE:
+        return float(tag_score)
+    text_overlap = _text_overlap(kw, skill)
+    if text_overlap >= _MIN_SKILL_SCORE:
+        return text_overlap * _TEXT_FALLBACK_WEIGHT
+    return 0.0
+
+
 def rank_skills(prompt: str, archetype: str, storage: SkillStorage | None = None) -> list:
     storage = storage or SkillStorage()
     skills = storage.list_all()
@@ -35,8 +58,8 @@ def rank_skills(prompt: str, archetype: str, storage: SkillStorage | None = None
     scored = []
     for s in skills:
         tags = {t.lower() for t in s.tags}
-        score = len(kw & tags)
-        if score >= _MIN_SKILL_SCORE:
+        score = _score_skill(kw, tags, s)
+        if score > 0:
             scored.append((score, s))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [
@@ -62,8 +85,8 @@ def rank_skills_for_tags(tags: list, root_cause_pattern: str, storage: SkillStor
     scored = []
     for s in skills:
         stags = {t.lower() for t in s.tags}
-        score = len(kw & stags)
-        if score >= _MIN_SKILL_SCORE:
+        score = _score_skill(kw, stags, s)
+        if score > 0:
             scored.append((score, s))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [

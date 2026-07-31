@@ -1,5 +1,7 @@
 """
-Graph report generator: reads graph.json, writes:
+Graph report generator (renamed from querier.py - this module writes reports, it
+never queries the graph itself; the real GraphQuerier class lives in query.py):
+reads graph.json, writes:
   GRAPH_REPORT.md       - compact index (god nodes, cluster table, cross-cluster)
   GRAPH_CLUSTERS/*.md   - one file per cluster with role-tagged file list
 

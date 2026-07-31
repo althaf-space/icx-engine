@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import json
 from icx_engine.exceptions import AuthError, ContextBuildError, RateLimited, SourceUnavailable
 from icx_engine.llm.base import LLMProvider, SYSTEM_PROMPT, build_user_message, finalize, _strip_json_fencing
@@ -24,11 +25,18 @@ class GeminiProvider(LLMProvider):
             temperature=0.0,
         )
         try:
-            response = await client.aio.models.generate_content(
-                model=self.model_name,
-                contents=build_user_message(raw),
-                config=cfg,
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=build_user_message(raw),
+                    config=cfg,
+                ),
+                timeout=90.0,
             )
+        except asyncio.TimeoutError as exc:
+            raise SourceUnavailable(
+                "Gemini did not respond in time. Check your network connection and retry."
+            ) from exc
         except ClientError as exc:
             _code = getattr(exc, "code", None)
             if _code == 429:
@@ -64,8 +72,10 @@ class GeminiProvider(LLMProvider):
         try:
             from google import genai
             client = genai.Client(api_key=self._api_key)
-            response = await client.aio.models.generate_content(
-                model=self.model_name, contents=prompt)
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(model=self.model_name, contents=prompt),
+                timeout=90.0,
+            )
             return getattr(response, "text", "") or ""
         except Exception:
             return ""

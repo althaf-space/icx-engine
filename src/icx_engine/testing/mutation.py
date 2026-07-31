@@ -16,6 +16,7 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from pathlib import Path
 
 from icx_engine.testing.runners.base import RunSpec
 
@@ -67,19 +68,19 @@ def build_mutation_command(lang: str, repo, runtime_path: str | None, target: st
                        cwd=repo, report_path="mutmut-results",
                        note="parse via 'mutmut results'; no native file report")
     if tool == "stryker":
-        report = f"{repo}/reports/mutation/mutation-report.json"
+        report = str(Path(repo) / "reports" / "mutation" / "mutation-report.json")
         return RunSpec(command=["npx", "stryker", "run", "--reporters", "json"],
                        cwd=repo, report_path=report,
                        note="Stryker JSON report")
     if tool == "pit":
         env = {"JAVA_HOME": runtime_path} if runtime_path else {}
         return RunSpec(command=["mvn", "-q", "org.pitest:pitest-maven:mutationCoverage"],
-                       cwd=repo, report_path=f"{repo}/target/pit-reports/mutations.xml",
+                       cwd=repo, report_path=str(Path(repo) / "target" / "pit-reports" / "mutations.xml"),
                        env=env, note="PIT mutations.xml")
     if tool == "infection":
-        report = f"{repo}/infection.log"
+        report = str(Path(repo) / "infection.json")
         return RunSpec(command=["vendor/bin/infection", "--logger-json=infection.json"],
-                       cwd=repo, report_path=f"{repo}/infection.json",
+                       cwd=repo, report_path=report,
                        note="Infection JSON log")
     return None
 

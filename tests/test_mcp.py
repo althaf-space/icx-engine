@@ -800,7 +800,7 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 40
+    assert len(tools) == 101
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
@@ -810,13 +810,59 @@ async def test_list_tools_returns_all_tools():
         "graph_cross_links", "graph_important_nodes", "graph_blast_radius",
         "graph_cycles", "graph_dead_code", "graph_ownership",
         "memory_find_by_file", "memory_get_hotspots", "memory_get_related",
-        "memory_get_patterns", "memory_search",
+        "memory_get_patterns", "memory_search", "memory_delete", "memory_update",
         "reinforce_memory_usage", "get_memory_audit",
         "start_testing_session", "resume_testing_session", "get_testing_session_status",
         "sonar_status", "sonar_projects", "sonar_branches",
         "sonar_measures", "sonar_quality_gate", "sonar_findings", "sonar_report",
-        "icx_skill_get", "icx_skills_index", "draft_skill",
+        "sonar_top_files", "sonar_history", "sonar_analyses", "sonar_rule", "sonar_rules", "sonar_hotspot",
+        "sonar_source", "sonar_metrics", "sonar_quality_gate_definition", "sonar_quality_profiles",
+        "sonar_issue_authors", "sonar_issue_tags", "sonar_issue_changelog", "sonar_system_health", "sonar_languages",
+        "icx_skill_get", "icx_skills_index", "draft_skill", "create_skill",
+        "git_repo_status", "git_start_branch", "git_blame", "git_log", "git_show_commit", "git_diff",
+        "git_stage_and_commit", "git_push",
+        "git_reverse_merge", "git_get_conflict", "git_complete_resolution",
+        "git_adopt_resolution", "git_discard_scratch",
+        "git_create_mr", "git_finish_ticket", "git_create_tag",
+        "gitlab_list_merge_requests", "gitlab_mr_changes", "gitlab_list_commits", "gitlab_compare",
+        "jira_get_close_requirements", "jira_apply_update",
+        "jira_create_issue", "jira_delete_issue",
+        "jira_comment_list", "jira_comment_add", "jira_comment_edit", "jira_comment_delete",
+        "jira_search", "jira_get_issue",
+        "jira_link_types", "jira_link_create", "jira_link_delete", "jira_set_assignee",
+        "jira_attachment_upload", "jira_attachment_delete",
+        "jira_get_current_user", "jira_list_watchers", "jira_list_worklogs",
+        "jira_set_watcher", "jira_worklog_add", "jira_worklog_edit", "jira_worklog_delete",
     }
+
+
+async def test_git_tool_descriptions_follow_sonar_use_when_must_convention():
+    """Every git_* tool description must follow the same USE WHEN...MUST... convention
+    already established by the sonar_* tool descriptions in mcp_server.py."""
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+
+    git_tools = [t for t in tools if t.name.startswith("git_")]
+    assert len(git_tools) == 16
+    for tool in git_tools:
+        assert "USE WHEN" in tool.description, f"{tool.name} missing 'USE WHEN'"
+        assert "MUST" in tool.description, f"{tool.name} missing 'MUST'"
+
+
+async def test_git_repo_status_description_mandates_icx_over_raw_git():
+    """Regression: git_repo_status must declare ICX the sole git-workflow interface, the same
+    way analyze_issue_fast/analyze_issue declare ICX the sole tracker interface - otherwise
+    nothing stops the agent falling back to raw git commands."""
+    from icx_engine.mcp_server import _list_tools
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    status_tool = next(t for t in tools if t.name == "git_repo_status")
+    desc = status_tool.description
+    assert "SOLE" in desc and "GIT-WORKFLOW INTERFACE" in desc
+    assert "NEVER run" in desc
 
 
 async def test_graph_cross_links_schema_has_file_path():
@@ -887,6 +933,27 @@ async def test_handle_analyze_issue_success_includes_icx_next():
     assert "work_item" in data
     assert "ITERATION RULE" in data["_icx_next"]["instruction"]
     assert "each new change requires its own fresh test confirmation" in data["_icx_next"]["instruction"]
+
+
+async def test_handle_analyze_issue_instruction_suggests_git_workflow():
+    """_icx_next.instruction nudges the agent toward git_repo_status + a feature branch."""
+    from icx_engine.models.output import IssueContext
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        with patch("icx_engine.mcp_server.engine.run", new=AsyncMock()) as mock_run:
+            mock_run.return_value = IssueContext(
+                problem_summary="AuthService token expired",
+                detailed_description="JWT refresh fails on rotation",
+                reproduction_steps=[], expected_behavior=None, actual_behavior=None,
+                acceptance_criteria=[], impact="high", priority="High", issue_type="Bug",
+                confidence_score=0.9, completeness_score=0.9, missing_information=[],
+            )
+            with patch("icx_engine.mcp_server._get_graphs_info", return_value=[{"status": "ready", "path": "/projects/my-svc", "report_path": "/projects/my-svc/.icx/graphs/GRAPH_REPORT.md", "access": "pre-authorized", "eta_seconds": None}]):
+                result = await _handle_analyze_issue("TEST-123", project_paths=["/projects/my-svc"])
+    data = json.loads(result)
+    instruction = data["_icx_next"]["instruction"]
+    assert "git_repo_status" in instruction
+    assert "feature branch" in instruction
 
 
 async def test_handle_save_memory_returns_saved_true(mcp_config):
@@ -2091,6 +2158,56 @@ async def test_call_tool_analyze_empty_project_paths_proceeds_to_engine():
     assert data.get("code") != "MISSING_PROJECT_PATH"
 
 
+async def test_call_tool_analyze_issue_fast_attaches_ticket_skill_hint():
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.schema import SkillEntry
+    from unittest.mock import AsyncMock, patch
+
+    class _FakeStorage:
+        def read(self, name):
+            assert name == "ticket-context-analysis"
+            return SkillEntry(name=name, description="d", title="t", when_to_use="w",
+                               procedure="p", pitfalls="x", verification="v")
+
+    with patch("icx_engine.mcp_server._handle_analyze_issue",
+               new=AsyncMock(return_value=json.dumps({"status": "ok"}))):
+        with patch("icx_engine.skills.hints.SkillStorage", _FakeStorage):
+            result = await _call_tool(
+                "analyze_issue_fast", {"issue_ref": "TEST-123", "project_paths": ["/projects/my-svc"]},
+            )
+    data = json.loads(result[0].text)
+    assert data["skills"]["index"][0]["name"] == "ticket-context-analysis"
+
+
+async def test_call_tool_analyze_issue_fast_appends_ranked_custom_skill(tmp_path):
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+    from unittest.mock import AsyncMock, patch
+
+    storage = SkillStorage(root=tmp_path)
+    default_entry = SkillEntry(name="ticket-context-analysis", description="d", title="t",
+                                when_to_use="w", procedure="p", pitfalls="x", verification="v")
+    storage.write(default_entry)
+    custom_entry = SkillEntry(name="payment-gateway-skill", description="handles payment gateway retries",
+                               tags=["paymentgateway"], title="Payment Gateway Skill",
+                               when_to_use="w", procedure="p", pitfalls="x", verification="v")
+    storage.write(custom_entry)
+
+    fake_response = json.dumps({
+        "work_item": {"type": "Bug", "summary": "paymentgateway timeout on checkout"},
+    })
+    with patch("icx_engine.mcp_server._handle_analyze_issue", new=AsyncMock(return_value=fake_response)):
+        with patch("icx_engine.skills.hints.SkillStorage", lambda: storage):
+            result = await _call_tool(
+                "analyze_issue_fast", {"issue_ref": "TEST-123", "project_paths": ["/projects/my-svc"]},
+            )
+    data = json.loads(result[0].text)
+    names = [e["name"] for e in data["skills"]["index"]]
+    assert names[0] == "ticket-context-analysis"
+    assert "payment-gateway-skill" in names
+
+
 async def test_call_tool_analyze_whitespace_only_paths_proceeds_to_engine():
     """analyze_issue with whitespace-only paths proceeds after stripping (no MISSING_PROJECT_PATH)."""
     from icx_engine.mcp_server import _call_tool
@@ -2310,6 +2427,15 @@ def test_tool_descriptions_forbid_external_tracker_mcp():
         # Generic - must not single out one provider in the rule text.
         assert "Jira MCP" not in desc
         assert "GitHub MCP" not in desc
+
+
+def test_tool_descriptions_cover_full_tracker_crud_not_just_fetch():
+    """Regression: create/search/lookup have no ticket key, so RULE 0 must not scope the
+    sole-tracker-interface ban to fetching alone - it must cover every tracker action."""
+    from icx_engine.mcp_server import _FAST_DESCRIPTION, _FULL_DESCRIPTION
+    for desc in (_FAST_DESCRIPTION, _FULL_DESCRIPTION):
+        assert "creating" in desc and "searching" in desc
+        assert "no ticket key yet" in desc
 
 
 def test_resume_desc_has_gate_posture_classification():
@@ -2693,6 +2819,87 @@ async def test_start_session_injects_session_id_into_state(monkeypatch):
     assert captured["session_id_in_state"]   # non-empty
 
 
+async def test_start_session_attaches_testing_session_driver_skill_hint(monkeypatch):
+    from icx_engine import mcp_server
+    from icx_engine.skills.schema import SkillEntry
+    from unittest.mock import patch
+
+    class _Snap:
+        tasks = []
+        next = ()
+        values = {}
+
+    class _FakeGraph:
+        async def ainvoke(self, state, config=None):
+            return None
+
+        async def aget_state(self, config):
+            return _Snap()
+
+    async def _fake_get_graph():
+        return _FakeGraph()
+
+    import icx_engine.testing.graph as _g
+    monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
+
+    class _FakeStorage:
+        def read(self, name):
+            assert name == "testing-session-driver"
+            return SkillEntry(name=name, description="d", title="t", when_to_use="w",
+                               procedure="p", pitfalls="x", verification="v")
+
+    with patch("icx_engine.skills.hints.SkillStorage", _FakeStorage):
+        result = await mcp_server._call_tool(
+            "start_testing_session", {"file_paths": ["a.tsx"], "test_mode": "automated"},
+        )
+    data = json.loads(result[0].text)
+    assert data["skills"]["index"][0]["name"] == "testing-session-driver"
+
+
+async def test_start_session_appends_ranked_custom_skill_from_context(tmp_path, monkeypatch):
+    from icx_engine import mcp_server
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+    from unittest.mock import patch
+
+    class _Snap:
+        tasks = []
+        next = ()
+        values = {}
+
+    class _FakeGraph:
+        async def ainvoke(self, state, config=None):
+            return None
+
+        async def aget_state(self, config):
+            return _Snap()
+
+    async def _fake_get_graph():
+        return _FakeGraph()
+
+    import icx_engine.testing.graph as _g
+    monkeypatch.setattr(_g, "get_testing_graph", _fake_get_graph)
+
+    storage = SkillStorage(root=tmp_path)
+    default_entry = SkillEntry(name="testing-session-driver", description="d", title="t",
+                                when_to_use="w", procedure="p", pitfalls="x", verification="v")
+    storage.write(default_entry)
+    custom_entry = SkillEntry(name="checkout-flow-tester", description="tests checkout flow edge cases",
+                               tags=["checkoutflow"], title="Checkout Flow Tester",
+                               when_to_use="w", procedure="p", pitfalls="x", verification="v")
+    storage.write(custom_entry)
+
+    with patch("icx_engine.skills.hints.SkillStorage", lambda: storage):
+        result = await mcp_server._call_tool(
+            "start_testing_session",
+            {"file_paths": ["a.tsx"], "test_mode": "automated", "context": "verify checkoutflow works end to end"},
+        )
+    data = json.loads(result[0].text)
+    names = [e["name"] for e in data["skills"]["index"]]
+    assert names[0] == "testing-session-driver"
+    assert "checkout-flow-tester" in names
+
+
 # -- async job/poll pattern (opacity fix - status:"running" + get_testing_session_status) ------
 
 class _RunningSnap:
@@ -2886,7 +3093,122 @@ async def test_memory_get_patterns_returns_items_from_manager():
     assert data["results"][0]["pattern_type"] == "dominant_tag"
 
 
+# -- memory_delete --------------------------------------------------------------
+
+async def test_memory_delete_tool_present_in_list_tools():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    assert any(t.name == "memory_delete" for t in tools)
+
+
+async def test_memory_delete_confirmation_flow_actually_deletes(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+
+    store = {"PROJ-1": "entry"}
+
+    class _FakeManager:
+        def delete(self, issue_key):
+            store.pop(issue_key, None)
+
+    monkeypatch.setattr("icx_engine.mcp_server._ensure_memory_manager", lambda: _FakeManager())
+
+    result = await _call_tool("memory_delete", {"issue_key": "PROJ-1"})
+    data = json.loads(result[0].text)
+    assert data["status"] == "pending_confirmation"
+    token = data["token"]
+    assert "PROJ-1" in store  # not deleted yet - only a token was issued
+
+    result2 = await _call_tool("memory_delete", {"issue_key": "PROJ-1", "confirm_token": token})
+    data2 = json.loads(result2[0].text)
+    assert data2 == {"ok": True, "issue_key": "PROJ-1"}
+    assert "PROJ-1" not in store
+
+
+async def test_memory_delete_invalid_confirm_token_rejected():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("memory_delete", {"issue_key": "PROJ-1", "confirm_token": "bogus-token"})
+    data = json.loads(result[0].text)
+    assert data == {
+        "ok": False,
+        "error": "Invalid or already-used confirm_token. Call again without a token to get a fresh one.",
+    }
+
+
+async def test_memory_delete_missing_issue_key_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("memory_delete", {})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+# -- memory_update ---------------------------------------------------------------
+
+async def test_memory_update_tool_present_in_list_tools():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    assert any(t.name == "memory_update" for t in tools)
+
+
+async def test_memory_update_happy_path_returns_updated_fields(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    from tests.memory.factories import make_entry
+
+    class _FakeManager:
+        def update(self, issue_key, **fields):
+            return make_entry(issue_key, **fields)
+
+    monkeypatch.setattr("icx_engine.mcp_server._ensure_memory_manager", lambda: _FakeManager())
+
+    result = await _call_tool("memory_update", {
+        "issue_key": "PROJ-1", "summary": "New summary", "tags": ["a", "b"],
+    })
+    data = json.loads(result[0].text)
+    assert data["ok"] is True
+    assert data["issue_key"] == "PROJ-1"
+    assert sorted(data["updated_fields"]) == ["summary", "tags"]
+
+
+async def test_memory_update_unknown_issue_key_returns_error(monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.exceptions import ICXMemoryError
+
+    class _FakeManager:
+        def update(self, issue_key, **fields):
+            raise ICXMemoryError(f"No memory entry found for {issue_key}")
+
+    monkeypatch.setattr("icx_engine.mcp_server._ensure_memory_manager", lambda: _FakeManager())
+
+    result = await _call_tool("memory_update", {"issue_key": "PROJ-9", "summary": "x"})
+    data = json.loads(result[0].text)
+    assert data == {"ok": False, "error": "No memory entry found for PROJ-9"}
+
+
+async def test_memory_update_disallowed_field_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    result = await _call_tool("memory_update", {"issue_key": "PROJ-1", "issue_type": "Task"})
+    data = json.loads(result[0].text)
+    assert data["ok"] is False
+    assert "error" in data
+
+
 # -- reinforce_memory_usage ----------------------------------------------------
+
+async def test_reinforce_memory_usage_schema_untouched_by_internal_naming_cleanup():
+    """Regression guard: the internal new_ticket_key -> used_by_key naming drift
+    (mcp_server local var vs _reinforce_usage_sync/MemoryManager.reinforce_usage's
+    already-consistent used_by_key/used_by_tickets) was fixed WITHOUT changing the
+    external MCP schema - any agent already calling this tool with new_ticket_key
+    must keep working identically. This must pass both before and after that fix."""
+    from icx_engine.mcp_server import _list_tools
+    from icx_engine.models.config import AppConfig
+    with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
+        mock_cm.load.return_value = AppConfig()
+        tools = await _list_tools()
+    tool = next(t for t in tools if t.name == "reinforce_memory_usage")
+    assert "new_ticket_key" in tool.inputSchema["properties"]
+    assert "new_ticket_key" in tool.inputSchema["required"]
+    assert "used_by_key" not in tool.inputSchema["properties"]
+
 
 async def test_reinforce_memory_usage_memory_not_ready_returns_error():
     from icx_engine.mcp_server import _call_tool
@@ -2907,6 +3229,26 @@ async def test_reinforce_memory_usage_invalid_key_format_returns_error():
     })
     data = json.loads(result[0].text)
     assert "error" in data
+
+
+def test_validate_issue_key_arg_helper_matches_original_duplicated_error_text():
+    """DRY refactor regression guard: _validate_issue_key_arg's error text/shape must
+    be byte-for-byte identical to what each of the 3 call sites duplicated before this
+    helper existed - a plain {"error": ...} dict, no "ok" key."""
+    import json as _json
+    from icx_engine.mcp_server import _validate_issue_key_arg
+
+    value, err = _validate_issue_key_arg({}, "source_key")
+    assert value is None
+    assert _json.loads(err[0].text) == {"error": "source_key is required."}
+
+    value, err = _validate_issue_key_arg({"issue_key": "not-a-key"}, "issue_key")
+    assert value is None
+    assert _json.loads(err[0].text) == {"error": "issue_key must be in PROJ-123 format."}
+
+    value, err = _validate_issue_key_arg({"new_ticket_key": "  proj-142  "}, "new_ticket_key")
+    assert err is None
+    assert value == "proj-142"  # stripped, NOT uppercased (matches original .strip() call sites)
 
 
 # -- get_memory_audit ----------------------------------------------------------
@@ -3105,6 +3447,67 @@ async def test_resume_strips_session_id_from_payload(monkeypatch, tmp_path):
     assert rec.session_id == "real-sess" and rec.storage_state == "/path/to/state.json"
 
 
+# -- Default-skill hints on tool-family entrypoints ----------------------------
+
+async def test_sonar_status_attaches_quality_skill_hint():
+    from icx_engine import mcp_server
+    from icx_engine.skills.schema import SkillEntry
+    from unittest.mock import AsyncMock, patch
+
+    class _FakeStorage:
+        def read(self, name):
+            assert name == "sonar-quality-review"
+            return SkillEntry(name=name, description="d", title="t", when_to_use="w",
+                               procedure="p", pitfalls="x", verification="v")
+
+    with patch("icx_engine.sonar.service.status", new=AsyncMock(return_value={"connected": True})):
+        with patch("icx_engine.skills.hints.SkillStorage", _FakeStorage):
+            result = await mcp_server._call_tool("sonar_status", {})
+    data = json.loads(result[0].text)
+    assert data["ok"] is True
+    assert data["skills"]["index"][0]["name"] == "sonar-quality-review"
+
+
+async def test_sonar_status_appends_ranked_custom_skill(tmp_path):
+    from icx_engine import mcp_server
+    from icx_engine.skills.schema import SkillEntry
+    from icx_engine.skills.storage import SkillStorage
+    from unittest.mock import AsyncMock, patch
+
+    storage = SkillStorage(root=tmp_path)
+    default_entry = SkillEntry(name="sonar-quality-review", description="d", title="t",
+                                when_to_use="w", procedure="p", pitfalls="x", verification="v")
+    storage.write(default_entry)
+    custom_entry = SkillEntry(name="custom-sonar-triage", description="triage sonar findings fast",
+                               tags=["findings"], title="Custom Sonar Triage",
+                               when_to_use="w", procedure="p", pitfalls="x", verification="v")
+    storage.write(custom_entry)
+
+    with patch("icx_engine.sonar.service.status", new=AsyncMock(return_value={"connected": True})):
+        with patch("icx_engine.skills.hints.SkillStorage", lambda: storage):
+            result = await mcp_server._call_tool("sonar_status", {})
+    data = json.loads(result[0].text)
+    names = [e["name"] for e in data["skills"]["index"]]
+    assert names[0] == "sonar-quality-review"
+    assert "custom-sonar-triage" in names
+
+
+async def test_sonar_status_omits_skill_hint_when_lookup_fails():
+    from icx_engine import mcp_server
+    from unittest.mock import AsyncMock, patch
+
+    class _BrokenStorage:
+        def read(self, name):
+            raise RuntimeError("boom")
+
+    with patch("icx_engine.sonar.service.status", new=AsyncMock(return_value={"connected": True})):
+        with patch("icx_engine.skills.hints.SkillStorage", _BrokenStorage):
+            result = await mcp_server._call_tool("sonar_status", {})
+    data = json.loads(result[0].text)
+    assert data["ok"] is True
+    assert "skills" not in data
+
+
 # -- Sonar MCP tools -----------------------------------------------------------
 
 async def test_sonar_tools_registered():
@@ -3115,7 +3518,8 @@ async def test_sonar_tools_registered():
         mock_cm.load.return_value = AppConfig()
         names = {t.name for t in await _list_tools()}
     for n in ("sonar_status", "sonar_projects", "sonar_branches",
-              "sonar_measures", "sonar_quality_gate", "sonar_findings", "sonar_report"):
+              "sonar_measures", "sonar_quality_gate", "sonar_findings", "sonar_report",
+              "sonar_top_files", "sonar_history", "sonar_analyses", "sonar_rule", "sonar_hotspot"):
         assert n in names
 
 
@@ -3666,6 +4070,37 @@ async def test_lock_plan_stores_locked_plan(monkeypatch):
     assert stored is not None and stored["chosen"] == ["a.py"] and stored["ok"] is True
 
 
+async def test_lock_plan_fan_out_runs_off_event_loop(monkeypatch):
+    # Regression guard for the fan_out(...) synchronous-blocking-the-event-loop fix: fan_out must be
+    # invoked via run_in_executor (a worker thread), and the final result must still be correct.
+    import threading
+    import icx_engine.context_completeness as cc
+    from icx_engine.mcp_server import _call_tool
+    import icx_engine.mcp_server as m
+
+    main_thread = threading.current_thread()
+    seen_threads: list = []
+    real_fan_out = cc.fan_out
+
+    def _tracking_fan_out(*a, **k):
+        seen_threads.append(threading.current_thread())
+        return real_fan_out(*a, **k)
+
+    monkeypatch.setattr(cc, "fan_out", _tracking_fan_out)
+    monkeypatch.setattr(m, "_context_signals",
+                        lambda p, s, k: (lambda: [("src/caller.py", "direct graph dependent")],
+                                          lambda: [], lambda: [], lambda: []))
+    monkeypatch.setattr(m, "_lock_plan_prior_fix", lambda chosen: set())
+
+    r = await _call_tool("lock_plan", {"issue_ref": "T-EXEC", "chosen_files": ["src/svc.py"]})
+    p = json.loads(r[0].text)
+
+    assert len(seen_threads) == 1
+    assert seen_threads[0] != main_thread                          # ran off the event-loop thread
+    assert p["ok"] is False                                        # correctness preserved
+    assert [x["path"] for x in p["blocking_missed"]] == ["src/caller.py"]
+
+
 async def test_lock_plan_in_tool_order_before_testing():
     from icx_engine.mcp_server import _list_tools
     from icx_engine.models.config import AppConfig
@@ -3797,6 +4232,38 @@ async def test_icx_boost_refine_fills_gaps_from_minimal_input():
     d = json.loads((await _call_tool("icx_boost_refine", {
         "prompt": "add a cache", "objective": "add a caching layer"}))[0].text)
     assert "# REQUIREMENTS" in d["boosted_prompt"] and "# STANDARDS" in d["boosted_prompt"]
+
+
+async def test_icx_boost_refine_fan_out_runs_off_event_loop(monkeypatch, tmp_path):
+    # Regression guard for the fan_out(...) synchronous-blocking-the-event-loop fix on the
+    # icx_boost_refine path: fan_out must run via run_in_executor and still produce correct context.
+    import threading
+    import icx_engine.context_completeness as cc
+    from icx_engine.mcp_server import _call_tool
+    import icx_engine.mcp_server as m
+
+    main_thread = threading.current_thread()
+    seen_threads: list = []
+    real_fan_out = cc.fan_out
+
+    def _tracking_fan_out(*a, **k):
+        seen_threads.append(threading.current_thread())
+        return real_fan_out(*a, **k)
+
+    monkeypatch.setattr(cc, "fan_out", _tracking_fan_out)
+    monkeypatch.setattr(m, "_context_signals",
+                        lambda p, s, k: (lambda: [], lambda: [("src/caller.py", "references seed")],
+                                          lambda: [], lambda: []))
+
+    res = await _call_tool("icx_boost_refine", {
+        "prompt": "add a login endpoint", "archetype": "security",
+        "objective": "Build a secure JWT login endpoint",
+        "repo_path": str(tmp_path), "current_file": "src/svc.py"})
+    d = json.loads(res[0].text)
+
+    assert len(seen_threads) == 1
+    assert seen_threads[0] != main_thread                          # ran off the event-loop thread
+    assert "src/caller.py" in d["boosted_prompt"]                  # context still fused in correctly
 
 
 async def test_icx_boost_refine_validates_input():
@@ -4200,6 +4667,75 @@ async def test_dynamic_step_sequences_mandate_draft_skill_after_save_memory():
     assert "draft_skill" in _FULL_DESCRIPTION
 
 
+# -- create_skill ----------------------------------------------------------------
+
+async def test_create_skill_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    assert any(t.name == "create_skill" for t in tools)
+
+
+async def test_create_skill_creates_without_project_key(tmp_path, monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: storage)
+
+    res = await _call_tool("create_skill", {
+        "name": "General Skill", "description": "d", "when_to_use": "w",
+        "procedure": "p", "verification": "v",
+    })
+    data = json.loads(res[0].text)
+    assert data["status"] == "created"
+    assert data["name"] == "general-skill"
+    saved = storage.read("general-skill")
+    assert saved is not None
+    assert saved.scope_hint == "generic"
+    assert saved.origin_projects == []
+
+
+async def test_create_skill_creates_with_project_key(tmp_path, monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: storage)
+
+    res = await _call_tool("create_skill", {
+        "name": "Repo Skill", "description": "d", "when_to_use": "w",
+        "procedure": "p", "verification": "v", "project_key": "PROJ",
+    })
+    data = json.loads(res[0].text)
+    assert data["status"] == "created"
+    saved = storage.read("repo-skill")
+    assert saved is not None
+    assert saved.scope_hint == "repo-specific"
+    assert saved.origin_projects == ["PROJ"]
+
+
+async def test_create_skill_called_twice_updates_not_duplicates(tmp_path, monkeypatch):
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    monkeypatch.setattr("icx_engine.mcp_server.SkillStorage", lambda: storage)
+
+    args = {"name": "Dup Skill", "description": "d", "when_to_use": "w", "procedure": "p", "verification": "v"}
+    res1 = await _call_tool("create_skill", args)
+    data1 = json.loads(res1[0].text)
+    assert data1["status"] == "created"
+
+    res2 = await _call_tool("create_skill", {**args, "description": "d2"})
+    data2 = json.loads(res2[0].text)
+    assert data2["status"] == "updated"
+    assert len(storage.list_all()) == 1
+
+
+async def test_create_skill_missing_required_field_returns_error():
+    from icx_engine.mcp_server import _call_tool
+    res = await _call_tool("create_skill", {"name": "X", "description": "d"})
+    data = json.loads(res[0].text)
+    assert "error" in data
+
+
 def test_skills_create_command_writes_a_skill_general_purpose(monkeypatch, tmp_path):
     """No issue_key involved - a human creating a general-purpose skill with no project tie."""
     from icx_engine.cli import app
@@ -4213,6 +4749,7 @@ def test_skills_create_command_writes_a_skill_general_purpose(monkeypatch, tmp_p
         "Use imperative present tense, lowercase, no period.",   # procedure
         "",                                              # pitfalls (blank allowed)
         "Reviewed by a human before merge.",             # verification
+        "",                                               # tags (blank allowed)
         "n",                                             # tied to a specific project? No
     ])
     monkeypatch.setattr("typer.prompt", lambda *a, **k: next(inputs))
@@ -4223,6 +4760,33 @@ def test_skills_create_command_writes_a_skill_general_purpose(monkeypatch, tmp_p
     assert saved is not None
     assert saved.scope_hint == "generic"
     assert saved.origin_projects == []
+    assert saved.tags == []
+
+
+def test_skills_create_command_populates_tags_from_comma_separated_input(monkeypatch, tmp_path):
+    """The tags prompt (added because rank_skills/rank_skills_for_tags score purely on tag overlap)
+    must be asked and its comma-separated answer parsed into a lowercased list."""
+    from icx_engine.cli import app
+    from icx_engine.skills.storage import SkillStorage
+    storage = SkillStorage(root=tmp_path)
+    monkeypatch.setattr("icx_engine.skills.storage.SkillStorage", lambda: storage)
+    inputs = iter([
+        "JWT Retry Fix",   # name
+        "Retries a JWT check on transient failure.",   # description
+        "When a JWT validation call intermittently fails.",   # when_to_use
+        "Wrap the JWT check in a bounded retry.",   # procedure
+        "",                                              # pitfalls (blank allowed)
+        "Verified against the flaky auth endpoint.",     # verification
+        "JWT, Auth, retry ",                              # tags
+        "n",                                             # tied to a specific project? No
+    ])
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: next(inputs))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    result = _runner.invoke(app, ["skills", "create"])
+    assert result.exit_code == 0
+    saved = storage.read("jwt-retry-fix")
+    assert saved is not None
+    assert saved.tags == ["jwt", "auth", "retry"]
 
 
 def test_skills_delete_command_removes_named_skill(monkeypatch, tmp_path):
@@ -4261,3 +4825,441 @@ def test_skills_create_and_delete_present_in_full_help():
     from icx_engine.cli import _FULL_HELP
     assert "icx skills create" in _FULL_HELP
     assert "icx skills delete" in _FULL_HELP
+
+
+def test_cached_querier_reuses_instance_for_unchanged_mtime(tmp_path, monkeypatch):
+    from icx_engine import mcp_server
+
+    build_count = {"n": 0}
+
+    class _FakeQuerier:
+        def __init__(self, path):
+            build_count["n"] += 1
+
+    monkeypatch.setattr("icx_engine.graph.query.GraphQuerier", _FakeQuerier)
+    monkeypatch.setattr(mcp_server, "_QUERIER_CACHE", {})
+    graph_json = tmp_path / "graph.json"
+    graph_json.write_text("{}", encoding="utf-8")
+
+    first = mcp_server._cached_querier(graph_json)
+    second = mcp_server._cached_querier(graph_json)
+    assert first is second
+    assert build_count["n"] == 1
+
+
+def test_cached_querier_concurrent_calls_construct_once(tmp_path, monkeypatch):
+    """Regression test for the _QUERIER_CACHE race: concurrent misses on the same
+    unchanged graph.json must not each construct their own GraphQuerier."""
+    import threading
+    from icx_engine import mcp_server
+
+    build_count = {"n": 0}
+    build_lock = threading.Lock()
+
+    class _SlowFakeQuerier:
+        def __init__(self, path):
+            import time
+            with build_lock:
+                build_count["n"] += 1
+            time.sleep(0.05)  # widen the race window
+
+    monkeypatch.setattr("icx_engine.graph.query.GraphQuerier", _SlowFakeQuerier)
+    monkeypatch.setattr(mcp_server, "_QUERIER_CACHE", {})
+    graph_json = tmp_path / "graph.json"
+    graph_json.write_text("{}", encoding="utf-8")
+
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(mcp_server._cached_querier(graph_json)))
+               for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert build_count["n"] == 1
+    assert len({id(r) for r in results}) == 1
+
+
+def test_sonar_scope_schema_exposes_rules_and_tags():
+    from icx_engine.mcp_server import _SONAR_SCOPE_SCHEMA
+    assert "rules" in _SONAR_SCOPE_SCHEMA["properties"]
+    assert "tags" in _SONAR_SCOPE_SCHEMA["properties"]
+
+
+def test_sonar_scope_args_passes_through_rules_and_tags():
+    from icx_engine.mcp_server import _sonar_scope_args
+    result = _sonar_scope_args({"project": "myproj", "rules": ["python:S1481"], "tags": ["security"]})
+    assert result["rules"] == ["python:S1481"]
+    assert result["tags"] == ["security"]
+
+
+# -- Sonar completeness tools (top_files/history/analyses/rule/hotspot) --------
+
+async def test_sonar_top_files_tool_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    names = {t.name for t in tools}
+    assert {"sonar_top_files", "sonar_history", "sonar_analyses", "sonar_rule", "sonar_rules", "sonar_hotspot"} <= names
+
+
+async def test_sonar_rules_tool_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    tool = next(t for t in tools if t.name == "sonar_rules")
+    assert tool.inputSchema["required"] == []
+    assert "language" in tool.inputSchema["properties"]
+    assert "tags" in tool.inputSchema["properties"]
+    assert "repositories" in tool.inputSchema["properties"]
+
+
+async def test_sonar_top_files_requires_project_and_metric(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_top_files", {"project": "myproj"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "metric" in payload["error"].lower()
+
+
+async def test_sonar_top_files_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_top_files", {"project": "myproj", "metric": "coverage"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_top_files_limit_zero_defaults_to_20():
+    import json
+    from unittest.mock import patch, AsyncMock
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.sonar import service as svc
+    fake_data = {"files": [{"file": "a.py", "value": 1}], "metric": "coverage"}
+    mock_top_files = AsyncMock(return_value=fake_data)
+    with patch.object(svc, "top_files", mock_top_files):
+        out = await _call_tool("sonar_top_files", {"project": "myproj", "metric": "coverage", "limit": 0})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is True
+    assert payload["data"] == fake_data                # not an empty/wrong result
+    _, kwargs = mock_top_files.call_args
+    assert kwargs["limit"] == 20                        # limit=0 coerced to the tool's default
+
+
+async def test_sonar_history_requires_project_and_metrics(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_history", {"project": "myproj"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "metrics" in payload["error"].lower()
+
+
+async def test_sonar_history_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_history", {"project": "myproj", "metrics": ["coverage"]})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_analyses_requires_project(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_analyses", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "project" in payload["error"].lower()
+
+
+async def test_sonar_analyses_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_analyses", {"project": "myproj"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_rule_requires_rule_key(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_rule", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "rule_key" in payload["error"].lower()
+
+
+async def test_sonar_rule_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_rule", {"rule_key": "python:S1481"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_hotspot_requires_hotspot_key(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_hotspot", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "hotspot_key" in payload["error"].lower()
+
+
+async def test_sonar_hotspot_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_hotspot", {"hotspot_key": "AWhX...key"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+# -- Sonar medium/low-tier completeness tools (source/metrics/quality-gate-definition/
+#    quality-profiles/issue-authors/issue-tags/issue-changelog/system-health/languages) ---
+
+async def test_sonar_medium_tier_tools_registered():
+    from icx_engine.mcp_server import _list_tools
+    tools = await _list_tools()
+    names = {t.name for t in tools}
+    assert {
+        "sonar_source", "sonar_metrics", "sonar_quality_gate_definition", "sonar_quality_profiles",
+        "sonar_issue_authors", "sonar_issue_tags", "sonar_issue_changelog", "sonar_system_health", "sonar_languages",
+    } <= names
+
+
+async def test_sonar_source_requires_project_and_path(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_source", {"project": "myproj"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "path" in payload["error"].lower()
+
+
+async def test_sonar_source_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_source", {"project": "myproj", "path": "src/a.py"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_metrics_tool_callable_with_empty_args():
+    import json
+    from unittest.mock import patch, AsyncMock
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.sonar import service as svc
+    fake_data = {"total": 0, "returned": 0, "metrics": []}
+    mock_metrics = AsyncMock(return_value=fake_data)
+    with patch.object(svc, "metrics", mock_metrics):
+        out = await _call_tool("sonar_metrics", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is True
+    assert payload["data"] == fake_data
+
+
+async def test_sonar_metrics_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_metrics", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_quality_gate_definition_requires_project_or_gate_name(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_quality_gate_definition", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "project" in payload["error"].lower() or "gate_name" in payload["error"].lower()
+
+
+async def test_sonar_quality_gate_definition_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_quality_gate_definition", {"project": "myproj"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_quality_profiles_tool_callable_with_empty_args():
+    import json
+    from unittest.mock import patch, AsyncMock
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.sonar import service as svc
+    fake_data = {"profiles": []}
+    mock_profiles = AsyncMock(return_value=fake_data)
+    with patch.object(svc, "quality_profiles", mock_profiles):
+        out = await _call_tool("sonar_quality_profiles", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is True
+    assert payload["data"] == fake_data
+
+
+async def test_sonar_quality_profiles_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_quality_profiles", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_issue_authors_tool_callable_with_empty_args():
+    import json
+    from unittest.mock import patch, AsyncMock
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.sonar import service as svc
+    fake_data = {"authors": []}
+    mock_authors = AsyncMock(return_value=fake_data)
+    with patch.object(svc, "issue_authors", mock_authors):
+        out = await _call_tool("sonar_issue_authors", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is True
+    assert payload["data"] == fake_data
+
+
+async def test_sonar_issue_authors_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_issue_authors", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_issue_tags_tool_callable_with_empty_args():
+    import json
+    from unittest.mock import patch, AsyncMock
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.sonar import service as svc
+    fake_data = {"tags": []}
+    mock_tags = AsyncMock(return_value=fake_data)
+    with patch.object(svc, "issue_tags", mock_tags):
+        out = await _call_tool("sonar_issue_tags", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is True
+    assert payload["data"] == fake_data
+
+
+async def test_sonar_issue_tags_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_issue_tags", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_issue_changelog_requires_issue_key(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    out = await mcp_server._call_tool("sonar_issue_changelog", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "issue_key" in payload["error"].lower()
+
+
+async def test_sonar_issue_changelog_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_issue_changelog", {"issue_key": "AWhX...issue"})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_system_health_tool_callable_with_empty_args():
+    import json
+    from unittest.mock import patch, AsyncMock
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.sonar import service as svc
+    fake_data = {"health": "GREEN", "causes": []}
+    mock_health = AsyncMock(return_value=fake_data)
+    with patch.object(svc, "system_health", mock_health):
+        out = await _call_tool("sonar_system_health", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is True
+    assert payload["data"] == fake_data
+
+
+async def test_sonar_system_health_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_system_health", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()
+
+
+async def test_sonar_languages_tool_callable_with_empty_args():
+    import json
+    from unittest.mock import patch, AsyncMock
+    from icx_engine.mcp_server import _call_tool
+    from icx_engine.sonar import service as svc
+    fake_data = {"languages": []}
+    mock_languages = AsyncMock(return_value=fake_data)
+    with patch.object(svc, "languages", mock_languages):
+        out = await _call_tool("sonar_languages", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is True
+    assert payload["data"] == fake_data
+
+
+async def test_sonar_languages_tool_disabled(monkeypatch):
+    import json
+    from icx_engine import mcp_server
+    from icx_engine.sonar import service
+    from icx_engine.models.config import AppConfig
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: AppConfig()))
+    out = await mcp_server._call_tool("sonar_languages", {})
+    payload = json.loads(out[0].text)
+    assert payload["ok"] is False
+    assert "sonar add" in payload["error"].lower()

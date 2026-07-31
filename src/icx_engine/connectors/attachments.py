@@ -64,6 +64,22 @@ def _mime_type(filename: str) -> str:
     return _MIME_TYPES.get(Path(filename).suffix.lower(), "image/png")
 
 
+def _sdk_client_for(cache: dict | None, key, builder):
+    """Return a cached SDK client for `key`, building it via `builder()` on first use.
+
+    cache=None preserves the original per-call behavior (always build fresh) - every
+    existing caller that does not pass a cache is unaffected. Safe to reuse: AsyncOpenAI/
+    AsyncAnthropic/genai.Client are all designed for concurrent reuse across calls.
+    """
+    if cache is None:
+        return builder()
+    client = cache.get(key)
+    if client is None:
+        client = builder()
+        cache[key] = client
+    return client
+
+
 from icx_engine.llm.registry import (
     api_style as _api_style,
     openai_compat_base_urls as _openai_compat_base_urls,
@@ -143,9 +159,13 @@ _VISION_PROMPT = (
 )
 
 
-async def _vision_enrich_anthropic(config: ChannelConfig, image_bytes: bytes, ocr_text: str, fname: str = "") -> str:
+async def _vision_enrich_anthropic(
+    config: ChannelConfig, image_bytes: bytes, ocr_text: str, fname: str = "",
+    *, _client_cache: dict | None = None,
+) -> str:
     from anthropic import AsyncAnthropic
-    client = AsyncAnthropic(api_key=config.api_key)
+    client = _sdk_client_for(_client_cache, ("anthropic", id(config)),
+                              lambda: AsyncAnthropic(api_key=config.api_key))
     b64 = base64.b64encode(image_bytes).decode()
     response = await client.messages.create(
         model=config.model,
@@ -168,14 +188,19 @@ async def _vision_enrich_anthropic(config: ChannelConfig, image_bytes: bytes, oc
     return response.content[0].text.strip() if response.content else ocr_text
 
 
-async def _vision_enrich_openai_compat(config: ChannelConfig, image_bytes: bytes, ocr_text: str, fname: str = "") -> str:
+async def _vision_enrich_openai_compat(
+    config: ChannelConfig, image_bytes: bytes, ocr_text: str, fname: str = "",
+    *, _client_cache: dict | None = None,
+) -> str:
     """OpenAI-compatible vision call - works for openai, nim, and ollama providers."""
     from openai import AsyncOpenAI
-    kwargs: dict = {"api_key": config.api_key or "ollama"}
-    base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
-    if base_url:
-        kwargs["base_url"] = base_url
-    client = AsyncOpenAI(**kwargs)
+    def _build():
+        kwargs: dict = {"api_key": config.api_key or "ollama"}
+        base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
+        if base_url:
+            kwargs["base_url"] = base_url
+        return AsyncOpenAI(**kwargs)
+    client = _sdk_client_for(_client_cache, ("openai_compat", id(config)), _build)
     b64 = base64.b64encode(image_bytes).decode()
     response = await client.chat.completions.create(
         model=config.model,
@@ -198,11 +223,15 @@ async def _vision_enrich_openai_compat(config: ChannelConfig, image_bytes: bytes
     return (response.choices[0].message.content or ocr_text).strip()
 
 
-async def _vision_enrich_google(config: ChannelConfig, image_bytes: bytes, ocr_text: str, fname: str = "") -> str:
+async def _vision_enrich_google(
+    config: ChannelConfig, image_bytes: bytes, ocr_text: str, fname: str = "",
+    *, _client_cache: dict | None = None,
+) -> str:
     """Google Gemini vision enrichment via google-genai SDK."""
     from google import genai
     from google.genai import types
-    client = genai.Client(api_key=config.api_key)
+    client = _sdk_client_for(_client_cache, ("google", id(config)),
+                              lambda: genai.Client(api_key=config.api_key))
     contents = [
         types.Part.from_bytes(data=image_bytes, mime_type=_mime_type(fname)),
         types.Part.from_text(text=_VISION_PROMPT.format(ocr_text=ocr_text or "(no OCR output)")),
@@ -217,7 +246,10 @@ async def _vision_enrich_google(config: ChannelConfig, image_bytes: bytes, ocr_t
     return (response.text or ocr_text).strip()
 
 
-async def vision_enrich(config: ChannelConfig, image_bytes: bytes, ocr_text: str, fname: str = "") -> str:
+async def vision_enrich(
+    config: ChannelConfig, image_bytes: bytes, ocr_text: str, fname: str = "",
+    *, _client_cache: dict | None = None,
+) -> str:
     """
     Refine OCR text with the configured image channel.
 
@@ -225,10 +257,10 @@ async def vision_enrich(config: ChannelConfig, image_bytes: bytes, ocr_text: str
     """
     try:
         if _api_style(config.provider) == "anthropic":
-            return await _vision_enrich_anthropic(config, image_bytes, ocr_text, fname)
+            return await _vision_enrich_anthropic(config, image_bytes, ocr_text, fname, _client_cache=_client_cache)
         if _api_style(config.provider) == "google":
-            return await _vision_enrich_google(config, image_bytes, ocr_text, fname)
-        return await _vision_enrich_openai_compat(config, image_bytes, ocr_text, fname)
+            return await _vision_enrich_google(config, image_bytes, ocr_text, fname, _client_cache=_client_cache)
+        return await _vision_enrich_openai_compat(config, image_bytes, ocr_text, fname, _client_cache=_client_cache)
     except Exception as exc:
         from icx_engine.exceptions import ContextBuildError
         raise ContextBuildError(
@@ -556,13 +588,17 @@ _SUMMARIZE_SYSTEM = (
 )
 
 
-async def _llm_summarize_chunk(config: ChannelConfig, filename: str, content: str) -> str:
+async def _llm_summarize_chunk(
+    config: ChannelConfig, filename: str, content: str,
+    *, _client_cache: dict | None = None,
+) -> str:
     """Summarize one chunk of content via the configured text LLM. Raises on failure -
     callers (`_summarize_content`) handle the fallback."""
     prompt = f"Summarize this content from attachment '{filename}':\n\n{content}"
     if _api_style(config.provider) == "anthropic":
         from anthropic import AsyncAnthropic
-        client = AsyncAnthropic(api_key=config.api_key)
+        client = _sdk_client_for(_client_cache, ("anthropic", id(config)),
+                                  lambda: AsyncAnthropic(api_key=config.api_key))
         resp = await client.messages.create(
             model=config.model,
             max_tokens=1024,
@@ -574,7 +610,8 @@ async def _llm_summarize_chunk(config: ChannelConfig, filename: str, content: st
     if _api_style(config.provider) == "google":
         from google import genai
         from google.genai import types
-        client = genai.Client(api_key=config.api_key)
+        client = _sdk_client_for(_client_cache, ("google", id(config)),
+                                  lambda: genai.Client(api_key=config.api_key))
         cfg = types.GenerateContentConfig(
             system_instruction=_SUMMARIZE_SYSTEM,
             temperature=0.0,
@@ -589,11 +626,13 @@ async def _llm_summarize_chunk(config: ChannelConfig, filename: str, content: st
         )
         return (resp.text or content).strip()
     from openai import AsyncOpenAI
-    kwargs: dict = {"api_key": config.api_key or "ollama"}
-    base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
-    if base_url:
-        kwargs["base_url"] = base_url
-    client = AsyncOpenAI(**kwargs)
+    def _build():
+        kwargs: dict = {"api_key": config.api_key or "ollama"}
+        base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
+        if base_url:
+            kwargs["base_url"] = base_url
+        return AsyncOpenAI(**kwargs)
+    client = _sdk_client_for(_client_cache, ("openai_compat", id(config)), _build)
     resp = await client.chat.completions.create(
         model=config.model,
         max_tokens=1024,
@@ -641,6 +680,7 @@ async def _summarize_content(
     filename: str,
     content: str,
     log: Callable[[str], None] | None = None,
+    *, _client_cache: dict | None = None,
 ) -> str:
     """Summarize content for attachment output.
 
@@ -657,17 +697,18 @@ async def _summarize_content(
 
     try:
         if len(content) <= _SINGLE_CALL_LIMIT:
-            return await _llm_summarize_chunk(config, filename, content)
+            return await _llm_summarize_chunk(config, filename, content, _client_cache=_client_cache)
 
         chunks = _split_into_chunks(content, _CHUNK_SIZE)
         summaries = []
         for i, chunk in enumerate(chunks, start=1):
             summaries.append(
-                await _llm_summarize_chunk(config, f"{filename} (part {i}/{len(chunks)})", chunk)
+                await _llm_summarize_chunk(config, f"{filename} (part {i}/{len(chunks)})", chunk,
+                                            _client_cache=_client_cache)
             )
         combined = "\n\n".join(summaries)
         if len(combined) <= _SINGLE_CALL_LIMIT:
-            return await _llm_summarize_chunk(config, filename, combined)
+            return await _llm_summarize_chunk(config, filename, combined, _client_cache=_client_cache)
         return combined
     except Exception as exc:
         _log.warning("LLM summarization failed (%s); returning full content", exc)
@@ -682,6 +723,7 @@ async def _process_image(
     downloader,
     image_config: ChannelConfig | None,
     log: Callable[[str], None] | None,
+    *, _client_cache: dict | None = None,
 ) -> tuple[str, str, dict[str, str], str, str]:
     """Download an image, OCR it, optionally vision-enrich.
 
@@ -701,7 +743,7 @@ async def _process_image(
     if log:
         log(f"    {filename}: OCR: {len(text)} chars")
     if image_config:
-        text = await vision_enrich(image_config, image_bytes, text, filename)
+        text = await vision_enrich(image_config, image_bytes, text, filename, _client_cache=_client_cache)
         if log:
             log(f"    {filename}: vision: {len(text)} chars")
     return filename, text, {filename: b64}, "", ""
@@ -713,6 +755,7 @@ async def _process_document(
     downloader,
     text_config: ChannelConfig | None,
     log: Callable[[str], None] | None,
+    *, _client_cache: dict | None = None,
 ) -> tuple[str, str, dict[str, str], str, str]:
     """Download a document, convert to text/markdown, optionally summarize.
 
@@ -753,7 +796,7 @@ async def _process_document(
         return filename, "", {}, "", raw_b64
     if log:
         log(f"    {filename}: {Path(filename).suffix}: {len(capped_text)} chars")
-    summarized = await _summarize_content(text_config, filename, capped_text, log=log)
+    summarized = await _summarize_content(text_config, filename, capped_text, log=log, _client_cache=_client_cache)
     if log and len(summarized) != len(capped_text):
         log(f"    {filename}: summarized: {len(summarized)} chars")
     images = {
@@ -882,6 +925,7 @@ async def _describe_video_frames(
     config: "ChannelConfig",
     frames: list[bytes],
     ocr_texts: list[str],
+    *, _client_cache: dict | None = None,
 ) -> str:
     """One combined vision call describing the full sequence of sampled frames."""
     ocr_block = "\n".join(
@@ -890,7 +934,8 @@ async def _describe_video_frames(
     prompt = _VIDEO_FRAMES_PROMPT.format(n=len(frames), ocr_block=ocr_block)
     if _api_style(config.provider) == "anthropic":
         from anthropic import AsyncAnthropic
-        client = AsyncAnthropic(api_key=config.api_key)
+        client = _sdk_client_for(_client_cache, ("anthropic", id(config)),
+                                  lambda: AsyncAnthropic(api_key=config.api_key))
         content: list[dict] = [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                           "data": base64.b64encode(fb).decode()}}
@@ -905,7 +950,8 @@ async def _describe_video_frames(
     if _api_style(config.provider) == "google":
         from google import genai
         from google.genai import types
-        client = genai.Client(api_key=config.api_key)
+        client = _sdk_client_for(_client_cache, ("google", id(config)),
+                                  lambda: genai.Client(api_key=config.api_key))
         contents = [types.Part.from_bytes(data=fb, mime_type="image/jpeg") for fb in frames]
         contents.append(types.Part.from_text(text=prompt))
         resp = await asyncio.wait_for(
@@ -914,11 +960,13 @@ async def _describe_video_frames(
         )
         return (resp.text or "").strip()
     from openai import AsyncOpenAI
-    kwargs: dict = {"api_key": config.api_key or "ollama"}
-    base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
-    if base_url:
-        kwargs["base_url"] = base_url
-    client = AsyncOpenAI(**kwargs)
+    def _build():
+        kwargs: dict = {"api_key": config.api_key or "ollama"}
+        base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
+        if base_url:
+            kwargs["base_url"] = base_url
+        return AsyncOpenAI(**kwargs)
+    client = _sdk_client_for(_client_cache, ("openai_compat", id(config)), _build)
     content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(fb).decode()}"}}
         for fb in frames
@@ -980,6 +1028,7 @@ async def _process_audio(
     text_config: "ChannelConfig | None",
     whisper,
     log: Callable[[str], None] | None,
+    *, _client_cache: dict | None = None,
 ) -> tuple[str, str, dict[str, str], str, str]:
     """Download audio, transcribe via LLM or local Whisper.
 
@@ -993,7 +1042,7 @@ async def _process_audio(
         return filename, "", {}, "", ""
     try:
         from icx_engine.connectors.audio import transcribe as audio_transcribe
-        transcript = await audio_transcribe(text_config, audio_bytes, filename, whisper)
+        transcript = await audio_transcribe(text_config, audio_bytes, filename, whisper, _client_cache=_client_cache)
     except Exception as exc:
         if _is_setup_required_error(exc):
             if log:
@@ -1015,6 +1064,7 @@ async def _process_video(
     image_config: "ChannelConfig | None",
     whisper,
     log: Callable[[str], None] | None,
+    *, _client_cache: dict | None = None,
 ) -> tuple[str, str, dict[str, str], str, str]:
     """Download video, transcribe audio (if any), AND sample frames across the full duration.
 
@@ -1038,7 +1088,7 @@ async def _process_video(
         if len(audio_bytes) >= 44:  # WAV header is 44 bytes minimum; less means no audio track
             from icx_engine.connectors.audio import transcribe as audio_transcribe
             raw_transcript = await audio_transcribe(
-                text_config, audio_bytes, Path(filename).stem + ".wav", whisper
+                text_config, audio_bytes, Path(filename).stem + ".wav", whisper, _client_cache=_client_cache
             )
             if not _is_empty_transcript(raw_transcript):
                 transcript = raw_transcript
@@ -1076,7 +1126,7 @@ async def _process_video(
         ocr_texts = [ocr_image(fb) for fb in frames]
         if image_config:
             try:
-                frame_text = await _describe_video_frames(image_config, frames, ocr_texts)
+                frame_text = await _describe_video_frames(image_config, frames, ocr_texts, _client_cache=_client_cache)
             except Exception:
                 frame_text = ""
         if not frame_text:
@@ -1145,17 +1195,25 @@ async def process_attachments(
         for f in raw.attachment_content_urls
     )
     _whisper = _get_whisper() if _has_av else None
+    # Shared across this batch's image/document/video tasks so N attachments using the
+    # same LLM config (identical api_key/base_url) reuse one SDK client's connection
+    # pool instead of each constructing (and TLS-handshaking) its own.
+    _client_cache: dict = {}
 
     tasks = []
     for filename, content_url in raw.attachment_content_urls.items():
         if _is_image(filename):
-            tasks.append(_process_image(filename, content_url, downloader, image_config, log))
+            tasks.append(_process_image(filename, content_url, downloader, image_config, log,
+                                         _client_cache=_client_cache))
         elif _is_document(filename):
-            tasks.append(_process_document(filename, content_url, downloader, text_config, log))
+            tasks.append(_process_document(filename, content_url, downloader, text_config, log,
+                                            _client_cache=_client_cache))
         elif _is_audio(filename):
-            tasks.append(_process_audio(filename, content_url, downloader, text_config, _whisper, log))
+            tasks.append(_process_audio(filename, content_url, downloader, text_config, _whisper, log,
+                                         _client_cache=_client_cache))
         elif _is_video(filename):
-            tasks.append(_process_video(filename, content_url, downloader, text_config, image_config, _whisper, log))
+            tasks.append(_process_video(filename, content_url, downloader, text_config, image_config, _whisper, log,
+                                         _client_cache=_client_cache))
         elif log:
             log(f"    {filename}: unsupported type - skipped")
 

@@ -178,6 +178,61 @@ def test_remove_when_nothing_installed_is_safe(fake_home):
     assert remove_enforcement(get_host("claude")) == []
 
 
+# -- windsurf/devin desktop path migration --------------------------------------
+
+def _devin_dir(fake_home):
+    import sys
+    if sys.platform == "win32":
+        return fake_home / "AppData" / "Roaming" / "devin"
+    if sys.platform == "darwin":
+        return fake_home / "Library" / "Application Support" / "devin"
+    return fake_home / ".config" / "devin"
+
+
+def test_windsurf_config_path_is_new_devin_location(fake_home):
+    h = get_host("windsurf")
+    assert h.config_path == _devin_dir(fake_home) / "mcp_config.json"
+
+
+def test_windsurf_old_codeium_path_kept_as_extra(fake_home):
+    h = get_host("windsurf")
+    old = fake_home / ".codeium" / "windsurf" / "mcp_config.json"
+    assert old in h.extra_config_paths
+
+
+def test_windsurf_write_creates_entry_at_both_new_and_old_paths(fake_home):
+    (fake_home / ".codeium" / "windsurf").mkdir(parents=True)  # simulate windsurf/devin installed
+    write_icx_entry(get_host("windsurf"))
+    new_path = _devin_dir(fake_home) / "mcp_config.json"
+    old_path = fake_home / ".codeium" / "windsurf" / "mcp_config.json"
+    assert new_path.exists()
+    assert old_path.exists()
+    assert json.loads(new_path.read_text())["mcpServers"]["icx"]
+    assert json.loads(old_path.read_text())["mcpServers"]["icx"]
+
+
+def test_windsurf_remove_cleans_stale_old_path_entry(fake_home):
+    # Exact reported scenario: user already had an ICX entry at the old pre-migration path (icx
+    # setup ran before this fix shipped) - `icx mcp remove` must still clean it up.
+    old_path = fake_home / ".codeium" / "windsurf" / "mcp_config.json"
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_text(json.dumps({"mcpServers": {"icx": {"command": "icx", "args": ["mcp", "run"]}}}))
+    assert remove_icx_entry(get_host("windsurf")) is True
+    assert "icx" not in json.loads(old_path.read_text())["mcpServers"]
+
+
+def test_windsurf_remove_cleans_old_path_even_when_new_path_never_created(fake_home):
+    # The bug this fix closes: remove_icx_entry used to bail out entirely if the PRIMARY
+    # config_path didn't exist, silently skipping extra_config_paths cleanup.
+    old_path = fake_home / ".codeium" / "windsurf" / "mcp_config.json"
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_text(json.dumps({"mcpServers": {"icx": {"command": "icx", "args": ["mcp", "run"]}}}))
+    new_path = _devin_dir(fake_home) / "mcp_config.json"
+    assert not new_path.exists()
+    assert remove_icx_entry(get_host("windsurf")) is True
+    assert "icx" not in json.loads(old_path.read_text())["mcpServers"]
+
+
 # -- shipped detector script behavior -----------------------------------------
 
 def _run_detector(fake_home, prompt: str) -> str:
@@ -275,6 +330,26 @@ def test_rule_block_covers_agent_connector_fallback_for_other_links():
     from icx_engine.mcp_hosts import _RULE_BLOCK
     b = _RULE_BLOCK.lower()
     assert "connector" in b
+
+
+def test_rule_block_covers_full_tracker_crud_not_just_analysis():
+    # regression: a create/search/lookup request has no ticket key yet, so it must not be
+    # scoped out of ICX routing just because analyze_issue_fast doesn't apply to it
+    from icx_engine.mcp_hosts import _RULE_BLOCK
+    b = _RULE_BLOCK.lower()
+    assert "creating" in b and "searching" in b
+    assert "native tracker connector" in b or "separate or native tracker connector" in b
+    assert "not analysis alone" in b
+
+
+def test_rule_block_mandates_git_workflow_through_icx():
+    # regression: nothing previously told the agent git operations must go through ICX, so it
+    # fell back to raw git commands for branch creation/commits, bypassing the safety doctrine
+    from icx_engine.mcp_hosts import _RULE_BLOCK
+    b = _RULE_BLOCK.lower()
+    assert "git_repo_status" in b
+    assert "raw `git`" in b or "raw git" in b
+    assert "sole git-workflow" in b and "interface" in b
 
 
 # -- vscode host: different config shape ("servers", not "mcpServers") ---------

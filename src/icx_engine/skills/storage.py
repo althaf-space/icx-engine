@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 from icx_engine.skills.schema import SkillEntry
@@ -14,6 +15,10 @@ _SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 class SkillStorage:
     def __init__(self, root: Path | None = None) -> None:
         self._root = root or (Path.home() / ".icx" / "skills")
+
+    @property
+    def root(self) -> Path:
+        return self._root
 
     def _path(self, name: str) -> Path:
         if not _SAFE_NAME_RE.match(name):
@@ -34,7 +39,7 @@ class SkillStorage:
 
     def write(self, entry: SkillEntry) -> None:
         path = self._path(entry.name)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
         tmp = path.parent / f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
         try:
             tmp.write_text(entry.to_markdown(), encoding="utf-8")

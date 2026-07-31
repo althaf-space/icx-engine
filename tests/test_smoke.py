@@ -24,7 +24,7 @@ def test_full_help_lists_every_command():
 
     def walk(cmd, prefix=""):
         out = []
-        if isinstance(cmd, click.Group):
+        if hasattr(cmd, "commands"):
             for name, sub in cmd.commands.items():
                 out += walk(sub, (prefix + " " + name).strip())
         else:
@@ -36,12 +36,57 @@ def test_full_help_lists_every_command():
     assert not missing, f"commands missing from `icx --help`: {missing}"
 
 
+def test_every_leaf_command_has_debug_and_traceback_options():
+    """Enforces developer.md Section 8's MANDATORY CLI convention: every leaf command must expose
+    both --debug and --traceback. Walks the full command tree (including git/jira/gitlab/etc - every
+    sub-app registered via app.add_typer) via typer.main.get_command(app), exactly as developer.md
+    documents this test doing."""
+    import typer
+
+    cli = typer.main.get_command(app)
+
+    def leaf_commands(cmd, prefix=""):
+        out = []
+        if hasattr(cmd, "commands"):
+            for name, sub in cmd.commands.items():
+                out += leaf_commands(sub, (prefix + " " + name).strip())
+        else:
+            out.append((prefix, cmd))
+        return out
+
+    leaves = leaf_commands(cli, "icx")
+    missing = []
+    for name, cmd in leaves:
+        param_names = {p.name for p in cmd.params}
+        if "debug" not in param_names or "traceback" not in param_names:
+            missing.append(name)
+    assert not missing, f"commands missing --debug/--traceback: {missing}"
+    assert len(leaves) >= 70, (
+        f"only found {len(leaves)} leaf commands - the walk itself may be broken "
+        "(update this floor if commands were legitimately removed)"
+    )
+
+
 def test_graph_help(cli_runner):
     result = cli_runner.invoke(app, ["graph", "--help"])
     assert result.exit_code == 0
     output = click.unstyle(result.output)
     for cmd in ("add", "build", "list", "status", "remove"):
         assert cmd in output
+
+
+def test_git_help(cli_runner):
+    result = cli_runner.invoke(app, ["git", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    assert "status" in output
+
+
+def test_jira_help(cli_runner):
+    result = cli_runner.invoke(app, ["jira", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    assert "update" in output
 
 
 def test_graph_module_importable():
@@ -237,6 +282,59 @@ def test_jira_client_has_download_attachment():
     assert callable(JiraClient.download_attachment)
 
 
+def test_connect_jira_oauth_scopes_include_write():
+    """OAuth scope bump: write:jira-work must be requested so a freshly-connected
+    account can use jira_apply_update. Drives _connect_jira_oauth directly (debug=True
+    re-raises past run_pkce_flow so the captured scopes are checked without needing a
+    real browser/token exchange)."""
+    import pytest
+    from unittest.mock import patch
+    from icx_engine.services import connection_service as cs
+
+    captured = {}
+
+    def fake_prompt(text, **kwargs):
+        if "Client ID" in text:
+            return "cid"
+        if "Client Secret" in text:
+            return "secret"
+        if "base URL" in text:
+            return "https://company.atlassian.net"
+        return ""
+
+    def fake_run_pkce_flow(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop-after-capture")
+
+    with patch.object(cs.typer, "prompt", side_effect=fake_prompt), \
+         patch.object(ConfigManager, "load", return_value=AppConfig()), \
+         patch("icx_engine.auth.pkce.run_pkce_flow", fake_run_pkce_flow):
+        with pytest.raises(RuntimeError):
+            cs._connect_jira_oauth(debug=True)
+
+    assert "write:jira-work" in captured["scopes"]
+
+
+def test_model_add_routes_through_connection_service(cli_runner):
+    """S1 regression guard: LLM credential prompts must route through
+    connection_service, mirroring how the Jira/GitLab/Sonar connect flows
+    already route their credential prompts - never prompt directly in cli.py."""
+    from unittest.mock import patch
+    from icx_engine.models.config import ChannelConfig
+
+    text_cfg = ChannelConfig(provider="ollama", model="llama3")
+    with patch.object(ConfigManager, "load", return_value=AppConfig()), \
+         patch("icx_engine.services.connection_service._prompt_channel_config", return_value=text_cfg) as mock_text, \
+         patch("icx_engine.services.connection_service._prompt_vision_channel", return_value=None) as mock_vision, \
+         patch("icx_engine.cli._validate_and_save_model") as mock_validate:
+        result = cli_runner.invoke(app, ["model", "--add"], input="work\n")
+
+    assert result.exit_code == 0, result.output
+    mock_text.assert_called_once()
+    mock_vision.assert_called_once()
+    mock_validate.assert_called_once()
+
+
 def test_uae_optional_dependencies_importable():
     """Universal Attachment Engine converters (.xls, .pptx, scanned-PDF OCR) are importable."""
     import xlrd
@@ -341,6 +439,51 @@ def test_memory_patterns_help(cli_runner):
     assert result.exit_code == 0
 
 
+def test_memory_update_help(cli_runner):
+    result = cli_runner.invoke(app, ["memory", "update", "--help"])
+    assert result.exit_code == 0
+
+
+def test_memory_update_command_changes_field(cli_runner, tmp_path, monkeypatch):
+    """icx memory update <KEY> prompts for a field and new value, then persists the change."""
+    import uuid
+    from unittest.mock import MagicMock, patch
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.memory.schema import MemoryEntry
+
+    mock_emb = MagicMock()
+    mock_emb.embed.return_value = [0.1] * 768
+    mock_emb.check_ready.return_value = None
+    mock_emb.ensure_ready.return_value = None
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=mock_emb):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(MemoryEntry(
+            id=str(uuid.uuid4()),
+            issue_key="PROJ-77",
+            project_key="PROJ",
+            source_type="jira",
+            issue_type="Bug",
+            summary="Old summary",
+            problem_description="desc",
+            resolution_note="note",
+            files_changed=[],
+            resolution_confirmed=False,
+            saved_at="2026-01-01T00:00:00Z",
+        ))
+
+    monkeypatch.setattr("icx_engine.memory.manager.MemoryManager", lambda *a, **k: mgr)
+    inputs = iter(["summary", "New summary"])
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: next(inputs))
+
+    result = cli_runner.invoke(app, ["memory", "update", "PROJ-77"])
+    assert result.exit_code == 0
+
+    updated = mgr.show("PROJ-77")
+    assert updated is not None
+    assert updated.summary == "New summary"
+
+
 def test_memory_export_import_roundtrip_preserves_confirmation_count(tmp_path):
     """Export then import must preserve confirmation_count exactly (no double-increment)."""
     import json
@@ -430,6 +573,34 @@ def test_logout_help(cli_runner):
 def test_uninstall_help(cli_runner):
     result = cli_runner.invoke(app, ["uninstall", "--help"])
     assert result.exit_code in (0, 2)
+
+
+def test_uninstall_log_lives_under_icx_home_not_shared_temp():
+    from icx_engine.cli import _UNINSTALL_LOG
+    # Security fix: a predictable filename in the shared OS temp dir is
+    # spoofable by another local user - must live under the user's own
+    # ~/.icx/ instead.
+    import tempfile as _tempfile
+    assert str(_tempfile.gettempdir()) not in str(_UNINSTALL_LOG.parent)
+    assert _UNINSTALL_LOG.parent.name == ".icx"
+
+
+def test_check_uninstall_result_reads_and_clears_failure_from_icx_home(monkeypatch, tmp_path):
+    import icx_engine.cli as cli_mod
+    log_path = tmp_path / ".icx" / "uninstall_result.txt"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("FAILED:exit 1", encoding="utf-8")
+    monkeypatch.setattr(cli_mod, "_UNINSTALL_LOG", log_path)
+
+    cli_mod._check_uninstall_result()
+
+    assert not log_path.exists()  # consumed exactly once
+
+
+def test_check_uninstall_result_noop_when_log_absent(monkeypatch, tmp_path):
+    import icx_engine.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_UNINSTALL_LOG", tmp_path / ".icx" / "uninstall_result.txt")
+    cli_mod._check_uninstall_result()  # must not raise
 
 
 def test_test_group_in_help(cli_runner):
@@ -670,3 +841,147 @@ def test_update_strips_stale_config_keys(cli_runner, isolated_config):
     assert "magik_base_url" not in on_disk
     assert "test_max_iterations" in on_disk        # live field kept
     assert stale_config_keys_on_disk() == []       # nothing stale remains
+
+
+def test_update_seeds_default_skills(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    calls = []
+
+    def _fake_seed():
+        calls.append(True)
+        return {"seeded": ["systematic-debugging"], "updated": [], "skipped_customized": []}
+
+    monkeypatch.setattr("icx_engine.skills.seed.seed_default_skills", _fake_seed)
+    result = cli_runner.invoke(app, ["update"])
+    assert result.exit_code == 0
+    assert calls == [True]
+    assert "Default skills" in result.stdout
+
+
+import respx
+import httpx
+
+
+@respx.mock
+def test_gitlab_connect_command_saves_connection(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    respx.get("https://gitlab.example.com/api/v4/user").mock(
+        return_value=httpx.Response(200, json={"id": 1, "username": "u", "name": "U"})
+    )
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: {
+        "Connection name": "default",
+        "GitLab server URL": "https://gitlab.example.com",
+        "Personal access token (blank to keep existing)": "glpat-x",
+    }.get(a[0], ""))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    result = cli_runner.invoke(app, ["gitlab", "--add"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    config = ConfigManager.load()
+    assert config.active_gitlab == "default"
+    assert config.gitlab_connections["default"].token == "glpat-x"
+
+
+def test_gitlab_status_command_reports_not_configured(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["gitlab", "status"])
+    assert result.exit_code == 0
+    assert "not configured" in result.stdout.lower() or "none" in result.stdout.lower()
+
+
+def test_gitlab_remove_command_with_unknown_name_reports_cleanly(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["gitlab", "--remove", "somename"])
+    assert result.exit_code != 0
+
+
+def test_gitlab_bare_invocation_lists_connections(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["gitlab"])
+    assert result.exit_code == 0
+    assert "no gitlab connections" in result.stdout.lower()
+
+
+@respx.mock
+def test_gitlab_active_and_list_flags(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    respx.get("https://gitlab.example.com/api/v4/user").mock(
+        return_value=httpx.Response(200, json={"id": 1, "username": "u1", "name": "U1"})
+    )
+    respx.get("https://gitlab.staging.com/api/v4/user").mock(
+        return_value=httpx.Response(200, json={"id": 2, "username": "u2", "name": "U2"})
+    )
+    prompts = iter([
+        {"Connection name": "prod", "GitLab server URL": "https://gitlab.example.com", "Personal access token (blank to keep existing)": "t1"},
+        {"Connection name": "staging", "GitLab server URL": "https://gitlab.staging.com", "Personal access token (blank to keep existing)": "t2"},
+    ])
+    current = {"d": {}}
+
+    def _prompt(*a, **k):
+        return current["d"].get(a[0], "")
+
+    monkeypatch.setattr("typer.prompt", _prompt)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+
+    current["d"] = next(prompts)
+    result = cli_runner.invoke(app, ["gitlab", "--add"])
+    assert result.exit_code == 0
+
+    current["d"] = next(prompts)
+    result = cli_runner.invoke(app, ["gitlab", "--add"])
+    assert result.exit_code == 0
+
+    result = cli_runner.invoke(app, ["gitlab", "--list"])
+    assert result.exit_code == 0
+    assert "prod" in result.stdout and "staging" in result.stdout
+
+    result = cli_runner.invoke(app, ["gitlab", "--active", "prod"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    assert ConfigManager.load().active_gitlab == "prod"
+
+    result = cli_runner.invoke(app, ["gitlab", "--remove", "staging"])
+    assert result.exit_code == 0
+    assert "staging" not in ConfigManager.load().gitlab_connections
+
+
+@respx.mock
+def test_gitlab_connect_with_debug_still_hides_token_input(cli_runner, isolated_config, monkeypatch):
+    """Verify that --debug flag does NOT bypass token input hiding.
+
+    This is a security test: the token prompt should ALWAYS use hide_input=True,
+    even when --debug is passed. Plaintext token echo is a critical security issue.
+    """
+    from icx_engine.cli import app
+    respx.get("https://gitlab.example.com/api/v4/user").mock(
+        return_value=httpx.Response(200, json={"id": 1, "username": "u", "name": "U"})
+    )
+
+    # Track kwargs passed to typer.prompt to verify hide_input setting
+    call_kwargs = {}
+
+    def mock_prompt(*a, **k):
+        # Capture kwargs for the token field prompt
+        if "token" in str(a[0]).lower():
+            call_kwargs["token_prompt_kwargs"] = k.copy()
+        # Return default values matching existing test pattern
+        prompts = {
+            "Connection name": "default",
+            "GitLab server URL": "https://gitlab.example.com",
+            "Personal access token (blank to keep existing)": "glpat-x",
+        }
+        return prompts.get(a[0], "")
+
+    monkeypatch.setattr("typer.prompt", mock_prompt)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+
+    # Invoke with --debug flag
+    result = cli_runner.invoke(app, ["gitlab", "--add", "--debug"])
+    assert result.exit_code == 0
+
+    # Verify the token prompt was called
+    assert "token_prompt_kwargs" in call_kwargs, "Token prompt was not called"
+
+    # CRITICAL: Even with --debug, hide_input must be True
+    assert call_kwargs["token_prompt_kwargs"]["hide_input"] is True, \
+        "SECURITY BUG: Token prompt called with hide_input=False when --debug was passed"

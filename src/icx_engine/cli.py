@@ -130,6 +130,7 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx memory list --project <KEY>[/cyan]                        Filter list by project key (e.g. PROJ)
   [cyan]icx memory list --source <TYPE>[/cyan]                        Filter list by source type (e.g. jira)
   [cyan]icx memory show <KEY>[/cyan]                                  Show full detail for one entry
+  [cyan]icx memory update <KEY>[/cyan]                                Update one field on a saved entry
   [cyan]icx memory delete <KEY>[/cyan]                                Delete one saved entry
   [cyan]icx memory export[/cyan]                                      Export all memory to a JSON file
   [cyan]icx memory export --output <FILE>[/cyan]                      Export to a specific path
@@ -183,6 +184,54 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx skills list[/cyan]                                        List every skill ICX has learned from verified fixes
   [cyan]icx skills create[/cyan]                                      Create a skill by hand - no ticket required
   [cyan]icx skills delete <NAME>[/cyan]                                Delete one skill
+
+[bold]Git[/bold]
+  [cyan]icx git status[/cyan]                                         Show current branch, dirty files, and leftover state
+  [cyan]icx git branch --ticket <KEY> --name <TEXT>[/cyan]            Create a feature branch (or switch to it if it already exists)
+  [cyan]icx git sync --parent <branch> --ticket <KEY>[/cyan]          Reverse-merge parent in; quarantines conflicts on a scratch branch
+  [cyan]icx git push --remote <NAME>[/cyan]                          Push the current branch to the remote - plain push, no force
+  [cyan]icx git mr --parent <branch> --ticket <KEY> --summary <TEXT>[/cyan]  Create/reuse an MR and attempt one immediate merge
+  [cyan]icx git finish --parent <branch> --feature <NAME> --ticket <KEY> --mr-iid <N>[/cyan]  Post-merge cleanup
+  [cyan]icx git tag --env <ENV> --branch <NAME>[/cyan]                  Propose and hard-gate-approve the next tag for an environment
+  [cyan]icx git blame <FILE>[/cyan]                                    Per-line commit sha, author, and content - add --from-line/--to-line to narrow
+  [cyan]icx git log[/cyan]                                             Commit history - filter with --file/--author/--since/--limit
+  [cyan]icx git show <SHA>[/cyan]                                      Full detail for one commit - message plus changed files
+  [cyan]icx git diff <REF_A> <REF_B>[/cyan]                            Per-file status plus insertions/deletions between two refs
+
+[bold]Jira[/bold]
+  [cyan]icx jira update <KEY>[/cyan]                                   Discover close-out requirements (transitions, required fields) and apply them
+  [cyan]icx jira create[/cyan]                                        Interactively create a new issue (project, issue type, summary, required fields)
+  [cyan]icx jira delete <KEY>[/cyan]                                   Permanently delete an issue (no undo, no trash) - supports --delete-subtasks
+  [cyan]icx jira comment list <KEY>[/cyan]                             List comments on an issue
+  [cyan]icx jira comment add <KEY>[/cyan]                              Add a comment to an issue
+  [cyan]icx jira comment edit <KEY>[/cyan]                             Edit an existing comment
+  [cyan]icx jira comment delete <KEY>[/cyan]                           Permanently delete a comment (no undo, no trash)
+  [cyan]icx jira search <JQL>[/cyan]                                   Search issues by JQL, print matching keys/summaries (lightweight, raw)
+  [cyan]icx jira get <KEY>[/cyan]                                      Print an issue's raw fields (lightweight, raw - not full LLM analysis)
+  [cyan]icx jira link types[/cyan]                                    List link types available for linking two issues (e.g. Blocks, Relates to)
+  [cyan]icx jira link create <TYPE> <INWARD_KEY> <OUTWARD_KEY>[/cyan]  Link two issues together with the given link type
+  [cyan]icx jira link delete <ISSUE_KEY> <LINK_ID>[/cyan]              Remove a link between two issues (recreatable, but hides dependency info meanwhile)
+  [cyan]icx jira assign <KEY> <ACCOUNT_ID>[/cyan]                      Assign an issue to an account - supports --unassign and --default
+  [cyan]icx jira attach add <KEY> <FILE_PATH>[/cyan]                   Upload a local file as an attachment to an issue
+  [cyan]icx jira attach remove <ISSUE_KEY> <ATTACHMENT_ID>[/cyan]      Permanently delete an attachment (no undo, no trash)
+  [cyan]icx jira whoami[/cyan]                                        Print your own Jira identity (accountId, displayName)
+  [cyan]icx jira watch add <KEY> [dim](ACCOUNT_ID)[/dim][/cyan]         Add a watcher - self is immediate, another user asks to confirm first
+  [cyan]icx jira watch remove <KEY> [dim](ACCOUNT_ID)[/dim][/cyan]      Remove a watcher - self is immediate, another user asks to confirm first
+  [cyan]icx jira worklog list <KEY>[/cyan]                             List worklog entries on an issue
+  [cyan]icx jira worklog add <KEY> <SECONDS> <STARTED>[/cyan]         Log time against an issue - always logged as yourself
+  [cyan]icx jira worklog edit <KEY> <WORKLOG_ID>[/cyan]                Edit a worklog entry - own is immediate, someone else's asks to confirm first
+  [cyan]icx jira worklog delete <KEY> <WORKLOG_ID>[/cyan]              Delete a worklog entry - own is immediate, someone else's asks to confirm first
+
+[bold]GitLab[/bold]
+  [cyan]icx gitlab --add[/cyan]                     Add a GitLab server connection (name, URL, token)
+  [cyan]icx gitlab --list[/cyan]                    List connections and which is active
+  [cyan]icx gitlab --active <NAME>[/cyan]           Set the active connection
+  [cyan]icx gitlab --remove <NAME>[/cyan]           Remove a connection
+  [cyan]icx gitlab verify[/cyan]                    Re-check the connection, list accessible projects
+  [cyan]icx gitlab status[/cyan]                    Show the active GitLab connection
+  [cyan]icx gitlab mrs[/cyan]                       List merge requests - --project/--state/--target-branch/--limit
+  [cyan]icx gitlab commits[/cyan]                   List commit history - --project/--ref/--path/--since/--limit
+  [cyan]icx gitlab compare <FROM_REF> <TO_REF>[/cyan]  File-level diff summary between two refs
 
 [bold]MCP Server[/bold]
   [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio transport)
@@ -294,6 +343,15 @@ app.add_typer(boost_app, name="boost", rich_help_panel="Boost")
 
 skills_app = typer.Typer(help="Inspect ICX's learned skills.", rich_markup_mode="rich")
 app.add_typer(skills_app, name="skills", rich_help_panel="Skills")
+
+from icx_engine.git.cli_commands import git_app
+app.add_typer(git_app, name="git", rich_help_panel="Git")
+
+from icx_engine.jira.cli_commands import jira_app
+app.add_typer(jira_app, name="jira", rich_help_panel="Jira")
+
+gitlab_app = typer.Typer(help="GitLab connection for MR creation (distinct from your work tracker).", rich_markup_mode="rich")
+app.add_typer(gitlab_app, name="gitlab", rich_help_panel="GitLab")
 
 console = Console(highlight=False)
 
@@ -480,6 +538,8 @@ def skills_create(debug: DebugOpt = False, traceback: TracebackOpt = False) -> N
         procedure = typer.prompt("Procedure")
         pitfalls = typer.prompt("Pitfalls (optional, Enter to skip)", default="")
         verification = typer.prompt("Verification")
+        tags_raw = typer.prompt("Tags (comma-separated, e.g. 'jwt, auth, retry')", default="")
+        tags = [t.strip().lower() for t in tags_raw.split(",") if t.strip()]
         tied = typer.confirm("Is this tied to a specific project?", default=False)
         origin_projects: list = []
         if tied:
@@ -487,7 +547,7 @@ def skills_create(debug: DebugOpt = False, traceback: TracebackOpt = False) -> N
             origin_projects = [project_key]
 
         draft = SkillEntry(
-            name=slug, description=description, tags=[], origin_projects=origin_projects,
+            name=slug, description=description, tags=tags, origin_projects=origin_projects,
             origin_issue_keys=[], scope_hint="repo-specific" if origin_projects else "generic",
             title=name, when_to_use=when_to_use, procedure=procedure, pitfalls=pitfalls,
             verification=verification,
@@ -727,6 +787,37 @@ def memory_delete(
         mgr = MemoryManager()
         mgr.delete(key)
         console.print(f"[green]Deleted memory entry for {key}.[/green]")
+    except Exception as exc:
+        render_icx_error(exc, err_console)
+        raise typer.Exit(1)
+
+
+@memory_app.command("update")
+@_guarded
+def memory_update(
+    key: Annotated[str, typer.Argument(help="Issue key to update, e.g. PROJ-456")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Update one field on a saved memory entry."""
+    from icx_engine.memory.manager import MemoryManager
+    try:
+        mgr = MemoryManager()
+        entry = mgr.show(key)
+        if entry is None:
+            console.print(f"  No memory entry found for [cyan]{key}[/cyan].")
+            return
+        field_name = typer.prompt(
+            "Field to update (summary/problem_description/impact/resolution_note/files_changed/tags)"
+        )
+        new_value = typer.prompt("New value")
+        if field_name in ("files_changed", "tags"):
+            value: object = [v.strip() for v in new_value.split(",") if v.strip()]
+        else:
+            value = new_value
+        updated = mgr.update(entry.issue_key, **{field_name: value})
+        console.print(f"[green]Updated {field_name} for {updated.issue_key}.[/green]")
+        console.print(f"  {field_name}: {getattr(updated, field_name, None)}")
     except Exception as exc:
         render_icx_error(exc, err_console)
         raise typer.Exit(1)
@@ -1029,7 +1120,7 @@ def memory_import_cmd(
 # ---------------------------------------------------------------------------
 
 @app.callback(invoke_without_command=True, add_help_option=False)
-def main(
+def repl_callback(
     ctx: typer.Context,
     debug: DebugOpt = False,
     version: Annotated[Optional[bool], typer.Option(
@@ -1118,7 +1209,7 @@ def setup(
             _tb_mod.print_exc()
 
     # Step 3: tiktoken BPE encoding (graph token counting)
-    con.print("\n[bold]Step 3/3[/bold] Token encoder [dim](graph context sizing, ~1 MB)[/dim]")
+    con.print("\n[bold]Step 3/4[/bold] Token encoder [dim](graph context sizing, ~1 MB)[/dim]")
     try:
         import tiktoken
         _TIKTOKEN_ENC = "cl100k_base"
@@ -1127,6 +1218,19 @@ def setup(
         con.print("[green]OK[/green] Token encoder ready.")
     except ImportError:
         con.print("[dim]Skipped (tiktoken not installed).[/dim]")
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]X[/red] Failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
+    # Step 4: pre-installed best-practice skills (usable from any connected AI coding agent)
+    con.print("\n[bold]Step 4/4[/bold] Default skills [dim](best-practice skills in ~/.icx/skills/)[/dim]")
+    try:
+        from icx_engine.skills.seed import seed_default_skills
+        seeded = seed_default_skills()
+        n = len(seeded["seeded"]) + len(seeded["updated"])
+        con.print(f"[green]OK[/green] {n} default skill(s) current, {len(seeded['skipped_customized'])} customized skipped.")
     except Exception as exc:
         any_failed = True
         con.print(f"[red]X[/red] Failed: {exc}")
@@ -1163,7 +1267,7 @@ def update(
 
     con = Console()
     any_failed = False
-    total_steps = 4
+    total_steps = 5
 
     # Step 1: Config migration - write any new default fields introduced in this version.
     con.print(f"\n[bold]Step 1/{total_steps}[/bold] Config migration [dim](apply new defaults to ~/.icx/config.json)[/dim]")
@@ -1253,6 +1357,19 @@ def update(
     except Exception as exc:
         any_failed = True
         con.print(f"[red]X[/red] Stale cleanup failed: {exc}")
+        if debug or traceback:
+            _tb_mod.print_exc()
+
+    # Step 5: pre-installed best-practice skills - seed new ones, safely update unedited ones.
+    con.print(f"\n[bold]Step 5/{total_steps}[/bold] Default skills [dim](best-practice skills in ~/.icx/skills/)[/dim]")
+    try:
+        from icx_engine.skills.seed import seed_default_skills
+        seeded = seed_default_skills()
+        n = len(seeded["seeded"]) + len(seeded["updated"])
+        con.print(f"[green]OK[/green] {n} default skill(s) current, {len(seeded['skipped_customized'])} customized skipped.")
+    except Exception as exc:
+        any_failed = True
+        con.print(f"[red]X[/red] Default skills seeding failed: {exc}")
         if debug or traceback:
             _tb_mod.print_exc()
 
@@ -1378,82 +1495,11 @@ def _connect_jira(debug: bool = False) -> None:
         _connect_jira_token(debug=debug)
 
 
-# Provider menu + default models are derived from the single-source registry.
-from icx_engine.llm.registry import PROVIDERS as _PROVIDER_SPECS
-
-_PROVIDERS = [(name, spec.cli_label) for name, spec in _PROVIDER_SPECS.items()]
-
-_DEFAULT_MODELS: dict[str, dict[str, str]] = {
-    name: {"text": spec.default_text_model, "image": spec.default_image_model}
-    for name, spec in _PROVIDER_SPECS.items()
-}
-
-
-def _prompt_channel_config(label: str, provider_key: str | None = None) -> "ChannelConfig":
-    """Interactively prompt for one channel's provider/model/key/url."""
-    from icx_engine.models.config import ChannelConfig
-
-    typer.echo(f"\n-- {label} --")
-    if provider_key is None:
-        for i, (_, lbl) in enumerate(_PROVIDERS, 1):
-            typer.echo(f"  {i}. {lbl}")
-        choice = typer.prompt("Select provider", default="1")
-        try:
-            idx = int(choice.strip()) - 1
-            provider_key, _ = _PROVIDERS[idx]
-        except (ValueError, IndexError):
-            err_console.print("Invalid choice.")
-            raise typer.Exit(1)
-
-    model_default = _DEFAULT_MODELS[provider_key]["text" if "Text" in label else "image"]
-    model = typer.prompt("Model", default=model_default)
-
-    api_key: str | None = None
-    base_url: str | None = None
-
-    if provider_key == "ollama":
-        custom_url = typer.prompt("Ollama base URL", default="http://localhost:11434/v1")
-        base_url = None if custom_url == "http://localhost:11434/v1" else custom_url
-    elif provider_key == "nim":
-        api_key = typer.prompt("Nvidia NIM API key", hide_input=True).strip()
-        custom_url = typer.prompt("NIM base URL", default="https://integrate.api.nvidia.com/v1")
-        if custom_url.startswith("http://"):
-            render_icx_error(ValueError("NIM base URL must use HTTPS."), err_console)
-            raise typer.Exit(1)
-        base_url = None if custom_url == "https://integrate.api.nvidia.com/v1" else custom_url
-    else:
-        provider_label = next(lbl for k, lbl in _PROVIDERS if k == provider_key)
-        api_key = typer.prompt(f"{provider_label} API key", hide_input=True).strip()
-
-    return ChannelConfig(provider=provider_key, model=model, api_key=api_key, base_url=base_url)
-
-
-def _prompt_vision_channel(text_config: "ChannelConfig") -> "ChannelConfig | None":
-    """Prompt for vision channel choice: same provider / different / skip."""
-    from icx_engine.models.config import ChannelConfig
-
-    typer.echo(
-        "\nConfigure vision channel?\n"
-        "  1. Same provider as text  (reuses key & URL, just pick image model)\n"
-        "  2. Different provider     (full setup for image channel)\n"
-        "  3. Skip - OCR only\n"
-    )
-    choice = typer.prompt("Select", default="1").strip()
-    if choice == "3":
-        return None
-    if choice == "2":
-        return _prompt_channel_config("Visual Intelligence", provider_key=None)
-    # Same provider
-    image_model = typer.prompt(
-        "Image model",
-        default=_DEFAULT_MODELS[text_config.provider]["image"],
-    )
-    return ChannelConfig(
-        provider=text_config.provider,
-        model=image_model,
-        api_key=text_config.api_key,
-        base_url=text_config.base_url,
-    )
+# Provider menu + default models are derived from the single-source registry
+# inside services/connection_service.py (the sole consumer, since LLM credential
+# prompts live there per CLAUDE.md's credential-prompt rule). Re-exported here
+# for backward compatibility with code/tests that import them from cli.
+from icx_engine.services.connection_service import _PROVIDERS, _DEFAULT_MODELS
 
 
 def _validate_and_save_model(
@@ -1583,6 +1629,7 @@ def model(
     from icx_engine.config_manager import ConfigManager
     from icx_engine.models.config import LLMConfig
     from icx_engine import management
+    from icx_engine.services.connection_service import _prompt_channel_config, _prompt_vision_channel
 
     try:
         # -- --add --------------------------------------------------------------
@@ -1996,6 +2043,24 @@ def status(
             sonar_table.caption = "Run [bold]icx sonar --add[/bold] to add one."
         console.print(sonar_table)
 
+        # -- GitLab connections --------------------------------------------------
+        console.print()
+        gitlab_table = Table(title="GitLab Connections", show_header=True, header_style="bold cyan")
+        gitlab_table.add_column("#", style="dim", width=3)
+        gitlab_table.add_column("Name")
+        gitlab_table.add_column("URL")
+        gitlab_table.add_column("TLS", width=5)
+        gitlab_table.add_column("Token", width=8)
+        gitlab_table.add_column("Active")
+        for i, (name, gc) in enumerate(config.gitlab_connections.items(), 1):
+            active_cell = "[bold green][ACTIVE][/bold green]" if name == config.active_gitlab else ""
+            token_cell = "[dim]set[/dim]" if gc.token else "[red]missing[/red]"
+            gitlab_table.add_row(
+                str(i), name, gc.url, "yes" if gc.verify_tls else "no", token_cell, active_cell)
+        if not config.gitlab_connections:
+            gitlab_table.caption = "Run [bold]icx gitlab --add[/bold] to add one."
+        console.print(gitlab_table)
+
     except Exception as exc:
         render_icx_error(exc, err_console, show_traceback=traceback)
         raise typer.Exit(1)
@@ -2037,7 +2102,7 @@ def _build_uninstall_cmd() -> list[str]:
     return [sys.executable, "-m", "pip", "uninstall", "-y", "icx-engine"]
 
 
-_UNINSTALL_LOG = Path(tempfile.gettempdir()) / "icx_uninstall_result.txt"
+_UNINSTALL_LOG = Path.home() / ".icx" / "uninstall_result.txt"
 
 
 def _check_uninstall_result() -> None:
@@ -2073,6 +2138,11 @@ def _uninstall_package(console: Console) -> None:
         subprocess.run(cmd, check=True)
         console.print("[bold green]OK ICX fully removed. Goodbye![/bold green]\n")
         return
+
+    # ~/.icx/ almost always already exists (created on first `icx` use), but the
+    # detached PS script's `Out-File` does not auto-create a missing parent dir -
+    # ensure it exists so the result log can always be written.
+    _UNINSTALL_LOG.parent.mkdir(parents=True, exist_ok=True)
 
     def _ps_quote(arg: str) -> str:
         arg = arg.replace('`', '``')   # escape PS escape-char first
@@ -3242,28 +3312,6 @@ def test_rules(reset: bool = typer.Option(
 # Sonar subcommands
 # ---------------------------------------------------------------------------
 
-def _sonar_add_flow(default_name: str = "default") -> None:
-    from icx_engine.sonar import service
-    name = typer.prompt("Connection name", default=default_name)
-    url = typer.prompt("SonarQube server URL")
-    token = typer.prompt("SonarQube token (blank to keep existing)", default="", hide_input=True, show_default=False)
-    verify_tls = typer.confirm("Verify TLS certificates?", default=True)
-    make_active = typer.confirm("Make this the active connection?", default=True)
-    out = asyncio.run(service.add_connection(
-        name.strip(), url.strip(), token.strip() or None,
-        verify_tls=verify_tls, make_active=make_active,
-    ))
-    console.print(f"[green]Sonar connection '{out['name']}' saved.[/green]")
-    console.print(f"  url:        {out['url']}")
-    console.print(f"  verify_tls: {out['verify_tls']}")
-    console.print(f"  active:     {out['active']}")
-    v = out.get("validation") or {}
-    if v.get("valid") is True:
-        console.print(f"  connection: [green]ok[/green] (SonarQube {v.get('version', '')})")
-    elif v.get("valid") is False:
-        console.print(f"  connection: [red]failed[/red] {v.get('error', '')}")
-
-
 def _sonar_resolve_name(value: str) -> str:
     """Map a 1-based index (from `icx status` / `icx sonar --list`) to a connection
     name; pass a name through unchanged."""
@@ -3310,6 +3358,7 @@ def sonar_main(
         return
     from icx_engine.sonar import service
     if add:
+        from icx_engine.services.connection_service import _sonar_add_flow
         _sonar_add_flow()
         return
     if active:
@@ -3401,6 +3450,272 @@ def sonar_report_cmd(
     by_sev = summary.get("by_severity", {})
     if by_sev:
         console.print(f"  by severity: {by_sev}")
+
+
+def _gitlab_status_report() -> None:
+    """Print the active GitLab connection status - used by `icx gitlab status`/`icx gitlab verify`."""
+    import asyncio
+    from icx_engine.gitlab import service as gitlab_service
+    out = asyncio.run(gitlab_service.status())
+    if not out["configured"]:
+        console.print("[yellow]GitLab: not configured. Run `icx gitlab --add`.[/yellow]")
+        return
+    console.print(f"  active:     {out['active']}")
+    console.print(f"  url:        {out['url']}")
+    console.print(f"  verify_tls: {out['verify_tls']}")
+    conn = out.get("connection")
+    if conn is not None:
+        console.print(f"  connection: {conn}")
+
+
+def _gitlab_resolve_name(value: str) -> str:
+    """Map a 1-based index (from `icx status` / `icx gitlab --list`) to a
+    connection name; pass a name through unchanged."""
+    if value and value.isdigit():
+        from icx_engine.config_manager import ConfigManager
+        names = list(ConfigManager.load().gitlab_connections.keys())
+        idx = int(value) - 1
+        if 0 <= idx < len(names):
+            return names[idx]
+    return value
+
+
+def _gitlab_list() -> None:
+    from icx_engine.gitlab import service as gitlab_service
+    out = gitlab_service.list_connections()
+    if not out["connections"]:
+        console.print("[yellow]No GitLab connections. Run `icx gitlab --add`.[/yellow]")
+        return
+    for c in out["connections"]:
+        mark = "[bold green][ACTIVE][/bold green]" if c["active"] else ""
+        console.print(f"  {c['name']:<16} {c['url']:<40} verify_tls={c['verify_tls']} {mark}")
+
+
+@gitlab_app.callback(invoke_without_command=True)
+def gitlab_main(
+    ctx: typer.Context,
+    add: Annotated[bool, typer.Option("--add", help="Add a GitLab server connection (interactive).")] = False,
+    active: Annotated[Optional[str], typer.Option("--active", metavar="NAME", help="Set the active connection.")] = None,
+    remove: Annotated[Optional[str], typer.Option("--remove", metavar="NAME", help="Remove a connection (clears its keyring token).")] = None,
+    list_conns: Annotated[bool, typer.Option("--list", help="List connections and which is active.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Manage GitLab server connections - add, list, switch active, remove (same flag form as `icx sonar`).
+
+    \b
+    Examples:
+      icx gitlab --add                 Add a server connection (name, URL, token)
+      icx gitlab --list                List connections (bare `icx gitlab` also lists)
+      icx gitlab --active prod         Make 'prod' the active connection
+      icx gitlab --active 2            Make connection #2 (from `icx status`) active
+      icx gitlab --remove prod         Remove 'prod'
+      icx gitlab --remove 2            Remove connection #2 (from `icx status`)
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from icx_engine.gitlab import service
+    try:
+        if add:
+            from icx_engine.services.connection_service import _connect_gitlab
+            _connect_gitlab(debug=debug)
+            return
+        if active:
+            try:
+                out = service.set_active(_gitlab_resolve_name(active))
+            except KeyError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1)
+            console.print(f"[green]Active GitLab connection: {out['active']}[/green]")
+            return
+        if remove:
+            try:
+                out = service.remove_connection(_gitlab_resolve_name(remove))
+            except KeyError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1)
+            console.print(f"[green]Removed '{out['removed']}'.[/green] Active: {out['active'] or '(none)'}")
+            return
+        _gitlab_list()
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=(debug or traceback))
+        raise typer.Exit(1)
+
+
+@gitlab_app.command("verify")
+@_guarded
+def gitlab_verify(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """Re-check the active GitLab connection and list a few accessible projects."""
+    import asyncio
+    from icx_engine.gitlab.client import GitLabClient
+    from icx_engine.config_manager import ConfigManager
+
+    config = ConfigManager.load()
+    conn = config.active_gitlab_connection()
+    if conn is None:
+        console.print("[yellow]No active GitLab connection. Run `icx gitlab --add`.[/yellow]")
+        raise typer.Exit(1)
+
+    async def _verify() -> None:
+        async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+            result = await client.validate()
+            if not result.get("valid"):
+                console.print(f"[red]Validation failed: {result}[/red]")
+                raise typer.Exit(1)
+            user = result.get("user", {})
+            console.print(f"[green]Connected as {user.get('name', user.get('username', ''))} ({conn.url})[/green]")
+            try:
+                projects = await client.list_projects(limit=5)
+                if projects:
+                    console.print("Accessible projects (up to 5):")
+                    for p in projects:
+                        console.print(f"  {p.get('path_with_namespace', p.get('id'))}")
+            except Exception:
+                pass  # project listing is a convenience, not required for a successful verify
+
+    asyncio.run(_verify())
+
+
+@gitlab_app.command("status")
+@_guarded
+def gitlab_status_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """Show the active GitLab connection status."""
+    _gitlab_status_report()
+
+
+def _gitlab_resolve_project(project: Optional[str]) -> str:
+    """--project wins outright; otherwise derive from the current directory's origin
+    remote. Raises typer.Exit(1) with a clear message if neither resolves."""
+    from icx_engine.git.gitcmd import remote_url
+    from icx_engine.gitlab.client import project_path_from_remote_url
+
+    if project:
+        return project
+    resolved = None
+    try:
+        resolved = project_path_from_remote_url(remote_url(Path.cwd()))
+    except Exception:
+        resolved = None
+    if not resolved:
+        console.print("[red]Could not resolve a GitLab project - pass --project or run from inside a GitLab-hosted repo.[/red]")
+        raise typer.Exit(1)
+    return resolved
+
+
+def _gitlab_require_connection():
+    from icx_engine.config_manager import ConfigManager
+    conn = ConfigManager.load().active_gitlab_connection()
+    if conn is None:
+        console.print("[yellow]No active GitLab connection. Run `icx gitlab --add`.[/yellow]")
+        raise typer.Exit(1)
+    return conn
+
+
+@gitlab_app.command("mrs")
+@_guarded
+def gitlab_mrs(
+    project: Annotated[Optional[str], typer.Option("--project", help="GitLab project path (namespace/project) - derived from the current repo's origin remote if omitted")] = None,
+    state: Annotated[str, typer.Option("--state", help="merged | opened | closed")] = "merged",
+    target_branch: Annotated[Optional[str], typer.Option("--target-branch", help="Only MRs targeting this branch")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Max merge requests to show")] = 20,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """List merge requests for a GitLab project."""
+    import asyncio
+    from rich.markup import escape
+    from icx_engine.gitlab.client import GitLabClient
+
+    conn = _gitlab_require_connection()
+    resolved_project = _gitlab_resolve_project(project)
+
+    async def _list() -> list[dict]:
+        async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+            return await client.list_merge_requests(resolved_project, state=state, target_branch=target_branch, limit=limit)
+
+    mrs = asyncio.run(_list())
+    if not mrs:
+        console.print("[yellow]No merge requests found.[/yellow]")
+        return
+    for mr in mrs:
+        merged_by = mr.get("merged_by") or {}
+        by = f"  by {escape(merged_by.get('username', ''))}" if merged_by else ""
+        at = f"  {mr['merged_at']}" if mr.get("merged_at") else ""
+        console.print(f"!{mr['iid']}  {mr.get('state', ''):<8}  {escape(mr.get('title', ''))}{by}{at}")
+
+
+@gitlab_app.command("commits")
+@_guarded
+def gitlab_commits(
+    project: Annotated[Optional[str], typer.Option("--project", help="GitLab project path (namespace/project) - derived from the current repo's origin remote if omitted")] = None,
+    ref: Annotated[Optional[str], typer.Option("--ref", help="Branch, tag, or commit to list from")] = None,
+    path: Annotated[Optional[str], typer.Option("--path", help="Only commits touching this file path")] = None,
+    since: Annotated[Optional[str], typer.Option("--since", help="Only commits after this ISO 8601 date")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Max commits to show")] = 20,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """List commit history for a GitLab project."""
+    import asyncio
+    from rich.markup import escape
+    from icx_engine.gitlab.client import GitLabClient
+
+    conn = _gitlab_require_connection()
+    resolved_project = _gitlab_resolve_project(project)
+
+    async def _list() -> list[dict]:
+        async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+            return await client.list_commits(resolved_project, ref=ref, path=path, since=since, limit=limit)
+
+    commits = asyncio.run(_list())
+    if not commits:
+        console.print("[yellow]No commits found.[/yellow]")
+        return
+    for c in commits:
+        console.print(
+            f"[cyan]{c.get('id', '')[:8]}[/cyan]  {escape(c.get('author_name', ''))}  "
+            f"{c.get('created_at', '')}  {escape(c.get('title', ''))}"
+        )
+
+
+@gitlab_app.command("compare")
+@_guarded
+def gitlab_compare(
+    from_ref: Annotated[str, typer.Argument(help="Source ref - branch, tag, or commit")],
+    to_ref: Annotated[str, typer.Argument(help="Target ref - branch, tag, or commit")],
+    project: Annotated[Optional[str], typer.Option("--project", help="GitLab project path (namespace/project) - derived from the current repo's origin remote if omitted")] = None,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """File-level diff summary between two refs on a GitLab project."""
+    import asyncio
+    from icx_engine.gitlab.client import GitLabClient
+
+    conn = _gitlab_require_connection()
+    resolved_project = _gitlab_resolve_project(project)
+
+    async def _compare() -> dict:
+        async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+            return await client.compare(resolved_project, from_ref, to_ref)
+
+    result = asyncio.run(_compare())
+    diffs = result.get("diffs", [])
+    if not diffs:
+        console.print("[yellow]No differences.[/yellow]")
+        return
+    for d in diffs:
+        if d.get("new_file"):
+            marker = "A"
+        elif d.get("deleted_file"):
+            marker = "D"
+        elif d.get("renamed_file"):
+            marker = "R"
+        else:
+            marker = "M"
+        path = d.get("new_path") or d.get("old_path")
+        console.print(f"  {marker}  {path}")
 
 
 # ---------------------------------------------------------------------------
