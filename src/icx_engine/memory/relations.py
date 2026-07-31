@@ -81,8 +81,10 @@ class RelationManager:
                         f"source_key = '{_sq(a)}' AND target_key = '{_sq(b)}'"
                         f" AND relation_type = '{_sq(relation_type)}'"
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Stale-edge cleanup is best-effort - a delete failure must not block the
+                    # upsert below, but stays traceable rather than vanishing silently.
+                    _log.debug("[memory] stale edge delete failed for %s -> %s: %s", a, b, exc)
             table.add([
                 {
                     "source_key": source_key,
@@ -106,7 +108,12 @@ class RelationManager:
         """Return [{issue_key, relation_type, strength}] sorted by strength desc."""
         try:
             table = self._get_table()
-            rows = table.to_arrow().to_pylist()
+            total = table.count_rows()
+            if total == 0:
+                return []
+            rows = table.search().where(
+                f"source_key = '{_sq(issue_key)}'", prefilter=True
+            ).limit(total).to_list()
         except Exception:
             return []
         result = [
@@ -116,7 +123,6 @@ class RelationManager:
                 "strength": r["strength"],
             }
             for r in rows
-            if r["source_key"] == issue_key
         ]
         result.sort(key=lambda x: -x["strength"])
         return result

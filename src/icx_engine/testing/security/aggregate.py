@@ -10,7 +10,6 @@ from icx_engine.testing.security.sast import scan_sast
 from icx_engine.testing.security.sca import scan_deps
 from icx_engine.testing.security.scan_base import (
     Finding,
-    SEVERITY_RANK,
     dedupe,
     sort_findings,
 )

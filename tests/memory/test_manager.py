@@ -289,6 +289,60 @@ def test_delete_nonexistent_is_noop(tmp_path):
         mgr.delete("PROJ-999")  # must not raise
 
 
+def test_update_allowed_field_persists_and_round_trips(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-100", resolution_note="First fix"))
+
+        updated = mgr.update("PROJ-100", resolution_note="Better fix")
+        assert updated.resolution_note == "Better fix"
+
+        reread = mgr._find_by_key("PROJ-100")
+        assert reread is not None
+        assert reread.resolution_note == "Better fix"
+        via_list = next(e for e in mgr.list_entries() if e.issue_key == "PROJ-100")
+        assert via_list.resolution_note == "Better fix"
+
+
+def test_update_disallowed_field_raises(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.exceptions import ICXMemoryError
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-100"))
+        with pytest.raises(ICXMemoryError):
+            mgr.update("PROJ-100", issue_type="Task")
+
+
+def test_update_nonexistent_issue_key_raises(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+    from icx_engine.exceptions import ICXMemoryError
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        with pytest.raises(ICXMemoryError):
+            mgr.update("PROJ-999", summary="x")
+
+
+def test_update_list_fields_replace_not_append(tmp_path):
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(issue_key="PROJ-100", tags=["old-tag"], files_changed=["src/old.py"]))
+
+        updated = mgr.update("PROJ-100", tags=["new-tag"], files_changed=["src/new.py"])
+        assert updated.tags == ["new-tag"]
+        assert updated.files_changed == ["src/new.py"]
+
+        reread = mgr._find_by_key("PROJ-100")
+        assert reread.tags == ["new-tag"]
+        assert reread.files_changed == ["src/new.py"]
+
+
 def test_clear_removes_all(tmp_path):
     from icx_engine.memory.manager import MemoryManager
 
@@ -369,20 +423,25 @@ def test_get_related_delegates_to_sub_manager(tmp_path):
 
 
 def test_get_patterns_delegates_to_sub_manager(tmp_path):
+    """Also the regression test for save()'s 5th-entry pattern-refresh trigger:
+    proves patterns are still detected/stored end-to-end after switching that
+    path from list_entries() to the lean _lean_pattern_candidates() scan."""
     from icx_engine.memory.manager import MemoryManager
 
     hot = "src/auth/token.py"
     with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
         mgr = MemoryManager(db_path=tmp_path)
-        for i in range(10):
-            mgr.save(_make_entry(
-                issue_key=f"PROJ-{i}",
-                id=str(uuid.uuid4()),
-                files_changed=[hot],
-                project_key="PROJ",
-            ))
-        patterns = mgr.get_patterns(project_key="PROJ")
+        with patch.object(mgr, "_lean_pattern_candidates", wraps=mgr._lean_pattern_candidates) as spy:
+            for i in range(10):
+                mgr.save(_make_entry(
+                    issue_key=f"PROJ-{i}",
+                    id=str(uuid.uuid4()),
+                    files_changed=[hot],
+                    project_key="PROJ",
+                ))
+            patterns = mgr.get_patterns(project_key="PROJ")
 
+    assert spy.call_count >= 2  # triggered at the 5th and 10th unique save
     assert len(patterns) > 0
     assert all(p["project_key"] == "PROJ" for p in patterns)
 
@@ -454,6 +513,77 @@ def test_lean_link_candidates_matches_list_entries_for_project_filter(tmp_path):
 
     assert full == lean == {"PROJ-1", "PROJ-2"}
     assert lean_via_issue_key == {"PROJ-1", "PROJ-2"}
+
+
+def test_lean_pattern_candidates_match_list_entries_including_defaults(tmp_path):
+    """Lean pattern candidates carry the same values list_entries() would for
+    every field detect_patterns() reads, including default handling for an
+    entry that leaves the optional pattern fields unset (finding R2)."""
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+        mgr.save(_make_entry(
+            issue_key="PROJ-1", id="id-1", project_key="PROJ",
+            root_cause_pattern="n_plus_one_query",
+            used_by_tickets=["PROJ-9"],
+            full_ticket_text="slow query on dashboard",
+        ))
+        # PROJ-2 leaves root_cause_pattern/used_by_tickets/full_ticket_text at
+        # MemoryEntry defaults - proves the lean path's fallbacks match
+        # _row_to_entry's for the same unset fields.
+        mgr.save(_make_entry(issue_key="PROJ-2", id="id-2", project_key="PROJ"))
+
+        def _key(entry_like):
+            return (
+                sorted(entry_like.files_changed), sorted(entry_like.tags),
+                entry_like.work_item_type, entry_like.root_cause_pattern,
+                sorted(entry_like.used_by_tickets), entry_like.full_ticket_text,
+            )
+
+        lean = {c.issue_key: _key(c) for c in mgr._lean_pattern_candidates()}
+        full = {e.issue_key: _key(e) for e in mgr.list_entries()}
+
+    assert lean == full
+    assert lean["PROJ-1"][3] == "n_plus_one_query"
+    assert lean["PROJ-2"][3] == "uncategorized"
+    assert lean["PROJ-2"][4] == []
+    assert lean["PROJ-2"][5] == ""
+
+
+def test_lean_pattern_candidates_excludes_heavy_columns(tmp_path):
+    """_lean_pattern_candidates() must never fetch the 768-dim vector or JSON
+    blob columns - only the 8 fields detect_patterns() actually reads."""
+    from icx_engine.memory.manager import MemoryManager
+
+    with patch("icx_engine.memory.manager.EmbeddingsManager", return_value=_mock_embeddings()):
+        mgr = MemoryManager(db_path=tmp_path)
+
+        mock_table = MagicMock()
+        mock_table.count_rows.return_value = 1
+        mock_table.search.return_value.select.return_value.limit.return_value.to_list.return_value = [
+            {
+                "issue_key": "PROJ-1",
+                "project_key": "PROJ",
+                "files_changed": ["src/a.py"],
+                "tags": ["jwt"],
+                "work_item_type": "bug",
+                "root_cause_pattern": "uncategorized",
+                "used_by_tickets": [],
+                "full_ticket_text": "",
+            }
+        ]
+        with patch.object(mgr, "_get_table", return_value=mock_table):
+            result = mgr._lean_pattern_candidates()
+
+    assert len(result) == 1
+    columns_arg = mock_table.search.return_value.select.call_args[0][0]
+    assert columns_arg == [
+        "issue_key", "project_key", "files_changed", "tags", "work_item_type",
+        "root_cause_pattern", "used_by_tickets", "full_ticket_text",
+    ]
+    for heavy in ("vector", "save_context_vector_json", "causal_chain_json"):
+        assert heavy not in columns_arg
 
 
 def test_dimension_mismatch_raises_memory_error(tmp_path):

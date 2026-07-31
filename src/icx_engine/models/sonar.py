@@ -158,3 +158,135 @@ class SonarReport(BaseModel):
     summary: dict = Field(default_factory=dict)
     total_findings: int = 0
     truncated: bool = False
+
+
+class ComponentMeasure(BaseModel):
+    """One row of a component_tree ranking - a file or directory's value for
+    a single metric, used to answer 'top N files by metric X'."""
+
+    key: str                        # full component key, e.g. "project:src/foo.py"
+    path: str                       # path relative to the project root
+    qualifier: str = ""             # FIL (file) | DIR (directory) | UTS (test file)
+    metric: str = ""
+    value: str | None = None
+    language: str | None = None
+
+
+class MetricHistoryPoint(BaseModel):
+    date: str
+    value: str | None = None
+
+
+class AnalysisEvent(BaseModel):
+    key: str = ""
+    category: str = ""              # VERSION | QUALITY_GATE | OTHER | DEFINITION_CHANGE
+    name: str = ""
+    description: str = ""
+
+
+class SonarAnalysis(BaseModel):
+    key: str = ""
+    date: str = ""
+    project_version: str = ""
+    events: list[AnalysisEvent] = Field(default_factory=list)
+
+
+class SonarRule(BaseModel):
+    """Full detail for a single rule - what a SonarFinding.rule key refers to."""
+
+    key: str
+    name: str = ""
+    language: str = ""
+    type: str = ""                  # BUG | VULNERABILITY | CODE_SMELL | SECURITY_HOTSPOT
+    severity: str = ""
+    status: str = ""                # READY | DEPRECATED | REMOVED | BETA
+    html_description: str = ""      # full rationale + fix guidance, as authored by SonarSource
+    remediation_function: str = ""
+    tags: list[str] = Field(default_factory=list)
+    repository: str = ""
+
+
+class SonarHotspotDetail(BaseModel):
+    """Full detail for one security hotspot - richer than the summary
+    SonarFinding a hotspots/search list entry produces."""
+
+    key: str
+    rule_key: str = ""
+    message: str = ""
+    file: str | None = None
+    line: int | None = None
+    status: str = ""                 # TO_REVIEW | REVIEWED
+    resolution: str | None = None    # FIXED | SAFE (only when status=REVIEWED)
+    vulnerability_probability: str = ""
+    security_category: str = ""
+    author: str = ""
+    creation_date: str = ""
+    update_date: str = ""
+    risk_description: str = ""
+    vulnerability_description: str = ""
+    fix_recommendations: str = ""
+
+
+class SourceLine(BaseModel):
+    """One line of source code with its per-line Sonar annotations - lets a
+    caller see the exact flagged lines with coverage/duplication context
+    without a separate file read."""
+
+    line: int
+    code: str = ""
+    covered: bool | None = None        # None = not measured (e.g. non-executable line)
+    line_hits: int | None = None
+    duplicated: bool = False
+    scm_author: str = ""
+    scm_revision: str = ""
+    scm_date: str = ""
+
+
+class MetricInfo(BaseModel):
+    """One entry from the metric catalog - what a metric key means."""
+
+    key: str
+    name: str = ""
+    description: str = ""
+    domain: str = ""                    # e.g. "Coverage", "Duplications"
+    type: str = ""                      # e.g. "PERCENT", "INT", "RATING"
+    direction: int = 0                  # 1 = higher is better, -1 = lower is better, 0 = neutral
+    qualitative: bool = False
+
+
+class QualityGateConditionDef(BaseModel):
+    """One authored threshold in a quality gate's definition (distinct from
+    SonarGateCondition, which is a per-analysis pass/fail RESULT - this is
+    the gate's own configuration, independent of any specific analysis)."""
+
+    metric: str
+    comparator: str = ""
+    error_threshold: str = ""
+
+
+class QualityGateDefinition(BaseModel):
+    """A quality gate's own identity and authored configuration."""
+
+    id: str = ""
+    name: str = ""
+    is_default: bool = False
+    conditions: list[QualityGateConditionDef] = Field(default_factory=list)
+
+
+class IssueChangelogEntry(BaseModel):
+    creation_date: str = ""
+    user: str = ""
+    changes: list[dict] = Field(default_factory=list)   # each: {"key": "...", "old_value": "...", "new_value": "..."}
+
+
+class QualityProfile(BaseModel):
+    key: str = ""
+    name: str = ""
+    language: str = ""
+    is_default: bool = False
+    active_rule_count: int = 0
+
+
+class SystemHealth(BaseModel):
+    health: str = ""                    # GREEN | YELLOW | RED
+    causes: list[str] = Field(default_factory=list)

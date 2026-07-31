@@ -283,8 +283,10 @@ class PatternManager:
             table = self._get_table()
             try:
                 table.delete(f"project_key = '{_sq(project_key)}'")
-            except Exception:
-                pass
+            except Exception as exc:
+                # Clearing prior patterns is best-effort - a delete failure must not block
+                # inserting fresh ones below, but stays traceable rather than vanishing silently.
+                _log.debug("[memory] pattern delete failed for project %s: %s", project_key, exc)
 
             raw_patterns = detect_patterns(entries)
             if not raw_patterns:
@@ -324,12 +326,17 @@ class PatternManager:
         """Return stored patterns, optionally filtered to one project_key."""
         try:
             table = self._get_table()
-            rows = table.to_arrow().to_pylist()
+            total = table.count_rows()
+            if total == 0:
+                return []
+            if project_key:
+                rows = table.search().where(
+                    f"project_key = '{_sq(project_key)}'", prefilter=True
+                ).limit(total).to_list()
+            else:
+                rows = table.search().limit(total).to_list()
         except Exception:
             return []
-
-        if project_key:
-            rows = [r for r in rows if r["project_key"] == project_key]
 
         result = []
         for r in rows:

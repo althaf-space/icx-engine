@@ -16,10 +16,26 @@ _log = logging.getLogger(__name__)
 # never hydrated for the file-overlap comparison.
 _LinkCandidate = namedtuple("_LinkCandidate", ["issue_key", "files_changed"])
 
+# Minimal shape detect_patterns() reads from candidate entries. Loaded via a
+# column-projected scan so the 768-dim vector and JSON blob columns are never
+# hydrated for pattern detection.
+_PatternCandidate = namedtuple(
+    "_PatternCandidate",
+    [
+        "issue_key", "project_key", "files_changed", "tags", "work_item_type",
+        "root_cause_pattern", "used_by_tickets", "full_ticket_text",
+    ],
+)
+
 from icx_engine.exceptions import ICXMemoryError
 
 _SAFE_KEY_RE = re.compile(r'^[A-Z][A-Z0-9]*-[0-9]+$')
 _BARE_KEY_RE = re.compile(r'[A-Z][A-Z0-9]*-[0-9]+')
+
+# Fields update() may touch - small, user-meaningful, never structural/computed state.
+_UPDATE_ALLOWED_FIELDS = {
+    "summary", "problem_description", "impact", "resolution_note", "files_changed", "tags",
+}
 
 
 def _normalize_project_key_filter(project_key: str | None) -> str | None:
@@ -354,6 +370,11 @@ class MemoryManager:
             _log_debug(f"[memory_audit] write failed: {e}")
 
     def _find_by_key(self, issue_key: str) -> MemoryEntry | None:
+        """Not-found convention: plain `None`, same as `show` (its only caller
+        outside this file). Note this also returns `None` on a genuine lookup
+        failure (logged at debug level) - a real DB error is indistinguishable
+        from "not found" to this method's caller, an accepted tradeoff for a
+        read path, not something this task changes."""
         try:
             table = self._get_table()
             rows = table.search().where(
@@ -516,7 +537,14 @@ class MemoryManager:
         return updated
 
     def reinforce_usage(self, source_key: str, used_by_key: str) -> dict:
-        """Record that source_key was used when solving used_by_key."""
+        """Record that source_key was used when solving used_by_key.
+
+        Not-found convention: returns {"error": "entry not found", ...} rather
+        than raising - deliberate, matching verify_resolution/negate_resolution.
+        "No such source_key" is an ordinary, expected outcome for these
+        update-an-existing-entry operations (an MCP/CLI caller relays it to the
+        agent/user, it is not exceptional) - unlike ICXMemoryError, which signals
+        a genuine storage/infrastructure failure (see its own docstring)."""
         entry = self._find_by_key(source_key)
         if entry is None:
             return {"error": "entry not found", "source_key": source_key}
@@ -572,7 +600,10 @@ class MemoryManager:
         }
 
     def verify_resolution(self, issue_key: str, feedback_note: str) -> dict:
-        """Record that a resolution was confirmed working by the developer."""
+        """Record that a resolution was confirmed working by the developer.
+
+        Not-found convention: see reinforce_usage's docstring - returns a dict,
+        does not raise."""
         entry = self._find_by_key(issue_key)
         if entry is None:
             return {"error": "entry not found", "issue_key": issue_key}
@@ -607,7 +638,10 @@ class MemoryManager:
         }
 
     def negate_resolution(self, issue_key: str, reason: str) -> dict:
-        """Record that a resolution was confirmed wrong by the developer."""
+        """Record that a resolution was confirmed wrong by the developer.
+
+        Not-found convention: see reinforce_usage's docstring - returns a dict,
+        does not raise."""
         entry = self._find_by_key(issue_key)
         if entry is None:
             return {"error": "entry not found", "issue_key": issue_key}
@@ -743,7 +777,7 @@ class MemoryManager:
         try:
             count = self._get_table().count_rows()
             if count >= 5 and count % 5 == 0:
-                project_entries = self.list_entries(project_key=entry.project_key)
+                project_entries = self._lean_pattern_candidates(project_key=entry.project_key)
                 self._patterns.refresh(project_entries, entry.project_key, manager=self)
         except Exception as exc:
             _log.warning("Pattern refresh failed after save of %s: %s", entry.issue_key, exc)
@@ -776,6 +810,48 @@ class MemoryManager:
             ]
         except Exception as exc:
             _log.debug("[memory] lean candidate scan failed (%s); using full load", exc)
+            return self.list_entries(project_key=project_key)
+
+    def _lean_pattern_candidates(self, project_key: str | None = None) -> list:
+        """Candidate entries for detect_patterns(): the 8 fields it actually reads.
+
+        Uses a column-projected scan so the 768-dim vector and JSON columns are
+        never hydrated. Field defaults mirror _row_to_entry() so behavior for
+        missing/legacy columns matches what list_entries() would have produced.
+        Falls back to the full load on any error, preserving prior behavior.
+        """
+        try:
+            table = self._get_table()
+            total = table.count_rows()
+            if total == 0:
+                return []
+            rows = (
+                table.search()
+                .select([
+                    "issue_key", "project_key", "files_changed", "tags", "work_item_type",
+                    "root_cause_pattern", "used_by_tickets", "full_ticket_text",
+                ])
+                .limit(total)
+                .to_list()
+            )
+            _pk = _normalize_project_key_filter(project_key)
+            if _pk:
+                rows = [r for r in rows if (r.get("project_key") or "").upper() == _pk]
+            return [
+                _PatternCandidate(
+                    issue_key=r["issue_key"],
+                    project_key=r["project_key"],
+                    files_changed=list(r.get("files_changed") or []),
+                    tags=list(r.get("tags") or []),
+                    work_item_type=r.get("work_item_type", "bug"),
+                    root_cause_pattern=r.get("root_cause_pattern") or "uncategorized",
+                    used_by_tickets=list(r.get("used_by_tickets") or []),
+                    full_ticket_text=r.get("full_ticket_text") or "",
+                )
+                for r in rows
+            ]
+        except Exception as exc:
+            _log.debug("[memory] lean pattern candidate scan failed (%s); using full load", exc)
             return self.list_entries(project_key=project_key)
 
     def list_entries(
@@ -1019,7 +1095,13 @@ class MemoryManager:
         }
 
     def show(self, issue_key: str) -> MemoryEntry | None:
-        """Return the full MemoryEntry for one issue_key, or None if not found."""
+        """Return the full MemoryEntry for one issue_key, or None if not found.
+
+        Not-found convention: plain `None` (the standard Python optional-lookup
+        idiom), distinct from reinforce_usage/verify_resolution/negate_resolution's
+        {"error": ...} dict - those mutate an existing entry and need to report
+        the failure alongside other result fields; this is a pure read with no
+        result shape to report it inside."""
         return self._find_by_key(issue_key)
 
     def delete(self, issue_key: str) -> None:
@@ -1035,6 +1117,27 @@ class MemoryManager:
         except Exception as exc:
             raise ICXMemoryError(f"Failed to delete memory entry for {normalised}: {exc}") from exc
         self._relations.delete_for(normalised)
+
+    def update(self, issue_key: str, **fields) -> MemoryEntry:
+        """Update a safe allowlist of user-meaningful fields on an existing entry.
+
+        Persists by deleting the old row and re-saving the updated one through the
+        same save() path every other write uses (restore=True so confirmation_count/
+        memory_confidence are carried over unchanged rather than recomputed as if
+        this were a fresh save)."""
+        invalid = set(fields) - _UPDATE_ALLOWED_FIELDS
+        if invalid:
+            raise ICXMemoryError(
+                f"Cannot update field(s) {sorted(invalid)}. "
+                f"Allowed fields: {sorted(_UPDATE_ALLOWED_FIELDS)}."
+            )
+        entry = self._find_by_key(issue_key)
+        if entry is None:
+            raise ICXMemoryError(f"No memory entry found for {issue_key}")
+        updated = entry.model_copy(update=fields)
+        self.delete(entry.issue_key)
+        self.save(updated, restore=True)
+        return updated
 
     def clear(self) -> None:
         """Delete all memory entries, relations, and patterns. Recreates empty tables."""

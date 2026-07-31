@@ -16,6 +16,10 @@ class SkillStorage:
     def __init__(self, root: Path | None = None) -> None:
         self._root = root or (Path.home() / ".icx" / "skills")
 
+    @property
+    def root(self) -> Path:
+        return self._root
+
     def _path(self, name: str) -> Path:
         if not _SAFE_NAME_RE.match(name):
             raise ValueError(f"invalid skill name: {name!r}")

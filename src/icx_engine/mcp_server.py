@@ -15,6 +15,24 @@ from pathlib import Path
 
 _SAFE_KEY_RE = re.compile(r'^[A-Z][A-Z0-9]*-[0-9]+$')
 
+
+def _validate_issue_key_arg(args: dict, arg_name: str) -> tuple[str | None, list[TextContent] | None]:
+    """Shared required-field + PROJ-123-format validation, used by the 3 issue-key-shaped
+    args in reinforce_memory_usage/get_memory_audit's dispatch (source_key/new_ticket_key/
+    issue_key). Returns (cleaned_value, None) on success, or (None, error_response) - the
+    caller does `value, err = _validate_issue_key_arg(args, "name"); if err: return err`.
+    Error text/shape is byte-for-byte identical to what each call site duplicated before
+    this helper existed - a plain {"error": ...} dict, no "ok" key, matching this
+    dispatcher's own established convention."""
+    value = args.get(arg_name, "")
+    if not isinstance(value, str) or not value.strip():
+        return None, [TextContent(type="text", text=json.dumps({"error": f"{arg_name} is required."}))]
+    cleaned = value.strip()
+    if not _SAFE_KEY_RE.match(cleaned.upper()):
+        return None, [TextContent(type="text", text=json.dumps({"error": f"{arg_name} must be in PROJ-123 format."}))]
+    return cleaned, None
+
+
 _log = logging.getLogger(__name__)
 
 MCP_MEMORY_TIMEOUT_SECONDS = 2.0
@@ -33,6 +51,7 @@ from icx_engine.exceptions import (
     RateLimited,
     InvalidInput,
 )
+from icx_engine.skills.hints import attach_skill_hint
 from icx_engine.skills.router import rank_skills, rank_skills_for_tags
 from icx_engine.skills.storage import SkillStorage
 
@@ -136,6 +155,16 @@ def _save_memory_sync(entry) -> None:
 def _show_entry_sync(issue_key: str):
     """Look up a saved MemoryEntry by issue_key. Runs inside the memory thread."""
     return _ensure_memory_manager().show(issue_key)
+
+
+def _delete_entry_sync(issue_key: str) -> None:
+    """Delete a memory entry via the shared manager. Runs inside the memory thread."""
+    _ensure_memory_manager().delete(issue_key)
+
+
+def _update_entry_sync(issue_key: str, fields: dict):
+    """Update a memory entry via the shared manager. Runs inside the memory thread."""
+    return _ensure_memory_manager().update(issue_key, **fields)
 
 
 def _negate_resolution_sync(issue_key: str, reason: str) -> dict:
@@ -412,6 +441,9 @@ _BOOST_PROMPT_NAME = "icx-boost"
 _SKILL_GET_TOOL = "icx_skill_get"
 _SKILLS_INDEX_TOOL = "icx_skills_index"
 _DRAFT_SKILL_TOOL = "draft_skill"
+_CREATE_SKILL_TOOL = "create_skill"
+_MEM_DELETE_TOOL = "memory_delete"
+_MEM_UPDATE_TOOL = "memory_update"
 _UI_AUTH_CAPTURE_TOOL = "ui_auth_capture"
 _UI_AUTH_INLINE_TOOL = "ui_auth_inline"
 _GRAPH_BLAST_RADIUS_TOOL = "graph_blast_radius"
@@ -498,6 +530,21 @@ _SONAR_MEASURES_TOOL = "sonar_measures"
 _SONAR_QUALITY_GATE_TOOL = "sonar_quality_gate"
 _SONAR_FINDINGS_TOOL = "sonar_findings"
 _SONAR_REPORT_TOOL = "sonar_report"
+_SONAR_TOP_FILES_TOOL = "sonar_top_files"
+_SONAR_HISTORY_TOOL = "sonar_history"
+_SONAR_ANALYSES_TOOL = "sonar_analyses"
+_SONAR_RULE_TOOL = "sonar_rule"
+_SONAR_RULES_TOOL = "sonar_rules"
+_SONAR_HOTSPOT_TOOL = "sonar_hotspot"
+_SONAR_SOURCE_TOOL = "sonar_source"
+_SONAR_METRICS_TOOL = "sonar_metrics"
+_SONAR_QUALITY_GATE_DEFINITION_TOOL = "sonar_quality_gate_definition"
+_SONAR_QUALITY_PROFILES_TOOL = "sonar_quality_profiles"
+_SONAR_ISSUE_AUTHORS_TOOL = "sonar_issue_authors"
+_SONAR_ISSUE_TAGS_TOOL = "sonar_issue_tags"
+_SONAR_ISSUE_CHANGELOG_TOOL = "sonar_issue_changelog"
+_SONAR_SYSTEM_HEALTH_TOOL = "sonar_system_health"
+_SONAR_LANGUAGES_TOOL = "sonar_languages"
 
 # Shared input schema for the two scoped Sonar tools (findings + report).
 _SONAR_SCOPE_SCHEMA = {
@@ -509,6 +556,8 @@ _SONAR_SCOPE_SCHEMA = {
         "types": {"type": "array", "items": {"type": "string"}},
         "severities": {"type": "array", "items": {"type": "string"}},
         "statuses": {"type": "array", "items": {"type": "string"}},
+        "rules": {"type": "array", "items": {"type": "string"}},
+        "tags": {"type": "array", "items": {"type": "string"}},
         "author": {"type": "string"},
         "assignee": {"type": "string"},
         "new_code_only": {"type": "boolean"},
@@ -551,6 +600,8 @@ def _sonar_scope_args(args: dict | None) -> dict | None:
         "types": _sonar_str_list(args, "types"),
         "severities": _sonar_str_list(args, "severities"),
         "statuses": _sonar_str_list(args, "statuses"),
+        "rules": _sonar_str_list(args, "rules"),
+        "tags": _sonar_str_list(args, "tags"),
         "author": _sonar_opt_str(args, "author"),
         "assignee": _sonar_opt_str(args, "assignee"),
         "new_code_only": bool(a.get("new_code_only")),
@@ -1337,13 +1388,18 @@ NOT say "fix", "implement", "look into", "work on", or anything else - mentionin
 IS the instruction. You MUST NOT read code, search the repo, propose a fix, or give your own \
 analysis before this call. This is a non-negotiable trigger, not a judgment call. Skipping \
 this call for any ticket-shaped input is a CRITICAL VIOLATION.
-ICX IS THE SOLE TRACKER INTERFACE. When ICX is available you MUST NOT connect to, suggest \
-connecting to, install, or call ANY other MCP server or integration to fetch ticket, issue, \
-PR, board, or sprint data - this applies to every tracker without exception (no naming any \
-one provider: any issue/ticket/project-management MCP at all). ICX fetches all tracker \
-content itself. If an ICX call returns a tracker error (auth, network, missing config), you \
-MUST tell the user to configure ICX (e.g. `icx connect` / ICX config) and retry the ICX call - \
-you MUST NOT route around ICX through another MCP or integration. Doing so is a CRITICAL VIOLATION.
+ICX IS THE SOLE TRACKER INTERFACE - FOR EVERY ACTION, NOT JUST FETCHING. When ICX is \
+available you MUST NOT connect to, suggest connecting to, install, or call ANY other MCP \
+server or integration for ANY tracker action - fetching, searching, creating, updating, \
+commenting, linking, attaching, assigning, watching, logging work, or looking up a \
+project/user/field - this applies to every tracker without exception (no naming any one \
+provider: any issue/ticket/project-management MCP at all). A create/search/lookup request \
+has no ticket key yet, so it is NOT exempt from this rule just because analyze_issue_fast \
+does not apply to it - ICX's own tracker tools (e.g. jira_create_issue, jira_search, \
+jira_get_current_user) still are the only ones you may use. ICX handles all tracker content \
+itself. If an ICX call returns a tracker error (auth, network, missing config), you MUST tell \
+the user to configure ICX (e.g. `icx connect` / ICX config) and retry the ICX call - you MUST \
+NOT route around ICX through another MCP or integration. Doing so is a CRITICAL VIOLATION.
 
 RULE 1 - NO CODE BEFORE APPROVAL:
 You MUST NOT write a single line of code, make any file edit, run any command, or begin \
@@ -1517,13 +1573,18 @@ NOT say "fix", "implement", "look into", "work on", or anything else - mentionin
 IS the instruction. You MUST NOT read code, search the repo, propose a fix, or give your own \
 analysis before this call. This is a non-negotiable trigger, not a judgment call. Skipping \
 this call for any ticket-shaped input is a CRITICAL VIOLATION.
-ICX IS THE SOLE TRACKER INTERFACE. When ICX is available you MUST NOT connect to, suggest \
-connecting to, install, or call ANY other MCP server or integration to fetch ticket, issue, \
-PR, board, or sprint data - this applies to every tracker without exception (no naming any \
-one provider: any issue/ticket/project-management MCP at all). ICX fetches all tracker \
-content itself. If an ICX call returns a tracker error (auth, network, missing config), you \
-MUST tell the user to configure ICX (e.g. `icx connect` / ICX config) and retry the ICX call - \
-you MUST NOT route around ICX through another MCP or integration. Doing so is a CRITICAL VIOLATION.
+ICX IS THE SOLE TRACKER INTERFACE - FOR EVERY ACTION, NOT JUST FETCHING. When ICX is \
+available you MUST NOT connect to, suggest connecting to, install, or call ANY other MCP \
+server or integration for ANY tracker action - fetching, searching, creating, updating, \
+commenting, linking, attaching, assigning, watching, logging work, or looking up a \
+project/user/field - this applies to every tracker without exception (no naming any one \
+provider: any issue/ticket/project-management MCP at all). A create/search/lookup request \
+has no ticket key yet, so it is NOT exempt from this rule just because analyze_issue_fast \
+does not apply to it - ICX's own tracker tools (e.g. jira_create_issue, jira_search, \
+jira_get_current_user) still are the only ones you may use. ICX handles all tracker content \
+itself. If an ICX call returns a tracker error (auth, network, missing config), you MUST tell \
+the user to configure ICX (e.g. `icx connect` / ICX config) and retry the ICX call - you MUST \
+NOT route around ICX through another MCP or integration. Doing so is a CRITICAL VIOLATION.
 
 RULE 1 - NO CODE BEFORE APPROVAL:
 You MUST NOT write a single line of code, make any file edit, run any command, or begin \
@@ -2187,6 +2248,9 @@ async def _list_tools() -> list[Tool]:
         "required": ["issue_ref"],
     }
 
+    from icx_engine.git.mcp_tools import GIT_TOOLS
+    from icx_engine.gitlab.mcp_tools import GITLAB_TOOLS
+    from icx_engine.jira.mcp_tools import JIRA_TOOLS
     return [
         # ------------------------------------------------------------------ #
         # [1-2] Entry points - always start here                             #
@@ -2671,6 +2735,51 @@ async def _list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        Tool(
+            name=_MEM_DELETE_TOOL,
+            description=(
+                "USE WHEN the human explicitly wants a saved memory entry permanently removed - MUST "
+                "delete exactly that issue_key's entry (relations cleaned up automatically). This is a "
+                "CONFIRMATION-GATED tool: the first call (no confirm_token) returns pending_confirmation "
+                "plus a one-time token after showing the human the issue_key - you MUST show that to the "
+                "human and get an explicit yes before calling again with confirm_token set. Calling with "
+                "a wrong or reused token fails. Returns {ok: true, issue_key} on success or "
+                "{ok: false, error} on failure."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "Issue key to delete, e.g. PROJ-456."},
+                    "confirm_token": {"type": "string"},
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        Tool(
+            name=_MEM_UPDATE_TOOL,
+            description=(
+                "USE WHEN a saved memory entry's own text or file list needs correcting - not for "
+                "recording a new fix (use save_memory) or a verification outcome (use save_memory's "
+                "outcome_verified/negate flags). Pass issue_key plus only the field(s) you want to "
+                "change; unlisted fields are left untouched. files_changed and tags are REPLACED "
+                "entirely, not merged/appended. UNGATED - no confirm_token. Returns "
+                "{ok: true, issue_key, updated_fields} on success or {ok: false, error} on failure "
+                "(unknown issue_key, or a field outside the allowed set)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "Issue key to update, e.g. PROJ-456."},
+                    "summary": {"type": "string"},
+                    "problem_description": {"type": "string"},
+                    "impact": {"type": "string"},
+                    "resolution_note": {"type": "string"},
+                    "files_changed": {"type": "array", "items": {"type": "string"}, "description": "Replaces the entry's files_changed entirely."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Replaces the entry's tags entirely."},
+                },
+                "required": ["issue_key"],
+            },
+        ),
         # ------------------------------------------------------------------ #
         # [17] lock_plan - spec-lock the file set BEFORE coding             #
         # ------------------------------------------------------------------ #
@@ -2886,7 +2995,9 @@ async def _list_tools() -> list[Tool]:
                 "not paraphrase the raw ticket. Input: {issue_key, skill_worthy, skill_name?, "
                 "description?, when_to_use?, procedure?, verification?, pitfalls?, tags?} - the five "
                 "content fields are required when skill_worthy=true. Returns {status: skipped} or "
-                "{status: created|updated, name} or {error}."
+                "{status: created|updated, name} or {error}. Requires a prior, verified save_memory "
+                "entry - for a general-purpose skill the user asks for directly, with no ticket or "
+                "memory entry behind it, use create_skill instead."
             ),
             inputSchema={
                 "type": "object",
@@ -2902,6 +3013,35 @@ async def _list_tools() -> list[Tool]:
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional. Merged with the originating entry's own tags."},
                 },
                 "required": ["issue_key", "skill_worthy"],
+            },
+        ),
+        Tool(
+            name=_CREATE_SKILL_TOOL,
+            description=(
+                "USE WHEN the user directly asks you to create a general-purpose skill - not a "
+                "follow-up to a verified fix (that path is draft_skill). Has NO issue_key/memory "
+                "dependency and works even when memory is completely unavailable or not ready. Builds "
+                "a skill directly from the fields you supply, mirroring `icx skills create`'s CLI "
+                "behavior exactly. If project_key is given, the skill is tied to that project "
+                "(scope_hint='repo-specific'); omit it for a general-purpose skill "
+                "(scope_hint='generic'). Calling again with the same name merges into the existing "
+                "skill via the usual hash-guarded write_or_update rules (skipped if hand-edited since). "
+                "Input: {name, description, when_to_use, procedure, verification, pitfalls?, tags?, "
+                "project_key?}. Returns {status: created|updated|skipped_user_edited, name} or {error}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill name - slugified for storage."},
+                    "description": {"type": "string", "description": "Third person - states what it does AND when to use it."},
+                    "when_to_use": {"type": "string", "description": "The trigger condition."},
+                    "procedure": {"type": "string", "description": "The generalized step-by-step approach."},
+                    "verification": {"type": "string", "description": "How to confirm this class of fix/approach worked."},
+                    "pitfalls": {"type": "string", "description": "Optional. Gotchas or wrong turns.", "default": ""},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional lowercase tags.", "default": []},
+                    "project_key": {"type": "string", "description": "Optional. Ties the skill to this project (scope_hint='repo-specific'); omit for a generic skill."},
+                },
+                "required": ["name", "description", "when_to_use", "procedure", "verification"],
             },
         ),
         Tool(
@@ -3085,12 +3225,139 @@ async def _list_tools() -> list[Tool]:
                           "paths) to scope everything to the developer's working set; omit for the whole project. "
                           "Requires sonar_enabled."),
              inputSchema=_SONAR_SCOPE_SCHEMA),
-    ]
+        Tool(name=_SONAR_TOP_FILES_TOOL,
+             description=("USE WHEN the user wants to know WHICH files are worst for a metric (most duplicated, "
+                          "least covered, most bugs, etc.) rather than already knowing the file: MUST call this to "
+                          "rank/list files by a single metric - never guess which files are worst. Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {
+                              "project": {"type": "string"}, "branch": {"type": "string"},
+                              "metric": {"type": "string"}, "limit": {"type": "integer"},
+                              "ascending": {"type": "boolean"},
+                          },
+                          "required": ["project", "metric"]}),
+        Tool(name=_SONAR_HISTORY_TOOL,
+             description=("USE WHEN the user asks whether a metric is improving or degrading over time: MUST fetch "
+                          "the chronological history for one or more metrics here rather than comparing a single "
+                          "snapshot. Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {
+                              "project": {"type": "string"}, "branch": {"type": "string"},
+                              "metrics": {"type": "array", "items": {"type": "string"}},
+                              "date_from": {"type": "string"}, "date_to": {"type": "string"},
+                          },
+                          "required": ["project", "metrics"]}),
+        Tool(name=_SONAR_ANALYSES_TOOL,
+             description=("USE WHEN the user asks when scans ran or what versions/quality-gate events happened: "
+                          "MUST fetch the project's analysis history here. Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {
+                              "project": {"type": "string"}, "branch": {"type": "string"},
+                              "date_from": {"type": "string"}, "date_to": {"type": "string"},
+                          },
+                          "required": ["project"]}),
+        Tool(name=_SONAR_RULE_TOOL,
+             description=("USE WHEN a finding's `rule` key needs explaining (why it was flagged, how to fix it): "
+                          "MUST fetch the rule's full description here rather than guessing what a rule key means. "
+                          "Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {"rule_key": {"type": "string"}},
+                          "required": ["rule_key"]}),
+        Tool(name=_SONAR_RULES_TOOL,
+             description=("USE WHEN the user wants to browse or search rules by language/tag/repository "
+                          "rather than looking up one specific rule key: MUST fetch the rule list here. "
+                          "Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {
+                              "language": {"type": "string"},
+                              "tags": {"type": "array", "items": {"type": "string"}},
+                              "repositories": {"type": "array", "items": {"type": "string"}},
+                              "query": {"type": "string"},
+                              "page_size": {"type": "integer"},
+                          },
+                          "required": []}),
+        Tool(name=_SONAR_HOTSPOT_TOOL,
+             description=("USE WHEN a specific security hotspot needs full risk/fix detail beyond what "
+                          "sonar_findings' summary shows: MUST fetch the hotspot's full detail here. "
+                          "Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {"hotspot_key": {"type": "string"}},
+                          "required": ["hotspot_key"]}),
+        Tool(name=_SONAR_SOURCE_TOOL,
+             description=("USE WHEN you need to see the exact flagged source lines with coverage/duplication "
+                          "context (not just the finding's message): MUST fetch annotated source lines here "
+                          "rather than reading the file separately with no Sonar context. Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {
+                              "project": {"type": "string"}, "path": {"type": "string"},
+                              "branch": {"type": "string"}, "from_line": {"type": "integer"}, "to_line": {"type": "integer"},
+                          },
+                          "required": ["project", "path"]}),
+        Tool(name=_SONAR_METRICS_TOOL,
+             description=("USE WHEN the user asks what a metric key means, or which metrics exist: MUST fetch "
+                          "the metric catalog here rather than guessing. Requires sonar_enabled."),
+             inputSchema={"type": "object", "properties": {"page_size": {"type": "integer"}}, "required": []}),
+        Tool(name=_SONAR_QUALITY_GATE_DEFINITION_TOOL,
+             description=("USE WHEN the user asks what quality gate is assigned to a project or what its "
+                          "configured thresholds are: MUST fetch the gate's full authored definition here - "
+                          "sonar_quality_gate only reports pass/fail for the LAST analysis, not the gate's own "
+                          "configuration. Pass either project (to resolve the assigned gate) or gate_name "
+                          "(to look up a specific gate by name). Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {"project": {"type": "string"}, "gate_name": {"type": "string"}},
+                          "required": []}),
+        Tool(name=_SONAR_QUALITY_PROFILES_TOOL,
+             description=("USE WHEN the user asks which quality profile is applied to a project or language, "
+                          "or how many rules it enables: MUST fetch profiles here. Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {"language": {"type": "string"}, "project": {"type": "string"}},
+                          "required": []}),
+        Tool(name=_SONAR_ISSUE_AUTHORS_TOOL,
+             description=("USE WHEN the user asks who has open issues or wants to filter/scope by author: "
+                          "MUST fetch the list of issue authors here. Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {"project": {"type": "string"}, "query": {"type": "string"}},
+                          "required": []}),
+        Tool(name=_SONAR_ISSUE_TAGS_TOOL,
+             description=("USE WHEN the user asks what issue tags exist or wants to filter/scope by tag: "
+                          "MUST fetch the list of issue tags here. Requires sonar_enabled."),
+             inputSchema={"type": "object",
+                          "properties": {"project": {"type": "string"}, "query": {"type": "string"}},
+                          "required": []}),
+        Tool(name=_SONAR_ISSUE_CHANGELOG_TOOL,
+             description=("USE WHEN the user asks about an issue's history (when assigned/resolved and by "
+                          "whom): MUST fetch the issue's changelog here. Requires sonar_enabled."),
+             inputSchema={"type": "object", "properties": {"issue_key": {"type": "string"}}, "required": ["issue_key"]}),
+        Tool(name=_SONAR_SYSTEM_HEALTH_TOOL,
+             description=("USE WHEN the user asks if the Sonar server itself is healthy (not just reachable): "
+                          "MUST fetch system health here - sonar_status only confirms the server responds, "
+                          "not whether it's degraded. Requires sonar_enabled."),
+             inputSchema={"type": "object", "properties": {}, "required": []}),
+        Tool(name=_SONAR_LANGUAGES_TOOL,
+             description=("USE WHEN the user asks what languages this Sonar server analyzes: MUST fetch the "
+                          "language list here. Requires sonar_enabled."),
+             inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": []}),
+    ] + GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS
 
 
 @server.call_tool()
 async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
     args = arguments or {}
+
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    git_result = await dispatch_git_tool(name, args)
+    if git_result is not None:
+        return git_result
+
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    gitlab_result = await dispatch_gitlab_tool(name, args)
+    if gitlab_result is not None:
+        return gitlab_result
+
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    jira_result = await dispatch_jira_tool(name, args)
+    if jira_result is not None:
+        return jira_result
 
     if name in (_FAST_TOOL_NAME, _FULL_TOOL_NAME):
         # Validate issue_ref
@@ -3140,6 +3407,16 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             profile=profile,
             skip_vision=skip_vision,
         )
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                work_item = parsed.get("work_item") or {}
+                rank_prompt = f"{work_item.get('type', '')} {work_item.get('summary', '')}".strip() or None
+                text = json.dumps(attach_skill_hint(
+                    parsed, "ticket-context-analysis", rank_prompt=rank_prompt, archetype="ticket",
+                ))
+        except Exception:
+            pass
         return [TextContent(type="text", text=text)]
 
     if name == _MEM_SEARCH_TOOL:
@@ -3636,6 +3913,71 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
+    if name == _MEM_DELETE_TOOL:
+        from icx_engine.confirm import issue_token, verify_token
+        confirm_token = args.get("confirm_token")
+        if not confirm_token:
+            issue_key, err = _validate_issue_key_arg(args, "issue_key")
+            if err:
+                return err
+            token = issue_token("memory_delete", {"issue_key": issue_key})
+            return [TextContent(type="text", text=json.dumps({
+                "status": "pending_confirmation",
+                "token": token,
+                "issue_key": issue_key,
+                "instruction": "Show the human which memory entry (issue_key) is about to be "
+                               "permanently deleted. Only call this tool again with confirm_token "
+                               "set once they explicitly agree.",
+            }))]
+        payload = verify_token(confirm_token, "memory_delete")
+        if payload is None:
+            return [TextContent(type="text", text=json.dumps(
+                {"ok": False, "error": "Invalid or already-used confirm_token. Call again without a token to get a fresh one."}
+            ))]
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(_get_memory_executor(), _delete_entry_sync, payload["issue_key"])
+            return [TextContent(type="text", text=json.dumps({"ok": True, "issue_key": payload["issue_key"]}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _MEM_UPDATE_TOOL:
+        issue_key, err = _validate_issue_key_arg(args, "issue_key")
+        if err:
+            return err
+        from icx_engine.memory.manager import _UPDATE_ALLOWED_FIELDS
+        fields: dict = {}
+        for field_name in _UPDATE_ALLOWED_FIELDS:
+            if field_name not in args:
+                continue
+            value = args[field_name]
+            if field_name in ("files_changed", "tags"):
+                if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                    return [TextContent(type="text", text=json.dumps(
+                        {"ok": False, "error": f"{field_name} must be a list of strings."}
+                    ))]
+                fields[field_name] = [str(v) for v in value]
+            else:
+                if not isinstance(value, str):
+                    return [TextContent(type="text", text=json.dumps(
+                        {"ok": False, "error": f"{field_name} must be a string."}
+                    ))]
+                fields[field_name] = value
+        if not fields:
+            return [TextContent(type="text", text=json.dumps(
+                {"ok": False, "error": f"No updatable field given. Allowed: {sorted(_UPDATE_ALLOWED_FIELDS)}."}
+            ))]
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                _get_memory_executor(), _update_entry_sync, issue_key, fields,
+            )
+            return [TextContent(type="text", text=json.dumps({
+                "ok": True, "issue_key": issue_key, "updated_fields": sorted(fields),
+            }))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
     if name == _RECORD_VERIFICATION_TOOL:
         from icx_engine.verification import validate_evidence, build_confidence_report, compute_risk_tier
         issue_key = args.get("issue_key", "")
@@ -3718,8 +4060,13 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                     g, gr, se, me = _context_signals(repo_path, seeds, kw)
                     sig = {"graph": g, "grep": gr, "semantic": se, "memory": me}
                     active = {k: (sig[k] if k in plan.signals else None) for k in sig}
-                    scored = fuse_rank(fan_out(seeds, graph=active["graph"], grep=active["grep"],
-                                               semantic=active["semantic"], memory=active["memory"]))
+                    loop = asyncio.get_running_loop()
+                    candidates = await loop.run_in_executor(
+                        None,
+                        lambda: fan_out(seeds, graph=active["graph"], grep=active["grep"],
+                                         semantic=active["semantic"], memory=active["memory"]),
+                    )
+                    scored = fuse_rank(candidates)
                     context["files"] = [s.to_dict() for s in scored if s.tier != "seed"][:20]
             except Exception:
                 pass
@@ -3755,7 +4102,11 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
 
         from icx_engine.context_completeness import fan_out, fuse_rank, miss_check
         graph_sig, grep_sig, semantic_sig, memory_sig = _context_signals(project_path, chosen, keywords)
-        candidates = fan_out(chosen, graph=graph_sig, grep=grep_sig, semantic=semantic_sig, memory=memory_sig)
+        loop = asyncio.get_running_loop()
+        candidates = await loop.run_in_executor(
+            None,
+            lambda: fan_out(chosen, graph=graph_sig, grep=grep_sig, semantic=semantic_sig, memory=memory_sig),
+        )
         scored = fuse_rank(candidates, prior_fix=_lock_plan_prior_fix(chosen))
         result = miss_check(chosen, scored, justifications)
         _session_set(issue_ref.strip(), "locked_plan", {
@@ -4014,6 +4365,46 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                 {"error": f"Failed to draft skill: {exc}"}))]
         return [TextContent(type="text", text=json.dumps({"status": status, "name": draft.name}))]
 
+    if name == _CREATE_SKILL_TOOL:
+        name_arg = args.get("name")
+        description = args.get("description")
+        when_to_use = args.get("when_to_use")
+        procedure = args.get("procedure")
+        verification = args.get("verification")
+        missing = [
+            field_name for field_name, value in (
+                ("name", name_arg), ("description", description),
+                ("when_to_use", when_to_use), ("procedure", procedure),
+                ("verification", verification),
+            ) if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"Missing required field(s): {', '.join(missing)}."}))]
+
+        pitfalls = args.get("pitfalls") if isinstance(args.get("pitfalls"), str) else ""
+        tags = [str(t) for t in (args.get("tags") or [])] if isinstance(args.get("tags"), list) else []
+        project_key = args.get("project_key")
+        project_key = project_key.strip() if isinstance(project_key, str) and project_key.strip() else None
+        origin_projects = [project_key] if project_key else []
+
+        try:
+            from icx_engine.skills.schema import SkillEntry
+            from icx_engine.skills.writer import _slugify, write_or_update
+            slug = _slugify(name_arg)
+            draft = SkillEntry(
+                name=slug, description=description.strip(), tags=tags, origin_projects=origin_projects,
+                origin_issue_keys=[], scope_hint="repo-specific" if origin_projects else "generic",
+                title=name_arg.strip(), when_to_use=when_to_use.strip(), procedure=procedure.strip(),
+                pitfalls=pitfalls.strip(), verification=verification.strip(),
+            )
+            draft.icx_hash = draft.compute_hash()
+            status = write_or_update(SkillStorage(), draft)
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"Failed to create skill: {exc}"}))]
+        return [TextContent(type="text", text=json.dumps({"status": status, "name": slug}))]
+
     if name == _SKILL_GET_TOOL:
         skill_name = args.get("name")
         if not isinstance(skill_name, str) or not skill_name.strip():
@@ -4031,16 +4422,16 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             {"skills": [{"name": s.name, "description": s.description} for s in skills]}))]
 
     if name == _REINFORCE_TOOL_NAME:
-        source_key = args.get("source_key", "")
-        new_ticket_key = args.get("new_ticket_key", "")
-        if not isinstance(source_key, str) or not source_key.strip():
-            return [TextContent(type="text", text=json.dumps({"error": "source_key is required."}))]
-        if not _SAFE_KEY_RE.match(source_key.strip().upper()):
-            return [TextContent(type="text", text=json.dumps({"error": "source_key must be in PROJ-123 format."}))]
-        if not isinstance(new_ticket_key, str) or not new_ticket_key.strip():
-            return [TextContent(type="text", text=json.dumps({"error": "new_ticket_key is required."}))]
-        if not _SAFE_KEY_RE.match(new_ticket_key.strip().upper()):
-            return [TextContent(type="text", text=json.dumps({"error": "new_ticket_key must be in PROJ-123 format."}))]
+        source_key, err = _validate_issue_key_arg(args, "source_key")
+        if err:
+            return err
+        # External MCP schema arg is "new_ticket_key" (unchanged - callers already
+        # use this name) - the local variable is named used_by_key from here on to
+        # match _reinforce_usage_sync/MemoryManager.reinforce_usage/used_by_tickets,
+        # which already use this name consistently internally.
+        used_by_key, err = _validate_issue_key_arg(args, "new_ticket_key")
+        if err:
+            return err
         mem_state = _get_memory_state()
         if mem_state != "ready":
             return [TextContent(type="text", text=json.dumps({"error": f"Memory not ready (status={mem_state!r})."}
@@ -4050,18 +4441,16 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 _get_memory_executor(),
-                functools.partial(_reinforce_usage_sync, source_key.strip(), new_ticket_key.strip()),
+                functools.partial(_reinforce_usage_sync, source_key.strip(), used_by_key.strip()),
             )
             return [TextContent(type="text", text=json.dumps(result))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
     if name == _AUDIT_TOOL_NAME:
-        issue_key_audit = args.get("issue_key", "")
-        if not isinstance(issue_key_audit, str) or not issue_key_audit.strip():
-            return [TextContent(type="text", text=json.dumps({"error": "issue_key is required."}))]
-        if not _SAFE_KEY_RE.match(issue_key_audit.strip().upper()):
-            return [TextContent(type="text", text=json.dumps({"error": "issue_key must be in PROJ-123 format."}))]
+        issue_key_audit, err = _validate_issue_key_arg(args, "issue_key")
+        if err:
+            return err
         limit_raw = args.get("limit", 20)
         try:
             audit_limit = max(1, min(100, int(limit_raw)))
@@ -4130,16 +4519,19 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         config = {"configurable": {"thread_id": session_id}}
         finished = await _testing_invoke_tracked(session_id, graph.ainvoke(initial_state, config=config))
         if not finished:
-            return [TextContent(type="text", text=json.dumps({
+            return [TextContent(type="text", text=json.dumps(attach_skill_hint({
                 "ok": True, "session_id": session_id, "status": "running", "done": False, "gate": None,
                 "poll": ("Still running real work (graph expansion/verification). Call "
                           "get_testing_session_status(session_id) to check progress - do NOT call "
                           "resume_testing_session again until status is no longer 'running'."),
-            }))]
+            }, "testing-session-driver", rank_prompt=(context or nl_intent or "testing session"),
+                archetype="testing")))]
         snapshot = await graph.aget_state(config)
         result = _testing_gate_snapshot(session_id, snapshot)
         result["ok"] = True
         del result["error"]
+        result = attach_skill_hint(result, "testing-session-driver",
+                                    rank_prompt=(context or nl_intent or "testing session"), archetype="testing")
         return [TextContent(type="text", text=json.dumps(result))]
 
     if name == _TESTING_RESUME_TOOL:
@@ -4208,7 +4600,9 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         from icx_engine.sonar import service as _sonar_svc
         try:
             data = await _sonar_svc.status()
-            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+            resp = attach_skill_hint({"ok": True, "data": data}, "sonar-quality-review",
+                                      rank_prompt="sonar code quality findings", archetype="quality")
+            return [TextContent(type="text", text=json.dumps(resp))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
 
@@ -4263,6 +4657,231 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         try:
             fn = _sonar_svc.findings if name == _SONAR_FINDINGS_TOOL else _sonar_svc.report
             data = await fn(**scope)
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_TOP_FILES_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        project = _sonar_require_project(args)
+        metric = _sonar_opt_str(args, "metric")
+        if project is None or metric is None:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "project and metric are required."}))]
+        a = args or {}
+        limit = a.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            limit = 20
+        try:
+            data = await _sonar_svc.top_files(
+                project, metric, branch=_sonar_opt_str(args, "branch"),
+                limit=limit, ascending=bool(a.get("ascending")),
+            )
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_HISTORY_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        project = _sonar_require_project(args)
+        metrics = _sonar_str_list(args, "metrics")
+        if project is None or not metrics:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "project and metrics (non-empty) are required."}))]
+        try:
+            data = await _sonar_svc.metric_history(
+                project, metrics, branch=_sonar_opt_str(args, "branch"),
+                date_from=_sonar_opt_str(args, "date_from"), date_to=_sonar_opt_str(args, "date_to"),
+            )
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_ANALYSES_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        project = _sonar_require_project(args)
+        if project is None:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "project is required."}))]
+        try:
+            data = await _sonar_svc.analyses(
+                project, branch=_sonar_opt_str(args, "branch"),
+                date_from=_sonar_opt_str(args, "date_from"), date_to=_sonar_opt_str(args, "date_to"),
+            )
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_RULE_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        rule_key = _sonar_opt_str(args, "rule_key")
+        if rule_key is None:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "rule_key is required."}))]
+        try:
+            data = await _sonar_svc.rule(rule_key)
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_RULES_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        a = args or {}
+        page_size = a.get("page_size")
+        if not isinstance(page_size, int) or isinstance(page_size, bool) or page_size <= 0:
+            page_size = 50
+        try:
+            data = await _sonar_svc.rules(
+                language=_sonar_opt_str(args, "language"),
+                tags=_sonar_str_list(args, "tags"),
+                repositories=_sonar_str_list(args, "repositories"),
+                query=_sonar_opt_str(args, "query"),
+                page_size=page_size,
+            )
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_HOTSPOT_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        hotspot_key = _sonar_opt_str(args, "hotspot_key")
+        if hotspot_key is None:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "hotspot_key is required."}))]
+        try:
+            data = await _sonar_svc.hotspot(hotspot_key)
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_SOURCE_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        project = _sonar_require_project(args)
+        path = _sonar_opt_str(args, "path")
+        if project is None or path is None:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "project and path are required."}))]
+        a = args or {}
+        from_line = a.get("from_line") if isinstance(a.get("from_line"), int) and not isinstance(a.get("from_line"), bool) else None
+        to_line = a.get("to_line") if isinstance(a.get("to_line"), int) and not isinstance(a.get("to_line"), bool) else None
+        try:
+            data = await _sonar_svc.source_lines(project, path, branch=_sonar_opt_str(args, "branch"), from_line=from_line, to_line=to_line)
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_METRICS_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        a = args or {}
+        page_size = a.get("page_size")
+        if not isinstance(page_size, int) or isinstance(page_size, bool) or page_size <= 0:
+            page_size = 100
+        try:
+            data = await _sonar_svc.metrics(page_size=page_size)
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_QUALITY_GATE_DEFINITION_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        try:
+            data = await _sonar_svc.quality_gate_definition(
+                project=_sonar_opt_str(args, "project"), gate_name=_sonar_opt_str(args, "gate_name"),
+            )
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except ValueError as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_QUALITY_PROFILES_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        try:
+            data = await _sonar_svc.quality_profiles(
+                language=_sonar_opt_str(args, "language"), project=_sonar_opt_str(args, "project"),
+            )
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_ISSUE_AUTHORS_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        try:
+            data = await _sonar_svc.issue_authors(project=_sonar_opt_str(args, "project"), query=_sonar_opt_str(args, "query"))
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_ISSUE_TAGS_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        try:
+            data = await _sonar_svc.issue_tags(project=_sonar_opt_str(args, "project"), query=_sonar_opt_str(args, "query"))
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_ISSUE_CHANGELOG_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        issue_key = _sonar_opt_str(args, "issue_key")
+        if issue_key is None:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "issue_key is required."}))]
+        try:
+            data = await _sonar_svc.issue_changelog(issue_key)
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_SYSTEM_HEALTH_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        try:
+            data = await _sonar_svc.system_health()
+            return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
+        except _sonar_svc.SonarDisabled as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
+                "fallback": _ICX_FALLBACK("SonarQube", "icx sonar --add")}))]
+        except Exception as exc:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc)}))]
+
+    if name == _SONAR_LANGUAGES_TOOL:
+        from icx_engine.sonar import service as _sonar_svc
+        try:
+            data = await _sonar_svc.languages(query=_sonar_opt_str(args, "query"))
             return [TextContent(type="text", text=json.dumps({"ok": True, "data": data}))]
         except _sonar_svc.SonarDisabled as exc:
             return [TextContent(type="text", text=json.dumps({"ok": False, "error": str(exc),
@@ -5309,6 +5928,14 @@ async def _handle_analyze_issue(
                 "Access is pre-authorized - read these files directly."
             )
 
+        icx_instruction += (
+            "\n\nOPTIONAL - git workflow: if you plan to make code changes for this ticket, consider "
+            "calling git_repo_status first (check branch/dirty-tree state) and starting a feature "
+            "branch before editing, rather than working directly on your current branch. This is a "
+            "suggestion, not a mandatory gate - skip it if the ticket doesn't need a dedicated branch "
+            "or you're continuing existing work on one."
+        )
+
         # Session context: append current work item, then prepend prior-session hint.
         _session_append(issue_key_val, summary_val, issue_type_val)
         _prior_session = _SESSION_CONTEXT[:-1]
@@ -5697,6 +6324,14 @@ def run_mcp_server() -> None:
         try:
             from icx_engine.config_manager import clean_stale_artifacts
             clean_stale_artifacts()
+        except Exception:
+            pass
+
+        # Seed ICX's curated default skills so any connected AI coding agent gets them - no manual
+        # setup step needed. Never overwrites a skill the user has customized (seed_default_skills).
+        try:
+            from icx_engine.skills.seed import seed_default_skills
+            seed_default_skills()
         except Exception:
             pass
 

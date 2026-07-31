@@ -448,10 +448,12 @@ def _config_lock():
                 except Exception:
                     pass
                 lf.close()
-                try:
-                    lock_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                # Never unlink the lock file here: unlinking after unlock/close is a
+                # flock-then-unlink TOCTOU (a second process can flock the now-unlinked
+                # inode while a third creates a fresh file at the same path, so two
+                # processes both believe they hold the exclusive lock). The lock file is
+                # a permanent sentinel - flock is inode-based, so reopening this same
+                # path is always race-free.
         else:
             # Windows: atomic file-creation (O_EXCL) as the mutual-exclusion primitive.
             # Write our PID so a later process can evict us if we crash without cleanup.
@@ -691,6 +693,22 @@ class ConfigManager:
             elif _sc_tok:
                 needs_secret_migration = True
 
+        # Resolve per-connection GitLab tokens (mirrors sonar_connections above)
+        for _gc_name, _gc in (raw.get("gitlab_connections") or {}).items():
+            if not isinstance(_gc, dict):
+                continue
+            _gc_acct = f"gitlab_conn_token:{_gc_name}"
+            _gc_tok = _gc.get("token") or ""
+            if _gc_tok == _SENTINEL:
+                _gc["token"] = _resolve(_gc_acct) or None
+            elif isinstance(_gc_tok, str) and _gc_tok.startswith(_DLOCK_PREFIX):
+                try:
+                    _gc["token"] = _dlock_decrypt(_gc_tok)
+                except Exception:
+                    _gc["token"] = _env_get(_gc_acct) or None
+            elif _gc_tok:
+                needs_secret_migration = True
+
         # Resolve secret fields for registered third-party integrations.
         # No-op for configs without an "integrations" map (i.e. every existing config).
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
@@ -846,6 +864,23 @@ class ConfigManager:
                 _sc_raw["token"] = _sc_tok
                 _warn_plaintext(_sc_acct, f"Sonar token for connection '{_sc_name}'")
 
+        # Store per-connection GitLab tokens via keyring (mirrors sonar_connections above)
+        for _gc_name, _gc_model in config.gitlab_connections.items():
+            if _gc_name not in raw.get("gitlab_connections", {}):
+                continue
+            _gc_raw = raw["gitlab_connections"][_gc_name]
+            _gc_tok = getattr(_gc_model, "token", None) or ""
+            if not _gc_tok:
+                continue
+            _gc_acct = f"gitlab_conn_token:{_gc_name}"
+            if _check_keychain() and len(_gc_tok) > _DLOCK_THRESHOLD:
+                _gc_raw["token"] = _dlock_encrypt(_gc_tok)
+            elif _check_keychain() and _kset(_gc_acct, _gc_tok):
+                _gc_raw["token"] = _SENTINEL
+            else:
+                _gc_raw["token"] = _gc_tok
+                _warn_plaintext(_gc_acct, f"GitLab token for connection '{_gc_name}'")
+
         # Store secret fields for registered integrations (generic; excluded
         # from plaintext serialization). No-op when no integrations are stored.
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
@@ -930,6 +965,8 @@ class ConfigManager:
         _kdel("sonar_token")
         for _sc_name in (config.sonar_connections or {}):
             _kdel(f"sonar_conn_token:{_sc_name}")
+        for _gc_name in (config.gitlab_connections or {}):
+            _kdel(f"gitlab_conn_token:{_gc_name}")
         # Registered integration secrets.
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
         for _int_name in (config.integrations or {}):
@@ -960,6 +997,12 @@ class ConfigManager:
         if not _check_keychain():
             return
         _kdel(f"sonar_conn_token:{name}")
+
+    @staticmethod
+    def delete_gitlab_connection_secret(name: str) -> None:
+        if not _check_keychain():
+            return
+        _kdel(f"gitlab_conn_token:{name}")
 
     @staticmethod
     def delete_llm_profile_secrets(profile_name: str) -> None:

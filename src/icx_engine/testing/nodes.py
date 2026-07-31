@@ -13,7 +13,6 @@ from icx_engine.testing.compat import build_report
 from icx_engine.testing.handlers import get_handler
 from icx_engine.testing.expand import expand_via_grep, union_rank
 from icx_engine.testing import auth as _auth
-from icx_engine.testing import apispec as _apispec
 from icx_engine.testing import rules as _rules
 
 _log = logging.getLogger(__name__)
@@ -612,73 +611,6 @@ async def node_compat_check(state: TestingState) -> dict:
         "compat_resolution": resolution,
         "compat_iteration": iteration + 1,
     }
-
-
-# -- Gate 2: mode + scope selection ----------------------------------------
-
-async def node_mode_gate(state: TestingState) -> dict:
-    _MODE_MAP = {"1": "auto_detect", "2": "json_spec"}
-    _SCOPE_MAP = {"1": "ticket", "2": "full"}
-    _MERGE_MAP = {"1": True, "2": False}
-    default_mode = "auto_detect" if state.get("url") else "json_spec"
-    default_merge = state.get("merge_files", len(state["file_paths"]) > 1)
-
-    response = interrupt({
-        "gate": 2,
-        "message": (
-            "Answer all questions below. Press Enter after each.\n\n"
-            "DETECTION MODE (how the UI layer generates the test spec):\n"
-            "  1. auto_detect - the UI layer opens the URL live with Playwright, scans page fields.\n"
-            "                   Requires the app to be running and URL accessible.\n"
-            "  2. json_spec   - AI reads your JSX/TSX source files directly. No browser needed.\n"
-            "                   Use this when URL requires VPN or auth.\n"
-            f"  Default: {'1' if default_mode == 'auto_detect' else '2'}. {default_mode}\n\n"
-            "TEST SCOPE:\n"
-            "  1. ticket - Test only functionality changed by the listed files (recommended).\n"
-            "  2. full   - Full end-to-end test of the entire screen.\n"
-            "  Default: 1. ticket\n\n"
-            + (
-                "MERGE FILES (multiple JSX files - merge into one spec?):\n"
-                "  1. yes - merge all files into one combined spec.\n"
-                "  2. no  - generate separate specs per file.\n"
-                f"  Default: {'1. yes' if default_merge else '2. no'}\n\n"
-                if len(state["file_paths"]) > 1 else ""
-            ) +
-            "URL (required for auto_detect, optional for json_spec):\n"
-            f"  Current: {state.get('url') or 'not set'}\n"
-            "  Provide URL or press Enter to keep current."
-        ),
-        "options": {
-            "mode":        ["1. auto_detect", "2. json_spec"],
-            "scope":       ["1. ticket", "2. full"],
-            "merge_files": ["1. yes", "2. no"],
-        },
-        "defaults": {
-            "mode":        f"{'1' if default_mode == 'auto_detect' else '2'}",
-            "scope":       "1",
-            "merge_files": "1" if default_merge else "2",
-            "url":         state.get("url"),
-        },
-        "file_paths": state["file_paths"],
-    })
-
-    mode = _resolve_choice(response, "mode", _MODE_MAP)
-    if mode not in ("auto_detect", "json_spec"):
-        mode = default_mode
-    scope = _resolve_choice(response, "scope", _SCOPE_MAP)
-    if scope not in ("ticket", "full"):
-        scope = "ticket"
-    merge_raw = _resolve_choice(response, "merge_files", _MERGE_MAP)
-    merge = bool(merge_raw) if isinstance(merge_raw, bool) else default_merge
-
-    update: dict[str, Any] = {
-        "detection_mode": mode,
-        "scope": scope,
-        "merge_files": merge,
-    }
-    if response.get("url"):
-        update["url"] = response["url"]
-    return update
 
 
 # -- gate 2b: rulebook-injected JSON spec generation -----------------------

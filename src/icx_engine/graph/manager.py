@@ -196,7 +196,7 @@ def _generate_cluster_descriptions(graph_path: Path) -> None:
     except Exception as exc:
         _log.debug("Cluster description generation failed (%s); skipping", type(exc).__name__)
 from icx_engine.graph.change import current_git_commit
-from icx_engine.graph.querier import generate_graph_report
+from icx_engine.graph.report import generate_graph_report
 from icx_engine.graph.storage import (
     BuildStatus,
     ProjectInfo,

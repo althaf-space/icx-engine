@@ -154,6 +154,52 @@ def test_pattern_manager_refresh_and_get(tmp_path):
     assert all(p["project_key"] == "PROJ" for p in patterns)
 
 
+def test_get_patterns_filtered_uses_where_not_full_table_scan(tmp_path):
+    # Perf fix: get_patterns(project_key=...) must push the filter down via
+    # .search().where(...) instead of pulling the whole table into Python.
+    from icx_engine.memory.patterns import PatternManager
+
+    hot = "src/auth/token.py"
+    entries = [
+        _make_entry(issue_key=f"PROJ-{i}", id=str(uuid.uuid4()), files_changed=[hot])
+        for i in range(4)
+    ]
+    pm = PatternManager(db_path=tmp_path)
+    pm.refresh(entries, "PROJ")
+
+    real_table = pm._get_table()
+    with patch.object(type(real_table), "to_arrow", side_effect=AssertionError(
+        "get_patterns(project_key=...) must not call to_arrow() - it should filter via .where() instead"
+    )), patch.object(pm, "_get_table", return_value=real_table):
+        patterns = pm.get_patterns("PROJ")
+
+    assert len(patterns) > 0
+    assert all(p["project_key"] == "PROJ" for p in patterns)
+
+
+def test_pattern_manager_refresh_logs_delete_failure(tmp_path, caplog):
+    # Regression: a failed pre-refresh delete must not vanish silently - it's still
+    # best-effort (never blocks inserting fresh patterns), but now traceable via debug log.
+    import logging
+    from icx_engine.memory.patterns import PatternManager
+
+    hot = "src/auth/token.py"
+    entries = [
+        _make_entry(issue_key=f"PROJ-{i}", id=str(uuid.uuid4()), files_changed=[hot])
+        for i in range(4)
+    ]
+    pm = PatternManager(db_path=tmp_path)
+    real_table = pm._get_table()
+    with patch.object(type(real_table), "delete", side_effect=RuntimeError("boom")), \
+         patch.object(pm, "_get_table", return_value=real_table), \
+         caplog.at_level(logging.DEBUG, logger="icx_engine.memory.patterns"):
+        pm.refresh(entries, "PROJ")
+
+    assert any("pattern delete failed" in r.message for r in caplog.records)
+    # Fresh patterns still get inserted despite the failed pre-refresh delete.
+    assert len(pm.get_patterns("PROJ")) > 0
+
+
 def test_pattern_manager_refresh_replaces_old(tmp_path):
     from icx_engine.memory.patterns import PatternManager
 

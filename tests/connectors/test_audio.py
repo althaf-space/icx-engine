@@ -202,6 +202,40 @@ async def test_transcribe_openai_strips_whitespace():
     assert result == "spaced"
 
 
+async def test_transcribe_openai_reuses_cached_client_across_calls():
+    # Perf fix: passing the same _client_cache dict across two calls with the
+    # same config must construct the SDK client only once - proves the cache
+    # is real, not just present in the signature.
+    config = ChannelConfig(provider="openai", model="gpt-4o", api_key="sk-test")
+    cache: dict = {}
+
+    with patch("openai.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.audio.transcriptions.create = AsyncMock(return_value="one")
+        await transcribe_openai(config, b"a", "a.mp3", _client_cache=cache)
+        mock_client.audio.transcriptions.create = AsyncMock(return_value="two")
+        await transcribe_openai(config, b"b", "b.mp3", _client_cache=cache)
+
+    assert mock_cls.call_count == 1
+
+
+async def test_transcribe_openai_no_cache_still_builds_fresh_client_each_call():
+    # Backward-compatibility guarantee: _client_cache=None (the default, and
+    # every pre-existing call site) must preserve the original per-call
+    # construction behavior exactly.
+    config = ChannelConfig(provider="openai", model="gpt-4o", api_key="sk-test")
+
+    with patch("openai.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.audio.transcriptions.create = AsyncMock(return_value="one")
+        await transcribe_openai(config, b"a", "a.mp3")
+        await transcribe_openai(config, b"b", "b.mp3")
+
+    assert mock_cls.call_count == 2
+
+
 async def test_transcribe_google_calls_gemini_with_audio_bytes():
     config = ChannelConfig(provider="google", model="gemini-1.5-flash", api_key="goog-test")
     audio_bytes = b"fake audio"
@@ -323,7 +357,7 @@ async def test_transcribe_dispatch_anthropic_uses_local_then_cleanup():
 
     assert result == "cleaned"
     mock_local.assert_called_once()
-    mock_cleanup.assert_called_once_with(config, "raw local")
+    mock_cleanup.assert_called_once_with(config, "raw local", _client_cache=None)
 
 
 async def test_transcribe_dispatch_no_llm_uses_local_only():

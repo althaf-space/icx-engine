@@ -38,6 +38,17 @@ class SonarConnection(BaseModel):
     verify_tls: bool = True
 
 
+class GitLabConnection(BaseModel):
+    """A single GitLab server connection (personal access token auth). Token
+    stored in the OS keyring, same as SonarConnection."""
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    url: str
+    token: str | None = Field(default=None, exclude=True)
+    verify_tls: bool = True
+
+
 class ChannelConfig(BaseModel):
     provider: str                    # "ollama" | "nim" | "openai" | "anthropic" | "google" | "xai"
     model: str
@@ -92,6 +103,12 @@ class AppConfig(BaseModel):
     sonar_connections: dict[str, SonarConnection] = {}
     active_sonar: str | None = None
 
+    # GitLab (repo-host connector for MR creation/merge). Multiple named server
+    # connections with one active, mirroring sonar_connections/active_sonar exactly
+    # - CLI exposes full multi-connection parity (--add/--active/--remove/--list).
+    gitlab_connections: dict[str, GitLabConnection] = {}
+    active_gitlab: str | None = None
+
     # Legacy single-server fields - retained only for backward-compatible loading
     # of older config files. Resolved into an implicit "default" connection when a
     # config predates sonar_connections. Not written by new code.
@@ -133,6 +150,12 @@ class AppConfig(BaseModel):
                 name="default", url=self.sonar_url,
                 token=self.sonar_token, verify_tls=self.sonar_verify_tls,
             )
+        return None
+
+    def active_gitlab_connection(self) -> "GitLabConnection | None":
+        """Resolve the active GitLab connection, or None."""
+        if self.active_gitlab and self.active_gitlab in self.gitlab_connections:
+            return self.gitlab_connections[self.active_gitlab]
         return None
 
     # Generic, pluggable third-party integration settings. New integrations

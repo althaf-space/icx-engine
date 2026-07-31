@@ -18,6 +18,22 @@ from pathlib import Path
 from icx_engine.testing import auth as _auth
 
 
+def _restrict_session_files(out: str) -> None:
+    """Lock the captured storageState (real app cookies) and its sessionStorage companion
+    (`icx-auth.mjs` writes both: `out` via context.storageState(), `out + '.session'` via the
+    snapshot) down to owner-only, POSIX only - the harness writes them at the OS default mode
+    (typically world/group-readable). Guarded: a missing companion file or a chmod failure is
+    never fatal to session capture."""
+    import sys
+    if sys.platform == "win32":
+        return
+    for p in (Path(out), Path(f"{out}.session")):
+        try:
+            p.chmod(0o600)
+        except OSError:
+            pass
+
+
 def _harness_env() -> tuple[str, dict]:
     """(node executable, env) for the auth harness - the modern harness node + the ICX-installed
     Playwright + its Chromium (all under ~/.icx/testing, never global)."""
@@ -33,16 +49,20 @@ def _harness_env() -> tuple[str, dict]:
     return node, env
 
 
-async def _run_harness(mode: str, url: str, out: str, extra: list[str], timeout: float) -> bool:
+async def _run_harness(mode: str, url: str, out: str, extra: list[str], timeout: float,
+                       extra_env: dict | None = None) -> bool:
     """Launch the auth harness as an async subprocess. Returns (ok, detail) - detail carries the
     harness's own error output on failure so the real reason is not swallowed. Guarded - never
-    raises (except a genuine cancellation)."""
+    raises (except a genuine cancellation). `extra_env` (e.g. credentials) is merged into the
+    subprocess environment - never passed as argv, which is visible via process listing."""
     import logging
     from icx_engine.testing.runners.install import auth_harness_path, runtime_harness_path
     from icx_engine._proc import win_argv, kill_tree
 
     _log = logging.getLogger("icx.testing.ui_auth")
     node, env = _harness_env()
+    if extra_env:
+        env = {**env, **extra_env}
     # Run the harness FROM the install dir (next to node_modules) so ESM `import "playwright"`
     # resolves - NODE_PATH is ignored for ESM imports.
     harness = runtime_harness_path("icx-auth.mjs", auth_harness_path())
@@ -81,6 +101,7 @@ async def capture_session(project: str, host: str, url: str,
     ok, detail = await _run_harness("capture", url, out, extra, timeout)
     if not ok:
         return None, detail or "capture did not complete"
+    _restrict_session_files(out)
     _auth.save_session(project, host, out, storage_state=out)
     return out, ""
 
@@ -91,7 +112,7 @@ async def inline_session(project: str, host: str, url: str, username: str, passw
     """Drive the login form with the app credentials (passed to the process, never via chat), then
     save + register the session. Returns (storageState path | None, detail)."""
     out = str(_auth.session_state_path(project, host))
-    extra = ["--user", username, "--pass", password]
+    extra: list[str] = []
     if success_url:
         extra += ["--success-url", success_url]
     if user_selector:
@@ -100,8 +121,10 @@ async def inline_session(project: str, host: str, url: str, username: str, passw
         extra += ["--pass-selector", pass_selector]
     if submit_selector:
         extra += ["--submit-selector", submit_selector]
-    ok, detail = await _run_harness("inline", url, out, extra, timeout)
+    creds_env = {"ICX_AUTH_USER": username, "ICX_AUTH_PASS": password}
+    ok, detail = await _run_harness("inline", url, out, extra, timeout, extra_env=creds_env)
     if not ok:
         return None, detail or "inline login did not complete"
+    _restrict_session_files(out)
     _auth.save_session(project, host, out, storage_state=out)
     return out, ""

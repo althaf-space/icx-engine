@@ -13,6 +13,8 @@ _log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from icx_engine.models.config import ChannelConfig
 
+from icx_engine.llm.registry import api_style as _api_style
+
 WHISPER_MODEL = "base"
 AUDIO_DIR = Path.home() / ".icx" / "audio"
 MODEL_DIR = AUDIO_DIR / "model"
@@ -203,14 +205,21 @@ class WhisperManager:
         )
 
 
-async def transcribe_openai(config: "ChannelConfig", audio_bytes: bytes, fname: str) -> str:
+async def transcribe_openai(
+    config: "ChannelConfig", audio_bytes: bytes, fname: str, *, _client_cache: dict | None = None,
+) -> str:
     """Transcribe using OpenAI Whisper API (whisper-1 = large-v2, highest accuracy)."""
     import io
     from openai import AsyncOpenAI
-    kwargs: dict = {"api_key": config.api_key}
-    if config.base_url:
-        kwargs["base_url"] = config.base_url
-    client = AsyncOpenAI(**kwargs)
+    from icx_engine.connectors.attachments import _sdk_client_for
+
+    def _build() -> AsyncOpenAI:
+        kwargs: dict = {"api_key": config.api_key}
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
+        return AsyncOpenAI(**kwargs)
+
+    client = _sdk_client_for(_client_cache, ("openai_compat", id(config)), _build)
     audio_file = io.BytesIO(audio_bytes)
     audio_file.name = fname
     response = await client.audio.transcriptions.create(
@@ -222,11 +231,16 @@ async def transcribe_openai(config: "ChannelConfig", audio_bytes: bytes, fname: 
     return response.strip() if isinstance(response, str) else str(response).strip()
 
 
-async def transcribe_google(config: "ChannelConfig", audio_bytes: bytes, fname: str) -> str:
+async def transcribe_google(
+    config: "ChannelConfig", audio_bytes: bytes, fname: str, *, _client_cache: dict | None = None,
+) -> str:
     """Transcribe using Gemini native audio (multimodal, high accuracy)."""
     from google import genai
     from google.genai import types
-    client = genai.Client(api_key=config.api_key)
+    from icx_engine.connectors.attachments import _sdk_client_for
+
+    client = _sdk_client_for(_client_cache, ("google", id(config)),
+                              lambda: genai.Client(api_key=config.api_key))
     mime = audio_mime_type(fname)
     contents = [
         types.Part.from_bytes(data=audio_bytes, mime_type=mime),
@@ -241,7 +255,9 @@ async def transcribe_google(config: "ChannelConfig", audio_bytes: bytes, fname: 
     return (response.text or "").strip()
 
 
-async def cleanup_transcript_llm(config: "ChannelConfig", transcript: str) -> str:
+async def cleanup_transcript_llm(
+    config: "ChannelConfig", transcript: str, *, _client_cache: dict | None = None,
+) -> str:
     """Run a local Whisper transcript through a text LLM to clean errors and formatting.
 
     Used for providers without native audio (Anthropic, xAI, Ollama, NIM).
@@ -251,9 +267,11 @@ async def cleanup_transcript_llm(config: "ChannelConfig", transcript: str) -> st
         return transcript
     prompt = f"{_CLEANUP_PROMPT}\n\n{transcript}"
     try:
-        if config.provider == "anthropic":
+        from icx_engine.connectors.attachments import _sdk_client_for
+        if _api_style(config.provider) == "anthropic":
             from anthropic import AsyncAnthropic
-            client = AsyncAnthropic(api_key=config.api_key)
+            client = _sdk_client_for(_client_cache, ("anthropic", id(config)),
+                                      lambda: AsyncAnthropic(api_key=config.api_key))
             resp = await client.messages.create(
                 model=config.model,
                 max_tokens=2048,
@@ -263,11 +281,15 @@ async def cleanup_transcript_llm(config: "ChannelConfig", transcript: str) -> st
             return resp.content[0].text.strip() if resp.content else transcript
         from openai import AsyncOpenAI
         from icx_engine.connectors.attachments import _DEFAULT_BASE_URLS
-        kwargs: dict = {"api_key": config.api_key or "ollama"}
-        base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
-        if base_url:
-            kwargs["base_url"] = base_url
-        client = AsyncOpenAI(**kwargs)
+
+        def _build() -> AsyncOpenAI:
+            kwargs: dict = {"api_key": config.api_key or "ollama"}
+            base_url = config.base_url or _DEFAULT_BASE_URLS.get(config.provider)
+            if base_url:
+                kwargs["base_url"] = base_url
+            return AsyncOpenAI(**kwargs)
+
+        client = _sdk_client_for(_client_cache, ("openai_compat", id(config)), _build)
         resp = await client.chat.completions.create(
             model=config.model,
             max_tokens=2048,
@@ -299,6 +321,7 @@ async def transcribe(
     audio_bytes: bytes,
     fname: str,
     whisper: "WhisperManager",
+    *, _client_cache: dict | None = None,
 ) -> str:
     """
     Main dispatch for audio transcription.
@@ -307,23 +330,26 @@ async def transcribe(
     google  -> Gemini native audio, local fallback on error
     others  -> local Whisper base -> text LLM cleanup
     no LLM  -> local Whisper base only
+
+    `_client_cache=None` preserves original per-call behavior (always build a fresh
+    SDK client) - every existing caller that does not pass a cache is unaffected.
     """
     if config is None:
         return await _local_transcribe(audio_bytes, fname, whisper)
 
-    if config.provider == "openai":
+    if _api_style(config.provider) == "openai":
         try:
-            return await transcribe_openai(config, audio_bytes, fname)
+            return await transcribe_openai(config, audio_bytes, fname, _client_cache=_client_cache)
         except Exception as exc:
             _log.warning("OpenAI transcription failed (%s); falling back to local Whisper.", exc)
             return await _local_transcribe(audio_bytes, fname, whisper)
 
-    if config.provider == "google":
+    if _api_style(config.provider) == "google":
         try:
-            return await transcribe_google(config, audio_bytes, fname)
+            return await transcribe_google(config, audio_bytes, fname, _client_cache=_client_cache)
         except Exception as exc:
             _log.warning("Google transcription failed (%s); falling back to local Whisper.", exc)
             return await _local_transcribe(audio_bytes, fname, whisper)
 
     local = await _local_transcribe(audio_bytes, fname, whisper)
-    return await cleanup_transcript_llm(config, local)
+    return await cleanup_transcript_llm(config, local, _client_cache=_client_cache)

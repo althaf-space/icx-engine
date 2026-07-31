@@ -1028,6 +1028,7 @@ async def _process_audio(
     text_config: "ChannelConfig | None",
     whisper,
     log: Callable[[str], None] | None,
+    *, _client_cache: dict | None = None,
 ) -> tuple[str, str, dict[str, str], str, str]:
     """Download audio, transcribe via LLM or local Whisper.
 
@@ -1041,7 +1042,7 @@ async def _process_audio(
         return filename, "", {}, "", ""
     try:
         from icx_engine.connectors.audio import transcribe as audio_transcribe
-        transcript = await audio_transcribe(text_config, audio_bytes, filename, whisper)
+        transcript = await audio_transcribe(text_config, audio_bytes, filename, whisper, _client_cache=_client_cache)
     except Exception as exc:
         if _is_setup_required_error(exc):
             if log:
@@ -1087,7 +1088,7 @@ async def _process_video(
         if len(audio_bytes) >= 44:  # WAV header is 44 bytes minimum; less means no audio track
             from icx_engine.connectors.audio import transcribe as audio_transcribe
             raw_transcript = await audio_transcribe(
-                text_config, audio_bytes, Path(filename).stem + ".wav", whisper
+                text_config, audio_bytes, Path(filename).stem + ".wav", whisper, _client_cache=_client_cache
             )
             if not _is_empty_transcript(raw_transcript):
                 transcript = raw_transcript
@@ -1208,7 +1209,8 @@ async def process_attachments(
             tasks.append(_process_document(filename, content_url, downloader, text_config, log,
                                             _client_cache=_client_cache))
         elif _is_audio(filename):
-            tasks.append(_process_audio(filename, content_url, downloader, text_config, _whisper, log))
+            tasks.append(_process_audio(filename, content_url, downloader, text_config, _whisper, log,
+                                         _client_cache=_client_cache))
         elif _is_video(filename):
             tasks.append(_process_video(filename, content_url, downloader, text_config, image_config, _whisper, log,
                                          _client_cache=_client_cache))

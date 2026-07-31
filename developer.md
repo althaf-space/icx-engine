@@ -69,6 +69,8 @@ ICX/
 |   +-- _proc.py                # shared cross-platform process-TREE kill (group/psutil/taskkill)
 |   +-- verification.py         # Definition-of-Done: checklist, risk tiering, evidence + confidence (pure)
 |   +-- config_manager.py       # load/save config + keyring/env-var secret management
+|   +-- confirm.py              # one-time confirmation tokens for the MCP path's two-step confirmation gate -
+|   |                           # package-neutral, shared by git-workflow and Jira write-back (promoted out of git/)
 |   +-- exceptions.py           # all ICX exception classes (incl. GraphError)
 |   +-- error_display.py        # Rich Panel error rendering - render_icx_error()
 |   +-- models/
@@ -90,7 +92,9 @@ ICX/
 |   |   \-- jira/               # Jira connector (see section 5 for how it's structured)
 |   |       +-- config.py       # JiraConnection, TokenAuth, JiraOAuthAuth models
 |   |       +-- connector.py    # JiraConnector - implements ConnectorBase
-|   |       +-- client.py       # JiraClient - raw HTTP calls to Jira REST API
+|   |       +-- client.py       # JiraClient - raw HTTP calls to Jira REST API: fetch (read), get_transitions/
+|   |       |                   # get_editmeta/transition_issue/update_fields (close-out write), list_issuetypes/
+|   |       |                   # get_createmeta_fields/create_issue/delete_issue (create/delete)
 |   |       +-- parser.py       # Jira API JSON -> RawIssueData
 |   |       +-- auth.py         # build_auth_header() for token and OAuth
 |   |       \-- oauth.py        # refresh_oauth_if_needed()
@@ -99,7 +103,7 @@ ICX/
 |   |   +-- storage.py          # project registry, ProjectInfo, path helpers (~/.icx/graphs/, ~/.icx/temp/)
 |   |   +-- builder.py          # _build_project_isolated (subprocess), estimate_build_eta, progress event writer
 |   |   +-- change.py           # check_staleness, current_git_commit, ChangeResult
-|   |   +-- querier.py          # generate_graph_report - writes GRAPH_REPORT.md index + GRAPH_CLUSTERS/
+|   |   +-- report.py           # generate_graph_report - writes GRAPH_REPORT.md index + GRAPH_CLUSTERS/
 |   |   +-- manager.py          # GraphManager - register, build, status, list, remove, resolve; LLM descriptions
 |   |   +-- paths.py            # path resolution, sub-project detection, git root helpers
 |   |   +-- progress.py         # cross-process build progress channel (subprocess writes, parent tails)
@@ -155,7 +159,128 @@ ICX/
 |   |   +-- schema.py           # SkillEntry: frontmatter-as-JSON + body sections, hash-guard
 |   |   +-- storage.py          # SkillStorage: atomic read/write at ~/.icx/skills/, path-traversal guard
 |   |   +-- writer.py           # draft_skill_entry (agent-authored text -> SkillEntry), write_or_update (hash-guarded create/merge)
-|   |   \-- router.py           # rank_skills (free-text overlap), rank_skills_for_tags (structured tag overlap)
+|   |   +-- router.py           # rank_skills (free-text overlap), rank_skills_for_tags (structured tag overlap)
+|   |   +-- defaults.py         # curated catalog of 14 pre-installed default skills
+|   |   +-- seed.py             # seed_default_skills(): writes/updates defaults, never overwrites a user edit
+|   |   \-- hints.py            # attach_skill_hint(): attaches one named default skill to a tool's own response
+|   +-- git/                    # git-workflow lifecycle engine - branch/sync/backup/commit, own CLI group + MCP
+|   |   |                       # tools. See docs/superpowers/specs/2026-07-26-icx-git-workflow-design.md
+|   |   +-- gitcmd.py           # thin subprocess wrappers over plain git commands only - no rebase/force-push/history-rewrite.
+|   |   |                       # Includes read-only history helpers blame() (--line-porcelain, optional line_range),
+|   |   |                       # log() (relpath/limit/author/since filters), show_commit() (message + --name-status files),
+|   |   |                       # diff_between() (--numstat + --name-status between two refs, binary files -> None counts),
+|   |   |                       # push() (plain, non-force push, -u sets tracking branch on first push)
+|   |   +-- naming.py           # branch-name derivation from ticket key + summary
+|   |   +-- settings.py         # per-repo ICX settings file (parent branch, etc.)
+|   |   +-- safety.py           # backups + detect_leftover_state (self-heal from an interrupted prior run)
+|   |   +-- manager.py          # GitLifecycleManager - validate, resolve_parent_branch/confirm_parent_branch, dirty tree,
+|   |   |                       # start_branch, sync_with_remote, stage_and_commit, scan_staged_debug_leftovers,
+|   |   |                       # reverse_merge_standard, start_conflict_resolution, complete/adopt/discard_scratch_resolution,
+|   |   |                       # build_mr_description, create_mr_for_ticket (validates the GitLab connection FIRST -
+|   |   |                       # fail fast on a bad token before any git work - then pushes the feature branch to
+|   |   |                       # origin before creating the MR: a branch must exist on the remote first), post_merge_cleanup
+|   |   +-- cli_commands.py     # git_app Typer group - `icx git status`, `icx git branch` (--ticket/--name/--parent,
+|   |   |                       # wraps start_branch), `icx git sync`, `icx git push` (--remote, plain push, prompts via
+|   |   |                       # typer.confirm before pushing), `icx git mr`, `icx git finish`, `icx git tag`,
+|   |   |                       # `icx git blame <FILE>` (--from-line/--to-line), `icx git log`
+|   |   |                       # (--file/--author/--since/--limit), `icx git show <SHA>`, `icx git diff <REF_A> <REF_B>`
+|   |   \-- mcp_tools.py        # GIT_TOOLS + dispatch_git_tool() - repo_status/git_start_branch (wraps start_branch,
+|   |                           # NOT confirmation-gated)/git_blame/git_log/git_show_commit/git_diff
+|   |                           # (all four read-only, ungated)/stage_and_commit (confirmation-gated; response also
+|   |                           # carries on_parent_branch - true when the branch about to be committed to is this
+|   |                           # repo's confirmed parent/shared branch, strengthening the warning shown to the human
+|   |                           # without ever blocking the commit)/reverse_merge/get_conflict/
+|   |                           # complete_resolution/adopt_resolution/discard_scratch (force-deletes the scratch
+|   |                           # branch - confirmation-gated)/git_push (confirmation-gated, same token pattern as
+|   |                           # stage_and_commit)/
+|   |                           # create_mr (validates the GitLab connection first, then pushes automatically before
+|   |                           # creating the MR)/finish_ticket/create_tag
+|   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag plus the read-only
+|   |                           # list_merge_requests/get_merge_request_changes/list_commits/compare), service.py
+|   |                           # (connection + MR business logic + group_tags_by_environment/propose_next_tag/
+|   |                           # parse_tag_name), mcp_tools.py (GITLAB_TOOLS + dispatch_gitlab_tool() -
+|   |                           # gitlab_list_merge_requests/gitlab_mr_changes/gitlab_list_commits/gitlab_compare, all
+|   |                           # ungated - project resolved from either an explicit `project` argument or a `repo_path`
+|   |                           # local checkout's origin remote via project_path_from_remote_url()). Separate from
+|   |                           # work-tracker connectors (Section 8.1 of the design spec).
+|   +-- jira/                   # Jira WRITE-back (close-out + create/delete + comments + search + links/assignee +
+|   |   |                       # attachments) - independent of connectors/jira/'s ConnectorBase read pipeline,
+|   |   |                       # matching sonar/gitlab's own client+service shape.
+|   |   +-- service.py          # get_close_requirements (transitions+editmeta merge), apply_update (transition/fields/
+|   |   |                       # comment; 400-validation-error -> needs_fields second-round shape, never raises for that
+|   |   |                       # case); list_issue_types/get_createmeta_fields (create-time analogs); create_issue
+|   |   |                       # (resolves connection by domain via _resolve_client_by_domain - no issue_key exists yet);
+|   |   |                       # delete_issue (resolves by issue_key via the existing _resolve_client, unchanged);
+|   |   |                       # list_comments/add_comment/edit_comment/delete_comment (comment CRUD, add/edit wrap
+|   |   |                       # plain text via _text_to_adf); search/get_issue (JQL search with an ICX-side hard cap
+|   |   |                       # on max_results/fields, and a raw single-issue fetch - both resolve by domain, distinct
+|   |   |                       # from the read pipeline and from analyze_issue_fast/analyze_issue); link_types/create_link/
+|   |   |                       # delete_link (link CRUD - link_types resolves by domain like create_issue/search,
+|   |   |                       # create_link resolves by its inward_key, delete_link takes issue_key purely to resolve a
+|   |   |                       # connection since Jira's DELETE .../issueLink/{id} is global and takes no issue key);
+|   |   |                       # set_assignee (its own endpoint, not folded into update_fields - "-1"=default assignee,
+|   |   |                       # None=unassign); upload_attachment/delete_attachment (attachment CRUD - upload resolves
+|   |   |                       # by the given issue_key like any other write, delete_attachment takes issue_key purely
+|   |   |                       # to resolve a connection, the same reasoning as delete_link, since Jira's DELETE
+|   |   |                       # .../attachment/{id} is also global and takes no issue key); get_current_user/
+|   |   |                       # list_watchers/add_watcher/remove_watcher/list_worklogs/add_worklog/edit_worklog/
+|   |   |                       # delete_worklog (watcher/worklog surface, Task 6 - all plain pass-throughs, the
+|   |   |                       # self-vs-other GATING DECISION lives entirely at the MCP/CLI layer, not here;
+|   |   |                       # get_current_user resolves by issue_key when given - the SAME connection a
+|   |   |                       # watcher/worklog mutation on that issue will use, since accountId is scoped per
+|   |   |                       # Jira site/connection - and falls back to _resolve_client_by_domain otherwise;
+|   |   |                       # add_watcher's client call posts a BARE JSON STRING body, not an object;
+|   |   |                       # add_worklog/edit_worklog format `started` via _format_started_for_jira, a helper
+|   |   |                       # that accepts a datetime or ISO string and emits Jira's exact wire format - numeric
+|   |   |                       # timezone offset, no trailing "Z")
+|   |   +-- cli_commands.py     # jira_app Typer group - `icx jira update <KEY>` (retries once on needs_fields),
+|   |   |                       # `icx jira create` (interactive: project/issuetype/summary + createmeta-required fields),
+|   |   |                       # `icx jira delete <KEY>` (explicit permanent/no-undo/no-trash warning, --delete-subtasks),
+|   |   |                       # `icx jira comment list/add/edit/delete <KEY>` (nested Typer sub-app), `icx jira search
+|   |   |                       # <JQL>`, `icx jira get <KEY>` (lightweight/raw), `icx jira link types/create/delete`
+|   |   |                       # (nested Typer sub-app; delete shows a dependency-visibility warning, NOT a false
+|   |   |                       # permanent/no-undo claim - a link can be recreated), `icx jira assign <KEY> <ACCOUNT_ID>`
+|   |   |                       # (--unassign sends null, --default sends "-1", so the human never needs Jira's sentinel),
+|   |   |                       # `icx jira attach add <KEY> <FILE_PATH>`/`icx jira attach remove <ISSUE_KEY>
+|   |   |                       # <ATTACHMENT_ID>` (nested Typer sub-app; add reads the file via pathlib.Path.read_bytes()
+|   |   |                       # and infers content_type via mimetypes; remove shows the same explicit permanent/no-undo/
+|   |   |                       # no-trash warning as `icx jira delete`); `icx jira whoami` (prints own accountId/
+|   |   |                       # displayName); `icx jira watch add/remove <KEY> [ACCOUNT_ID]` (nested Typer sub-app -
+|   |   |                       # self-vs-other gating expressed via plain typer.confirm(), not a token round-trip, since
+|   |   |                       # the CLI path never uses icx_engine.confirm; omitted/matching ACCOUNT_ID is self and
+|   |   |                       # immediate, a different one shows a warning and asks to confirm); `icx jira worklog
+|   |   |                       # list/add/edit/delete <KEY>` (nested Typer sub-app; add is always immediate - no
+|   |   |                       # self-vs-other branch exists since Jira's worklog POST has no author-override; edit/
+|   |   |                       # delete fetch the worklog first via list_worklogs to compare author.accountId against
+|   |   |                       # whoami, same self-vs-other gating as watch)
+|   |   \-- mcp_tools.py        # JIRA_TOOLS + dispatch_jira_tool() - jira_get_close_requirements (ungated), jira_apply_update,
+|   |                           # jira_create_issue, jira_delete_issue (all three confirmation-gated, same token round-trip
+|   |                           # as git_stage_and_commit; jira_delete_issue's description carries an explicit
+|   |                           # permanent/no-undo/no-trash/no-recycle-bin warning - Jira Cloud has no recycle bin for
+|   |                           # issues); jira_comment_list/add/edit (ungated), jira_comment_delete (gated, same
+|   |                           # permanent warning style); jira_search/jira_get_issue (ungated, descriptions explicitly
+|   |                           # distinguish themselves from analyze_issue_fast/analyze_issue); jira_link_types/
+|   |                           # jira_link_create (ungated), jira_link_delete (gated - but its warning describes a
+|   |                           # dependency-visibility risk, not false permanence, since a Jira link CAN be recreated
+|   |                           # after deletion, unlike an issue/comment); jira_set_assignee (ungated); jira_attachment_upload
+|   |                           # (ungated - accepts EITHER file_path, ICX reads the file directly off local disk same as
+|   |                           # icx jira attach add, the reliable option for binary files since no agent-side encoding
+|   |                           # step is involved, OR content_base64 for in-memory-only content with no local path, decoded
+|   |                           # server-side before upload), jira_attachment_delete (gated, same permanent/no-undo/no-trash
+|   |                           # warning style as jira_delete_issue - verified Jira Cloud has no recycle bin for
+|   |                           # attachments either); jira_get_current_user (ungated, no required args - GET .../myself,
+|   |                           # the lookup half of every self-vs-other decision below), jira_list_watchers/
+|   |                           # jira_list_worklogs (ungated, read-only); jira_set_watcher (ONE tool for add+remove,
+|   |                           # direction via `watching` - the REAL self-vs-other gating decision: calls
+|   |                           # jira_get_current_user first to learn the caller's own accountId, then compares to the
+|   |                           # target - omitted/self-matching account_id executes immediately with NO token involved
+|   |                           # at all; a different account_id routes through the SAME confirm-token machinery as
+|   |                           # jira_delete_issue); jira_worklog_add (unconditionally ungated - Jira's worklog POST has
+|   |                           # no author-override field, so there is no on-behalf-of-someone-else case to gate);
+|   |                           # jira_worklog_edit/jira_worklog_delete (self-vs-other gated the same way as
+|   |                           # jira_set_watcher, but the target identity is looked up FIRST via jira_list_worklogs'
+|   |                           # author.accountId rather than taken as a direct argument; an unrecognized worklog_id is
+|   |                           # treated as OTHER, fail-safe toward gating, not silently treated as self)
 |   \-- llm/
 |       +-- base.py             # LLMProvider ABC, SYSTEM_PROMPT, build_user_message,
 |       |                       # finalize(), _compute_completeness(), _compute_missing(),
@@ -179,7 +304,7 @@ ICX/
 |   |   +-- test_storage.py             # storage.py: register, lookup, meta, remove
 |   |   +-- test_change.py              # change.py: staleness thresholds, git/mtime fallback
 |   |   +-- test_builder.py             # builder.py: ETA, isolated build error handling
-|   |   +-- test_querier.py             # querier.py: community clusters, god nodes, report generation
+|   |   +-- test_report.py              # report.py: community clusters, god nodes, report generation
 |   |   +-- test_manager.py             # manager.py: register/build/query/resolve integration
 |   |   +-- test_query.py               # GraphQuerier: find_context, get_call_chain, get_impact, get_subsystem
 |   |   +-- test_cluster_weights.py     # cluster weight and community detection edge cases
@@ -239,7 +364,7 @@ engine.run(input_str, config, connection=None, log=None, mcp_mode=False, profile
   |   |       document filenames -> docs_pending (collected, not processed)
   |   |       unrecognised types -> unsupported_pending (collected, not processed)
   |   \- [if skip_vision=False (default)]
-  |       \- attachment_texts, images = await connector.process_attachments(raw, active_llm)
+  |       \- attachment_texts, images, full_texts, raw_sidecars = await connector.process_attachments(raw, active_llm)
   |           # Universal Attachment Engine (connectors/attachments.py):
   |           #   images       -> OCR (Tesseract) + optional vision LLM + Base64 capture
   |           #   documents    -> CSV/Excel/PDF/DOCX/TXT conversion (see UAE section below)
@@ -595,7 +720,13 @@ A path is only ever **used** if it is a registered ICX project, or it was resolv
 
 **Ironclad tool-description contract:** EVERY MCP tool description must open with a strict directive - a `MANDATORY` / `MUST` / `ALWAYS` / `NEVER` / `CALL ...` / `USE WHEN ...` trigger line - so no agent can treat a tool as optional. The format is: a strict WHEN/trigger line, then what it gives + where it sits in the sequence, then `Input:` / params. This is enforced by `tests/test_mcp.py::test_every_tool_description_is_strict_and_substantial`, which fails if any tool's description lacks a strict keyword or is under 40 chars - so a newly added tool with a soft description breaks CI. The heavily-tuned testing descriptions (`_TESTING_START_DESCRIPTION`, `_TESTING_RESUME_DESCRIPTION`) carry embedded gate protocol locked by their own assertions; keep their bodies intact when editing.
 
-**ICX is the sole tracker interface:** RULE 0 in both tool descriptions (`_FAST_DESCRIPTION`, `_FULL_DESCRIPTION`) forbids the agent from connecting to, suggesting, or calling any other MCP server/integration for tracker, issue, PR, board, or sprint data - stated generically, with no single provider singled out. On an ICX tracker error the agent must reconfigure ICX and retry, never route around it. Because this lives in the MCP tool description, it reaches every MCP-capable editor identically (Claude Code, Codex, Cursor, Windsurf, Antigravity, etc.) - that is the cross-editor enforcement and it is editor-agnostic by construction, requiring no per-editor config file.
+**ICX is the sole tracker interface - every action, not just fetching:** RULE 0 in both tool descriptions (`_FAST_DESCRIPTION`, `_FULL_DESCRIPTION`) forbids the agent from connecting to, suggesting, or calling any other MCP server/integration for ANY tracker action - fetching, searching, creating, updating, commenting, linking, attaching, assigning, watching, or looking up a project/user/field - stated generically, with no single provider singled out. This scope explicitly covers actions that have no ticket key yet (creating an issue, searching, looking up a user's accountId) - those are not exempt just because `analyze_issue_fast`'s own ticket-mention trigger doesn't apply to them. On an ICX tracker error the agent must reconfigure ICX and retry, never route around it. Because this lives in the MCP tool description, it reaches every MCP-capable editor identically (Claude Code, Codex, Cursor, Windsurf, Antigravity, etc.) - that is the cross-editor enforcement and it is editor-agnostic by construction, requiring no per-editor config file. The `icx mcp setup` rule-file text (`mcp_hosts.py:_RULE_BLOCK`) and the Claude Code hook's ticket directive carry the same "every action" scope as a secondary, always-visible-in-context layer - all three must stay in sync when this wording changes.
+
+**ICX is the sole git-workflow interface (2026-07-31):** `git_repo_status`'s tool description (`git/mcp_tools.py`) now carries the same "sole interface" declaration as tracker RULE 0 - it forbids running a raw `git`/`gh`/`glab` command directly, or routing through another git integration, for ANY git-workflow action (status, branch, commit, sync, push, MR, finish, tag), not just the tools this module happens to expose. Added after a real incident: nothing previously told the agent this, so it fell back to raw git commands for branch creation and commits (bypassing the no-rebase/no-force-push safety doctrine entirely), and two genuine functional gaps compounded it - `GitLifecycleManager.start_branch()` was fully built and tested but never wired into any MCP tool or CLI command (fixed: `git_start_branch`/`icx git branch`), and there was no `git push` anywhere in the codebase at all, so `create_mr_for_ticket()` asked GitLab to create an MR from a branch that was never pushed to the remote (fixed: `gitcmd.push()`, called automatically inside `create_mr_for_ticket` before the GitLab API call, plus a standalone `git_push`/`icx git push` for pushing without opening an MR). `mcp_hosts.py:_RULE_BLOCK` carries the same git-mandatory item as a secondary, always-visible-in-context layer, mirroring the tracker rule's two-layer pattern - both must stay in sync when this wording changes.
+
+**Parent/target branch is confirmed every call, never silently reused (2026-07-31, explicit design reversal):** `_needs_parent_branch()` (`git/mcp_tools.py`) and `_resolve_parent_or_ask()` (`git/cli_commands.py`) previously implemented "ask once per repo, then silently remember and reuse forever" - `GitLifecycleManager.resolve_parent_branch()` returning `status="resolved"` meant "proceed without asking." The user explicitly reversed this: for `git_start_branch`/`git_reverse_merge`/`git_create_mr`/`git_finish_ticket` (and their CLI equivalents `icx git branch`/`sync`/`mr`/`finish`) the parent/target branch is now confirmed on every call when not explicitly passed - a remembered value is surfaced as `proposed_default` (MCP: `status="confirm_remembered"`; CLI: `typer.confirm(..., default=True)`) so re-confirming it is a single round-trip, not a blind re-pick, but it is never applied without that confirmation. This is not a bug fix - it intentionally reverses the prior "ask-once-then-remember" design. `icx git tag`'s `--branch` already followed this stronger rule and is unchanged.
+
+**Commit-target safety check and push confirmation gate (2026-07-31):** two further active-confirmation additions, consistent with the parent-branch reversal above. (1) `git_stage_and_commit`'s no-token branch (`git/mcp_tools.py`) now reads the repo's stored parent branch via `git/settings.py:read_repo_settings()` (a pure local read, no network - `mgr.resolve_parent_branch()` is deliberately not called here, since that fetches and would slow down every commit) and compares it to the current branch. When they match, the `pending_confirmation` response sets `on_parent_branch: true` and swaps in a stronger instruction warning the human that they are about to commit directly on the parent/shared branch and suggesting `git_start_branch` first - it never blocks the commit, the human can still choose to proceed; the `confirm_token` execute branch is completely unchanged. (2) `git_push` was previously plain and ungated (a real gap - a push is not locally destructive but does mutate a shared remote); it now follows the same two-call `pending_confirmation`/`confirm_token` pattern as `git_stage_and_commit`, showing branch and remote before executing `gitcmd.push()`. `icx git push` (`git/cli_commands.py`) gained the CLI-side equivalent - a `typer.confirm()` prompt showing the branch and remote before pushing, matching `icx git mr`/`icx git finish`'s existing style.
 
 **Enforcement tiers.** Two distinct guarantees, do not conflate them:
 - **Hard (cannot be bypassed by any editor):** the path/build behaviors are enforced in Python - `GraphManager.resolve_project()` raises on an unregistered path, `_handle_analyze_issue()` drops unregistered paths and never triggers a build. No agent prompt can defeat these; they are code.
@@ -709,12 +840,14 @@ MCP mode skips automatic memory enrichment in `engine.run()`. Memory runs inside
 |------|-------------|--------|-------------|-----------|--------------|
 | claude | `~/.claude/settings.json` | json | `~/.claude` | `mcpServers` | - |
 | cursor | `~/.cursor/mcp.json` | json | `~/.cursor` | `mcpServers` | - |
-| windsurf | `~/.codeium/windsurf/mcp_config.json` | json | `~/.codeium/windsurf` | `mcpServers` | - |
+| windsurf | `_devin_config_dir()/mcp_config.json` (+ extra: `~/.codeium/windsurf/mcp_config.json`) | json | `~/.codeium/windsurf` | `mcpServers` | - |
 | codex | `~/.codex/config.toml` | toml | `~/.codex` | `mcp_servers` | - |
 | antigravity | `~/.gemini/antigravity/mcp_config.json` | json | `~/.gemini` | `mcpServers` | - |
 | vscode | `<cwd>/.vscode/mcp.json` | json | `<cwd>/.vscode` | `servers` | `stdio` |
 
 VS Code has no stable, documented cross-platform path for a user-profile MCP config (unlike the other five hosts' home-relative globals) - its MCP mechanism is workspace-scoped (`.vscode/mcp.json`), so it is detected/written relative to the current project (`Path.cwd()`), and its JSON shape differs (`{"servers": {"icx": {"type": "stdio", ...}}}` instead of `{"mcpServers": {"icx": {...}}}`). `MCPHost.mcp_key` and `MCPHost.entry_type` carry this difference; `_write_json(path, mcp_key, entry_type)` / `_remove_json(path, mcp_key)` and `_make_icx_entry(entry_type)` are parameterized accordingly - `write_icx_entry`/`remove_icx_entry` pass `host.mcp_key`/`host.entry_type` through.
+
+**Windsurf -> Devin Desktop MCP config migration (2026-07):** Cognition renamed Windsurf to Devin Desktop and moved the MCP config file out of `~/.codeium/windsurf/mcp_config.json` into a dedicated per-app config dir - `_devin_config_dir()` (`mcp_hosts.py`), Windows path confirmed directly from a live Devin Desktop migration prompt, macOS/Linux inferred from the standard single-app-name config-dir convention (not independently confirmed - revisit if a Mac/Linux user reports otherwise). The old path is kept as `extra_config_paths=(...,)` rather than dropped, for two reasons: Devin CLI's own docs say it still reads `~/.codeium/<channel>/mcp_config.json`, and a user who ran `icx mcp setup` before this fix shipped has a stale ICX entry sitting at the old path that `icx mcp remove` must still clean up. `rules_path`/`command_path` (global_rules.md/global_workflows) are unchanged - only the MCP server config file itself is confirmed to have moved. `remove_icx_entry()` was also fixed here: it used to `return False` immediately when the PRIMARY `config_path` didn't exist, silently skipping `extra_config_paths` cleanup entirely - exactly the case where a fresh install has no new-path file yet but still has a stale old-path entry. Each path (primary + every extra) is now checked and cleaned independently.
 
 `write_icx_entry(host) -> WriteResult` returns `WriteResult(path, fallback)`. When `host.detect_path` does not exist (tool not installed), it writes to `Path.cwd() / ".mcp.json"` and returns `fallback=True`. There is no `"manual"` config format - all hosts write automatically. The `MCPHost.config_path` field is always a `Path`, never `None`.
 
@@ -737,7 +870,7 @@ The file is fully ICX-owned (never merged with user content, unlike the rules fi
 
 **ICX enforcement (all editors) - ticket/testing/sonar routing, NOT boost:** `MCPHost.enforces` (True for every supported host) gates the enforcement installed by `install_enforcement(host)` on `icx mcp setup` and torn down by `remove_enforcement(host)` on `icx mcp remove`. This is now a SEPARATE, narrower concern from boost (see the command-file section above) - it covers only the three high-precision, always-on triggers: a work-tracker ticket reference -> `analyze_issue_fast`, a testing request -> `start_testing_session`, a Sonar/code-quality request -> the `sonar_*` tools. `MCPHost.enforce_kind` picks the mechanism per editor (verified against each editor's 2026 docs): `"hook"` for Claude Code (a hard pre-agent `UserPromptSubmit` hook + CLAUDE.md); `"rules"` for the rest, which write the ICX rule into that editor's documented global-rules file - Windsurf `~/.codeium/windsurf/memories/global_rules.md`, Codex `~/.codex/AGENTS.md`, Antigravity `~/.gemini/GEMINI.md` (fixed from an earlier incorrect `AGENTS.md` assumption - Antigravity's own global rules file is GEMINI.md), Cursor `~/.cursor/rules/icx.mdc`, VS Code `<cwd>/.github/copilot-instructions.md`. The rules-file path is instruction-based. HONEST caveat surfaced for Cursor: it does not natively guarantee global file-rules (official: feature request, no ETA 2026), so `MCPHost.rules_note` tells the user to add a one-line User Rule in Settings if the file is not picked up. This is where ALL MCP-related setup lives - there is no separate hook command. For Claude Code specifically, two idempotent, merge-safe layers so a ticket/testing/sonar request is always routed correctly, with no "use icx" needed:
 - **UserPromptSubmit hook:** a standalone pure-stdlib detector (`_HOOK_SCRIPT`) is written to `~/.icx/hooks/icx-boost-gate.py`; a keyed group (identified via `_is_icx_hook_group`, which matches the current filename AND the legacy `icx-ticket-gate.py` for clean migration) is merged into `~/.claude/settings.json` UserPromptSubmit, preserving all other hooks. It stays SILENT unless the prompt matches one of three patterns: a work-tracker ticket (`_is_ticket` -> `mcp__icx__analyze_issue_fast`), a testing request (`_TESTING_RE`: test/qa/coverage/e2e/check-a-screen -> `mcp__icx__start_testing_session`), or a code-quality request (`_SONAR_RE`: sonar/quality-gate/code-smell/vulnerability -> the `mcp__icx__sonar_*` tools) - it no longer injects any boost directive (that was the old, retired every-message mandate). Each directive self-neutralizes if the match is a false positive or ICX is not connected. Pure stdlib, no ICX import, no per-prompt subprocess to ICX. The command uses `sys.executable` so a working Python is guaranteed at hook time. `_write_hook_script` deletes any legacy hook file, and `remove_enforcement` deletes both current and legacy - so an existing install migrates cleanly on the next `icx mcp setup`/`icx mcp remove`.
-- **CLAUDE.md / global-rules block:** a marker-delimited block (`_RULE_START`/`_RULE_END`, `_RULE_BLOCK`) mandating ICX as the single channel for THREE always-on jobs - (1) work-tracker ticket -> `analyze_issue_fast`, (2) testing an app/screen/UI/API -> `start_testing_session`, (3) code quality / SonarQube -> `sonar_*` tools - plus a fourth item covering any OTHER pasted/ticket-embedded URL (use ICX's connector if it has one, else the agent's own connector, else tell the user), inserted into the editor's rules file (`~/.claude/CLAUDE.md` for Claude, the global-rules file for the others), replaced in place on re-run, stripped on remove; surrounding user content is preserved. The block also POINTS to `/icx-boost` as the separate, on-demand way to boost a request - it no longer mandates calling it on every message.
+- **CLAUDE.md / global-rules block:** a marker-delimited block (`_RULE_START`/`_RULE_END`, `_RULE_BLOCK`) mandating ICX as the single channel for FOUR always-on jobs - (1) work-tracker ticket -> `analyze_issue_fast`, (2) testing an app/screen/UI/API -> `start_testing_session`, (3) code quality / SonarQube -> `sonar_*` tools, (4) any git operation (status/branch/commit/sync/push/MR/tag) -> `git_repo_status` first, then `git_*`/`gitlab_*` tools, never a raw git command - plus a fifth item covering any OTHER pasted/ticket-embedded URL (use ICX's connector if it has one, else the agent's own connector, else tell the user), inserted into the editor's rules file (`~/.claude/CLAUDE.md` for Claude, the global-rules file for the others), replaced in place on re-run, stripped on remove; surrounding user content is preserved. The block also POINTS to `/icx-boost` as the separate, on-demand way to boost a request - it no longer mandates calling it on every message.
 Both layers are guarded per-step - a failure installing enforcement warns but never aborts MCP registration. The `icx boost brief` CLI (P4) remains available for a custom/non-standard hook.
 
 **Graceful fallback when an ICX integration is not connected (`_ICX_FALLBACK`):** routing is mandatory but never a dead end. When the agent routes a ticket to `analyze_issue_fast` or a code-quality request to a `sonar_*` tool and the integration is not configured, the tool returns a structured error PLUS a `fallback` instruction (from `_ICX_FALLBACK(kind, connect_cmd)`) that encodes the same 3-tier intelligence as the boost link handling: (1) tell the user it is not enabled and to connect ICX (`icx connection --add` / `icx sonar --add`) - the preferred path; (2) if the agent has its own connector/MCP for that target, use it meanwhile; (3) otherwise proceed with the normal flow and note the ICX integration is off - never fabricate the data. So ICX stays the preferred channel, but a missing connector degrades cleanly to the agent's own tools or the normal flow rather than blocking. Link enrichment in the boost brief already applies the same tiers per link (`boost/links.py`: `icx_tool` when ICX has a connected connector, `icx_connect_needed` when ICX has it but it is off, `agent_fetch` when ICX has none - e.g. Figma).
@@ -1069,7 +1202,9 @@ Project and branch are NOT stored - they are chosen per request. The intended fl
 
 **Data contracts (`models/sonar.py`):** `SonarFinding` (issue or hotspot, normalized), `SonarMeasures` (every dashboard metric: bugs/vulnerabilities/code smells/security hotspots, coverage, duplication, technical debt, A-E ratings, unit-test metrics, plus new-code variants), `SonarQualityGate` + `SonarGateCondition`, `SonarDuplication` + `SonarDupBlock`, `SonarTestGap`, `SonarScope` (the request/filter model), and `SonarReport` (the assembled output).
 
-**Developer scoping (`SonarScope`):** `files` is supplied by the caller only - ICX never derives it. An empty `files` list means project-wide (bounded by `limit`). When `files` is given, findings, per-file measures, and duplication are all restricted to exactly those file components, which also keeps "fetch everything" cheap. Additional filters: `types`, `severities`, `statuses`, `author`, `assignee`, `new_code_only`.
+**Developer scoping (`SonarScope`):** `files` is supplied by the caller only - ICX never derives it. An empty `files` list means project-wide (bounded by `limit`). When `files` is given, findings, per-file measures, and duplication are all restricted to exactly those file components, which also keeps "fetch everything" cheap. Additional filters: `types`, `severities`, `statuses`, `rules`, `tags`, `author`, `assignee`, `new_code_only`. `rules`/`tags` are plumbed end-to-end (`SonarScope` -> `sonar_findings`/`sonar_report` MCP schema -> `_sonar_scope_args`) - previously reachable on the client but not from MCP.
+
+**Completeness tools (`component_tree`/ranking, history/analyses, rule/hotspot detail):** beyond scoped findings/report, `SonarClient` exposes `component_tree` (ranked file/directory listing sorted server-side by one metric - `measures/component_tree`), `search_history` (per-metric time series - `measures/search_history`), `project_analyses` (scan/version/quality-gate event history - `project_analyses/search`), `rule_show` (full rule description - `rules/show`), and `hotspot_show` (full hotspot risk/fix detail - `hotspots/show`). `sonar/service.py` wraps each as a plain-dict function (`top_files`, `metric_history`, `analyses`, `rule`, `hotspot`) following the same `.model_dump()`-at-the-boundary convention as `measures`/`quality_gate`, and `mcp_server.py` exposes them as `sonar_top_files`, `sonar_history`, `sonar_analyses`, `sonar_rule`, `sonar_hotspot`.
 
 **Full coverage:** for a scope, `service.report` pulls issues (`/api/issues/search`), security hotspots (`/api/hotspots/search`), project measures and per-file measures (`/api/measures/component`), duplication blocks (`/api/duplications/show`), and derives `test_gaps` (files whose measured coverage is 0). Test-coverage gaps are surfaced as data; the MCP agent decides whether to offer to create the missing tests - ICX does not generate them.
 
@@ -1110,8 +1245,27 @@ Gated commands catch `SonarDisabled` and print a clear message then exit with co
 | `sonar_quality_gate` | Yes | Quality gate status + failing conditions; input: `{project, branch?}` |
 | `sonar_findings` | Yes | Scoped findings (issues + hotspots); input: `{project, branch?, files?, types?, severities?, statuses?, author?, assignee?, new_code_only?, limit?}` |
 | `sonar_report` | Yes | Full report: gate + project/per-file measures + findings + duplications + test gaps; same input schema as `sonar_findings` |
+| `sonar_top_files` | Yes | Rank files/directories by a single metric (worst duplication, lowest coverage, most bugs, etc.); input: `{project, metric, branch?, limit?, ascending?}`; backed by `client.component_tree` (`measures/component_tree`, sorted server-side) |
+| `sonar_history` | Yes | Chronological history for one or more metrics, for trend questions; input: `{project, metrics, branch?, date_from?, date_to?}`; backed by `client.search_history` (`measures/search_history`) |
+| `sonar_analyses` | Yes | Analysis/scan history (when scans ran, version and quality-gate events); input: `{project, branch?, date_from?, date_to?}`; backed by `client.project_analyses` (`project_analyses/search`) |
+| `sonar_rule` | Yes | Full description of a rule key (why it fires, how to fix it); input: `{rule_key}`; backed by `client.rule_show` (`rules/show`) |
+| `sonar_rules` | Yes | Browse/search rules by language, tag, or repository; input: `{language?, tags?, repositories?, query?, page_size?}`; backed by `client.rules_search` (`rules/search`) |
+| `sonar_hotspot` | Yes | Full risk/fix detail for one security hotspot key; input: `{hotspot_key}`; backed by `client.hotspot_show` (`hotspots/show`) |
+| `sonar_source` | Yes | Annotated source lines (coverage/duplication context) for a flagged file; input: `{project, path, branch?, from_line?, to_line?}`; backed by `service.source_lines` (`client.sources_lines`, `sources/lines`) |
+| `sonar_metrics` | Yes | Metric catalog (what a metric key means, which metrics exist); input: `{page_size?}`; backed by `service.metrics` (`client.metrics_search`, `metrics/search`) |
+| `sonar_quality_gate_definition` | Yes | The gate's full authored definition (assigned gate + configured thresholds), distinct from `sonar_quality_gate`'s pass/fail-for-last-analysis; input: `{project?, gate_name?}` (one of the two required, raises `ValueError` otherwise); backed by `service.quality_gate_definition` (`client.qualitygates_get_by_project` or `client.qualitygates_show`) |
+| `sonar_quality_profiles` | Yes | Quality profile assigned to a project/language and its rule count; input: `{language?, project?}`; backed by `service.quality_profiles` (`client.quality_profiles_search`, `qualityprofiles/search`) |
+| `sonar_issue_authors` | Yes | List of issue authors, for filter/scope-by-author; input: `{project?, query?}`; backed by `service.issue_authors` (`client.issues_authors`, `issues/authors`) |
+| `sonar_issue_tags` | Yes | List of issue tags, for filter/scope-by-tag; input: `{project?, query?}`; backed by `service.issue_tags` (`client.issues_tags`, `issues/tags`) |
+| `sonar_issue_changelog` | Yes | An issue's history (assigned/resolved, by whom); input: `{issue_key}`; backed by `service.issue_changelog` (`client.issues_changelog`, `issues/changelog`) |
+| `sonar_system_health` | Yes | Sonar server health beyond reachability; input: `{}`; backed by `service.system_health` (`client.system_health`, `system/health`) |
+| `sonar_languages` | Yes | Languages this Sonar server analyzes; input: `{query?}`; backed by `service.languages` (`client.languages_list`, `languages/list`) |
 
-Gated tools return `{ok: false, error: "No active SonarQube connection..."}` when no connection is active. Scoped tools return `{ok: false, error: "project is required..."}` when `project` is missing. `sonar_status` always returns the current state.
+Gated tools return `{ok: false, error: "No active SonarQube connection..."}` when no connection is active. Scoped tools return `{ok: false, error: "project is required..."}` when `project` is missing. `sonar_status` always returns the current state. `sonar_top_files`/`sonar_history`/`sonar_analyses` return `{ok: false, error: "..."}` when their required fields (`project`+`metric`, `project`+`metrics`, `project`) are missing; `sonar_rule`/`sonar_hotspot` require `rule_key`/`hotspot_key` respectively; `sonar_source` requires `project`+`path`; `sonar_issue_changelog` requires `issue_key`. `sonar_quality_gate_definition` is the one 3-tier dispatch: a `ValueError` (neither `project` nor `gate_name` given) is caught first and returned as-is, before the usual `SonarDisabled`/generic-`Exception` pair, so its validation message is never swallowed by the generic handler.
+
+`sonar_findings`/`sonar_report` scoping also accepts `rules` and `tags` (schema + `_sonar_scope_args` plumbing) alongside the existing filters, closing the earlier gap where those two SonarQube filter dimensions were unreachable from MCP.
+
+Beyond Plan 5's ranking/history/rule-detail coverage (`sonar_top_files`, `sonar_history`, `sonar_analyses`, `sonar_rule`, `sonar_rules`, `sonar_hotspot`), the reader now also covers source-annotation (`sonar_source`), the metric catalog (`sonar_metrics`), quality-gate definitions (`sonar_quality_gate_definition`), quality profiles (`sonar_quality_profiles`), and issue lifecycle - authors, tags, changelog (`sonar_issue_authors`, `sonar_issue_tags`, `sonar_issue_changelog`) - plus server-level `sonar_system_health` and `sonar_languages`.
 
 **Activation:** Add a connection with `icx sonar add`; the first one becomes active and all operational paths work immediately. Switch servers with `icx sonar active <name>`.
 
@@ -1288,7 +1442,7 @@ class MyConnector(ConnectorBase):
         # Download and return raw bytes. Pin to your platform's hostname.
         ...
 
-    async def process_attachments(self, raw, llm_config, log=None) -> tuple[dict[str, str], dict[str, str]]:
+    async def process_attachments(self, raw, llm_config, log=None) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
         # Delegate to the shared Universal Attachment Engine:
         from icx_engine.connectors.attachments import process_attachments as _pa
         return await _pa(raw, self, llm_config, log=log)
@@ -1315,7 +1469,7 @@ def extract_bare_key_from_ref(cls, ref: str) -> str | None:
 
 `extract_project_key()`'s result is matched against `ProjectInfo.tracker_project_key` (set via `icx graph add --project`) to auto-resolve project paths in `_resolve_paths_from_ticket()`. Only override `extract_bare_key_from_ref()` if your platform's bare-key/URL format differs from Jira's `PROJ-123`.
 
-The return type of `process_attachments` is `tuple[dict[str, str], dict[str, str]]` - `(attachment_texts, images)`. The first dict maps filename -> extracted text; the second maps filename -> Base64.
+The return type of `process_attachments` is `tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]` - `(attachment_texts, images, full_texts, raw)`. The first dict maps filename -> extracted (possibly summarized/capped) text; the second maps filename -> Base64; the third maps filename -> the complete uncapped/unsummarized text (see "Attachment full-fidelity paths" above); the fourth maps filename -> the untouched original bytes/content, for types where that distinction applies.
 
 **Avoid the lossy round-trip in `__init__`.** If your connector stores the connection model as an attribute, check the type before calling `model_validate(model_dump(...))`:
 
@@ -1527,8 +1681,19 @@ elsewhere.
     default_text_model="...",
     default_image_model="...",
     cli_label="My Provider        (cloud, paid)",
+    # prompts_for_base_url / prompts_for_api_key default to False/True (key-only,
+    # the majority case) - only set them when the CLI connect flow needs to differ:
+    #   prompts_for_base_url=True,  prompts_for_api_key=False  -> URL only (Ollama)
+    #   prompts_for_base_url=True,  prompts_for_api_key=True   -> key + URL, HTTPS
+    #                                                              enforced on the URL (NIM)
 ),
 ```
+
+`_prompt_channel_config` (`services/connection_service.py`) drives its prompting
+purely off these two flags - never add a literal `provider_key == "myprovider"`
+check there. The HTTPS check fires automatically whenever a provider sets both
+flags `True`, since that is the only case where a secret API key would otherwise
+be sendable to an unencrypted custom endpoint.
 
 `test_llm_registry.py` asserts that every registry provider also has a class
 wired in `get_provider` (Step 3) - keep them in sync.
@@ -1578,7 +1743,7 @@ The memory module lives at `src/icx_engine/memory/` and follows the same layerin
 | `memory/__init__.py` | Public exports: MemoryManager, MemoryQueryInput |
 | `memory/schema.py` | MemoryEntry (Pydantic), MemoryQueryInput (dataclass), `connect_with_timeout()` shared LanceDB connect helper |
 | `memory/embeddings.py` | EmbeddingsManager: onnxruntime + tokenizers ONNX inference, first-run sentinel, per-file download progress |
-| `memory/manager.py` | MemoryManager: save, query, delete, list, show, clear, status |
+| `memory/manager.py` | MemoryManager: save, query, delete, update, list, show, clear, status |
 | `memory/bridge.py` | Cross-reference MemoryEntry.files_changed with codebase graph; bug density analysis |
 | `memory/relations.py` | RelationManager: memory_edges table; auto-detect shares_file relations on save |
 | `memory/patterns.py` | PatternManager: memory_patterns table; detect_patterns() + auto-refresh every 5 saves |
@@ -1892,7 +2057,7 @@ The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/p
 | `graph/storage.py` | Project registry, `ProjectInfo` dataclass, path helpers for `~/.icx/graphs/` and `~/.icx/temp/`; `icxignore_path()` |
 | `graph/builder.py` | `_build_project_isolated` (top-level for pickle), `estimate_build_eta`, progress event emission |
 | `graph/change.py` | `check_staleness`, `current_git_commit`, `ChangeResult` |
-| `graph/querier.py` | `generate_graph_report` - reads `graph.json`, writes compact `GRAPH_REPORT.md` index + `GRAPH_CLUSTERS/<name>.md` per-cluster files; `_role_tag`, `_sanitize_cluster_filename` |
+| `graph/report.py` | `generate_graph_report` - reads `graph.json`, writes compact `GRAPH_REPORT.md` index + `GRAPH_CLUSTERS/<name>.md` per-cluster files; `_role_tag`, `_sanitize_cluster_filename` |
 | `graph/manager.py` | `GraphManager` - register, build, status, list, remove, resolve; `_generate_cluster_descriptions` (LLM step) |
 | `graph/paths.py` | Path resolution and sub-project detection; safe git command helpers; `_GIT_BASE_CMD` |
 | `graph/progress.py` | Cross-process build progress channel: `ProgressEmitter` writes newline-delimited JSON events to a temp file; parent process tails and forwards to Rich Progress or no-op |
@@ -1906,7 +2071,7 @@ The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/p
 | `graph/parser/detect.py` | Language and extension detection; `_is_noise_dir` |
 | `graph/parser/icxignore.py` | `.icxignore` per-project exclusion patterns; seeded with defaults on first build |
 | `graph/parser/confidence.py` | Edge confidence scoring |
-| `graph/parser/roles.py` | File role tag detection (mirrors `querier.py:_role_tag`) |
+| `graph/parser/roles.py` | File role tag detection (mirrors `report.py:_role_tag`) |
 | `graph/parser/validate.py` | Graph integrity validation |
 | `graph/parser/dedup.py` | Duplicate edge deduplication |
 | `graph/parser/lsp_client.py` | Generic LSP stdio JSON-RPC client; `wait_ready(timeout, grace)` blocks until all `$/progress` tokens complete (workDoneProgress protocol), enabling heavy servers (kotlin-ls) to finish indexing before definition queries begin |
@@ -2078,7 +2243,7 @@ In MCP mode (`_get_graph_info`): when `is_stale=True`, the existing graph is alw
 
 **No auto-build in MCP:** when `build_status == "not_built"`, `_get_graph_info` returns `"not_built"` status with a message. The agent is instructed to tell the user to run `icx graph build <name>` and fall back to grep/glob. No background build is triggered. The `icx graph build` CLI command calls `manager.build()` (blocking) directly and is the only way to trigger a build.
 
-### Report generation (`querier.py`)
+### Report generation (`report.py`)
 
 `generate_graph_report(graph_json_path, output_path)` reads `graph.json` and writes two outputs:
 - `GRAPH_REPORT.md` at `output_path` - compact index (~2-5k tokens regardless of project size)
@@ -2148,10 +2313,10 @@ Agents can instantiate `GraphQuerier(graph_json_path)` directly from the path re
 - `graph/builder.py:_build_project_isolated` - `cache_root=icx_cache` must be passed to `extract()`. When omitted, the parser infers `effective_root` from absolute source file paths (= project root) and writes output into the project directory.
 - `graph/storage.py:derive_project_id` - changing the hash function or length invalidates all existing project IDs. The input is always `path.as_posix()` (forward-slash separated) to ensure cross-platform hash stability.
 - `mcp_server.py:_load_querier_simple` - all five graph analysis tools (`graph_important_nodes`, `graph_blast_radius`, `graph_cycles`, `graph_dead_code`, `graph_ownership`) route through this helper which calls `validate_project_path()` before any filesystem access. Do not bypass it with raw `Path(project_path)` - matches the pattern used by the other graph query tools via `_resolve_graph_path()`.
-- `graph/querier.py:_role_tag` hook detection - the check `stem.startswith("use") and len(stem) > 3 and stem[3].isupper()` is intentional. React hooks start with lowercase `use` + uppercase letter. Changing to `sl.startswith("use")` causes false matches on `userList`, `userActions` etc.
-- `graph/querier.py` deduplication - the `used_filenames` set must use `.lower()` for membership checks. Windows NTFS is case-insensitive; without this, two communities with labels like "Modal" and "modal" silently overwrite each other's cluster file.
-- `graph/querier.py:_community_label:_SKIP_PARTS` - the extended set of Java package directory names must stay. Removing them causes generic package names to bleed through as cluster labels on Java projects.
-- `graph/querier.py` cluster file write strategy - must use write-in-place + stale-file removal, NOT `shutil.rmtree` + `mkdir`. The rmtree pattern has a TOCTOU window where a symlink can be inserted between delete and recreate, redirecting all subsequent file writes to an attacker-controlled path.
+- `graph/report.py:_role_tag` hook detection - the check `stem.startswith("use") and len(stem) > 3 and stem[3].isupper()` is intentional. React hooks start with lowercase `use` + uppercase letter. Changing to `sl.startswith("use")` causes false matches on `userList`, `userActions` etc.
+- `graph/report.py` deduplication - the `used_filenames` set must use `.lower()` for membership checks. Windows NTFS is case-insensitive; without this, two communities with labels like "Modal" and "modal" silently overwrite each other's cluster file.
+- `graph/report.py:_community_label:_SKIP_PARTS` - the extended set of Java package directory names must stay. Removing them causes generic package names to bleed through as cluster labels on Java projects.
+- `graph/report.py` cluster file write strategy - must use write-in-place + stale-file removal, NOT `shutil.rmtree` + `mkdir`. The rmtree pattern has a TOCTOU window where a symlink can be inserted between delete and recreate, redirecting all subsequent file writes to an attacker-controlled path.
 - `cli.py` memory commands - must call `check_ready()` (raises `ICXMemoryError` if model absent), never `ensure_ready()`. Graph and other commands must not touch the embedding model at all - the graph pipeline uses the LLM API directly, not the embedding model.
 - `~/.icx/graphs/` layout - tools and tests both rely on this exact directory structure.
 - `graph/parser/resolvers/*.py` literal `"/"` concatenation (e.g. `if src_file.startswith(project_str + "/")`) - this is intentional, not a hardcoded-separator bug. `project_str`/`root_posix`-style variables are explicitly POSIX-normalized (`str(x).replace("\\", "/")`) upstream to build stable, cross-platform graph node keys - they are not filesystem paths and pathlib is the wrong tool here. Do not "fix" these into `pathlib.Path` joins; doing so silently breaks graph node-key identity across resolvers.
@@ -2255,11 +2420,13 @@ The skills module lives at `src/icx_engine/skills/` and captures learned, reprod
 
 SKILL.md files store frontmatter as a JSON object (not YAML), delimited by `---`. This design avoids adding a YAML dependency - any valid JSON document is also valid YAML 1.2, so files remain parseable by tools expecting YAML frontmatter (agentskills.io, Claude Code Skills) without extra libraries. The body sections (## When to Use, ## Procedure, ## Pitfalls, ## Verification) are Markdown, extracted by exact header matching.
 
-### Creation - agent-authored, two paths
+### Creation - three paths
 
-**Agent path (`draft_skill` MCP tool):** the sole path for creating or refining a skill from a memory entry. It is MANDATORY immediately after every `save_memory` call - the dynamic per-issue-type STEP-sequence instructions embedded in `analyze_issue_fast`/`analyze_issue`'s response text (`mcp_server.py`) tell the agent to call `draft_skill` right after `save_memory`, every time, deciding for itself whether the fix is skill-worthy. `skill_worthy=false` is a valid, expected answer - it returns `{"status": "skipped"}` immediately with no `SkillStorage` access. When `skill_worthy=true`, the agent must also supply `skill_name`, `description`, `when_to_use`, `procedure`, `verification` (all agent-authored, full-context text written for this call - no fallback to raw memory-entry fields); `pitfalls`/`tags` are optional. The tool re-checks `outcome_verified` on the referenced `issue_key`'s memory entry server-side - it never trusts the agent's earlier claim, so a skill can only ever be drafted from a genuinely verified fix.
+**Agent path, from a verified fix (`draft_skill` MCP tool):** the path for creating or refining a skill from a memory entry. It is MANDATORY immediately after every `save_memory` call - the dynamic per-issue-type STEP-sequence instructions embedded in `analyze_issue_fast`/`analyze_issue`'s response text (`mcp_server.py`) tell the agent to call `draft_skill` right after `save_memory`, every time, deciding for itself whether the fix is skill-worthy. `skill_worthy=false` is a valid, expected answer - it returns `{"status": "skipped"}` immediately with no `SkillStorage` access. When `skill_worthy=true`, the agent must also supply `skill_name`, `description`, `when_to_use`, `procedure`, `verification` (all agent-authored, full-context text written for this call - no fallback to raw memory-entry fields); `pitfalls`/`tags` are optional. The tool re-checks `outcome_verified` on the referenced `issue_key`'s memory entry server-side - it never trusts the agent's earlier claim, so a skill can only ever be drafted from a genuinely verified fix.
 
 `save_memory`'s own response carries an optional `related_skills` array (via `rank_skills_for_tags`, scored against the entry's tags/root_cause_pattern) whenever anything scores - this is the agent's create-vs-refine signal. If one of those names already covers the fix, the agent reuses that `skill_name` in the following `draft_skill` call to refine it (the fresh text replaces the stale text via `write_or_update()`'s hash-guarded merge) instead of creating a near-duplicate.
+
+**Agent path, memory-free (`create_skill` MCP tool):** for a general-purpose skill the user asks for directly - not a follow-up to any ticket or memory entry. Builds a `SkillEntry` straight from the agent-supplied fields (`name`, `description`, `when_to_use`, `procedure`, `verification`, optional `pitfalls`/`tags`/`project_key`), mirroring `icx skills create`'s CLI body exactly (same `_slugify()`, same `scope_hint` rule - `"repo-specific"` when `project_key` is given, else `"generic"`). No `issue_key`, no `outcome_verified` check, no `MemoryManager` access at all - it works even when memory is completely unavailable or not ready. Idempotent via the same hash-guarded `write_or_update()` every other creation path uses, so calling it twice with the same name updates rather than duplicates.
 
 **Human path (CLI):** `icx skills create` prompts interactively for name, description, when_to_use, procedure, pitfalls, verification, and an optional project tie - no ticket/issue_key is required, so a pure general-purpose skill with no work item behind it is fully supported. `icx skills delete <name>` removes one skill after a `typer.confirm()` prompt, mirroring the `memory_delete` single-entry confirmation style.
 
@@ -2314,6 +2481,25 @@ Returns: `{body: str}` - the complete Markdown (frontmatter + body) from `SkillE
 Schema: no input.
 Returns: `{"skills": [{"name": ..., "description": ...}, ...]}` - every stored skill, unranked and uncapped.
 
+### MCP tool: create_skill
+
+The memory-free creation path - use this when the user directly asks for a general-purpose skill rather than following up a verified fix. Unlike `draft_skill`, it has zero `issue_key`/`MemoryManager` dependency.
+
+Input schema:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | Required. Slugified (via `_slugify()`) for storage - same as the CLI's `icx skills create` |
+| `description` | `str` | Required. Third person - what the skill does and when to use it |
+| `when_to_use` | `str` | Required |
+| `procedure` | `str` | Required |
+| `verification` | `str` | Required |
+| `pitfalls` | `str` | Optional, defaults to `""` |
+| `tags` | `list[str]` | Optional, defaults to `[]` |
+| `project_key` | `str` | Optional. When given, sets `origin_projects=[project_key]` and `scope_hint="repo-specific"`; omitted means `scope_hint="generic"` - the same branch `icx skills create`'s "tied to a specific project?" prompt takes |
+
+Returns `{"status": "created"|"updated"|"skipped_user_edited", "name": ...}` from `write_or_update()`, or `{"error": ...}` when a required field is empty.
+
 ### save_memory has no skill fields
 
 `save_memory`'s own MCP schema carries no skill-related fields at all - skill authoring is fully decoupled into the separate `draft_skill` tool call described above. The only thing `save_memory` itself does that touches skills is compute the optional `related_skills` hint in its response.
@@ -2323,6 +2509,47 @@ Returns: `{"skills": [{"name": ..., "description": ...}, ...]}` - every stored s
 - `skills/schema.py:to_markdown()` and `from_markdown()` - the frontmatter-as-JSON design is foundational. Any change breaks SkillEntry round-trip serialisation.
 - `skills/storage.py:_root` location (`~/.icx/skills/`) - changing it breaks global scope guarantees and multi-project skill reuse.
 - `skills/writer.py:draft_skill_entry()` - do not add a fallback path to raw memory-entry text; the agent-authored-only contract is intentional.
+
+### Default (pre-installed) skills - agent-agnostic best practices
+
+`skills/defaults.py` ships a curated, static catalog of 14 default skills, written entirely in ICX's own words. They are seeded into every user's `~/.icx/skills/` store so any connected AI coding agent (Claude Code, Cursor, Windsurf, Copilot, etc.) gets consistent best-practice guidance with no manual setup - this is the mechanism, not a manually-maintained doc, that makes the guidance agent-agnostic.
+
+**Catalog:**
+
+| Skill | Purpose | Source/attribution |
+|---|---|---|
+| `systematic-debugging` | Reproduce, isolate, hypothesize, test, fix, verify | Generic engineering practice |
+| `test-driven-development` | Red-green-refactor, test must fail first | Generic engineering practice |
+| `plan-before-code` | Clarify intent, produce a short plan before touching code | Generic engineering practice |
+| `minimal-diff-discipline` | No unrequested scope; every changed line traces to the request | Principle distilled from Andrej Karpathy's public commentary on AI-assisted coding - not his own published text |
+| `verification-before-completion` | Never declare done without an objective check | Generic engineering practice |
+| `code-review-before-merge` | Self-review the diff against the request before finishing | Generic engineering practice |
+| `ui-ux-accessibility-baseline` | Checkable UI/UX rules: keyboard/focus, labels, contrast, semantic HTML, reduced motion | Adapted from cross-agent UI guideline sets (e.g. Vercel's Web Design Guidelines) and WCAG 2.2 AA - not copied verbatim |
+| `comprehensive-test-authoring` | Full-coverage test generation: functional, security, data validation, API contract, architecture conformance, non-functional, regression guard | Grounded in OWASP ASVS 5.0, ISO/IEC 25010:2023, contract-testing patterns |
+| `sonar-quality-review` | Triage by severity, fix root cause, re-check the gate after fixing | ICX's own `sonar_*` tool conventions |
+| `ticket-context-analysis` | Read the full ticket + attachments + linked issues before coding | ICX's own tracker-analysis conventions |
+| `safe-git-workflow` | Status-check first, never force-push, resolve don't discard conflicts | ICX's own `git_*` tool conventions (mirrors this file's own Git Permissions rules) |
+| `codebase-graph-navigation` | Check blast radius/ownership before editing shared code | ICX's own graph-tool conventions |
+| `testing-session-driver` | Drive the testing session's census -> author -> verify/heal loop, never hand-roll | ICX's own testing-module conventions |
+| `memory-effective-usage` | Search before implementing, save with verified outcomes | ICX's own memory-tool conventions |
+
+No third-party skill's markdown is ever copied verbatim into a default; each is ICX's own text, citing its source inline in the skill's own body where one exists.
+
+**Seeding (`skills/seed.py`):** `seed_default_skills(storage=None)` writes any default not yet present, and safely reconciles later changes to a default without ever clobbering a user's edit. For an existing skill, it recomputes `existing.compute_hash()` from the entry's *actual current body text* (never trusting a possibly-stale `icx_hash` field alone) and compares it to the hash ICX last shipped for that name, tracked in a sidecar state file (`~/.icx/skills/.defaults_state.json`, `{name: last_shipped_hash}`). A match means the user never touched it - safe to update. Any mismatch - a real edit, or no record for that name at all (missing/corrupt state file, or a same-named skill ICX never seeded) - is left untouched. Every step is guarded; one failing definition never blocks the rest. Called from: `icx setup` (Step 4/4), `icx update` (Step 5/5), and MCP server startup (guarded, alongside `clean_stale_artifacts()`).
+
+**Tool-family hints (`skills/hints.py`):** `attach_skill_hint(response, skill_name)` looks up one named default skill and attaches `{"name": ..., "description": ...}` under `response["skills"]["index"]`, guarded so a lookup failure never breaks the tool's own result. This reaches an agent even when it never calls `icx_boost` (which still separately ranks the whole catalog via `rank_skills()`, unchanged). Wired into four tool-family entrypoints, one deterministic skill each:
+
+| Tool | Skill attached |
+|---|---|
+| `start_testing_session` | `testing-session-driver` |
+| `sonar_status` | `sonar-quality-review` |
+| `analyze_issue_fast` / `analyze_issue` | `ticket-context-analysis` |
+| `git_repo_status` | `safe-git-workflow` |
+
+### What NOT to touch (defaults)
+
+- `skills/defaults.py` catalog content - do not copy a third-party skill's markdown text verbatim into a default; write ICX's own words and cite the source inline instead.
+- `skills/seed.py` - do not compare against the stored `icx_hash` field directly; always recompute via `compute_hash()` from the entry's live body text, or a hand-edit that left a stale hash field would be wrongly treated as unedited and overwritten.
 
 ---
 
@@ -2336,7 +2563,7 @@ The CLI uses [Typer](https://typer.tiangolo.com/) with `rich_markup_mode="rich"`
 - Always raise `typer.Exit(1)` on error, not `sys.exit()`
 - MANDATORY CLI convention: EVERY user-facing command exposes BOTH `--debug` (`DebugOpt`) and `--traceback` (`TracebackOpt`) - no exceptions. A new command MUST add both params and the `@_guarded` decorator (between `@x_app.command(...)` and `def`), which wraps the body in `try/except -> render_icx_error(exc, err_console, show_traceback=traceback or debug)` and passes `typer.Exit` through. `_guarded` is signature-preserving (`functools.wraps`) so Typer still builds the options. The shared `DebugOpt`/`TracebackOpt`/`_guarded` block is defined right after `console = Console(...)`, above the first command. Propagate `debug` to inner calls where they support it.
 - All errors are routed through `render_icx_error(exc, err_console, show_traceback=...)` (via `_guarded` or an explicit try/except) - never use `err_console.print(str(exc))` directly.
-- Consistency is enforceable: introspect `typer.main.get_command(app)`, walk the groups, and assert every leaf command's params include both `debug` and `traceback` (44/44 as of 2026-07-21).
+- Consistency is enforced: `tests/test_smoke.py::test_every_leaf_command_has_debug_and_traceback_options` introspects `typer.main.get_command(app)`, walks the full command tree (including every sub-app registered via `app.add_typer` - git, jira, gitlab, memory, graph, test, sonar, boost, skills, mcp), and asserts every leaf command's params include both `debug` and `traceback` (76/76 as of 2026-07-31) - a new command with a soft/missing pair breaks this test, not just a manual count.
 - **Authentication flows belong in `services/connection_service.py`**, not inline in `cli.py`
 
 The REPL (`_start_repl`) re-enters Typer for each line - do not add state that persists between REPL iterations.
@@ -2402,10 +2629,10 @@ async def test_fetch_issue():
 
 **Test all URL formats for `parse_input()`** - bare key, `/browse/` URL, `/issues/` URL, `?selectedIssue=` query param, no-scheme URL, invalid input. Every connector must have these.
 
-**When testing `process_attachments`**, remember it returns a tuple `(texts, images)` - always unpack both:
+**When testing `process_attachments`**, remember it returns a 4-tuple `(texts, images, full_texts, raw)` - always unpack all four:
 
 ```python
-texts, images = await process_attachments(raw, downloader, llm_config)
+texts, images, full_texts, raw = await process_attachments(raw, downloader, llm_config)
 ```
 
 **When testing `_compute_missing` or `finalize` for Story/Task/Epic issues with spreadsheets**, set `raw.attachments` to include the spreadsheet filename and check `detailed_description` / `acceptance_criteria` for the presence or absence of `[technical schema:` / `[technical logic:` to control whether `missing_schema` is flagged.
@@ -2480,6 +2707,8 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 - **D-Lock threshold:** Never raise `_DLOCK_THRESHOLD` above 512. Windows Credential Manager rejects credential blobs above this size, causing silent plaintext fallback. D-Lock exists precisely to handle values that exceed this limit.
 - **Master Key:** `"icx_master_key"` lives in the OS keyring like any other secret. Never write it to `config.json` or log it.
 
+**Jira OAuth scope bump requires re-authentication.** `services/connection_service.py`'s `_connect_jira_oauth()` requests `write:jira-work` (added alongside `read:jira-work`/`read:jira-user`/`offline_access`) so `jira_apply_update`/`icx jira update` can write. This scope is fixed at grant time by Atlassian - an `access_token`/`refresh_token` pair issued before this change was made carries only the old, narrower scope, and `refresh_oauth_if_needed()` refreshing that token does NOT silently add the new scope; the user must run `icx connection --add` again, choose Jira -> OAuth PKCE, and re-consent to pick up `write:jira-work`. Existing API-token (Basic auth) connections are unaffected - Jira permissions for a token are enforced server-side per user, with no OAuth-scope concept involved.
+
 **Testing credential isolation:** No credential is ever written to the LangGraph checkpoint DB. `capture`/`inline` auth run through ICX's own Playwright process only (`icx-auth.mjs`) and never pass a credential through chat; a restored session is loaded by the agent from `storageState`, never re-authored as login steps. `~/.icx/testing_auth.json` (`0o600`, keyed by project_id+host) holds only non-secret session intent `{session_id, captured_at, expires_at}`. `sonar_token` uses `Field(exclude=True)`.
 
 ---
@@ -2505,10 +2734,19 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 | `connectors/audio.py:WhisperManager._load` | Lock + double-checked locking is required - concurrent A/V attachments run through `asyncio.gather` and hit `_load()` from multiple executor threads. Removing the lock races the first-time download. |
 | `connectors/attachments.py:_extract_audio_from_video` | The `try/except asyncio.TimeoutError -> proc.kill(); await proc.wait()` block prevents orphan ffmpeg processes on timeout. The `proc.returncode != 0 -> raise RuntimeError` check prevents passing empty/partial WAV bytes to Whisper. Do not collapse either guard. |
 | `config_manager.py:_SENTINEL` | Do not change the sentinel string - it would invalidate all existing saved configs. |
+| `models/config.py:_get_connection_registry`/`_cast_connection` | KNOWN, ACCEPTED architecture inversion - `models/` (a should-be-low-level layer) imports `connectors/registry.py`. This is NOT accidental: importing `connectors.registry` is what triggers `connectors/base.py`'s lazy Jira self-registration (`_connector_registry()` only registers Jira the first time it runs, and `connectors/registry.py`'s module body calls it as an import side effect). No other code path in this repo eagerly imports `connectors.base`/`connectors.registry` before config loading (checked `cli.py`, `config_manager.py`, `engine.py` directly) - so this import is the ONLY reliable mechanism guaranteeing Jira is known before an existing user's saved Jira connection gets deserialized. Removing it without an equally-reliable replacement (e.g. a real eager-registration entrypoint in `cli.py`'s/`mcp_server.py`'s startup) would silently degrade an existing Jira connection to a plain `BaseConnection` (losing `.auth`) on the very first `ConfigManager.load()` call of a fresh process. Investigated and deliberately deferred during the 2026-07-29 audit-fix pass (Plan 11 Task 10) rather than risk this - a safe fix needs a genuine startup-time registration entrypoint, not just moving the dict. |
 | `auth/pkce.py` | Generic OAuth utility. Do not add Jira-specific logic here. When `webbrowser.open()` returns `False` or raises, the URL is printed to stderr for manual copy - this is intentional headless behaviour, do not remove it. Port binding tries `callback_port` through `callback_port + 4` (default 8765-8769); a clear `OSError` is raised if all are occupied. When a fallback port is used, a warning is printed to stderr. |
 | `auth/token.py` | Generic auth utilities. Do not add provider-specific logic here. |
 | `connectors/attachments.py` | Connector-agnostic UAE. Do not add platform-specific logic here. |
 | `grounding.py:_VERIFY_USER_TEMPLATE` | Grounding prompt is carefully tuned. The phrase "Visual evidence takes priority over text. Correct any contradictions found in the JSON." must remain present. |
+| `git/gitcmd.py` | No rebase, no force-push, no history-rewriting command may ever be added here. This is a hard architectural invariant (design spec Section 2 rule 5), not a style preference - the whole safety model assumes these operations do not exist in the codebase. |
+| `git/manager.py` | Methods must never call a prompt/confirm function directly (no `typer.confirm()`, no `input()`). It returns structured results; the CLI and MCP layers own all human interaction. Adding a prompt call here couples the engine to one front door and breaks the other. |
+| `git/manager.py:adopt_scratch_resolution` | Must remain a fast-forward-only merge (`fast_forward_ref`), never a `reset --hard` or any history-losing operation. This is what makes "the feature branch is never in a conflicted state" true even under a crash mid-adopt - changing this to reset/checkout-force breaks that guarantee silently. |
+| `git/manager.py:post_merge_cleanup` | Must re-verify the MR's actual merged state via the GitLab API before doing anything; never trust a caller-supplied "it's merged" claim. This is what prevents cleanup from running against an MR that's still open. |
+| `gitlab/client.py` | Auth header must stay `PRIVATE-TOKEN`, never `Authorization: Bearer` - that's GitLab's personal-access-token convention, not OAuth. |
+| `gitlab/service.py:propose_next_tag` | "Latest tag" must stay scoped per environment label; never compute a global latest across environments. |
+| `src/icx_engine/jira/*` (top-level, not `connectors/jira/`) | KNOWN, ACCEPTED architecture gap - write-side tracker operations (create/comment/link/worklog/watch/attach/whoami/search/get, wired into `cli.py` and `mcp_server.py`) call the Jira REST API directly with no `ConnectorBase` interface, unlike the read/analyze path which is genuinely pluggable per Section 5. A contributor adding a new tracker connector exactly per Section 5 gets `analyze_issue`/`analyze_issue_fast` support only - there is no extension point for create/comment/link/worklog tools; they would have to build a whole new parallel module rather than plug into an existing abstraction. Fixing this properly means expanding `ConnectorBase` with new abstract methods and per-connector CRUD implementations - a substantial API expansion, not a safe drop-in patch. Investigated and deliberately deferred during the 2026-07-30 full re-audit rather than risk a large surface-area change; scope it as its own plan if/when a second write-capable tracker connector is actually being added. |
+| `connectors/registry.py:CONNECTION_REGISTRY` | Exported as a live alias of `connectors/base.py`'s private `_CONNECTION_CLASSES` dict (`CONNECTION_REGISTRY: dict = _CONNECTION_CLASSES`), not a copy. Harmless today - `register_connector()` is the only writer and keeps both in sync since they're the same object - but any future code that writes to `CONNECTION_REGISTRY` directly (`CONNECTION_REGISTRY[x] = y`) would silently mutate `base.py`'s private state and bypass `register_connector()`'s guarantee that connector class and connection class stay paired. Treat `CONNECTION_REGISTRY` as read-only; register new connectors only through `register_connector()`. |
 
 ---
 

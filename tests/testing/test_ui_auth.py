@@ -71,6 +71,32 @@ async def test_capture_session_saves_on_success(monkeypatch, tmp_path):
     assert saved["k"]["storage_state"] == str(out)
 
 
+async def test_capture_session_restricts_file_perms(monkeypatch, tmp_path):
+    import sys
+    out = tmp_path / "s.json"
+    monkeypatch.setattr(_auth, "session_state_path", lambda p, h: out)
+    monkeypatch.setattr(_auth, "save_session", lambda *a, **k: None)
+
+    async def _ok(mode, url, o, extra, timeout):
+        Path(o).write_text("{}", encoding="utf-8")
+        Path(f"{o}.session").write_text("{}", encoding="utf-8")
+        return True, ""
+    monkeypatch.setattr(uiauth, "_run_harness", _ok)
+
+    await uiauth.capture_session("proj", "host", "http://x/login")
+    if sys.platform != "win32":
+        import stat
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
+        assert stat.S_IMODE((tmp_path / "s.json.session").stat().st_mode) == 0o600
+
+
+async def test_restrict_session_files_never_raises_when_companion_missing(tmp_path):
+    # Companion .session file absent (e.g. snapSession() failed harness-side) must not break capture.
+    out = tmp_path / "no-companion.json"
+    out.write_text("{}", encoding="utf-8")
+    uiauth._restrict_session_files(str(out))
+
+
 async def test_capture_session_none_on_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(_auth, "session_state_path", lambda p, h: tmp_path / "s.json")
 
@@ -88,9 +114,10 @@ async def test_inline_passes_credentials_and_success_url(monkeypatch, tmp_path):
     monkeypatch.setattr(_auth, "save_session", lambda *a, **k: None)
     seen = {}
 
-    async def _cap(mode, url, o, extra, timeout):
+    async def _cap(mode, url, o, extra, timeout, extra_env=None):
         seen["mode"] = mode
         seen["extra"] = extra
+        seen["extra_env"] = extra_env
         Path(o).write_text("{}", encoding="utf-8")
         return True, ""
     monkeypatch.setattr(uiauth, "_run_harness", _cap)
@@ -99,9 +126,47 @@ async def test_inline_passes_credentials_and_success_url(monkeypatch, tmp_path):
                                 success_url="http://x/home")
     e = seen["extra"]
     assert seen["mode"] == "inline"
-    assert "--user" in e and "admin" in e
-    assert "--pass" in e and "pw" in e
+    assert "--user" not in e and "admin" not in e
+    assert "--pass" not in e and "pw" not in e
+    assert seen["extra_env"] == {"ICX_AUTH_USER": "admin", "ICX_AUTH_PASS": "pw"}
     assert "--success-url" in e and "http://x/home" in e
+
+
+async def test_inline_session_password_never_in_argv_but_in_env(monkeypatch, tmp_path):
+    """Password must travel to the harness subprocess via env, never via argv - argv is
+    visible to other local users through process listing for the process's lifetime."""
+    monkeypatch.setattr(_auth, "session_state_path", lambda p, h: tmp_path / "s.json")
+    monkeypatch.setattr(_auth, "save_session", lambda *a, **k: None)
+    monkeypatch.setattr(uiauth, "_harness_env", lambda: ("node", {"PATH": "/x"}))
+    monkeypatch.setattr("icx_engine.testing.runners.install.auth_harness_path",
+                        lambda: str(tmp_path / "icx-auth.mjs"))
+    monkeypatch.setattr("icx_engine.testing.runners.install.runtime_harness_path",
+                        lambda name, path: path)
+    monkeypatch.setattr("icx_engine._proc.win_argv", lambda cmd: cmd)
+    captured = {}
+
+    class _FakeProc:
+        pid = 999
+        returncode = 0
+        async def communicate(self):
+            return b"", b""
+
+    async def _fake_exec(*args, **kwargs):
+        captured["cmd"] = list(args)
+        captured["env"] = kwargs.get("env")
+        return _FakeProc()
+    monkeypatch.setattr(uiauth.asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(uiauth.Path, "exists", lambda self: True)
+
+    secret_password = "s3cr3t-pw"
+    await uiauth.inline_session("p", "h", "http://x/login", "admin", secret_password)
+
+    cmd = captured["cmd"]
+    env = captured["env"]
+    assert secret_password not in cmd
+    assert not any(secret_password in str(part) for part in cmd)
+    assert env is not None and env.get("ICX_AUTH_PASS") == secret_password
+    assert env.get("ICX_AUTH_USER") == "admin"
 
 
 # -- packaged harness asset ---------------------------------------------------------

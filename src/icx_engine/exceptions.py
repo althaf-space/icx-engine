@@ -51,7 +51,14 @@ class ConfigError(ICXError):
 
 
 class ICXMemoryError(ICXError):
-    """Local memory operation failed (LanceDB, embeddings, or storage)."""
+    """Local memory operation failed (LanceDB, embeddings, or storage).
+
+    This signals an infrastructure/operational failure, NOT "entry not found" -
+    e.g. MemoryManager.save/delete/clear raise this only when the underlying
+    storage operation itself fails. "Entry not found" for an existing-entry
+    lookup is a separate, expected business outcome handled elsewhere: a dict
+    with an "error" key (reinforce_usage/verify_resolution/negate_resolution) or
+    a plain None (show/_find_by_key) - see those methods' own docstrings."""
 
 
 # Back-compat alias. Prefer ICXMemoryError; the bare name `MemoryError` shadows
@@ -61,3 +68,13 @@ MemoryError = ICXMemoryError
 
 class GraphError(ICXError):
     """Codebase graph operation failed (build, query, storage, or registration)."""
+
+
+class JiraValidationError(ICXError):
+    """400 from a Jira write call - carries the per-field validator errors
+    from the response body (`errors`) so callers can ask for exactly what's
+    missing instead of just failing."""
+
+    def __init__(self, message: str, errors: dict | None = None):
+        super().__init__(message)
+        self.errors = errors or {}

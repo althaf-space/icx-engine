@@ -1,6 +1,6 @@
 import icx_engine.config_manager as cm
 from icx_engine.config_manager import ConfigManager
-from icx_engine.models.config import AppConfig, SonarConnection
+from icx_engine.models.config import AppConfig, GitLabConnection, SonarConnection
 
 
 def test_sonar_connection_token_roundtrip_and_excluded(isolated_config, monkeypatch):
@@ -106,3 +106,78 @@ def test_legacy_config_loads_as_connection(isolated_config):
     assert "default" in loaded.sonar_connections
     assert loaded.active_sonar == "default"
     assert loaded.sonar_connections["default"].url == "http://legacy:9000"
+
+
+# --- GitLab connection (mirrors the Sonar connection tests above) ---
+
+def test_gitlab_connection_model_excludes_token():
+    gc = GitLabConnection(name="x", url="http://x.gitlab.com", token="t")
+    assert "token" not in gc.model_dump()
+
+
+def test_app_config_active_gitlab_connection_resolves_named_entry():
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    config = AppConfig(gitlab_connections={"gitlab.example.com": conn}, active_gitlab="gitlab.example.com")
+    assert config.active_gitlab_connection() == conn
+
+
+def test_app_config_active_gitlab_connection_none_when_unset():
+    config = AppConfig()
+    assert config.active_gitlab_connection() is None
+
+
+def test_gitlab_connection_token_roundtrip_and_excluded(isolated_config, monkeypatch):
+    # Pin a deterministic in-memory keychain so the test exercises the secure
+    # path (sentinel on disk, token in keychain) on every platform. Headless CI
+    # has no OS keyring, where save() would otherwise fall back to intentional
+    # plaintext storage and this exclusion assertion would spuriously fail.
+    store: dict[str, str] = {}
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kset", lambda account, value: store.__setitem__(account, value) or True)
+    monkeypatch.setattr(cm, "_kget", lambda account: store.get(account))
+    monkeypatch.setattr(cm, "_kdel", lambda account: store.pop(account, None))
+
+    cfg = AppConfig()
+    cfg.gitlab_connections = {
+        "gitlab.example.com": GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-secret"),
+    }
+    cfg.active_gitlab = "gitlab.example.com"
+    ConfigManager.save(cfg)
+
+    # token must never be written to the plaintext config file
+    disk = isolated_config.read_text(encoding="utf-8")
+    assert "glpat-secret" not in disk
+
+    loaded = ConfigManager.load()
+    assert loaded.active_gitlab == "gitlab.example.com"
+    assert loaded.gitlab_connections["gitlab.example.com"].url == "https://gitlab.example.com"
+    assert loaded.gitlab_connections["gitlab.example.com"].token == "glpat-secret"
+
+
+def test_config_manager_saves_and_loads_gitlab_token_via_plaintext_fallback(isolated_config, monkeypatch):
+    # deterministic plaintext-fallback path (no OS keyring available in CI)
+    monkeypatch.setattr(cm, "_check_keychain", lambda: False)
+    cfg = AppConfig(gitlab_connections={
+        "gitlab.example.com": GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-secret"),
+    }, active_gitlab="gitlab.example.com")
+    ConfigManager.save(cfg)
+    reloaded = ConfigManager.load()
+    assert reloaded.gitlab_connections["gitlab.example.com"].token == "glpat-secret"
+
+
+def test_config_manager_delete_gitlab_connection_secret_is_a_noop_without_keychain(monkeypatch):
+    monkeypatch.setattr(cm, "_check_keychain", lambda: False)
+    ConfigManager.delete_gitlab_connection_secret("gitlab.example.com")  # must not raise
+
+
+def test_delete_all_secrets_clears_gitlab_connection_accounts(monkeypatch):
+    deleted = []
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kdel", lambda account: deleted.append(account))
+    cfg = AppConfig()
+    cfg.gitlab_connections = {
+        "gitlab.example.com": GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="t1"),
+    }
+    cfg.active_gitlab = "gitlab.example.com"
+    ConfigManager.delete_all_secrets(cfg)
+    assert "gitlab_conn_token:gitlab.example.com" in deleted
