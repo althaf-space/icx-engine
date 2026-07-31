@@ -24,7 +24,7 @@ def test_full_help_lists_every_command():
 
     def walk(cmd, prefix=""):
         out = []
-        if isinstance(cmd, click.Group):
+        if hasattr(cmd, "commands"):
             for name, sub in cmd.commands.items():
                 out += walk(sub, (prefix + " " + name).strip())
         else:
@@ -47,7 +47,7 @@ def test_every_leaf_command_has_debug_and_traceback_options():
 
     def leaf_commands(cmd, prefix=""):
         out = []
-        if isinstance(cmd, click.Group):
+        if hasattr(cmd, "commands"):
             for name, sub in cmd.commands.items():
                 out += leaf_commands(sub, (prefix + " " + name).strip())
         else:

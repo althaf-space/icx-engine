@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import sys
 import pytest
 from pathlib import Path
 from pydantic import ValidationError
@@ -712,7 +713,13 @@ def test_lock_file_removed_after_save(isolated_config, monkeypatch):
     monkeypatch.setattr(cm, "_keychain_ok", False)
     lock_path = cm.CONFIG_PATH.with_suffix(".lock")
     cm.ConfigManager.save(AppConfig())
-    assert not lock_path.exists(), "lock file should be removed after save"
+    # Windows unlinks the lock file after use; POSIX keeps it as a permanent flock
+    # sentinel (unlink-after-unlock would be a flock-then-unlink TOCTOU race) - see
+    # the _config_lock() docstring in config_manager.py.
+    if sys.platform == "win32":
+        assert not lock_path.exists(), "lock file should be removed after save on Windows"
+    else:
+        assert lock_path.exists(), "lock sentinel should persist after save on POSIX"
 
 
 def test_lock_file_removed_after_save_exception(isolated_config, monkeypatch):
@@ -730,7 +737,12 @@ def test_lock_file_removed_after_save_exception(isolated_config, monkeypatch):
     with pytest.raises(OSError, match="simulated replace failure"):
         cm.ConfigManager.save(AppConfig())
 
-    assert not lock_path.exists(), "lock must be released even when save raises"
+    # See test_lock_file_removed_after_save: POSIX keeps the lock file as a permanent
+    # sentinel by design; only Windows unlinks it.
+    if sys.platform == "win32":
+        assert not lock_path.exists(), "lock must be released even when save raises"
+    else:
+        assert lock_path.exists(), "lock sentinel should persist even when save raises"
 
 
 def test_concurrent_saves_produce_valid_config(isolated_config, monkeypatch):
@@ -764,9 +776,14 @@ def test_concurrent_saves_produce_valid_config(isolated_config, monkeypatch):
     assert isinstance(raw, dict)
     loaded = cm.ConfigManager.load()
     assert loaded.current_llm_profile == "p"
-    # No orphaned temp or lock files
+    # No orphaned temp files. Lock file: Windows unlinks it, POSIX keeps it as a
+    # permanent flock sentinel by design - see test_lock_file_removed_after_save.
     assert not list(isolated_config.parent.glob("*.tmp.*"))
-    assert not isolated_config.with_suffix(".lock").exists()
+    lock_path = isolated_config.with_suffix(".lock")
+    if sys.platform == "win32":
+        assert not lock_path.exists()
+    else:
+        assert lock_path.exists()
 
 
 def test_oauth_plaintext_fallback_warns_to_stderr(isolated_config, monkeypatch, capsys):
