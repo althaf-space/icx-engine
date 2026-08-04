@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.6.1"
-description = "ICX (Integrated Contextual X-ecution Engine): an AI-native intelligence layer for development teams. Extracts deep issue context from work trackers, processes attachments including images, documents, audio and video, runs multi-provider LLM analysis, maintains a local-first RAG memory, builds a multi-language codebase knowledge graph, reads SonarQube code-quality findings, drives AI-assisted testing, automates the full git/GitLab workflow (branch, commit, MR, tag, safety-netted with confirmation gates), and integrates Workstatus time-tracking. Exposes everything to AI editors over MCP and the CLI."
+version = "0.6.0"
+description = "ICX (Integrated Contextual X-ecution Engine): an AI-native intelligence layer for development teams. Extracts deep issue context from work trackers, processes attachments, runs multi-provider LLM analysis, maintains local-first RAG memory, builds a codebase knowledge graph, reads SonarQube findings, drives AI-assisted testing, automates the git/GitLab workflow (confirmation-gated), and integrates Workstatus time-tracking. Exposes everything to AI editors over MCP and the CLI."
 readme = "readme.md"
 license = { file = "license" }
 authors = [
