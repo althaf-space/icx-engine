@@ -58,3 +58,37 @@ def test_skips_vendored_dirs(tmp_path):
     nm.mkdir(parents=True)
     (nm / "c.py").write_text('S = "sk_live_ABCDEFGHIJKLMNOPQRSTUVWX"\n', encoding="utf-8")
     assert scan_secrets(tmp_path) == []
+
+
+def test_raised_threshold_excludes_ordinary_low_entropy_value(tmp_path):
+    # entropy ~3.18 - would have fired under the old 3.0 threshold, correctly excluded now.
+    (tmp_path / "c.py").write_text('password = "mysecretpass1"\n', encoding="utf-8")
+    assert not any(x.rule == "hardcoded-credential" for x in scan_secrets(tmp_path))
+
+
+def test_placeholder_substring_marker_excludes_fake_prefixed_value(tmp_path):
+    # entropy 4.0, 16 chars - would otherwise fire; "fake" substring must exclude it even though
+    # it isn't a pure exact match against the whole-value placeholder list.
+    (tmp_path / "c.py").write_text('api_key = "fakeK9!zR2mXq7pL"\n', encoding="utf-8")
+    assert not any(x.rule == "hardcoded-credential" for x in scan_secrets(tmp_path))
+
+
+def test_git_sha_like_value_not_flagged(tmp_path):
+    # 40-hex, entropy ~3.77 - would otherwise fire; a git SHA is a well-known non-secret format.
+    (tmp_path / "c.py").write_text(
+        'commit_secret = "a3f5c9e1b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2"\n', encoding="utf-8")
+    assert not any(x.rule == "hardcoded-credential" for x in scan_secrets(tmp_path))
+
+
+def test_real_looking_secret_in_test_path_is_downgraded_not_dropped(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_foo.py").write_text('password = "S3cr3tP@ssw0rd123XZ"\n', encoding="utf-8")
+    f = [x for x in scan_secrets(tmp_path) if x.rule == "hardcoded-credential"]
+    assert f and f[0].severity == "info"
+
+
+def test_same_value_outside_test_path_stays_high_severity(tmp_path):
+    (tmp_path / "config.py").write_text('password = "S3cr3tP@ssw0rd123XZ"\n', encoding="utf-8")
+    f = [x for x in scan_secrets(tmp_path) if x.rule == "hardcoded-credential"]
+    assert f and f[0].severity == "high"

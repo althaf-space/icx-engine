@@ -1,6 +1,12 @@
 """Native secrets scanner - deterministic regex ruleset over the repo's own source. Catches the
 high-frequency real leaks (cloud keys, private keys, tokens, hardcoded credentials) plus a
-high-entropy assignment heuristic. No external tool, no network."""
+high-entropy assignment heuristic. No external tool, no network.
+
+False-positive tightening on the entropy heuristic (the pattern-based rules above it are exact
+tokens and need no tightening): the threshold alone was too permissive (ordinary mixed-case
+strings 6+ chars routinely clear 3.0 bits/char), so four independent narrowings apply before a
+`hardcoded-credential` finding fires - see `_looks_placeholder`/`_looks_non_secret_format`/
+`_is_test_path` and the raised threshold/length floor in `scan_secrets`."""
 from __future__ import annotations
 
 import re
@@ -44,14 +50,34 @@ _ASSIGN = re.compile(
     \s*[:=]\s*
     ['"]([^'"\n]{6,})['"]
     """)
-# Values that are obviously not real secrets (placeholders, env indirection).
+# Values that are obviously not real secrets (placeholders, env indirection) - whole-value match.
 _PLACEHOLDER = re.compile(
     r"(?i)^(?:x{3,}|\*{3,}|\.{3,}|changeme|placeholder|example|your[_-]?|<[^>]+>|\$\{?[a-z0-9_]+\}?|"
     r"process\.env|os\.environ|none|null|true|false|test|dummy|sample|redacted|\d+)$")
+# Same intent word, but as a substring - catches "testpassword123", "fake_key_1", "sample-token-x"
+# etc, which the whole-value list above misses because they aren't a pure exact match.
+_PLACEHOLDER_MARKER = re.compile(r"(?i)test|dummy|fake|sample|example|placeholder|changeme")
+# High-entropy but well-known NON-secret formats: UUIDs and git SHAs (short or full hex).
+_NON_SECRET_FORMAT = re.compile(
+    r"(?i)^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{7,8}|[0-9a-f]{40}|[0-9a-f]{64})$")
+# Paths whose secret-shaped values are almost always deliberate test fixtures, not real leaks.
+_TEST_PATH = re.compile(r"(?i)(^|[/\\])(tests?|specs?|fixtures?|mocks?|__tests__)([/\\]|$)|[_.-]test\.|test[_.-]")
+
+_ENTROPY_THRESHOLD = 3.5
+_ENTROPY_MIN_LEN = 12   # below this, entropy is too noisy to be a reliable signal either way
 
 
 def _looks_placeholder(v: str) -> bool:
-    return bool(_PLACEHOLDER.match(v.strip()))
+    v = v.strip()
+    return bool(_PLACEHOLDER.match(v) or _PLACEHOLDER_MARKER.search(v))
+
+
+def _looks_non_secret_format(v: str) -> bool:
+    return bool(_NON_SECRET_FORMAT.match(v.strip()))
+
+
+def _is_test_path(relp: str) -> bool:
+    return bool(_TEST_PATH.search(relp))
 
 
 def scan_secrets(repo: Path, file_limit: int = 6000) -> list[Finding]:
@@ -75,9 +101,17 @@ def scan_secrets(repo: Path, file_limit: int = 6000) -> list[Finding]:
             m = _ASSIGN.search(line)
             if m:
                 val = m.group(2)
-                if not _looks_placeholder(val) and shannon_entropy(val) >= 3.0:
+                if (
+                    len(val) >= _ENTROPY_MIN_LEN
+                    and not _looks_placeholder(val)
+                    and not _looks_non_secret_format(val)
+                    and shannon_entropy(val) >= _ENTROPY_THRESHOLD
+                ):
+                    # Deliberate test fixtures still get reported (a real secret can genuinely leak
+                    # into a fixture) but downgraded so it doesn't drown out production findings.
+                    severity = "info" if _is_test_path(relp) else "high"
                     findings.append(Finding(
-                        scanner="secrets", rule="hardcoded-credential", severity="high",
+                        scanner="secrets", rule="hardcoded-credential", severity=severity,
                         title="Hardcoded credential", file=relp, line=i,
                         detail=f"'{m.group(1)}' assigned a literal value in source.",
                         snippet=_mask(line.replace(val, val[:2] + "..."))))

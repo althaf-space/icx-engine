@@ -1,6 +1,6 @@
 import icx_engine.config_manager as cm
 from icx_engine.config_manager import ConfigManager
-from icx_engine.models.config import AppConfig, GitLabConnection, SonarConnection
+from icx_engine.models.config import AppConfig, GitLabConnection, SonarConnection, WorkstatusConnection
 
 
 def test_sonar_connection_token_roundtrip_and_excluded(isolated_config, monkeypatch):
@@ -181,3 +181,102 @@ def test_delete_all_secrets_clears_gitlab_connection_accounts(monkeypatch):
     cfg.active_gitlab = "gitlab.example.com"
     ConfigManager.delete_all_secrets(cfg)
     assert "gitlab_conn_token:gitlab.example.com" in deleted
+
+
+def test_workstatus_connection_model_excludes_secrets():
+    wc = WorkstatusConnection(name="x", user_id="1", org_id="2", authorization="a", sd_token="s")
+    dumped = wc.model_dump()
+    assert "authorization" not in dumped
+    assert "sd_token" not in dumped
+
+
+def test_app_config_active_workstatus_connection_resolves_named_entry():
+    conn = WorkstatusConnection(name="default", user_id="1", org_id="2", authorization="a", sd_token="s")
+    config = AppConfig(workstatus_connections={"default": conn}, active_workstatus="default")
+    assert config.active_workstatus_connection() == conn
+
+
+def test_app_config_active_workstatus_connection_none_when_unset():
+    config = AppConfig()
+    assert config.active_workstatus_connection() is None
+
+
+def test_app_config_migrates_legacy_workstatus_integration_to_named_connection():
+    config = AppConfig(integrations={
+        "workstatus": {"user_id": "1", "org_id": "2", "device_type": "web",
+                        "authorization": "Bearer a", "sd_token": "s"},
+    })
+    assert config.active_workstatus == "default"
+    assert config.workstatus_connections["default"].user_id == "1"
+    assert config.workstatus_connections["default"].authorization == "Bearer a"
+    assert "workstatus" not in config.integrations
+
+
+def test_app_config_legacy_workstatus_migration_does_not_override_existing_active():
+    conn = WorkstatusConnection(name="work", user_id="9", org_id="9", authorization="b", sd_token="t")
+    config = AppConfig(
+        workstatus_connections={"work": conn}, active_workstatus="work",
+        integrations={"workstatus": {"user_id": "1", "org_id": "2", "authorization": "a", "sd_token": "s"}},
+    )
+    # workstatus_connections already populated - migration must not run again / overwrite it
+    assert config.active_workstatus == "work"
+    assert "default" not in config.workstatus_connections
+
+
+def test_workstatus_connection_secrets_roundtrip_and_excluded(isolated_config, monkeypatch):
+    store: dict[str, str] = {}
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kset", lambda account, value: store.__setitem__(account, value) or True)
+    monkeypatch.setattr(cm, "_kget", lambda account: store.get(account))
+    monkeypatch.setattr(cm, "_kdel", lambda account: store.pop(account, None))
+
+    cfg = AppConfig()
+    cfg.workstatus_connections = {
+        "default": WorkstatusConnection(
+            name="default", user_id="175599", org_id="8570",
+            authorization="Bearer secret-auth", sd_token="secret-sd-token",
+        ),
+    }
+    cfg.active_workstatus = "default"
+    ConfigManager.save(cfg)
+
+    disk = isolated_config.read_text(encoding="utf-8")
+    assert "secret-auth" not in disk
+    assert "secret-sd-token" not in disk
+
+    loaded = ConfigManager.load()
+    assert loaded.active_workstatus == "default"
+    assert loaded.workstatus_connections["default"].user_id == "175599"
+    assert loaded.workstatus_connections["default"].authorization == "Bearer secret-auth"
+    assert loaded.workstatus_connections["default"].sd_token == "secret-sd-token"
+
+
+def test_config_manager_saves_and_loads_workstatus_secrets_via_plaintext_fallback(isolated_config, monkeypatch):
+    monkeypatch.setattr(cm, "_check_keychain", lambda: False)
+    cfg = AppConfig(workstatus_connections={
+        "default": WorkstatusConnection(name="default", user_id="1", org_id="2",
+                                         authorization="Bearer secret-auth", sd_token="secret-sd-token"),
+    }, active_workstatus="default")
+    ConfigManager.save(cfg)
+    reloaded = ConfigManager.load()
+    assert reloaded.workstatus_connections["default"].authorization == "Bearer secret-auth"
+    assert reloaded.workstatus_connections["default"].sd_token == "secret-sd-token"
+
+
+def test_config_manager_delete_workstatus_connection_secret_is_a_noop_without_keychain(monkeypatch):
+    monkeypatch.setattr(cm, "_check_keychain", lambda: False)
+    ConfigManager.delete_workstatus_connection_secret("default")  # must not raise
+
+
+def test_delete_all_secrets_clears_workstatus_connection_accounts(monkeypatch):
+    deleted = []
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kdel", lambda account: deleted.append(account))
+    cfg = AppConfig()
+    cfg.workstatus_connections = {
+        "default": WorkstatusConnection(name="default", user_id="1", org_id="2", authorization="a", sd_token="s"),
+    }
+    cfg.active_workstatus = "default"
+    ConfigManager.delete_all_secrets(cfg)
+    assert "workstatus_conn_authorization:default" in deleted
+    assert "workstatus_conn_sd_token:default" in deleted

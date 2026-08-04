@@ -709,6 +709,24 @@ class ConfigManager:
             elif _gc_tok:
                 needs_secret_migration = True
 
+        # Resolve per-connection Workstatus secrets (mirrors gitlab_connections above,
+        # but two secret fields per connection instead of one).
+        for _wc_name, _wc in (raw.get("workstatus_connections") or {}).items():
+            if not isinstance(_wc, dict):
+                continue
+            for _wc_field in ("authorization", "sd_token"):
+                _wc_acct = f"workstatus_conn_{_wc_field}:{_wc_name}"
+                _wc_val = _wc.get(_wc_field) or ""
+                if _wc_val == _SENTINEL:
+                    _wc[_wc_field] = _resolve(_wc_acct) or None
+                elif isinstance(_wc_val, str) and _wc_val.startswith(_DLOCK_PREFIX):
+                    try:
+                        _wc[_wc_field] = _dlock_decrypt(_wc_val)
+                    except Exception:
+                        _wc[_wc_field] = _env_get(_wc_acct) or None
+                elif _wc_val:
+                    needs_secret_migration = True
+
         # Resolve secret fields for registered third-party integrations.
         # No-op for configs without an "integrations" map (i.e. every existing config).
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
@@ -881,6 +899,25 @@ class ConfigManager:
                 _gc_raw["token"] = _gc_tok
                 _warn_plaintext(_gc_acct, f"GitLab token for connection '{_gc_name}'")
 
+        # Store per-connection Workstatus secrets via keyring (mirrors gitlab_connections
+        # above, but two secret fields per connection instead of one).
+        for _wc_name, _wc_model in config.workstatus_connections.items():
+            if _wc_name not in raw.get("workstatus_connections", {}):
+                continue
+            _wc_raw = raw["workstatus_connections"][_wc_name]
+            for _wc_field in ("authorization", "sd_token"):
+                _wc_val = getattr(_wc_model, _wc_field, None) or ""
+                if not _wc_val:
+                    continue
+                _wc_acct = f"workstatus_conn_{_wc_field}:{_wc_name}"
+                if _check_keychain() and len(_wc_val) > _DLOCK_THRESHOLD:
+                    _wc_raw[_wc_field] = _dlock_encrypt(_wc_val)
+                elif _check_keychain() and _kset(_wc_acct, _wc_val):
+                    _wc_raw[_wc_field] = _SENTINEL
+                else:
+                    _wc_raw[_wc_field] = _wc_val
+                    _warn_plaintext(_wc_acct, f"Workstatus {_wc_field} for connection '{_wc_name}'")
+
         # Store secret fields for registered integrations (generic; excluded
         # from plaintext serialization). No-op when no integrations are stored.
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
@@ -967,6 +1004,9 @@ class ConfigManager:
             _kdel(f"sonar_conn_token:{_sc_name}")
         for _gc_name in (config.gitlab_connections or {}):
             _kdel(f"gitlab_conn_token:{_gc_name}")
+        for _wc_name in (config.workstatus_connections or {}):
+            _kdel(f"workstatus_conn_authorization:{_wc_name}")
+            _kdel(f"workstatus_conn_sd_token:{_wc_name}")
         # Registered integration secrets.
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
         for _int_name in (config.integrations or {}):
@@ -1003,6 +1043,13 @@ class ConfigManager:
         if not _check_keychain():
             return
         _kdel(f"gitlab_conn_token:{name}")
+
+    @staticmethod
+    def delete_workstatus_connection_secret(name: str) -> None:
+        if not _check_keychain():
+            return
+        _kdel(f"workstatus_conn_authorization:{name}")
+        _kdel(f"workstatus_conn_sd_token:{name}")
 
     @staticmethod
     def delete_llm_profile_secrets(profile_name: str) -> None:

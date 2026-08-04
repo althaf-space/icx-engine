@@ -37,11 +37,16 @@ def test_advisory_not_matched_when_patched(tmp_path):
 
 def test_package_json_parsed(tmp_path):
     (tmp_path / "package.json").write_text(
-        json.dumps({"dependencies": {"lodash": "^4.17.0", "react": "18.2.0"}}), encoding="utf-8")
+        json.dumps({"dependencies": {"lodash": "^4.17.0", "react": "18.2.0", "left-pad": "*"}}),
+        encoding="utf-8")
     f = scan_deps(tmp_path)
-    # caret range is not an exact pin -> unpinned
-    assert any(x.extra.get("package") == "lodash" and x.rule == "unpinned-dependency" for x in f)
-    assert not any(x.extra.get("package") == "react" and x.rule == "unpinned-dependency" for x in f)
+    # caret range is a bounded, intentional pin -> low-noise "ranged", not "unpinned"
+    assert any(x.extra.get("package") == "lodash" and x.rule == "ranged-dependency" for x in f)
+    assert not any(x.extra.get("package") == "lodash" and x.rule == "unpinned-dependency" for x in f)
+    # exact version -> no finding at all
+    assert not any(x.extra.get("package") == "react" for x in f)
+    # a true wildcard is still "unpinned"
+    assert any(x.extra.get("package") == "left-pad" and x.rule == "unpinned-dependency" for x in f)
 
 
 def test_go_mod_parsed_and_advisory(tmp_path):
@@ -58,6 +63,30 @@ def test_empty_and_missing_manifests_no_crash(tmp_path):
     assert scan_deps(tmp_path) == []
     (tmp_path / "package.json").write_text("{not valid json", encoding="utf-8")
     assert isinstance(scan_deps(tmp_path), list)
+
+
+def test_requirements_semver_range_is_ranged_not_unpinned(tmp_path):
+    (tmp_path / "requirements.txt").write_text(
+        "requests~=2.31\nflask>=2.0,<3.0\ndjango\n", encoding="utf-8")
+    f = scan_deps(tmp_path)
+    assert any(x.extra.get("package") == "requests" and x.rule == "ranged-dependency" for x in f)
+    assert any(x.extra.get("package") == "flask" and x.rule == "ranged-dependency" for x in f)
+    assert not any(x.extra.get("package") in ("requests", "flask") and x.rule == "unpinned-dependency" for x in f)
+    # bare package name (no spec at all) is still a true unpinned wildcard
+    assert any(x.extra.get("package") == "django" and x.rule == "unpinned-dependency" for x in f)
+
+
+def test_pom_bracket_range_is_ranged_latest_release_still_unpinned(tmp_path):
+    (tmp_path / "pom.xml").write_text(
+        "<project>"
+        "<dependency><artifactId>a</artifactId><version>[1.0,2.0)</version></dependency>"
+        "<dependency><artifactId>b</artifactId><version>LATEST</version></dependency>"
+        "<dependency><artifactId>c</artifactId><version>1.2.3</version></dependency>"
+        "</project>", encoding="utf-8")
+    f = scan_deps(tmp_path)
+    assert any(x.extra.get("package") == "a" and x.rule == "ranged-dependency" for x in f)
+    assert any(x.extra.get("package") == "b" and x.rule == "unpinned-dependency" for x in f)
+    assert not any(x.extra.get("package") == "c" for x in f)
 
 
 def test_advisory_env_override(tmp_path, monkeypatch):

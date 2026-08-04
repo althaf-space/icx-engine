@@ -129,6 +129,23 @@ def test_auth_error_jira_shows_connection_command():
     assert "icx model --add" not in output
 
 
+def test_auth_error_workstatus_shows_workstatus_command_not_connection():
+    """Regression: a Workstatus AuthError used to fall through to the generic
+    'icx connection --add' hint, which is the wrong command entirely for this
+    integration (Workstatus is not in AppConfig.connections)."""
+    from io import StringIO
+    from rich.console import Console as RichConsole
+    from icx_engine.exceptions import AuthError
+    from icx_engine.error_display import render_icx_error
+
+    buf = StringIO()
+    console = RichConsole(file=buf, highlight=False)
+    render_icx_error(AuthError("Listing Workstatus projects failed: Workstatus permission denied (HTTP 403)."), console)
+    output = buf.getvalue()
+    assert "icx workstatus --add" in output
+    assert "icx connection --add" not in output
+
+
 def test_auth_error_case_insensitive_detection():
     from io import StringIO
     from rich.console import Console as RichConsole

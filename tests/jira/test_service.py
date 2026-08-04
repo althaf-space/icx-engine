@@ -9,19 +9,28 @@ class _FakeJiraClient:
     """Stand-in for JiraClient at the method level - service.py never sees the
     real HTTP transport once _make_client is monkeypatched."""
 
-    def __init__(self, transitions=None, editmeta=None, transition_error=None, update_error=None):
+    def __init__(
+        self, transitions=None, editmeta=None, transition_error=None, update_error=None,
+        status="In Progress",
+    ):
         self._transitions = transitions if transitions is not None else []
         self._editmeta = editmeta if editmeta is not None else {}
         self._transition_error = transition_error
         self._update_error = update_error
+        self._status = status
         self.transition_calls: list[dict] = []
         self.update_calls: list[dict] = []
+        self.get_issue_raw_calls: list[dict] = []
 
     async def get_transitions(self, issue_key):
         return self._transitions
 
     async def get_editmeta(self, issue_key):
         return self._editmeta
+
+    async def get_issue_raw(self, issue_key, fields=None):
+        self.get_issue_raw_calls.append({"issue_key": issue_key, "fields": fields})
+        return {"fields": {"status": {"name": self._status}}}
 
     async def transition_issue(self, issue_key, transition_id=None, fields=None, comment_adf=None):
         self.transition_calls.append({
@@ -51,8 +60,110 @@ async def test_get_close_requirements_merges_transitions_and_editmeta(monkeypatc
     out = await service.get_close_requirements("TEST-1")
 
     assert out["issue_key"] == "TEST-1"
+    assert out["status"] == "In Progress"
     assert out["transitions"] == fake._transitions
     assert out["editable_fields"] == fake._editmeta
+
+
+# -- get_close_requirements: since_status diff-on-repeat (JIRA-3) ------------
+
+@pytest.mark.asyncio
+async def test_get_close_requirements_since_status_matches_returns_compact_unchanged(monkeypatch, app_config):
+    fake = _FakeJiraClient(
+        transitions=[{"id": "11", "name": "To Do"}],
+        editmeta={"summary": {"required": True}},
+        status="In Progress",
+    )
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    out = await service.get_close_requirements("TEST-1", since_status="In Progress")
+
+    assert out == {
+        "issue_key": "TEST-1",
+        "status": "In Progress",
+        "unchanged": True,
+        "note": out["note"],
+    }
+    assert "transitions" not in out
+    assert "editable_fields" not in out
+
+
+@pytest.mark.asyncio
+async def test_get_close_requirements_since_status_mismatch_returns_full_bundle(monkeypatch, app_config):
+    fake = _FakeJiraClient(
+        transitions=[{"id": "21", "name": "Done"}],
+        editmeta={"summary": {"required": True}},
+        status="Done",
+    )
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    out = await service.get_close_requirements("TEST-1", since_status="In Progress")
+
+    assert out["status"] == "Done"
+    assert out["transitions"] == fake._transitions
+    assert out["editable_fields"] == fake._editmeta
+    assert "unchanged" not in out
+
+
+@pytest.mark.asyncio
+async def test_get_close_requirements_no_since_status_always_returns_full_bundle(monkeypatch, app_config):
+    fake = _FakeJiraClient(transitions=[{"id": "11"}], editmeta={}, status="In Progress")
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    out = await service.get_close_requirements("TEST-1")
+
+    assert out["status"] == "In Progress"
+    assert "transitions" in out and "editable_fields" in out
+
+
+@pytest.mark.asyncio
+async def test_get_close_requirements_default_keeps_allowed_values(monkeypatch, app_config):
+    fake = _FakeJiraClient(
+        transitions=[{"id": "21", "name": "Done", "fields": {
+            "resolution": {"required": True, "allowedValues": [{"id": "1", "name": "Fixed"}]},
+        }}],
+        editmeta={"customfield_10050": {
+            "required": True, "schema": {"type": "option"},
+            "allowedValues": [{"id": "1", "value": "Critical"}, {"id": "2", "value": "Major"}],
+        }},
+    )
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    out = await service.get_close_requirements("TEST-1")
+
+    assert "allowedValues" in out["editable_fields"]["customfield_10050"]
+    assert "allowedValues" in out["transitions"][0]["fields"]["resolution"]
+
+
+@pytest.mark.asyncio
+async def test_get_close_requirements_strips_allowed_values_when_disabled(monkeypatch, app_config):
+    fake = _FakeJiraClient(
+        transitions=[{"id": "21", "name": "Done", "fields": {
+            "resolution": {"required": True, "allowedValues": [{"id": "1", "name": "Fixed"}]},
+        }}],
+        editmeta={"customfield_10050": {
+            "required": True, "schema": {"type": "option"},
+            "allowedValues": [{"id": "1", "value": "Critical"}, {"id": "2", "value": "Major"}],
+        }},
+    )
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    out = await service.get_close_requirements("TEST-1", include_allowed_values=False)
+
+    field = out["editable_fields"]["customfield_10050"]
+    assert "allowedValues" not in field
+    assert field["required"] is True
+    assert field["schema"] == {"type": "option"}
+    transition_field = out["transitions"][0]["fields"]["resolution"]
+    assert "allowedValues" not in transition_field
+    assert transition_field["required"] is True
+    # transition's own name/id metadata untouched, only its nested fields trimmed
+    assert out["transitions"][0]["name"] == "Done"
 
 
 # -- apply_update: transition-only / fields-only branching -------------------
@@ -304,6 +415,46 @@ async def test_create_issue_passes_through_and_returns_ok_dict(monkeypatch, app_
         "project": "ABC", "issuetype": "Bug", "summary": "Something broke",
         "extra_fields": {"priority": {"name": "High"}},
     }]
+
+
+async def test_create_issue_wraps_plain_string_description_in_adf(monkeypatch, app_config):
+    """Real gap fixed: Jira's REST API v3 requires `description` to be ADF, not a
+    plain string - a bare string was previously sent through unmodified and
+    rejected by Jira, with no distinguishing error. Mirrors _text_to_adf's
+    existing use for comment bodies exactly."""
+    fake = _FakeCreateDeleteClient(create_key="ABC-101")
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    out = await service.create_issue("ABC", "Bug", "Something broke", fields={"description": "Steps to reproduce..."})
+
+    sent_fields = fake.create_issue_calls[0]["extra_fields"]
+    assert sent_fields["description"] == {
+        "type": "doc", "version": 1,
+        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Steps to reproduce..."}]}],
+    }
+    assert out["fields"]["description"] == sent_fields["description"]
+
+
+async def test_create_issue_leaves_already_adf_description_untouched(monkeypatch, app_config):
+    fake = _FakeCreateDeleteClient(create_key="ABC-102")
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+    already_adf = {"type": "doc", "version": 1, "content": []}
+
+    await service.create_issue("ABC", "Bug", "Something broke", fields={"description": already_adf})
+
+    assert fake.create_issue_calls[0]["extra_fields"]["description"] == already_adf
+
+
+async def test_create_issue_with_no_description_field_unaffected(monkeypatch, app_config):
+    fake = _FakeCreateDeleteClient(create_key="ABC-103")
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    await service.create_issue("ABC", "Bug", "Something broke", fields={"priority": {"name": "High"}})
+
+    assert fake.create_issue_calls[0]["extra_fields"] == {"priority": {"name": "High"}}
 
 
 @pytest.mark.asyncio
@@ -711,15 +862,17 @@ class _FakeLinkClient:
     """Stand-in for JiraClient at the method level for link/assignee methods."""
 
     def __init__(self, link_types=None, create_link_error=None,
-                 delete_link_error=None, set_assignee_error=None):
+                 delete_link_error=None, set_assignee_error=None, assignable_users=None):
         self._link_types = link_types if link_types is not None else []
         self._create_link_error = create_link_error
         self._delete_link_error = delete_link_error
         self._set_assignee_error = set_assignee_error
+        self._assignable_users = assignable_users if assignable_users is not None else []
         self.list_link_types_calls = 0
         self.create_link_calls: list[dict] = []
         self.delete_link_calls: list[str] = []
         self.set_assignee_calls: list[dict] = []
+        self.search_assignable_users_calls: list[dict] = []
 
     async def list_link_types(self):
         self.list_link_types_calls += 1
@@ -741,6 +894,10 @@ class _FakeLinkClient:
         self.set_assignee_calls.append({"issue_key": issue_key, "account_id": account_id})
         if self._set_assignee_error:
             raise self._set_assignee_error
+
+    async def search_assignable_users(self, issue_key, query):
+        self.search_assignable_users_calls.append({"issue_key": issue_key, "query": query})
+        return self._assignable_users
 
 
 @pytest.mark.asyncio
@@ -924,6 +1081,36 @@ async def test_set_assignee_ambiguous_connection_raises_no_connection_error(monk
     monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: multi_connection_config))
     with pytest.raises(NoConnectionError):
         await service.set_assignee("TEST-1", "acc-1")
+
+
+@pytest.mark.asyncio
+async def test_search_assignable_users_passes_through(monkeypatch, app_config):
+    fake = _FakeLinkClient(assignable_users=[{"accountId": "acc-1", "displayName": "Jane"}])
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    out = await service.search_assignable_users("TEST-1")
+
+    assert out == [{"accountId": "acc-1", "displayName": "Jane"}]
+    assert fake.search_assignable_users_calls == [{"issue_key": "TEST-1", "query": ""}]
+
+
+@pytest.mark.asyncio
+async def test_search_assignable_users_passes_query_through(monkeypatch, app_config):
+    fake = _FakeLinkClient()
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: app_config))
+    monkeypatch.setattr(service, "_make_client", lambda conn, allowed_hosts: fake)
+
+    await service.search_assignable_users("TEST-1", "jane")
+
+    assert fake.search_assignable_users_calls == [{"issue_key": "TEST-1", "query": "jane"}]
+
+
+@pytest.mark.asyncio
+async def test_search_assignable_users_ambiguous_connection_raises_no_connection_error(monkeypatch, multi_connection_config):
+    monkeypatch.setattr(service.ConfigManager, "load", staticmethod(lambda: multi_connection_config))
+    with pytest.raises(NoConnectionError):
+        await service.search_assignable_users("TEST-1")
 
 
 # -- Task 5: upload_attachment / delete_attachment ---------------------------

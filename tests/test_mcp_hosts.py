@@ -309,6 +309,20 @@ def test_detector_routes_sonar_requests(fake_home):
     assert "icx_boost" not in out
 
 
+def test_detector_routes_workstatus_requests(fake_home):
+    out = _run_detector(fake_home, "add a timesheet entry in workstatus for today")
+    assert "workstatus_" in out
+    assert "sonar_" not in out and "start_testing_session" not in out
+    assert "icx_boost" not in out
+
+
+def test_detector_workstatus_directive_is_a_soft_preference_not_a_mandate(fake_home):
+    out = _run_detector(fake_home, "clock in and log my time")
+    assert "SUGGESTED" in out
+    assert "PREFER" in out
+    assert "fall back" in out.lower()
+
+
 def test_rule_block_mandates_ticket_testing_sonar_routing():
     from icx_engine.mcp_hosts import _RULE_BLOCK
     b = _RULE_BLOCK
@@ -350,6 +364,18 @@ def test_rule_block_mandates_git_workflow_through_icx():
     assert "git_repo_status" in b
     assert "raw `git`" in b or "raw git" in b
     assert "sole git-workflow" in b and "interface" in b
+
+
+def test_rule_block_covers_workstatus_as_soft_preference_not_a_mandate():
+    # Workstatus coverage is partial, unlike git/Jira/Sonar/testing (1-5) which are full mandates -
+    # so item 6 must read as a preference with an explicit fallback, not "never bypass".
+    from icx_engine.mcp_hosts import _RULE_BLOCK
+    b = _RULE_BLOCK
+    assert "workstatus" in b.lower()
+    assert "mcp__icx__workstatus_" in b
+    assert "PREFER" in b
+    assert "not the same mandate as 1-5" in b
+    assert "fall back to another" in b and "approach" in b
 
 
 # -- vscode host: different config shape ("servers", not "mcpServers") ---------

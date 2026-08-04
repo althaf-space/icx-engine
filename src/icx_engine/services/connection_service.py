@@ -354,6 +354,50 @@ def _connect_gitlab(debug: bool = False, default_name: str = "default") -> None:
     ConfigManager.warn_if_plaintext()
 
 
+def _connect_workstatus(debug: bool = False, default_name: str = "default") -> None:
+    """Interactive Workstatus connect flow, full parity with `_connect_gitlab`/
+    `_sonar_add_flow` - name, session values, active-or-not, all prompted.
+    Workstatus has no public API docs and its login request body was never
+    captured (see developer.md) - rather than guess it, this prompts for the
+    four session header values the user copies from their own authenticated
+    browser session's Network tab (Authorization/UserID/OrgID/SDToken on any
+    api.workstatus.io request)."""
+    import asyncio
+    from icx_engine.workstatus import service as workstatus_service
+
+    name = typer.prompt("Connection name", default=default_name).strip()
+    typer.echo("\nWorkstatus - Session Credentials")
+    typer.echo(
+        "Workstatus has no public API. Log into app.workstatus.io in your browser, open "
+        "DevTools > Network, click any request to web-api.workstatus.io, and copy these "
+        "header values from its Request Headers exactly as shown (including a 'Bearer ' "
+        "prefix on Authorization if one is present - it is sent through unmodified):\n"
+    )
+    user_id = typer.prompt("UserID header value").strip()
+    org_id = typer.prompt("OrgID header value").strip()
+    if debug:
+        typer.echo("(--debug: values are visible)")
+    authorization = typer.prompt("Authorization header value", hide_input=not debug).strip()
+    sd_token = typer.prompt("SDToken header value", hide_input=not debug).strip()
+    device_type = typer.prompt("deviceType header value", default="web").strip()
+    make_active = typer.confirm("Make this the active connection?", default=True)
+
+    with console.status("[bold]Verifying Workstatus session...[/bold]", spinner="dots"):
+        out = asyncio.run(workstatus_service.add_connection(
+            name, user_id, org_id, authorization, sd_token,
+            device_type=device_type, make_active=make_active,
+        ))
+
+    validation = out["validation"]
+    if validation.get("valid") is True:
+        console.print(f"[green]Connected '{out['name']}'. Unread notifications: {validation.get('unread_notifications')}[/green]")
+    else:
+        console.print(f"[yellow]Saved connection '{out['name']}', but validation failed: {validation.get('error', validation)}[/yellow]")
+    console.print(f"  active: {out['active']}")
+    from icx_engine.config_manager import ConfigManager
+    ConfigManager.warn_if_plaintext()
+
+
 def _sonar_add_flow(default_name: str = "default") -> None:
     from icx_engine.sonar import service
     name = typer.prompt("Connection name", default=default_name)

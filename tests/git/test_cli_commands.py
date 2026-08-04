@@ -133,6 +133,34 @@ def test_git_push_cancelled_does_not_push(tmp_git_repo_with_remote, monkeypatch)
     assert remote_branch_exists(tmp_git_repo_with_remote, "feature/push-me") is False
 
 
+def test_git_push_cli_injects_gitlab_auth_env_for_matching_https_origin(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git.cli_commands import git_app
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    from icx_engine.models.config import GitLabConnection
+    from unittest.mock import Mock
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/push-auth-cli", "main")
+    checkout(tmp_git_repo_with_remote, "feature/push-auth-cli")
+
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    mock_push = Mock()
+    monkeypatch.setattr("icx_engine.git.cli_commands._resolve_cwd", lambda: tmp_git_repo_with_remote)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    monkeypatch.setattr("icx_engine.git.manager.remote_url", lambda repo, remote="origin": "https://gitlab.example.com/group/project.git")
+    monkeypatch.setattr("icx_engine.git.gitcmd.push", mock_push)
+
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        runner = typer.testing.CliRunner()
+        result = runner.invoke(git_app, ["push"])
+
+    assert result.exit_code == 0
+    mock_push.assert_called_once()
+    auth_env = mock_push.call_args.kwargs["extra_env"]
+    assert auth_env is not None
+    assert auth_env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+
+
 def test_git_sync_reports_conflict_and_scratch_branch(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.cli_commands import git_app
     from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit

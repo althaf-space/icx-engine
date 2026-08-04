@@ -45,9 +45,17 @@ class ScoredFile:
                 "signals": sorted(self.signals), "reasons": self.reasons}
 
 
-# Signals whose presence ALONE marks a file high-tier: a direct structural graph tie or a past fix.
-# (grep = weak/noisy, semantic = medium. These match the signal names fan_out emits.)
-_STRUCTURAL_SIGNALS = {"graph", "memory"}
+# Signals whose presence ALONE marks a file high-tier (blocking): a direct structural graph
+# tie only. "memory" (a past ticket's resolution touched this file) used to be bundled in
+# here too, alone promoting a file to blocking - real-world use showed this produces false
+# blocks: a file a wholly unrelated past ticket happened to touch (e.g. a JPA entity, a
+# config file) got flagged as a blocking miss on an unrelated one-line UI fix, forcing a
+# justification for every such file regardless of actual relevance. memory overlap is still
+# scored prominently (_W_PRIOR_FIX) and still promotes to "high" when combined with another
+# signal (real multi-signal agreement, via len(non_seed) >= 2) - it just no longer blocks on
+# its own. (grep = weak/noisy, semantic/memory-alone = medium/advisory. These match the
+# signal names fan_out emits.)
+_STRUCTURAL_SIGNALS = {"graph"}
 
 
 def fan_out(
@@ -100,12 +108,16 @@ def fan_out(
 
 
 def _tier(cand: Candidate, is_prior_fix: bool) -> str:
+    """`is_prior_fix` (path is in fuse_rank's `prior_fix` set, or carries a "memory" signal -
+    see fan_out) is advisory-only, never a blocking-tier promotion by itself - see
+    _STRUCTURAL_SIGNALS' comment for why. It still promotes to "high" when combined with
+    another real signal (len(non_seed) >= 2)."""
     if "seed" in cand.signals:
         return "seed"
     non_seed = cand.signals - {"seed"}
-    if is_prior_fix or len(non_seed) >= 2 or (cand.signals & _STRUCTURAL_SIGNALS):
+    if len(non_seed) >= 2 or (cand.signals & _STRUCTURAL_SIGNALS):
         return "high"
-    if "semantic" in non_seed:
+    if "semantic" in non_seed or is_prior_fix:
         return "medium"
     return "low"
 

@@ -4,9 +4,9 @@ from pathlib import Path
 from unittest.mock import patch
 import subprocess
 
-from icx_engine.git.gitcmd import local_branch_exists, current_branch
+from icx_engine.git.gitcmd import local_branch_exists, current_branch, head_sha
 from icx_engine.git.safety import (
-    create_backup, list_backups, prune_old_backups, detect_leftover_state,
+    create_backup, sync_backup, list_backups, prune_old_backups, detect_leftover_state,
 )
 
 
@@ -30,6 +30,58 @@ def test_create_backup_same_second_second_call_does_not_raise(tmp_git_repo):
         second = create_backup(tmp_git_repo, "main", "ABC-1")
     assert first == second
     assert local_branch_exists(tmp_git_repo, first) is True
+
+
+def test_sync_backup_creates_latest_branch_without_switching(tmp_git_repo):
+    name = sync_backup(tmp_git_repo, "main", "ABC-1")
+    assert name == "backup-latest/ABC-1"
+    assert local_branch_exists(tmp_git_repo, name) is True
+    assert current_branch(tmp_git_repo) == "main"
+
+
+def test_sync_backup_moves_existing_pointer_to_new_commit(tmp_git_repo):
+    """The core requirement this fixes: the backup must never trail behind -
+    a second sync_backup call after a new commit must move the SAME branch
+    name forward, not create a stale duplicate."""
+    import subprocess
+    first = sync_backup(tmp_git_repo, "main", "ABC-1")
+    first_sha = head_sha(tmp_git_repo)
+
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    subprocess.run(["git", "add", "b.txt"], cwd=str(tmp_git_repo), check=True)
+    subprocess.run(["git", "commit", "-m", "ABC-1 second commit"], cwd=str(tmp_git_repo), check=True)
+    second_sha = head_sha(tmp_git_repo)
+    assert second_sha != first_sha
+
+    second = sync_backup(tmp_git_repo, "main", "ABC-1")
+    assert second == first
+    subprocess.run(["git", "rev-parse", "--verify", first], cwd=str(tmp_git_repo), check=True)
+    backup_sha = subprocess.run(
+        ["git", "rev-parse", first], cwd=str(tmp_git_repo), check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert backup_sha == second_sha
+
+
+def test_sync_backup_is_local_only_distinct_from_timestamped_create_backup(tmp_git_repo):
+    latest = sync_backup(tmp_git_repo, "main", "ABC-1")
+    timestamped = create_backup(tmp_git_repo, "main", "ABC-1")
+    assert latest != timestamped
+    assert latest == "backup-latest/ABC-1"
+    assert timestamped.startswith("backup/ABC-1-")
+    assert local_branch_exists(tmp_git_repo, latest) is True
+    assert local_branch_exists(tmp_git_repo, timestamped) is True
+
+
+def test_sync_backup_never_appears_in_list_backups_or_pruning(tmp_git_repo):
+    """sync_backup's backup-latest/<key> prefix must never collide with
+    list_backups/prune_old_backups' backup/{ticket_key}-* glob - it is a
+    different mechanism (a single moving pointer, not timestamped history)
+    and must never be counted or deleted by pruning logic meant for the other."""
+    sync_backup(tmp_git_repo, "main", "ABC-1")
+    create_backup(tmp_git_repo, "main", "ABC-1")
+    backups = list_backups(tmp_git_repo, "ABC-1")
+    assert len(backups) == 1
+    assert all("latest" not in b for b in backups)
 
 
 def test_list_backups_returns_only_matching_ticket(tmp_git_repo):

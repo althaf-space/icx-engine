@@ -506,6 +506,59 @@ async def test_get_createmeta_fields_rekeys_values_by_field_id():
 
 
 @respx.mock
+async def test_get_createmeta_fields_follows_pagination_past_first_page():
+    """A create screen with more fields than one Jira page (default 50) must not
+    silently drop the rest - this is what made customfield_10045 (Severity)
+    invisible to jira_get_createmeta_fields on CCBSS: the field existed but was
+    never reached because pagination wasn't followed."""
+    url = "https://test.atlassian.net/rest/api/3/issue/createmeta/ABC/issuetypes/10001"
+    route = respx.get(url).mock(side_effect=[
+        httpx.Response(200, json={
+            "values": [{"fieldId": "summary", "required": True}],
+            "isLast": False,
+        }),
+        httpx.Response(200, json={
+            "values": [{"fieldId": "customfield_10045", "required": True, "schema": {"type": "option"}}],
+            "isLast": True,
+        }),
+    ])
+    client = _write_client()
+    result = await client.get_createmeta_fields("ABC", "10001")
+    assert result == {
+        "summary": {"fieldId": "summary", "required": True},
+        "customfield_10045": {"fieldId": "customfield_10045", "required": True, "schema": {"type": "option"}},
+    }
+    assert route.call_count == 2
+    assert route.calls[0].request.url.params["startAt"] == "0"
+    assert route.calls[1].request.url.params["startAt"] == "1"
+
+
+@respx.mock
+async def test_get_createmeta_fields_stops_when_isLast_absent():
+    url = "https://test.atlassian.net/rest/api/3/issue/createmeta/ABC/issuetypes/10001"
+    route = respx.get(url).mock(return_value=httpx.Response(200, json={
+        "values": [{"fieldId": "summary", "required": True}],
+    }))
+    client = _write_client()
+    result = await client.get_createmeta_fields("ABC", "10001")
+    assert result == {"summary": {"fieldId": "summary", "required": True}}
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_list_issuetypes_follows_pagination_past_first_page():
+    url = "https://test.atlassian.net/rest/api/3/issue/createmeta/ABC/issuetypes"
+    route = respx.get(url).mock(side_effect=[
+        httpx.Response(200, json={"values": [{"id": "10001", "name": "Bug"}], "isLast": False}),
+        httpx.Response(200, json={"values": [{"id": "10002", "name": "Task"}], "isLast": True}),
+    ])
+    client = _write_client()
+    result = await client.list_issuetypes("ABC")
+    assert result == [{"id": "10001", "name": "Bug"}, {"id": "10002", "name": "Task"}]
+    assert route.call_count == 2
+
+
+@respx.mock
 async def test_create_issue_posts_minimal_body_and_returns_key():
     url = "https://test.atlassian.net/rest/api/3/issue"
     route = respx.post(url).mock(return_value=httpx.Response(201, json={
@@ -992,6 +1045,37 @@ async def test_set_assignee_404_raises_issue_not_found():
     client = _write_client()
     with pytest.raises(IssueNotFound):
         await client.set_assignee("ABC-1", "acc-1")
+
+
+@respx.mock
+async def test_search_assignable_users_parses_response():
+    url = "https://test.atlassian.net/rest/api/3/user/assignable/search"
+    route = respx.get(url).mock(return_value=httpx.Response(200, json=[
+        {"accountId": "acc-1", "displayName": "Jane Doe"},
+    ]))
+    client = _write_client()
+    result = await client.search_assignable_users("ABC-1")
+    assert result == [{"accountId": "acc-1", "displayName": "Jane Doe"}]
+    assert route.calls.last.request.url.params["issueKey"] == "ABC-1"
+    assert "query" not in route.calls.last.request.url.params
+
+
+@respx.mock
+async def test_search_assignable_users_passes_query_param():
+    url = "https://test.atlassian.net/rest/api/3/user/assignable/search"
+    route = respx.get(url).mock(return_value=httpx.Response(200, json=[]))
+    client = _write_client()
+    await client.search_assignable_users("ABC-1", "jane")
+    assert route.calls.last.request.url.params["query"] == "jane"
+
+
+@respx.mock
+async def test_search_assignable_users_404_raises_issue_not_found():
+    url = "https://test.atlassian.net/rest/api/3/user/assignable/search"
+    respx.get(url).mock(return_value=httpx.Response(404))
+    client = _write_client()
+    with pytest.raises(IssueNotFound):
+        await client.search_assignable_users("ABC-1")
 
 
 # -- Task 5: upload_attachment / delete_attachment ---------------------------

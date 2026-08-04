@@ -44,6 +44,27 @@ def create_scratch_branch(repo: Path, source_branch: str, ticket_key: str) -> st
     return name
 
 
+def sync_backup(repo: Path, source_branch: str, backup_key: str) -> str:
+    """Move (or create) the single, continuously-updated backup-latest/<backup_key>
+    pointer to source_branch's current commit. Called after every commit
+    (stage_and_commit) so the backup never trails behind by however many commits
+    happened since the last risky-operation snapshot - distinct from
+    create_backup's timestamped point-in-time snapshots (taken specifically
+    before a reverse-merge/conflict-resolution attempt, kept as history via
+    prune_old_backups). Deliberately a SEPARATE top-level prefix
+    (backup-latest/<key>, not backup/<key>-latest) - list_backups/
+    prune_old_backups glob-match `backup/{ticket_key}-*`, which would otherwise
+    also match a `-latest` suffix under the same `backup/` prefix and let this
+    pointer get swept up in timestamp-sorted pruning it was never meant to be
+    part of. Local-only, never pushed - same as create_backup."""
+    name = f"backup-latest/{backup_key}"
+    if local_branch_exists(repo, name):
+        _run_git(repo, ["branch", "-f", name, source_branch])
+    else:
+        create_branch_from(repo, name, source_branch)
+    return name
+
+
 def list_backups(repo: Path, ticket_key: str) -> list[str]:
     result = _run_git(repo, ["branch", "--list", f"backup/{ticket_key}-*", "--format=%(refname:short)"])
     out = _stdout(result)

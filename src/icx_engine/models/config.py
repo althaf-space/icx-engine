@@ -49,6 +49,22 @@ class GitLabConnection(BaseModel):
     verify_tls: bool = True
 
 
+class WorkstatusConnection(BaseModel):
+    """A single Workstatus session (captured browser headers, not a
+    server-issued API token - see workstatus/config.py for the full auth
+    model explanation). Multiple named connections, one active - mirrors
+    GitLabConnection/SonarConnection exactly. `authorization`/`sd_token`
+    stored in the OS keyring, same as GitLab's `token`."""
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    user_id: str
+    org_id: str
+    device_type: str = "web"
+    authorization: str | None = Field(default=None, exclude=True)
+    sd_token: str | None = Field(default=None, exclude=True)
+
+
 class ChannelConfig(BaseModel):
     provider: str                    # "ollama" | "nim" | "openai" | "anthropic" | "google" | "xai"
     model: str
@@ -109,6 +125,12 @@ class AppConfig(BaseModel):
     gitlab_connections: dict[str, GitLabConnection] = {}
     active_gitlab: str | None = None
 
+    # Workstatus (time-tracking SaaS). Multiple named connections with one active,
+    # mirroring gitlab_connections/active_gitlab exactly - CLI exposes full
+    # multi-connection parity (--add/--active/--remove/--list), same as GitLab/Sonar.
+    workstatus_connections: dict[str, WorkstatusConnection] = {}
+    active_workstatus: str | None = None
+
     # Legacy single-server fields - retained only for backward-compatible loading
     # of older config files. Resolved into an implicit "default" connection when a
     # config predates sonar_connections. Not written by new code.
@@ -156,6 +178,39 @@ class AppConfig(BaseModel):
         """Resolve the active GitLab connection, or None."""
         if self.active_gitlab and self.active_gitlab in self.gitlab_connections:
             return self.gitlab_connections[self.active_gitlab]
+        return None
+
+    @model_validator(mode="after")
+    def _migrate_legacy_workstatus(self) -> "AppConfig":
+        """One-time migration: promote the old single-instance
+        `integrations["workstatus"]` entry into a named `workstatus_connections`
+        entry (multi-connection parity added later, matching GitLab/Sonar) so
+        it is visible in `icx status`/`icx workstatus --list` and removable -
+        by the time this validator runs, `authorization`/`sd_token` in the raw
+        dict have already been resolved from the keyring by ConfigManager.load()
+        (integrations["workstatus"] is still registered via
+        icx_engine.integrations purely so that resolution keeps working for
+        this one-time migration), so nothing is lost and no re-paste is
+        needed."""
+        legacy = self.integrations.get("workstatus")
+        if legacy and not self.workstatus_connections:
+            self.workstatus_connections["default"] = WorkstatusConnection(
+                name="default",
+                user_id=legacy.get("user_id", ""),
+                org_id=legacy.get("org_id", ""),
+                device_type=legacy.get("device_type") or "web",
+                authorization=legacy.get("authorization") or None,
+                sd_token=legacy.get("sd_token") or None,
+            )
+            if self.active_workstatus is None:
+                self.active_workstatus = "default"
+            self.integrations.pop("workstatus", None)
+        return self
+
+    def active_workstatus_connection(self) -> "WorkstatusConnection | None":
+        """Resolve the active Workstatus connection, or None."""
+        if self.active_workstatus and self.active_workstatus in self.workstatus_connections:
+            return self.workstatus_connections[self.active_workstatus]
         return None
 
     # Generic, pluggable third-party integration settings. New integrations

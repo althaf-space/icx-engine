@@ -37,6 +37,11 @@ _log = logging.getLogger(__name__)
 
 MCP_MEMORY_TIMEOUT_SECONDS = 2.0
 
+# Eager import: registers the "workstatus" integration config model before any
+# ConfigManager.load()/save() call in this process (see cli.py's matching
+# import and workstatus/__init__.py for why this must happen early).
+import icx_engine.workstatus  # noqa: F401,E402
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent, Prompt, PromptArgument, PromptMessage, GetPromptResult
@@ -2251,6 +2256,7 @@ async def _list_tools() -> list[Tool]:
     from icx_engine.git.mcp_tools import GIT_TOOLS
     from icx_engine.gitlab.mcp_tools import GITLAB_TOOLS
     from icx_engine.jira.mcp_tools import JIRA_TOOLS
+    from icx_engine.workstatus.mcp_tools import WORKSTATUS_TOOLS
     return [
         # ------------------------------------------------------------------ #
         # [1-2] Entry points - always start here                             #
@@ -3337,7 +3343,7 @@ async def _list_tools() -> list[Tool]:
              description=("USE WHEN the user asks what languages this Sonar server analyzes: MUST fetch the "
                           "language list here. Requires sonar_enabled."),
              inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": []}),
-    ] + GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS
+    ] + GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS + WORKSTATUS_TOOLS
 
 
 @server.call_tool()
@@ -3353,6 +3359,11 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
     gitlab_result = await dispatch_gitlab_tool(name, args)
     if gitlab_result is not None:
         return gitlab_result
+
+    from icx_engine.workstatus.mcp_tools import dispatch_workstatus_tool
+    workstatus_result = await dispatch_workstatus_tool(name, args)
+    if workstatus_result is not None:
+        return workstatus_result
 
     from icx_engine.jira.mcp_tools import dispatch_jira_tool
     jira_result = await dispatch_jira_tool(name, args)
@@ -3555,7 +3566,35 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                     min_confidence=_min_confidence,
                     source_root=_project_path,
                 )
-                payload = {"status": "ok", "project_path": str(_project_path), "results": [_asdict(r) for r in results]}
+                all_results = [_asdict(r) for r in results]
+                # find_context's own token_budget param is a documented no-op ("accepted for
+                # backward compatibility but unused" - graph/query.py:179) - it returns every
+                # scored file unconditionally. Real bug: this produced 700K+ char single-call
+                # responses that had to be spilled to disk and parsed externally. The actual
+                # cap is applied here, at the MCP boundary, via a coarse ~4-chars-per-token
+                # estimate on each result's serialized size - a rough, standard heuristic, not
+                # a real tokenizer count, but enough to keep this call's own token_budget
+                # honest without changing find_context's ranking/selection behavior itself.
+                kept: list[dict] = []
+                running_chars = 0
+                char_budget = max(_token_budget, 1) * 4
+                for r in all_results:
+                    r_chars = len(json.dumps(r))
+                    if kept and running_chars + r_chars > char_budget:
+                        break
+                    kept.append(r)
+                    running_chars += r_chars
+                payload = {
+                    "status": "ok", "project_path": str(_project_path), "results": kept,
+                    "total_matched": len(all_results),
+                }
+                if len(kept) < len(all_results):
+                    payload["truncated"] = True
+                    payload["note"] = (
+                        f"{len(all_results) - len(kept)} more result(s) omitted to stay within "
+                        f"token_budget ({_token_budget}) - raise token_budget to see more, or "
+                        "narrow the task description to rank fewer files higher."
+                    )
             elif name == _GRAPH_CHAIN_TOOL:
                 chain = q.get_call_chain(
                     node_id=node_id,
@@ -5227,11 +5266,13 @@ def _search_memory_sync(qi, top_k: int = 10) -> dict:
 
 
 def _find_by_file_sync(file_path: str, project_key: str | None) -> list[dict]:
-    """Return MemoryEntry dicts for entries whose files_changed contains file_path."""
+    """Return MemoryEntry dicts for entries whose files_changed contains file_path.
+    `save_context_vector` (the raw 384-float embedding) is excluded - no MCP caller
+    can use it, it is pure payload weight on every memory_find_by_file call."""
     from icx_engine.memory.bridge import find_work_items_by_file
     mem = _ensure_memory_manager()
     entries = find_work_items_by_file(file_path, mem, project_key=project_key)
-    return [e.model_dump() for e in entries]
+    return [e.model_dump(exclude={"save_context_vector"}) for e in entries]
 
 
 def _get_hotspots_sync(project_key: str | None, top_n: int) -> list[dict]:

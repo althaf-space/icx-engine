@@ -233,6 +233,34 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx gitlab commits[/cyan]                   List commit history - --project/--ref/--path/--since/--limit
   [cyan]icx gitlab compare <FROM_REF> <TO_REF>[/cyan]  File-level diff summary between two refs
 
+[bold]Workstatus[/bold]
+  [cyan]icx workstatus --add[/cyan]                 Add session credentials (interactive)
+  [cyan]icx workstatus status[/cyan]                Show the connection status
+  [cyan]icx workstatus profile[/cyan]                Show your own Workstatus profile
+  [cyan]icx workstatus unread[/cyan]                 Show your unread notification count
+  [cyan]icx workstatus add-time[/cyan]               Add a manual timesheet entry
+  [cyan]icx workstatus projects[/cyan]               List projects
+  [cyan]icx workstatus project[/cyan]                Show one project's details
+  [cyan]icx workstatus project-budget[/cyan]         Show a project's budget/margin analytics
+  [cyan]icx workstatus tasks[/cyan]                  List tasks for a project
+  [cyan]icx workstatus task-statuses[/cyan]          List task statuses for a project
+  [cyan]icx workstatus milestones[/cyan]             List milestones for a project
+  [cyan]icx workstatus task-checklist[/cyan]         List checklist items for a task
+  [cyan]icx workstatus members[/cyan]                List members
+  [cyan]icx workstatus teams[/cyan]                  List teams
+  [cyan]icx workstatus attendance[/cyan]              Show day-by-day attendance for a date range
+  [cyan]icx workstatus attendance-stats[/cyan]        Show summary attendance stats
+  [cyan]icx workstatus timesheets[/cyan]              List logged timesheet entries
+  [cyan]icx workstatus timesheet-clients[/cyan]       List timesheet-billable clients
+  [cyan]icx workstatus weekly-report[/cyan]           Show a weekly hours/activity/earnings report
+  [cyan]icx workstatus submission-kpis[/cyan]         Show timesheet submission/approval KPIs
+  [cyan]icx workstatus submission-table[/cyan]        Show the timesheet submission/approval table
+  [cyan]icx workstatus expenses[/cyan]                List expenses for a date range
+  [cyan]icx workstatus invoices[/cyan]                List invoices
+  [cyan]icx workstatus payroll[/cyan]                 Show a payroll report
+  [cyan]icx workstatus timesheet[/cyan]               Show one timesheet entry's full detail
+  [cyan]icx workstatus edit-time[/cyan]               Edit an existing timesheet entry
+
 [bold]MCP Server[/bold]
   [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio transport)
   [cyan]icx mcp setup[/cyan]                                          Register ICX with all detected AI editors
@@ -352,6 +380,16 @@ app.add_typer(jira_app, name="jira", rich_help_panel="Jira")
 
 gitlab_app = typer.Typer(help="GitLab connection for MR creation (distinct from your work tracker).", rich_markup_mode="rich")
 app.add_typer(gitlab_app, name="gitlab", rich_help_panel="GitLab")
+
+# Eager import: registers the "workstatus" integration config model with
+# icx_engine.integrations BEFORE any ConfigManager.load()/save() call in this
+# process, so its secret fields always route to the keyring (see
+# workstatus/__init__.py and config_manager.py's generic integration-secret
+# handling) instead of silently falling back to plaintext.
+import icx_engine.workstatus  # noqa: F401,E402
+
+workstatus_app = typer.Typer(help="Workstatus time-tracking/attendance integration.", rich_markup_mode="rich")
+app.add_typer(workstatus_app, name="workstatus", rich_help_panel="Workstatus")
 
 console = Console(highlight=False)
 
@@ -2061,6 +2099,23 @@ def status(
             gitlab_table.caption = "Run [bold]icx gitlab --add[/bold] to add one."
         console.print(gitlab_table)
 
+        # -- Workstatus connections -----------------------------------------------
+        console.print()
+        workstatus_table = Table(title="Workstatus Connections", show_header=True, header_style="bold cyan")
+        workstatus_table.add_column("#", style="dim", width=3)
+        workstatus_table.add_column("Name")
+        workstatus_table.add_column("User ID")
+        workstatus_table.add_column("Org ID")
+        workstatus_table.add_column("Auth", width=8)
+        workstatus_table.add_column("Active")
+        for i, (name, wc) in enumerate(config.workstatus_connections.items(), 1):
+            active_cell = "[bold green][ACTIVE][/bold green]" if name == config.active_workstatus else ""
+            auth_cell = "[dim]set[/dim]" if wc.authorization and wc.sd_token else "[red]missing[/red]"
+            workstatus_table.add_row(str(i), name, wc.user_id, wc.org_id, auth_cell, active_cell)
+        if not config.workstatus_connections:
+            workstatus_table.caption = "Run [bold]icx workstatus --add[/bold] to add one."
+        console.print(workstatus_table)
+
     except Exception as exc:
         render_icx_error(exc, err_console, show_traceback=traceback)
         raise typer.Exit(1)
@@ -3716,6 +3771,443 @@ def gitlab_compare(
             marker = "M"
         path = d.get("new_path") or d.get("old_path")
         console.print(f"  {marker}  {path}")
+
+
+def _workstatus_resolve_name(value: str) -> str:
+    """Map a 1-based index (from `icx status` / `icx workstatus --list`) to a
+    connection name; pass a name through unchanged."""
+    if value and value.isdigit():
+        from icx_engine.config_manager import ConfigManager
+        names = list(ConfigManager.load().workstatus_connections.keys())
+        idx = int(value) - 1
+        if 0 <= idx < len(names):
+            return names[idx]
+    return value
+
+
+def _workstatus_list() -> None:
+    from icx_engine.workstatus import service
+    out = service.list_connections()
+    if not out["connections"]:
+        console.print("[yellow]No Workstatus connections. Run `icx workstatus --add`.[/yellow]")
+        return
+    for c in out["connections"]:
+        mark = "[bold green][ACTIVE][/bold green]" if c["active"] else ""
+        console.print(f"  {c['name']:<16} user_id={c['user_id']:<12} org_id={c['org_id']:<12} {mark}")
+
+
+@workstatus_app.callback(invoke_without_command=True)
+def workstatus_main(
+    ctx: typer.Context,
+    add: Annotated[bool, typer.Option("--add", help="Add a Workstatus connection (interactive).")] = False,
+    active: Annotated[Optional[str], typer.Option("--active", metavar="NAME", help="Set the active connection.")] = None,
+    remove: Annotated[Optional[str], typer.Option("--remove", metavar="NAME", help="Remove a connection (clears its keyring secrets).")] = None,
+    list_conns: Annotated[bool, typer.Option("--list", help="List connections and which is active.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Manage Workstatus connections - add, list, switch active, remove (same flag form as
+    `icx sonar`/`icx gitlab`).
+
+    \b
+    Examples:
+      icx workstatus --add                 Add a connection (name, session values)
+      icx workstatus --list                List connections (bare `icx workstatus` also lists)
+      icx workstatus --active work         Make 'work' the active connection
+      icx workstatus --active 2            Make connection #2 (from `icx status`) active
+      icx workstatus --remove work         Remove 'work'
+      icx workstatus --remove 2            Remove connection #2 (from `icx status`)
+      icx workstatus status                Show the active connection's status
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from icx_engine.workstatus import service
+    try:
+        if add:
+            from icx_engine.services.connection_service import _connect_workstatus
+            _connect_workstatus(debug=debug)
+            return
+        if active:
+            try:
+                out = service.set_active(_workstatus_resolve_name(active))
+            except KeyError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1)
+            console.print(f"[green]Active Workstatus connection: {out['active']}[/green]")
+            return
+        if remove:
+            try:
+                out = service.remove_connection(_workstatus_resolve_name(remove))
+            except KeyError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1)
+            console.print(f"[green]Removed '{out['removed']}'.[/green] Active: {out['active'] or '(none)'}")
+            return
+        _workstatus_list()
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=(debug or traceback))
+        raise typer.Exit(1)
+
+
+def _workstatus_status_report() -> None:
+    import asyncio
+    from icx_engine.workstatus import service
+    out = asyncio.run(service.status())
+    if not out["configured"]:
+        console.print("[yellow]No Workstatus connection. Run `icx workstatus --add`.[/yellow]")
+        return
+    console.print(f"  active:     {out['active']}")
+    conn = out.get("connection") or {}
+    if conn.get("valid"):
+        console.print(f"[green]Connected.[/green] Unread notifications: {conn.get('unread_notifications')}")
+    else:
+        console.print(f"[red]Connected but validation failed: {conn.get('error', conn)}[/red]")
+
+
+@workstatus_app.command("status")
+@_guarded
+def workstatus_status_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """Show the Workstatus connection status."""
+    _workstatus_status_report()
+
+
+@workstatus_app.command("profile")
+@_guarded
+def workstatus_profile_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """Show your own Workstatus profile."""
+    import asyncio
+    from icx_engine.workstatus import service
+    from icx_engine.workstatus.service import WorkstatusNotConfigured
+    try:
+        profile = asyncio.run(service.my_profile())
+    except WorkstatusNotConfigured as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1)
+    console.print(profile)
+
+
+@workstatus_app.command("unread")
+@_guarded
+def workstatus_unread_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """Show your unread Workstatus notification count."""
+    import asyncio
+    from icx_engine.workstatus import service
+    from icx_engine.workstatus.service import WorkstatusNotConfigured
+    try:
+        count = asyncio.run(service.unread_notifications_count())
+    except WorkstatusNotConfigured as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1)
+    console.print(f"  unread notifications: {count}")
+
+
+@workstatus_app.command("add-time")
+@_guarded
+def workstatus_add_time_cmd(
+    project_id: Annotated[int, typer.Option("--project-id", help="Workstatus project id")],
+    todo_id: Annotated[int, typer.Option("--todo-id", help="Workstatus task id")],
+    date: Annotated[str, typer.Option("--date", help="DD-MM-YYYY")],
+    from_time: Annotated[str, typer.Option("--from", help="e.g. '10:00 am'")],
+    to_time: Annotated[str, typer.Option("--to", help="e.g. '11:00 am'")],
+    duration: Annotated[str, typer.Option("--duration", help="e.g. '1h 0m'")],
+    reason: Annotated[str, typer.Option("--reason")],
+    note: Annotated[str, typer.Option("--note")] = "",
+    billable: Annotated[bool, typer.Option("--billable")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Add a manual Workstatus timesheet entry. This creates a REAL entry - double-check the
+    project/task/date/time before running."""
+    import asyncio
+    from icx_engine.workstatus import service
+    from icx_engine.workstatus.service import WorkstatusNotConfigured
+    try:
+        result = asyncio.run(service.add_timesheet(
+            project_id=project_id, todo_id=todo_id, date=date, from_time=from_time,
+            to_time=to_time, duration=duration, reason=reason, note=note, billable=billable,
+        ))
+    except WorkstatusNotConfigured as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1)
+    console.print(f"[green]Timesheet entry added.[/green] {result}")
+
+
+def _workstatus_run(coro) -> None:
+    """Shared runner for the read-only workstatus commands below - resolves
+    the coroutine, prints the result, and reports a not-configured state the
+    same way every other workstatus command does."""
+    import asyncio
+    from icx_engine.workstatus.service import WorkstatusNotConfigured
+    try:
+        result = asyncio.run(coro)
+    except WorkstatusNotConfigured as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1)
+    console.print(result)
+
+
+@workstatus_app.command("projects")
+@_guarded
+def workstatus_projects_cmd(
+    keyword: Annotated[str, typer.Option("--keyword", help="Filter by project name")] = "",
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List Workstatus projects."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_projects(keyword=keyword))
+
+
+@workstatus_app.command("project")
+@_guarded
+def workstatus_project_cmd(
+    project_id: Annotated[int, typer.Option("--project-id")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show one Workstatus project's details."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.get_project(project_id))
+
+
+@workstatus_app.command("project-budget")
+@_guarded
+def workstatus_project_budget_cmd(
+    project_id: Annotated[int, typer.Option("--project-id")],
+    quarter: Annotated[str, typer.Option("--quarter")] = "",
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show a Workstatus project's budget/margin analytics."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.project_budget_analytics(project_id, quarter=quarter))
+
+
+@workstatus_app.command("tasks")
+@_guarded
+def workstatus_tasks_cmd(
+    project_id: Annotated[int, typer.Option("--project-id")],
+    search: Annotated[str, typer.Option("--search")] = "",
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List tasks for a Workstatus project."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_tasks(project_id, search=search))
+
+
+@workstatus_app.command("task-statuses")
+@_guarded
+def workstatus_task_statuses_cmd(
+    project_id: Annotated[int, typer.Option("--project-id")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List task statuses defined for a Workstatus project."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_task_statuses(project_id))
+
+
+@workstatus_app.command("milestones")
+@_guarded
+def workstatus_milestones_cmd(
+    project_id: Annotated[int, typer.Option("--project-id")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List milestones for a Workstatus project."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_milestones(project_id))
+
+
+@workstatus_app.command("task-checklist")
+@_guarded
+def workstatus_task_checklist_cmd(
+    task_id: Annotated[int, typer.Option("--task-id")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List checklist items for a Workstatus task."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_task_checklist(task_id))
+
+
+@workstatus_app.command("members")
+@_guarded
+def workstatus_members_cmd(
+    search_key: Annotated[str, typer.Option("--search-key")] = "",
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List Workstatus members."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_members(search_key=search_key))
+
+
+@workstatus_app.command("teams")
+@_guarded
+def workstatus_teams_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """List Workstatus teams."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_teams())
+
+
+@workstatus_app.command("attendance")
+@_guarded
+def workstatus_attendance_cmd(
+    start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
+    end_date: Annotated[str, typer.Option("--end-date", help="YYYY-MM-DD")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show your day-by-day Workstatus attendance for a date range."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.attendance_list(start_date, end_date))
+
+
+@workstatus_app.command("attendance-stats")
+@_guarded
+def workstatus_attendance_stats_cmd(
+    start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
+    end_date: Annotated[str, typer.Option("--end-date", help="YYYY-MM-DD")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show summary Workstatus attendance stats for a date range."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.attendance_stats(start_date, end_date))
+
+
+@workstatus_app.command("timesheets")
+@_guarded
+def workstatus_timesheets_cmd(
+    start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
+    end_date: Annotated[str, typer.Option("--end-date", help="YYYY-MM-DD")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List your logged Workstatus timesheet entries for a date range."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_timesheets(start_date, end_date))
+
+
+@workstatus_app.command("timesheet-clients")
+@_guarded
+def workstatus_timesheet_clients_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
+    """List clients billable via Workstatus timesheets."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_timesheet_clients())
+
+
+@workstatus_app.command("weekly-report")
+@_guarded
+def workstatus_weekly_report_cmd(
+    start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
+    end_date: Annotated[str, typer.Option("--end-date", help="YYYY-MM-DD")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show a weekly hours/activity/earnings report."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.weekly_report_all(start_date, end_date))
+
+
+@workstatus_app.command("submission-kpis")
+@_guarded
+def workstatus_submission_kpis_cmd(
+    start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
+    end_date: Annotated[str, typer.Option("--end-date", help="YYYY-MM-DD")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show timesheet submission/approval KPIs for a date range."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.timesheet_submission_kpis(start_date, end_date))
+
+
+@workstatus_app.command("submission-table")
+@_guarded
+def workstatus_submission_table_cmd(
+    start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
+    end_date: Annotated[str, typer.Option("--end-date", help="YYYY-MM-DD")],
+    page: Annotated[int, typer.Option("--page")] = 1,
+    per_page: Annotated[int, typer.Option("--per-page")] = 15,
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show the per-member timesheet submission/approval table for a date range."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.timesheet_submission_table(start_date, end_date, page=page, per_page=per_page))
+
+
+@workstatus_app.command("expenses")
+@_guarded
+def workstatus_expenses_cmd(
+    start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
+    end_date: Annotated[str, typer.Option("--end-date", help="YYYY-MM-DD")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List Workstatus expenses for a date range."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_expenses(start_date, end_date))
+
+
+@workstatus_app.command("invoices")
+@_guarded
+def workstatus_invoices_cmd(
+    search: Annotated[str, typer.Option("--search")] = "",
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """List Workstatus invoices."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.list_invoices(search=search))
+
+
+@workstatus_app.command("payroll")
+@_guarded
+def workstatus_payroll_cmd(
+    start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
+    end_date: Annotated[str, typer.Option("--end-date", help="YYYY-MM-DD")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show a Workstatus payroll report for a date range."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.payroll_report(start_date, end_date))
+
+
+@workstatus_app.command("timesheet")
+@_guarded
+def workstatus_get_timesheet_cmd(
+    timesheet_id: Annotated[int, typer.Option("--timesheet-id")],
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Show one timesheet entry's full detail (do this before editing it)."""
+    from icx_engine.workstatus import service
+    _workstatus_run(service.get_timesheet(timesheet_id))
+
+
+@workstatus_app.command("edit-time")
+@_guarded
+def workstatus_edit_timesheet_cmd(
+    timesheet_id: Annotated[int, typer.Option("--timesheet-id")],
+    project_id: Annotated[int, typer.Option("--project-id")],
+    todo_id: Annotated[int, typer.Option("--todo-id")],
+    date: Annotated[str, typer.Option("--date", help="DD-MM-YYYY")],
+    from_time: Annotated[str, typer.Option("--from", help="e.g. '10:00 am'")],
+    to_time: Annotated[str, typer.Option("--to", help="e.g. '11:00 am'")],
+    duration: Annotated[str, typer.Option("--duration", help="e.g. '1h 0m'")],
+    reason: Annotated[str, typer.Option("--reason")],
+    field_name: Annotated[str, typer.Option("--field-name", help="Which field changed, e.g. 'from'")],
+    previous_value: Annotated[str, typer.Option("--previous-value")],
+    new_value: Annotated[str, typer.Option("--new-value")],
+    note: Annotated[str, typer.Option("--note")] = "",
+    billable: Annotated[bool, typer.Option("--billable")] = False,
+    debug: DebugOpt = False, traceback: TracebackOpt = False,
+) -> None:
+    """Edit an EXISTING Workstatus timesheet entry. Run `icx workstatus timesheet --timesheet-id
+    <id>` first to see current values. This mutates a REAL entry - double-check before running."""
+    import asyncio
+    from icx_engine.workstatus import service
+    from icx_engine.workstatus.service import WorkstatusNotConfigured
+    try:
+        result = asyncio.run(service.edit_timesheet(
+            timesheet_id=timesheet_id, project_id=project_id, todo_id=todo_id, date=date,
+            from_time=from_time, to_time=to_time, duration=duration, reason=reason,
+            updated_fields=[{"field_name": field_name, "previous_value": previous_value, "new_value": new_value}],
+            note=note, billable=billable,
+        ))
+    except WorkstatusNotConfigured as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1)
+    console.print(f"[green]Timesheet entry updated.[/green] {result}")
 
 
 # ---------------------------------------------------------------------------

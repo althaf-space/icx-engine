@@ -17,6 +17,11 @@ _LIST_MRS_TOOL = "gitlab_list_merge_requests"
 _MR_CHANGES_TOOL = "gitlab_mr_changes"
 _LIST_COMMITS_TOOL = "gitlab_list_commits"
 _COMPARE_TOOL = "gitlab_compare"
+_LIST_TAGS_TOOL = "gitlab_list_tags"
+_LIST_BRANCHES_TOOL = "gitlab_list_branches"
+_LIST_PIPELINES_TOOL = "gitlab_list_pipelines"
+_PIPELINE_STATUS_TOOL = "gitlab_pipeline_status"
+_JOB_LOG_TOOL = "gitlab_job_log"
 
 GITLAB_TOOLS: list[Tool] = [
     Tool(
@@ -94,6 +99,93 @@ GITLAB_TOOLS: list[Tool] = [
                 "to_ref": {"type": "string"},
             },
             "required": ["from_ref", "to_ref"],
+        },
+    ),
+    Tool(
+        name=_LIST_TAGS_TOOL,
+        description=(
+            "USE WHEN the human wants to see this project's REAL existing tags before creating a "
+            "new one: MUST call this FIRST, before git_create_tag, with either project or "
+            "repo_path - never invent an environment name or version series from guesswork. "
+            "Returns every tag with its target commit and creation date, newest first per GitLab's "
+            "own ordering. Read-only, UNGATED. Requires an active GitLab connection."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}, "repo_path": {"type": "string"}},
+            "required": [],
+        },
+    ),
+    Tool(
+        name=_LIST_BRANCHES_TOOL,
+        description=(
+            "USE WHEN the human wants to see this project's REAL existing branches - e.g. before "
+            "proposing a parent/base branch, or to confirm an exact branch name rather than "
+            "guessing between similarly-named ones: MUST call this instead of inventing a branch "
+            "name. Returns name/protected/default/last-commit-date per branch. `search` (if given) "
+            "is GitLab's own server-side substring filter. Read-only, UNGATED. Requires an active "
+            "GitLab connection."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"}, "repo_path": {"type": "string"},
+                "search": {"type": "string"},
+            },
+            "required": [],
+        },
+    ),
+    Tool(
+        name=_LIST_PIPELINES_TOOL,
+        description=(
+            "USE WHEN the human wants to know whether a pipeline ran (or is running) for a "
+            "branch/tag/MR - e.g. right after git_create_mr or git_create_tag, instead of "
+            "guessing from timing alone whether a merge refusal means a real conflict or just an "
+            "in-progress/not-yet-started pipeline. `ref` (branch or tag name) narrows to that ref; "
+            "`status` (e.g. 'running', 'success', 'failed') narrows further. Returns the 20 most "
+            "recent matching pipelines. Read-only, UNGATED. Requires an active GitLab connection."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"}, "repo_path": {"type": "string"},
+                "ref": {"type": "string"}, "status": {"type": "string"},
+            },
+            "required": [],
+        },
+    ),
+    Tool(
+        name=_PIPELINE_STATUS_TOOL,
+        description=(
+            "USE WHEN the human wants the detailed status of one specific pipeline by id (found "
+            "via gitlab_list_pipelines): returns the pipeline's own status/duration/user PLUS "
+            "every job's name/status/stage in one call - the two are always wanted together for "
+            "'did this pass, and if not, which job'. Call gitlab_job_log next for a failed job's "
+            "actual error output. Read-only, UNGATED. Requires an active GitLab connection."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"}, "repo_path": {"type": "string"},
+                "pipeline_id": {"type": "integer"},
+            },
+            "required": ["pipeline_id"],
+        },
+    ),
+    Tool(
+        name=_JOB_LOG_TOOL,
+        description=(
+            "USE WHEN the human wants to know WHY a specific job failed: returns that job's raw "
+            "plain-text log (found via gitlab_pipeline_status's jobs list). Read-only, UNGATED. "
+            "Requires an active GitLab connection."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"}, "repo_path": {"type": "string"},
+                "job_id": {"type": "integer"},
+            },
+            "required": ["job_id"],
         },
     ),
 ]
@@ -207,6 +299,84 @@ async def dispatch_gitlab_tool(name: str, arguments: dict) -> list[TextContent] 
             async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
                 result = await client.compare(project, from_ref, to_ref)
             return _ok(result)
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _LIST_TAGS_TOOL:
+        try:
+            conn = ConfigManager.load().active_gitlab_connection()
+            if conn is None:
+                return _no_gitlab_connection_err()
+            project = _resolve_project(arguments)
+            if project is None:
+                return _err("Either project or repo_path is required (a repo_path remote must be a recognized GitLab URL).")
+            async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                result = await client.list_tags(project)
+            return _ok({"tags": result})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _LIST_BRANCHES_TOOL:
+        try:
+            conn = ConfigManager.load().active_gitlab_connection()
+            if conn is None:
+                return _no_gitlab_connection_err()
+            project = _resolve_project(arguments)
+            if project is None:
+                return _err("Either project or repo_path is required (a repo_path remote must be a recognized GitLab URL).")
+            async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                result = await client.list_branches(project, search=arguments.get("search") or "")
+            return _ok({"branches": result})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _LIST_PIPELINES_TOOL:
+        try:
+            conn = ConfigManager.load().active_gitlab_connection()
+            if conn is None:
+                return _no_gitlab_connection_err()
+            project = _resolve_project(arguments)
+            if project is None:
+                return _err("Either project or repo_path is required (a repo_path remote must be a recognized GitLab URL).")
+            async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                result = await client.list_pipelines(
+                    project, ref=arguments.get("ref") or "", status=arguments.get("status") or "",
+                )
+            return _ok({"pipelines": result})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _PIPELINE_STATUS_TOOL:
+        pipeline_id = arguments.get("pipeline_id")
+        if not isinstance(pipeline_id, int) or isinstance(pipeline_id, bool):
+            return _err("pipeline_id is required and must be an integer.")
+        try:
+            conn = ConfigManager.load().active_gitlab_connection()
+            if conn is None:
+                return _no_gitlab_connection_err()
+            project = _resolve_project(arguments)
+            if project is None:
+                return _err("Either project or repo_path is required (a repo_path remote must be a recognized GitLab URL).")
+            async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                result = await client.get_pipeline(project, pipeline_id)
+            return _ok({"pipeline": result})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _JOB_LOG_TOOL:
+        job_id = arguments.get("job_id")
+        if not isinstance(job_id, int) or isinstance(job_id, bool):
+            return _err("job_id is required and must be an integer.")
+        try:
+            conn = ConfigManager.load().active_gitlab_connection()
+            if conn is None:
+                return _no_gitlab_connection_err()
+            project = _resolve_project(arguments)
+            if project is None:
+                return _err("Either project or repo_path is required (a repo_path remote must be a recognized GitLab URL).")
+            async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                result = await client.get_job_trace(project, job_id)
+            return _ok({"log": result})
         except Exception as exc:
             return _err(str(exc))
 

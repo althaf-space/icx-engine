@@ -181,6 +181,31 @@ class GitLabClient:
             raise GitLabError(f"Creating tag '{tag_name}' failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
         return resp.json()
 
+    async def get_tag(self, project: str, tag_name: str) -> dict:
+        """GET .../repository/tags/:tag_name - a single tag's detail (target
+        commit, message), used to confirm a tag genuinely exists (and to
+        show its target sha) before a delete/retag ever proceeds."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        encoded_tag = quote(tag_name, safe="")
+        resp = await self._get(f"/api/v4/projects/{encoded}/repository/tags/{encoded_tag}")
+        if resp.status_code == 404:
+            raise GitLabError(f"Tag '{tag_name}' not found (HTTP 404).", 404)
+        if resp.status_code != 200:
+            raise GitLabError(f"Fetching tag '{tag_name}' failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+        return resp.json()
+
+    async def delete_tag(self, project: str, tag_name: str) -> None:
+        """DELETE .../repository/tags/:tag_name - permanently removes the tag
+        object itself (never touches the commit/branch it pointed at). GitLab
+        returns 204 with no body on success."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        encoded_tag = quote(tag_name, safe="")
+        resp = await self._request("DELETE", f"/api/v4/projects/{encoded}/repository/tags/{encoded_tag}")
+        if resp.status_code == 404:
+            raise GitLabError(f"Tag '{tag_name}' not found (HTTP 404) - nothing to delete.", 404)
+        if resp.status_code not in (200, 204):
+            raise GitLabError(f"Deleting tag '{tag_name}' failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+
     async def list_merge_requests(
         self, project: str, state: str = "merged", target_branch: str | None = None, limit: int = 20,
     ) -> list[dict]:
@@ -230,6 +255,78 @@ class GitLabClient:
                 f"Comparing '{from_ref}'..'{to_ref}' failed (HTTP {resp.status_code}): {resp.text}", resp.status_code
             )
         return resp.json()
+
+    async def list_branches(self, project: str, search: str = "") -> list[dict]:
+        """GET .../repository/branches - real branch list (name/protected/default/
+        commit) so a parent/base branch is never proposed from guesswork. `search`
+        (if given) is GitLab's own server-side substring filter."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        params: dict = {"per_page": 100}
+        if search:
+            params["search"] = search
+        resp = await self._get(f"/api/v4/projects/{encoded}/repository/branches", params=params)
+        if resp.status_code != 200:
+            raise GitLabError(f"Listing branches failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+        return resp.json()
+
+    async def list_pipelines(self, project: str, ref: str = "", status: str = "") -> list[dict]:
+        """GET .../pipelines - recent pipelines, optionally filtered by ref
+        (branch/tag) or status. Read-only; does not include per-pipeline job
+        detail (see get_pipeline)."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        params: dict = {"per_page": 20}
+        if ref:
+            params["ref"] = ref
+        if status:
+            params["status"] = status
+        resp = await self._get(f"/api/v4/projects/{encoded}/pipelines", params=params)
+        if resp.status_code != 200:
+            raise GitLabError(f"Listing pipelines failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+        return resp.json()
+
+    async def get_pipeline(self, project: str, pipeline_id: int) -> dict:
+        """GET .../pipelines/:id plus its jobs - status/duration/user for the
+        pipeline itself, and each job's name/status/stage, in one call (the
+        two are always wanted together for 'did this pipeline pass, and if
+        not, which job')."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        resp = await self._get(f"/api/v4/projects/{encoded}/pipelines/{pipeline_id}")
+        if resp.status_code != 200:
+            raise GitLabError(f"Fetching pipeline !{pipeline_id} failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+        pipeline = resp.json()
+        jobs_resp = await self._get(f"/api/v4/projects/{encoded}/pipelines/{pipeline_id}/jobs", params={"per_page": 100})
+        if jobs_resp.status_code != 200:
+            raise GitLabError(
+                f"Fetching jobs for pipeline !{pipeline_id} failed (HTTP {jobs_resp.status_code}): {jobs_resp.text}",
+                jobs_resp.status_code,
+            )
+        pipeline["jobs"] = jobs_resp.json()
+        return pipeline
+
+    async def get_job_trace(self, project: str, job_id: int) -> str:
+        """GET .../jobs/:id/trace - the raw plain-text job log, for reading
+        why a failed job failed without leaving the tool."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        resp = await self._get(f"/api/v4/projects/{encoded}/jobs/{job_id}/trace")
+        if resp.status_code != 200:
+            raise GitLabError(f"Fetching job {job_id} log failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+        return resp.text
+
+    async def get_repository_file(self, project: str, file_path: str, ref: str) -> str:
+        """GET .../repository/files/:path/raw - a single repo file's raw text
+        content at `ref` (branch/tag/SHA). Used to fetch .gitlab-ci.yml itself
+        so a proposed tag name can be validated against the real CI trigger
+        patterns instead of guessed."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        encoded_path = quote(file_path, safe="")
+        resp = await self._get(
+            f"/api/v4/projects/{encoded}/repository/files/{encoded_path}/raw", params={"ref": ref}
+        )
+        if resp.status_code == 404:
+            raise GitLabError(f"File '{file_path}' not found at ref '{ref}' (HTTP 404).", 404)
+        if resp.status_code != 200:
+            raise GitLabError(f"Fetching '{file_path}' failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+        return resp.text
 
 
 _SSH_REMOTE_RE = re.compile(r"^[\w.-]+@[\w.-]+:(?P<path>.+?)(?:\.git)?/?$")

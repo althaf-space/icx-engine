@@ -178,6 +178,70 @@ def test_status_runs_with_no_config(cli_runner):
     assert result.exit_code == 0
     assert "Connections" in result.output
     assert "AI Profiles" in result.output
+    assert "Sonar Connections" in result.output
+    assert "GitLab Connections" in result.output
+    assert "Workstatus Connection" in result.output
+    assert "icx workstatus --add" in result.output
+
+
+def test_status_shows_configured_workstatus_connection(cli_runner):
+    from unittest.mock import patch
+    from icx_engine.models.config import WorkstatusConnection
+    config = AppConfig(
+        workstatus_connections={
+            "default": WorkstatusConnection(
+                name="default", user_id="12345", org_id="67890",
+                authorization="Bearer abc.def.ghi", sd_token="sd-token-value",
+            ),
+        },
+        active_workstatus="default",
+    )
+    with patch.object(ConfigManager, "load", return_value=config):
+        result = cli_runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "Workstatus Connection" in result.output
+    assert "12345" in result.output
+    assert "67890" in result.output
+    assert "ACTIVE" in result.output
+
+
+def test_status_migrates_legacy_workstatus_integration_and_shows_it(cli_runner):
+    """The old single-instance integrations["workstatus"] format must still show up in
+    icx status (via the automatic migration to workstatus_connections), not disappear."""
+    from unittest.mock import patch
+    config = AppConfig(integrations={
+        "workstatus": {
+            "user_id": "12345", "org_id": "67890",
+            "authorization": "Bearer abc.def.ghi", "sd_token": "sd-token-value",
+        },
+    })
+    with patch.object(ConfigManager, "load", return_value=config):
+        result = cli_runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "12345" in result.output
+    assert "67890" in result.output
+    assert "ACTIVE" in result.output
+
+
+def test_status_shows_multiple_workstatus_connections_indexed(cli_runner):
+    from unittest.mock import patch
+    from icx_engine.models.config import WorkstatusConnection
+    config = AppConfig(
+        workstatus_connections={
+            "work": WorkstatusConnection(name="work", user_id="111", org_id="222",
+                                          authorization="Bearer a", sd_token="s1"),
+            "personal": WorkstatusConnection(name="personal", user_id="333", org_id="444",
+                                              authorization="Bearer b", sd_token="s2"),
+        },
+        active_workstatus="personal",
+    )
+    with patch.object(ConfigManager, "load", return_value=config):
+        result = cli_runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "work" in result.output
+    assert "personal" in result.output
+    assert "1" in result.output
+    assert "2" in result.output
 
 
 def test_status_shows_indexed_connections(cli_runner):
@@ -740,6 +804,17 @@ def test_test_setup_help_mentions_playwright(cli_runner):
     assert "playwright" in result.stdout.lower()
 
 
+def test_workstatus_integration_is_registered():
+    """Drift guard: the workstatus integration model must be registered before
+    ConfigManager touches config - see cli.py's eager `import icx_engine.workstatus`."""
+    import icx_engine.workstatus  # noqa: F401
+    from icx_engine.integrations import get_integration_model, integration_secret_fields
+    from icx_engine.workstatus.config import WorkstatusConfig
+
+    assert get_integration_model("workstatus") is WorkstatusConfig
+    assert set(integration_secret_fields("workstatus")) == {"authorization", "sd_token"}
+
+
 def test_appconfig_has_sonar_enable_fields():
     from icx_engine.models.config import AppConfig
     cfg = AppConfig()
@@ -985,3 +1060,90 @@ def test_gitlab_connect_with_debug_still_hides_token_input(cli_runner, isolated_
     # CRITICAL: Even with --debug, hide_input must be True
     assert call_kwargs["token_prompt_kwargs"]["hide_input"] is True, \
         "SECURITY BUG: Token prompt called with hide_input=False when --debug was passed"
+
+
+@respx.mock
+def test_workstatus_connect_command_saves_connection(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    respx.get("https://web-api.workstatus.io/api/v5/notifications/unread-count").mock(
+        return_value=httpx.Response(200, json={"code": 200, "message": "ok", "data": {"count": 3}})
+    )
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: {
+        "Connection name": "default",
+        "UserID header value": "12345",
+        "OrgID header value": "67890",
+        "Authorization header value": "Bearer abc.def.ghi",
+        "SDToken header value": "sd-token-value",
+        "deviceType header value": "web",
+    }.get(a[0], ""))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    result = cli_runner.invoke(app, ["workstatus", "--add"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    config = ConfigManager.load()
+    assert config.active_workstatus == "default"
+    assert config.workstatus_connections["default"].authorization == "Bearer abc.def.ghi"
+    assert config.workstatus_connections["default"].sd_token == "sd-token-value"
+    assert "Connected" in result.stdout
+
+
+def test_workstatus_status_command_reports_not_configured(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["workstatus", "status"])
+    assert result.exit_code == 0
+    assert "no workstatus connection" in result.stdout.lower()
+
+
+def test_workstatus_remove_command_with_unknown_name_reports_cleanly(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["workstatus", "--remove", "somename"])
+    assert result.exit_code != 0
+
+
+def test_workstatus_bare_invocation_lists_connections(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["workstatus"])
+    assert result.exit_code == 0
+    assert "no workstatus connections" in result.stdout.lower()
+
+
+@respx.mock
+def test_workstatus_active_and_list_flags(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    respx.get("https://web-api.workstatus.io/api/v5/notifications/unread-count").mock(
+        return_value=httpx.Response(200, json={"code": 200, "message": "ok", "data": {"count": 0}})
+    )
+    prompts = iter([
+        {"Connection name": "work", "UserID header value": "1", "OrgID header value": "10",
+         "Authorization header value": "Bearer a", "SDToken header value": "sda", "deviceType header value": "web"},
+        {"Connection name": "personal", "UserID header value": "2", "OrgID header value": "20",
+         "Authorization header value": "Bearer b", "SDToken header value": "sdb", "deviceType header value": "web"},
+    ])
+    current = {"d": {}}
+
+    def _prompt(*a, **k):
+        return current["d"].get(a[0], "")
+
+    monkeypatch.setattr("typer.prompt", _prompt)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+
+    current["d"] = next(prompts)
+    result = cli_runner.invoke(app, ["workstatus", "--add"])
+    assert result.exit_code == 0
+
+    current["d"] = next(prompts)
+    result = cli_runner.invoke(app, ["workstatus", "--add"])
+    assert result.exit_code == 0
+
+    result = cli_runner.invoke(app, ["workstatus", "--list"])
+    assert result.exit_code == 0
+    assert "work" in result.stdout and "personal" in result.stdout
+
+    result = cli_runner.invoke(app, ["workstatus", "--active", "work"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    assert ConfigManager.load().active_workstatus == "work"
+
+    result = cli_runner.invoke(app, ["workstatus", "--remove", "personal"])
+    assert result.exit_code == 0
+    assert "personal" not in ConfigManager.load().workstatus_connections

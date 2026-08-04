@@ -2,7 +2,14 @@
 (requirements.txt, package.json, pom.xml, go.mod) and flags unpinned / wildcard versions, then matches
 each dependency against an OPTIONAL offline advisory file the user drops in. Honest ceiling: without a
 live CVE feed this is best-effort - unpinned/wildcard findings are always emitted; known-vulnerable
-findings appear only for advisories present in the offline file."""
+findings appear only for advisories present in the offline file.
+
+False-positive fix: a semver-range spec (`^1.2.3`, `~1.2.3`, `~=1.4`, `>=1.0,<2.0`, a Maven
+`[1.0,2.0)` bracket range) is intentional, controlled version pinning, not the same risk as a bare
+wildcard (`*`, `latest`, `LATEST`/`RELEASE`, or no version at all). These used to be flagged
+identically as `unpinned-dependency`; a range now gets its own low-noise `ranged-dependency`
+(severity `info`) instead, so real floating/unpinned dependencies aren't drowned out by normal
+semver-range usage. See `_classify_spec`."""
 from __future__ import annotations
 
 import json
@@ -75,9 +82,36 @@ def _advisory_findings(eco: str, name: str, version: str, relp: str, line: int,
     return out
 
 
+# Semver/Maven range indicators - a spec starting with one of these (or bracket-delimited) is a
+# deliberately bounded range, not a floating wildcard.
+_RANGE_PREFIX = re.compile(r"^(?:\^|~=?|>=|<=|>|<)")
+_TRUE_WILDCARDS = {"", "*", "x", "latest", "release"}
+
+
+def _classify_spec(spec: str) -> str:
+    """Returns "exact" (caller already has a parsed version so this isn't consulted), "ranged"
+    (bounded semver/Maven range - low risk, informational only), or "unpinned" (true wildcard/
+    floating/missing version - the real risk this scanner exists to catch)."""
+    s = (spec or "").strip()
+    if s.lower() in _TRUE_WILDCARDS:
+        return "unpinned"
+    if _RANGE_PREFIX.match(s) or s.startswith(("[", "(")):
+        return "ranged"
+    return "unpinned"
+
+
 def _unpinned(eco: str, name: str, version: str, spec: str, relp: str, line: int) -> Finding | None:
     if version:
         return None
+    kind = _classify_spec(spec)
+    if kind == "ranged":
+        return Finding(scanner="sca", rule="ranged-dependency", severity="info",
+                       title=f"Range-pinned dependency: {name}",
+                       file=relp, line=line,
+                       detail=f"{name} constrained to '{spec}' - a bounded semver range, not an "
+                              f"exact pin. Lower risk than fully unpinned, but still not "
+                              f"byte-for-byte reproducible.",
+                       extra={"package": name, "ecosystem": eco, "spec": spec})
     return Finding(scanner="sca", rule="unpinned-dependency", severity="low",
                    title=f"Unpinned dependency: {name}",
                    file=relp, line=line,

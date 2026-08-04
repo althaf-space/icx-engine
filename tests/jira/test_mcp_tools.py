@@ -39,6 +39,36 @@ async def test_jira_get_close_requirements_returns_service_dict_on_success():
     assert payload["editable_fields"] == {"summary": {"required": True}}
 
 
+async def test_jira_get_close_requirements_defaults_include_allowed_values_true():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    with patch("icx_engine.jira.mcp_tools.service.get_close_requirements",
+               new=AsyncMock(return_value={"issue_key": "TEST-1", "transitions": [], "editable_fields": {}})) as mock_call:
+        await dispatch_jira_tool("jira_get_close_requirements", {"issue_key": "TEST-1"})
+    mock_call.assert_awaited_once_with("TEST-1", include_allowed_values=True, since_status=None)
+
+
+async def test_jira_get_close_requirements_passes_include_allowed_values_false():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    with patch("icx_engine.jira.mcp_tools.service.get_close_requirements",
+               new=AsyncMock(return_value={"issue_key": "TEST-1", "transitions": [], "editable_fields": {}})) as mock_call:
+        await dispatch_jira_tool("jira_get_close_requirements", {
+            "issue_key": "TEST-1", "include_allowed_values": False,
+        })
+    mock_call.assert_awaited_once_with("TEST-1", include_allowed_values=False, since_status=None)
+
+
+async def test_jira_get_close_requirements_passes_since_status_through():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    with patch("icx_engine.jira.mcp_tools.service.get_close_requirements",
+               new=AsyncMock(return_value={"issue_key": "TEST-1", "status": "Done", "unchanged": True})) as mock_call:
+        result = await dispatch_jira_tool("jira_get_close_requirements", {
+            "issue_key": "TEST-1", "since_status": "Done",
+        })
+    mock_call.assert_awaited_once_with("TEST-1", include_allowed_values=True, since_status="Done")
+    payload = json.loads(result[0].text)
+    assert payload["unchanged"] is True
+
+
 async def test_jira_get_close_requirements_service_error_surfaces_as_ok_false():
     from icx_engine.jira.mcp_tools import dispatch_jira_tool
     with patch("icx_engine.jira.mcp_tools.service.get_close_requirements",
@@ -206,6 +236,99 @@ async def test_jira_apply_update_no_connection_error_surfaces_as_ok_false():
     assert payload["error"] == "No Jira connection configured."
 
 
+# -- jira_list_issue_types: discovery lookup for jira_create_issue -----------
+
+async def test_jira_list_issue_types_missing_project_returns_named_error():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    result = await dispatch_jira_tool("jira_list_issue_types", {})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "project" in payload["error"]
+
+
+async def test_jira_list_issue_types_ungated_executes_immediately():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    service_result = [{"id": "10001", "name": "Bug"}]
+    with patch("icx_engine.jira.mcp_tools.service.list_issue_types",
+               new=AsyncMock(return_value=service_result)) as mock_call:
+        result = await dispatch_jira_tool("jira_list_issue_types", {"project": "ABC"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["issue_types"] == [{"id": "10001", "name": "Bug"}]
+    mock_call.assert_awaited_once_with("ABC", domain=None)
+
+
+async def test_jira_list_issue_types_passes_domain_through():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    with patch("icx_engine.jira.mcp_tools.service.list_issue_types",
+               new=AsyncMock(return_value=[])) as mock_call:
+        await dispatch_jira_tool("jira_list_issue_types", {"project": "ABC", "domain": "test.atlassian.net"})
+    mock_call.assert_awaited_once_with("ABC", domain="test.atlassian.net")
+
+
+async def test_jira_list_issue_types_no_connection_error_surfaces_as_ok_false():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    with patch("icx_engine.jira.mcp_tools.service.list_issue_types",
+               new=AsyncMock(side_effect=NoConnectionError("No Jira connection configured."))):
+        result = await dispatch_jira_tool("jira_list_issue_types", {"project": "ABC"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert payload["error"] == "No Jira connection configured."
+
+
+# -- jira_get_createmeta_fields: discovery lookup for jira_create_issue ------
+
+async def test_jira_get_createmeta_fields_missing_project_returns_named_error():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    result = await dispatch_jira_tool("jira_get_createmeta_fields", {"issuetype_id": "10001"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "project" in payload["error"]
+
+
+async def test_jira_get_createmeta_fields_missing_issuetype_id_returns_named_error():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    result = await dispatch_jira_tool("jira_get_createmeta_fields", {"project": "ABC"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "issuetype_id" in payload["error"]
+
+
+async def test_jira_get_createmeta_fields_ungated_executes_immediately():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    service_result = {"customfield_10050": {"required": True, "schema": {"type": "option"}}}
+    with patch("icx_engine.jira.mcp_tools.service.get_createmeta_fields",
+               new=AsyncMock(return_value=service_result)) as mock_call:
+        result = await dispatch_jira_tool("jira_get_createmeta_fields", {"project": "ABC", "issuetype_id": "10001"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["fields"] == service_result
+    mock_call.assert_awaited_once_with("ABC", "10001", domain=None)
+
+
+async def test_jira_get_createmeta_fields_no_connection_error_surfaces_as_ok_false():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    with patch("icx_engine.jira.mcp_tools.service.get_createmeta_fields",
+               new=AsyncMock(side_effect=NoConnectionError("No Jira connection configured."))):
+        result = await dispatch_jira_tool("jira_get_createmeta_fields", {"project": "ABC", "issuetype_id": "10001"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert payload["error"] == "No Jira connection configured."
+
+
+def test_jira_get_createmeta_fields_tool_description_warns_it_is_best_effort_and_names_fallback():
+    """Locks in the CCBSS incident fix: createmeta can return completely empty on some
+    Jira projects (a Jira Cloud gap, not a pagination bug) - the description must say so
+    and point at jira_get_close_requirements as the reliable fallback, not let the agent
+    silently guess a field key/value shape again."""
+    from icx_engine.jira.mcp_tools import JIRA_TOOLS
+    tool = next(t for t in JIRA_TOOLS if t.name == "jira_get_createmeta_fields")
+    description = tool.description.lower()
+    assert "best-effort" in description
+    assert "empty" in description
+    assert "jira_get_close_requirements" in description
+
+
 # -- jira_create_issue: required-field validation ----------------------------
 
 async def test_jira_create_issue_missing_project_returns_named_error():
@@ -330,6 +453,15 @@ async def test_jira_create_issue_no_connection_error_surfaces_as_ok_false():
     payload = json.loads(second[0].text)
     assert payload["ok"] is False
     assert payload["error"] == "No Jira connection configured."
+
+
+def test_jira_create_issue_tool_description_names_reliable_fallback_when_createmeta_empty():
+    from icx_engine.jira.mcp_tools import JIRA_TOOLS
+    tool = next(t for t in JIRA_TOOLS if t.name == "jira_create_issue")
+    description = tool.description.lower()
+    assert "unreliable" in description
+    assert "jira_get_close_requirements" in description
+    assert "never send a guessed field key" in description
 
 
 # -- jira_delete_issue: required-field validation + explicit warning ---------
@@ -786,6 +918,46 @@ async def test_jira_set_assignee_no_connection_error_surfaces_as_ok_false():
     with patch("icx_engine.jira.mcp_tools.service.set_assignee",
                new=AsyncMock(side_effect=NoConnectionError("No Jira connection configured."))):
         result = await dispatch_jira_tool("jira_set_assignee", {"issue_key": "TEST-1"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert payload["error"] == "No Jira connection configured."
+
+
+# -- jira_search_assignable_users: discovery lookup for jira_set_assignee ----
+
+async def test_jira_search_assignable_users_missing_issue_key_returns_named_error():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    result = await dispatch_jira_tool("jira_search_assignable_users", {})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "issue_key" in payload["error"]
+
+
+async def test_jira_search_assignable_users_ungated_executes_immediately():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    service_result = [{"accountId": "acc-1", "displayName": "Jane Doe"}]
+    with patch("icx_engine.jira.mcp_tools.service.search_assignable_users",
+               new=AsyncMock(return_value=service_result)) as mock_call:
+        result = await dispatch_jira_tool("jira_search_assignable_users", {"issue_key": "TEST-1"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["users"] == service_result
+    mock_call.assert_awaited_once_with("TEST-1", query="")
+
+
+async def test_jira_search_assignable_users_passes_query_through():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    with patch("icx_engine.jira.mcp_tools.service.search_assignable_users",
+               new=AsyncMock(return_value=[])) as mock_call:
+        await dispatch_jira_tool("jira_search_assignable_users", {"issue_key": "TEST-1", "query": "jane"})
+    mock_call.assert_awaited_once_with("TEST-1", query="jane")
+
+
+async def test_jira_search_assignable_users_no_connection_error_surfaces_as_ok_false():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    with patch("icx_engine.jira.mcp_tools.service.search_assignable_users",
+               new=AsyncMock(side_effect=NoConnectionError("No Jira connection configured."))):
+        result = await dispatch_jira_tool("jira_search_assignable_users", {"issue_key": "TEST-1"})
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
     assert payload["error"] == "No Jira connection configured."

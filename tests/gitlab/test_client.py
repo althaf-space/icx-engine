@@ -260,6 +260,46 @@ async def test_create_tag_raises_gitlab_error_on_failure(gitlab_base_url):
 
 
 @respx.mock
+async def test_get_tag_returns_tag_detail(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/tags/zz-icx-verify-1").mock(
+        return_value=httpx.Response(200, json={"name": "zz-icx-verify-1", "commit": {"id": "abc123"}})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        result = await client.get_tag("group/project", "zz-icx-verify-1")
+    assert result["commit"]["id"] == "abc123"
+
+
+@respx.mock
+async def test_get_tag_raises_gitlab_error_on_404(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/tags/nope").mock(
+        return_value=httpx.Response(404, json={"message": "404 Tag Not Found"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.get_tag("group/project", "nope")
+
+
+@respx.mock
+async def test_delete_tag_succeeds_on_204(gitlab_base_url):
+    route = respx.delete(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/tags/zz-icx-verify-1").mock(
+        return_value=httpx.Response(204)
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        await client.delete_tag("group/project", "zz-icx-verify-1")
+    assert route.calls.call_count == 1
+
+
+@respx.mock
+async def test_delete_tag_raises_gitlab_error_on_404(gitlab_base_url):
+    respx.delete(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/tags/nope").mock(
+        return_value=httpx.Response(404, json={"message": "404 Tag Not Found"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.delete_tag("group/project", "nope")
+
+
+@respx.mock
 async def test_list_merge_requests_returns_parsed_list(gitlab_base_url):
     respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/merge_requests").mock(
         return_value=httpx.Response(200, json=[
@@ -464,3 +504,172 @@ async def test_compare_raises_gitlab_error_on_failure(gitlab_base_url):
     async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
         with pytest.raises(GitLabError):
             await client.compare("group/project", "development", "feature/x-ABC-1")
+
+
+# -- list_branches ------------------------------------------------------------
+
+@respx.mock
+async def test_list_branches_returns_parsed_list(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/branches").mock(
+        return_value=httpx.Response(200, json=[
+            {"name": "development", "protected": True, "default": True, "commit": {"committed_date": "2026-08-03T05:19:48.000+00:00"}},
+            {"name": "feature/x-ABC-1", "protected": False, "default": False, "commit": {"committed_date": "2026-08-01T00:00:00.000+00:00"}},
+        ])
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        branches = await client.list_branches("group/project")
+    assert len(branches) == 2
+    assert branches[0]["name"] == "development"
+    assert branches[0]["default"] is True
+
+
+@respx.mock
+async def test_list_branches_sends_search_param_when_given(gitlab_base_url):
+    route = respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/branches").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        await client.list_branches("group/project", search="feature/x")
+    assert route.calls[0].request.url.params["search"] == "feature/x"
+
+
+@respx.mock
+async def test_list_branches_raises_gitlab_error_on_failure(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/branches").mock(
+        return_value=httpx.Response(404, json={"message": "404 Project Not Found"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.list_branches("group/project")
+
+
+# -- list_pipelines -------------------------------------------------------------
+
+@respx.mock
+async def test_list_pipelines_returns_parsed_list(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[
+            {"id": 1246493, "iid": 89, "status": "failed", "ref": "refs/merge-requests/85/head"},
+        ])
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        pipelines = await client.list_pipelines("group/project")
+    assert len(pipelines) == 1
+    assert pipelines[0]["status"] == "failed"
+
+
+@respx.mock
+async def test_list_pipelines_sends_ref_and_status_params(gitlab_base_url):
+    route = respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        await client.list_pipelines("group/project", ref="main", status="success")
+    params = route.calls[0].request.url.params
+    assert params["ref"] == "main"
+    assert params["status"] == "success"
+
+
+@respx.mock
+async def test_list_pipelines_raises_gitlab_error_on_failure(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(404, json={"message": "404 Project Not Found"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.list_pipelines("group/project")
+
+
+# -- get_pipeline (pipeline detail + jobs) --------------------------------------
+
+@respx.mock
+async def test_get_pipeline_merges_jobs_into_pipeline_dict(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/pipelines/1246493").mock(
+        return_value=httpx.Response(200, json={"id": 1246493, "status": "failed"})
+    )
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/pipelines/1246493/jobs").mock(
+        return_value=httpx.Response(200, json=[
+            {"id": 2177771, "name": "buildapp", "status": "failed", "stage": "build"},
+        ])
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        pipeline = await client.get_pipeline("group/project", 1246493)
+    assert pipeline["status"] == "failed"
+    assert pipeline["jobs"][0]["name"] == "buildapp"
+
+
+@respx.mock
+async def test_get_pipeline_raises_when_pipeline_fetch_fails(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/pipelines/999").mock(
+        return_value=httpx.Response(404, json={"message": "404 Not found"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.get_pipeline("group/project", 999)
+
+
+@respx.mock
+async def test_get_pipeline_raises_when_jobs_fetch_fails(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/pipelines/1246493").mock(
+        return_value=httpx.Response(200, json={"id": 1246493, "status": "failed"})
+    )
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/pipelines/1246493/jobs").mock(
+        return_value=httpx.Response(500, json={"message": "server error"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.get_pipeline("group/project", 1246493)
+
+
+# -- get_job_trace --------------------------------------------------------------
+
+@respx.mock
+async def test_get_job_trace_returns_raw_text(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/jobs/2177771/trace").mock(
+        return_value=httpx.Response(200, text="ERROR: Job failed: exit code 1")
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        trace = await client.get_job_trace("group/project", 2177771)
+    assert "exit code 1" in trace
+
+
+@respx.mock
+async def test_get_job_trace_raises_gitlab_error_on_failure(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/jobs/999/trace").mock(
+        return_value=httpx.Response(404, json={"message": "404 Not found"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.get_job_trace("group/project", 999)
+
+
+# -- get_repository_file --------------------------------------------------------
+
+@respx.mock
+async def test_get_repository_file_returns_raw_text(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/files/.gitlab-ci.yml/raw").mock(
+        return_value=httpx.Response(200, text="stages:\n  - build\n")
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        text = await client.get_repository_file("group/project", ".gitlab-ci.yml", "development")
+    assert "stages" in text
+
+
+@respx.mock
+async def test_get_repository_file_sends_ref_param(gitlab_base_url):
+    route = respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/files/.gitlab-ci.yml/raw").mock(
+        return_value=httpx.Response(200, text="")
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        await client.get_repository_file("group/project", ".gitlab-ci.yml", "development")
+    assert route.calls[0].request.url.params["ref"] == "development"
+
+
+@respx.mock
+async def test_get_repository_file_404_raises_gitlab_error(gitlab_base_url):
+    respx.get(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/repository/files/.gitlab-ci.yml/raw").mock(
+        return_value=httpx.Response(404, text="")
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.get_repository_file("group/project", ".gitlab-ci.yml", "development")

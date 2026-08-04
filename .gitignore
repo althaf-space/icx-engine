@@ -1,5 +1,5 @@
 ﻿# NEVER COMMIT:
-# ~/.ice/config.json - contains workflow-specific API tokens, OAuth access+refresh tokens, LLM API keys
+# ~/.icx/config.json - contains workflow-specific API tokens, OAuth access+refresh tokens, LLM API keys
 # .env files - any local environment overrides
 # __pycache__ - Python bytecode, auto-generated
 
@@ -44,8 +44,8 @@ Thumbs.db
 *.env
 
 # ── MCP host config files ─────────────────────────────────────────────────────
-# .claude/ is written by `jce mcp start` for Claude Code integration
-# .cursor/ is written by `jce mcp start` relative to project root - must be excluded
+# .claude/ is written by `icx mcp start` for Claude Code integration
+# .cursor/ is written by `icx mcp start` relative to project root - must be excluded
 .claude/
 .cursor/
 claude.md
