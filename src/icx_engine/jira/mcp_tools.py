@@ -16,6 +16,8 @@ from icx_engine.jira import service
 
 _GET_CLOSE_REQUIREMENTS_TOOL = "jira_get_close_requirements"
 _APPLY_UPDATE_TOOL = "jira_apply_update"
+_LIST_ISSUE_TYPES_TOOL = "jira_list_issue_types"
+_GET_CREATEMETA_FIELDS_TOOL = "jira_get_createmeta_fields"
 _CREATE_ISSUE_TOOL = "jira_create_issue"
 _DELETE_ISSUE_TOOL = "jira_delete_issue"
 _COMMENT_LIST_TOOL = "jira_comment_list"
@@ -28,6 +30,7 @@ _LINK_TYPES_TOOL = "jira_link_types"
 _LINK_CREATE_TOOL = "jira_link_create"
 _LINK_DELETE_TOOL = "jira_link_delete"
 _SET_ASSIGNEE_TOOL = "jira_set_assignee"
+_SEARCH_ASSIGNABLE_USERS_TOOL = "jira_search_assignable_users"
 _ATTACHMENT_UPLOAD_TOOL = "jira_attachment_upload"
 _ATTACHMENT_DELETE_TOOL = "jira_attachment_delete"
 _GET_CURRENT_USER_TOOL = "jira_get_current_user"
@@ -46,12 +49,29 @@ JIRA_TOOLS: list[Tool] = [
             "first, before jira_apply_update, to discover what the issue actually needs - "
             "available workflow transitions (with any per-transition required fields) and the "
             "fields currently editable on the issue. Transitions and required fields vary per "
-            "project/workflow - never guess them. Requires a resolvable Jira connection for the "
-            "issue's key."
+            "project/workflow - never guess them. `include_allowed_values` (default true) "
+            "controls whether each field's full option catalogue (`allowedValues` - every "
+            "Functionality/Component/Issue Category value, sometimes 50-70+ entries) is "
+            "included - PASS `include_allowed_values=false` on repeat calls for the SAME issue "
+            "within a multi-hop workflow walk (e.g. New -> Assigned -> Fixed -> Retest) once the "
+            "catalogue is already known from an earlier call - it does not change between hops "
+            "moments apart, and re-sending it every time is pure repeated payload. `required`/ "
+            "`schema` are still returned either way. The response always includes `status` (the "
+            "issue's current workflow status) - PASS that exact value back as `since_status` on "
+            "your NEXT call for the same issue if the intervening jira_apply_update call only "
+            "changed a field, not the status: if status is unchanged, this returns a compact "
+            "`{status, unchanged: true}` instead of the full transitions/editable_fields bundle "
+            "(both are purely a function of current status, so they cannot have changed either). "
+            "Omit `since_status` (or if the status DID change) to get the full bundle. Requires a "
+            "resolvable Jira connection for the issue's key."
         ),
         inputSchema={
             "type": "object",
-            "properties": {"issue_key": {"type": "string"}},
+            "properties": {
+                "issue_key": {"type": "string"},
+                "include_allowed_values": {"type": "boolean"},
+                "since_status": {"type": "string"},
+            },
             "required": ["issue_key"],
         },
     ),
@@ -85,11 +105,68 @@ JIRA_TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name=_LIST_ISSUE_TYPES_TOOL,
+        description=(
+            "USE WHEN the human wants to create a Jira issue and the exact issuetype name/id for "
+            "the target project isn't already known: call this first. Issue types are configured "
+            "per-project - never guess a name. Read-only, UNGATED. Pass `domain` only when "
+            "multiple Jira connections are configured and none is set as default."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}, "domain": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    Tool(
+        name=_GET_CREATEMETA_FIELDS_TOOL,
+        description=(
+            "BEST-EFFORT ONLY - call jira_list_issue_types + this tool as a first, cheap attempt "
+            "to learn create-time fields for a project+issuetype (keyed by real field id, e.g. "
+            "`customfield_10050`, each with `required`/`schema`/`allowedValues`) before creating a "
+            "Jira issue whose `fields` carries anything beyond a plain summary. UNRELIABLE ON SOME "
+            "JIRA PROJECTS: Jira's createmeta endpoint is documented to return an EMPTY or "
+            "incomplete field list on certain project configurations (observed live: team-managed "
+            "projects), independent of the field genuinely existing and being settable - this is a "
+            "known Jira Cloud API gap, not something a retry or different parameters fixes. "
+            "If this returns empty, or is missing a field the human named, do NOT fall back to "
+            "guessing its key or value shape: the RELIABLE fallback is jira_get_close_requirements "
+            "called on an EXISTING issue of the SAME project+issuetype (find one with jira_search, "
+            "e.g. `project = X AND issuetype = Y ORDER BY created DESC`, if none is already known) "
+            "- its `editable_fields` reliably includes the real field id and `allowedValues` (e.g. "
+            "`customfield_10045` for Severity with Critical/Major/Minor/Trivial) even when this tool "
+            "returns nothing. A field's DISPLAY NAME (e.g. 'Severity') is NEVER the correct JSON "
+            "key either way - select-list fields take `{\"value\": ...}` while a plain few system "
+            "fields like `priority` take `{\"name\": ...}`. Read-only, UNGATED. Pass `domain` only "
+            "when multiple Jira connections are configured and none is set as default."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "issuetype_id": {"type": "string"},
+                "domain": {"type": "string"},
+            },
+            "required": ["project", "issuetype_id"],
+        },
+    ),
+    Tool(
         name=_CREATE_ISSUE_TOOL,
         description=(
-            "USE WHEN the human wants to create a new Jira issue. Creates a persistent artifact "
-            "in Jira, so this is a CONFIRMATION-GATED tool: the first call (no confirm_token) "
-            "returns pending_confirmation plus a one-time token after showing the human the exact "
+            "USE WHEN the human wants to create a new Jira issue. If `fields` will carry anything "
+            "beyond a plain summary (severity, components, any custom field), its real field id and "
+            "value shape MUST be confirmed first - NEVER send a guessed field key (e.g. a literal "
+            "\"Severity\" key) or guessed value shape, Jira rejects it with a generic validation "
+            "error that does not say what was wrong. jira_get_createmeta_fields is a cheap "
+            "best-effort first try, but it is UNRELIABLE on some Jira projects and can return "
+            "completely empty; when it does (or is missing the field), call jira_get_close_requirements "
+            "on an EXISTING issue of the SAME project+issuetype instead (use jira_search to find one "
+            "if none is already known) - its `editable_fields` reliably has the real field id and "
+            "`allowedValues`, unlike createmeta. `fields.description` may be passed as a PLAIN "
+            "STRING - it is auto-wrapped into Jira's required ADF format before submission, no "
+            "manual conversion needed. Creates a persistent artifact in Jira, so "
+            "this is a CONFIRMATION-GATED tool: the first call (no confirm_token) returns "
+            "pending_confirmation plus a one-time token after showing the human the exact "
             "project/issuetype/summary/fields that will be submitted - you MUST show that to the "
             "human and get an explicit yes before calling again with confirm_token set. Calling "
             "with a wrong or reused token fails. Pass `domain` only when multiple Jira connections "
@@ -318,10 +395,12 @@ JIRA_TOOLS: list[Tool] = [
         name=_SET_ASSIGNEE_TOOL,
         description=(
             "USE WHEN the human wants to assign, unassign, or reset the assignee of a Jira "
-            "issue. Reversible at any time (assigning again changes it back), so this tool is "
-            "UNGATED - it executes immediately, no confirm_token round-trip. Pass `account_id` "
-            "to assign that account; omit it (or pass null) to unassign the issue; pass the "
-            "literal string \"-1\" to assign the project's default assignee. Requires a "
+            "issue. If assigning to anyone other than the caller and their real account_id "
+            "isn't already known, call jira_search_assignable_users first - do not guess an "
+            "account_id. Reversible at any time (assigning again changes it back), so this tool "
+            "is UNGATED - it executes immediately, no confirm_token round-trip. Pass "
+            "`account_id` to assign that account; omit it (or pass null) to unassign the issue; "
+            "pass the literal string \"-1\" to assign the project's default assignee. Requires a "
             "resolvable Jira connection for the issue_key."
         ),
         inputSchema={
@@ -329,6 +408,26 @@ JIRA_TOOLS: list[Tool] = [
             "properties": {
                 "issue_key": {"type": "string"},
                 "account_id": {"type": "string"},
+            },
+            "required": ["issue_key"],
+        },
+    ),
+    Tool(
+        name=_SEARCH_ASSIGNABLE_USERS_TOOL,
+        description=(
+            "USE WHEN the human wants to assign a Jira issue to someone other than themselves "
+            "and the real account_id isn't already known - call this before jira_set_assignee. "
+            "Returns users assignable to `issue_key`, each with a real `accountId`, optionally "
+            "narrowed by `query` (name/email substring). get_current_user only resolves the "
+            "caller's own accountId, never someone else's - this is the discovery path for "
+            "anyone else, so account_id is never guessed. Read-only, UNGATED. Requires a "
+            "resolvable Jira connection for the issue_key."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "issue_key": {"type": "string"},
+                "query": {"type": "string"},
             },
             "required": ["issue_key"],
         },
@@ -578,7 +677,11 @@ async def dispatch_jira_tool(name: str, arguments: dict) -> list[TextContent] | 
         if not issue_key or not isinstance(issue_key, str):
             return _err("issue_key is required and must be a non-empty string.")
         try:
-            result = await service.get_close_requirements(issue_key)
+            include_allowed_values = bool(arguments.get("include_allowed_values", True))
+            result = await service.get_close_requirements(
+                issue_key, include_allowed_values=include_allowed_values,
+                since_status=arguments.get("since_status"),
+            )
             return _ok(result)
         except Exception as exc:
             return _err(str(exc))
@@ -618,6 +721,29 @@ async def dispatch_jira_tool(name: str, arguments: dict) -> list[TextContent] | 
                 comment=payload.get("comment"),
             )
             return [TextContent(type="text", text=json.dumps(result))]
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _LIST_ISSUE_TYPES_TOOL:
+        project = arguments.get("project")
+        if not project or not isinstance(project, str):
+            return _err("project is required and must be a non-empty string.")
+        try:
+            result = await service.list_issue_types(project, domain=arguments.get("domain"))
+            return _ok({"issue_types": result})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _GET_CREATEMETA_FIELDS_TOOL:
+        project = arguments.get("project")
+        if not project or not isinstance(project, str):
+            return _err("project is required and must be a non-empty string.")
+        issuetype_id = arguments.get("issuetype_id")
+        if not issuetype_id or not isinstance(issuetype_id, str):
+            return _err("issuetype_id is required and must be a non-empty string.")
+        try:
+            result = await service.get_createmeta_fields(project, issuetype_id, domain=arguments.get("domain"))
+            return _ok({"fields": result})
         except Exception as exc:
             return _err(str(exc))
 
@@ -850,6 +976,16 @@ async def dispatch_jira_tool(name: str, arguments: dict) -> list[TextContent] | 
         try:
             result = await service.set_assignee(issue_key, account_id=arguments.get("account_id"))
             return _ok(result)
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _SEARCH_ASSIGNABLE_USERS_TOOL:
+        issue_key = arguments.get("issue_key")
+        if not issue_key or not isinstance(issue_key, str):
+            return _err("issue_key is required and must be a non-empty string.")
+        try:
+            result = await service.search_assignable_users(issue_key, query=arguments.get("query") or "")
+            return _ok({"users": result})
         except Exception as exc:
             return _err(str(exc))
 

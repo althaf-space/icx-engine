@@ -5,6 +5,19 @@ from unittest.mock import AsyncMock, patch
 
 from icx_engine.mcp_server import _ICX_FALLBACK
 
+# Minimal real-shaped .gitlab-ci.yml fixture (dev/qa tag-trigger patterns) - used by
+# git_create_tag tests so its live CI-pattern validation (added after live GitLab
+# research) doesn't block tests that mock GitLabClient wholesale without configuring
+# get_repository_file specifically.
+_SAMPLE_CI_YAML = """
+build_dev:
+  only:
+    - /^v\\d+\\.\\d+\\.\\d+-dev-(20\\d{2})(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])(\\d{3})$/
+build_qa:
+  only:
+    - /^v\\d+\\.\\d+\\.\\d+-qa-(20\\d{2})(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])(\\d{3})$/
+"""
+
 
 async def test_dispatch_git_tool_returns_none_for_unknown_tool():
     from icx_engine.git.mcp_tools import dispatch_git_tool
@@ -336,6 +349,59 @@ async def test_git_push_missing_repo_path_returns_named_error():
     assert payload["error"] != "'repo_path'"
 
 
+async def test_git_push_injects_gitlab_auth_env_for_matching_https_origin(tmp_git_repo_with_remote, monkeypatch):
+    """The actual push-credential fix, at the standalone git_push tool: this tool calls
+    gitcmd.push directly (never through create_mr_for_ticket), so it needs its own
+    resolve-connection-and-compute-auth-env wiring - this proves it's there."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    from icx_engine.models.config import GitLabConnection
+    from unittest.mock import Mock
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/push-auth", "main")
+    checkout(tmp_git_repo_with_remote, "feature/push-auth")
+
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    mock_push = Mock()
+    monkeypatch.setattr("icx_engine.git.manager.remote_url", lambda repo, remote="origin": "https://gitlab.example.com/group/project.git")
+    monkeypatch.setattr("icx_engine.git.gitcmd.push", mock_push)
+
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        first = await dispatch_git_tool("git_push", {"repo_path": str(tmp_git_repo_with_remote)})
+        token = json.loads(first[0].text)["token"]
+        await dispatch_git_tool("git_push", {
+            "repo_path": str(tmp_git_repo_with_remote), "confirm_token": token,
+        })
+
+    mock_push.assert_called_once()
+    auth_env = mock_push.call_args.kwargs["extra_env"]
+    assert auth_env is not None
+    assert auth_env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+
+
+async def test_git_push_no_gitlab_connection_still_pushes_with_no_extra_env(tmp_git_repo_with_remote):
+    """No regression for the common case (no GitLab connection configured at all) -
+    push must still behave exactly as before: extra_env=None, relying on whatever
+    git credential already exists."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout, remote_branch_exists
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/push-no-conn", "main")
+    checkout(tmp_git_repo_with_remote, "feature/push-no-conn")
+
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = None
+        first = await dispatch_git_tool("git_push", {"repo_path": str(tmp_git_repo_with_remote)})
+        token = json.loads(first[0].text)["token"]
+        second = await dispatch_git_tool("git_push", {
+            "repo_path": str(tmp_git_repo_with_remote), "confirm_token": token,
+        })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert remote_branch_exists(tmp_git_repo_with_remote, "feature/push-no-conn") is True
+
+
 async def test_git_reverse_merge_reports_clean(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
     from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit
@@ -438,6 +504,26 @@ async def test_git_create_mr_confirmation_gated_and_executes(tmp_git_repo_with_r
     payload = json.loads(second[0].text)
     assert payload["ok"] is True
     assert payload["merged"] is True
+
+
+async def test_git_create_mr_pending_confirmation_shows_source_branch(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    """Real bug fixed: the confirmation payload used to show only parent_branch
+    (the target) and never the source (current feature branch) - the instruction
+    text even said 'show ticket, summary, and target branch', source omitted."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-1", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
+
+    result = await dispatch_git_tool("git_create_mr", {
+        "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
+        "ticket_key": "ABC-1", "ticket_summary": "Fix login",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "pending_confirmation"
+    assert payload["source_branch"] == "feature/x-ABC-1"
+    assert payload["parent_branch"] == "main"
 
 
 async def test_git_create_mr_confirmed_once_still_asks_again_next_call(tmp_git_repo_with_remote, monkeypatch):
@@ -607,6 +693,7 @@ async def test_git_create_tag_confirmation_gated_and_executes(tmp_git_repo_with_
     mock_client = AsyncMock()
     mock_client.list_tags.return_value = [{"name": "v0.0.184-qa-20260727002"}]
     mock_client.create_tag.return_value = {"name": "v0.0.185-qa-20260727003"}
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
 
     # Pins the "today" the production code would otherwise take from the real
     # UTC clock, so this test's outcome never depends on the calendar date it
@@ -636,6 +723,177 @@ async def test_git_create_tag_confirmation_gated_and_executes(tmp_git_repo_with_
     payload = json.loads(second[0].text)
     assert payload["ok"] is True
     assert payload["tag"] == "v0.0.185-qa-20260727003"
+
+
+# -- git_create_tag: real CI-pattern validation (GIT-2/3/4) -------------------
+
+async def test_git_create_tag_rejects_environment_not_in_real_ci_patterns(tmp_git_repo_with_remote):
+    """GIT-2: a free-text environment with no relation to any real one (e.g.
+    'STAGING' when only dev/qa exist) must be rejected - the real bug was that
+    ICX accepted any string silently and the resulting tag triggered no pipeline."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.list_tags.return_value = []
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                result = await dispatch_git_tool("git_create_tag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "environment": "STAGING", "branch": "main",
+                })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "does not match any tag-triggering environment" in payload["error"]
+    assert "'dev'" in payload["error"] and "'qa'" in payload["error"]
+
+
+async def test_git_create_tag_normalizes_wrong_case_environment_instead_of_producing_a_dead_tag(tmp_git_repo_with_remote):
+    """The precise real-world bug this closes: passing 'DEV' (wrong case) used to
+    either get accepted verbatim (a tag with no matching CI pattern, a silent
+    no-op) or now would fail the pattern check a second time for the same reason.
+    Normalizing to the real observed casing here means it just works instead."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.gitlab.service import propose_next_tag as real_propose_next_tag
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.list_tags.return_value = [{"name": "v0.0.184-qa-20260727002"}]
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
+
+    def _fixed_propose_next_tag(environment, latest, today=None):
+        return real_propose_next_tag(environment, latest, today="20260727")
+
+    with patch("icx_engine.gitlab.service.propose_next_tag", side_effect=_fixed_propose_next_tag):
+        with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+            mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+            with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+                with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                    mock_client_cls.return_value.__aenter__.return_value = mock_client
+                    result = await dispatch_git_tool("git_create_tag", {
+                        "repo_path": str(tmp_git_repo_with_remote), "environment": "QA", "branch": "main",
+                    })
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "pending_confirmation"
+    assert payload["ci_pipeline_will_trigger"] is True
+    assert "-qa-" in payload["proposed_tag"]
+    assert "-QA-" not in payload["proposed_tag"]
+
+
+async def test_git_create_tag_refuses_when_proposed_tag_matches_no_ci_pattern(tmp_git_repo_with_remote):
+    """GIT-3: creating a tag that triggers no pipeline is a silent no-op - must
+    refuse rather than succeed, unless override_ci_check is explicitly passed."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.list_tags.return_value = []
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                result = await dispatch_git_tool("git_create_tag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "environment": "qa", "branch": "main",
+                    "tag_name_override": "v0.0.1-qa-not-a-real-date",
+                })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "does not match any tag-triggering pattern" in payload["error"]
+
+
+async def test_git_create_tag_override_ci_check_bypasses_refusal(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.list_tags.return_value = []
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                result = await dispatch_git_tool("git_create_tag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "environment": "qa", "branch": "main",
+                    "tag_name_override": "v0.0.1-qa-not-a-real-date", "override_ci_check": True,
+                })
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "pending_confirmation"
+    assert payload["ci_pipeline_will_trigger"] is False
+
+
+async def test_git_create_tag_no_previous_tag_carries_explicit_warning(tmp_git_repo_with_remote):
+    """GIT-4: previous_tag: null must be a hard-to-miss warning, not a footnote -
+    it can mean the environment name itself is wrong, not 'first tag ever'."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.gitlab.service import propose_next_tag as real_propose_next_tag
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.list_tags.return_value = []  # no tags at all for this environment
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
+
+    def _fixed_propose_next_tag(environment, latest, today=None):
+        return real_propose_next_tag(environment, latest, today="20260727")
+
+    with patch("icx_engine.gitlab.service.propose_next_tag", side_effect=_fixed_propose_next_tag):
+        with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+            mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+            with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+                with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                    mock_client_cls.return_value.__aenter__.return_value = mock_client
+                    result = await dispatch_git_tool("git_create_tag", {
+                        "repo_path": str(tmp_git_repo_with_remote), "environment": "qa", "branch": "main",
+                    })
+    payload = json.loads(result[0].text)
+    assert payload["previous_tag"] is None
+    assert "warning" in payload
+    assert "environment name is wrong" in payload["warning"]
+
+
+async def test_git_create_tag_degrades_to_warning_when_ci_file_unfetchable(tmp_git_repo_with_remote):
+    """If .gitlab-ci.yml can't be fetched, this must degrade to a surfaced warning,
+    never silently proceed as if validated and never hard-block on an
+    infrastructure hiccup."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.gitlab.service import propose_next_tag as real_propose_next_tag
+    from icx_engine.models.config import GitLabConnection
+    from icx_engine.gitlab.client import GitLabError
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.list_tags.return_value = [{"name": "v0.0.184-qa-20260727002"}]
+    mock_client.get_repository_file.side_effect = GitLabError("File not found", 404)
+
+    def _fixed_propose_next_tag(environment, latest, today=None):
+        return real_propose_next_tag(environment, latest, today="20260727")
+
+    with patch("icx_engine.gitlab.service.propose_next_tag", side_effect=_fixed_propose_next_tag):
+        with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+            mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+            with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+                with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                    mock_client_cls.return_value.__aenter__.return_value = mock_client
+                    result = await dispatch_git_tool("git_create_tag", {
+                        "repo_path": str(tmp_git_repo_with_remote), "environment": "qa", "branch": "main",
+                    })
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "pending_confirmation"  # never hard-blocked
+    assert "ci_check_error" in payload
+    assert payload["ci_pipeline_will_trigger"] is None
 
 
 async def test_git_repo_status_missing_repo_path_returns_named_error():
@@ -810,6 +1068,7 @@ async def test_git_create_tag_with_override_uses_exact_name(tmp_git_repo_with_re
     mock_client = AsyncMock()
     mock_client.list_tags.return_value = [{"name": "v0.0.184-qa-20260727002"}]
     mock_client.create_tag.return_value = {"name": "v9.9.9-qa-custom"}
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
 
     with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
         mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
@@ -818,7 +1077,7 @@ async def test_git_create_tag_with_override_uses_exact_name(tmp_git_repo_with_re
                 mock_client_cls.return_value.__aenter__.return_value = mock_client
                 first = await dispatch_git_tool("git_create_tag", {
                     "repo_path": str(tmp_git_repo_with_remote), "environment": "qa", "branch": "main",
-                    "tag_name_override": "v9.9.9-qa-custom",
+                    "tag_name_override": "v9.9.9-qa-custom", "override_ci_check": True,
                 })
                 first_payload = json.loads(first[0].text)
                 assert first_payload["proposed_tag"] == "v9.9.9-qa-custom"
@@ -1066,6 +1325,7 @@ async def test_git_create_tag_no_gitlab_connection_returns_fallback_hint_after_c
 
     mock_client = AsyncMock()
     mock_client.list_tags.return_value = [{"name": "v0.0.184-qa-20260727002"}]
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
 
     def _fixed_propose_next_tag(environment, latest, today=None):
         return real_propose_next_tag(environment, latest, today="20260727")
@@ -1088,3 +1348,192 @@ async def test_git_create_tag_no_gitlab_connection_returns_fallback_hint_after_c
     assert payload["ok"] is False
     assert payload["error"] == "No active GitLab connection. Run `icx gitlab --add` first."
     assert payload["fallback"] == _ICX_FALLBACK("GitLab", "icx gitlab --add")
+
+
+# -- git_delete_tag (GIT-5) ----------------------------------------------------
+
+async def test_git_delete_tag_confirmation_gated_and_executes(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.get_tag.return_value = {"name": "zz-icx-verify-1", "commit": {"id": "abc123"}}
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                first = await dispatch_git_tool("git_delete_tag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "zz-icx-verify-1",
+                })
+                first_payload = json.loads(first[0].text)
+                assert first_payload["status"] == "pending_confirmation"
+                assert first_payload["tag_name"] == "zz-icx-verify-1"
+                assert first_payload["target_commit"] == "abc123"
+
+                token = first_payload["token"]
+                second = await dispatch_git_tool("git_delete_tag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "zz-icx-verify-1",
+                    "confirm_token": token,
+                })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert payload["deleted"] == "zz-icx-verify-1"
+    mock_client.delete_tag.assert_awaited_once_with("group/project", "zz-icx-verify-1")
+
+
+async def test_git_delete_tag_nonexistent_tag_fails_before_confirmation(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.gitlab.client import GitLabError
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.get_tag.side_effect = GitLabError("Tag 'nope' not found (HTTP 404).", 404)
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                result = await dispatch_git_tool("git_delete_tag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "nope",
+                })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "not found" in payload["error"]
+    mock_client.delete_tag.assert_not_called()
+
+
+async def test_git_delete_tag_missing_tag_name_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_delete_tag", {"repo_path": "/fake/repo"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "tag_name" in payload["error"]
+
+
+# -- git_retag (GIT-6) ---------------------------------------------------------
+
+async def test_git_retag_confirmation_gated_and_executes(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.get_tag.return_value = {"name": "zz-icx-verify-1", "commit": {"id": "old111"}}
+    mock_client.list_branches.return_value = [{"name": "main", "commit": {"id": "new222"}}]
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
+    mock_client.create_tag.return_value = {"name": "zz-icx-verify-1"}
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                first = await dispatch_git_tool("git_retag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "zz-icx-verify-1", "branch": "main",
+                })
+                first_payload = json.loads(first[0].text)
+                assert first_payload["status"] == "pending_confirmation"
+                assert first_payload["previous_target"] == "old111"
+                assert first_payload["new_target"] == "new222"
+                assert first_payload["no_op"] is False
+
+                token = first_payload["token"]
+                second = await dispatch_git_tool("git_retag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "zz-icx-verify-1", "branch": "main",
+                    "confirm_token": token,
+                })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert payload["tag"] == "zz-icx-verify-1"
+    assert payload["previous_target"] == "old111"
+    mock_client.delete_tag.assert_awaited_once_with("group/project", "zz-icx-verify-1")
+    mock_client.create_tag.assert_awaited_once_with("group/project", "zz-icx-verify-1", "main")
+
+
+async def test_git_retag_detects_no_op_when_branch_tip_unchanged(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.get_tag.return_value = {"name": "zz-icx-verify-1", "commit": {"id": "same111"}}
+    mock_client.list_branches.return_value = [{"name": "main", "commit": {"id": "same111"}}]
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                result = await dispatch_git_tool("git_retag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "zz-icx-verify-1", "branch": "main",
+                })
+    payload = json.loads(result[0].text)
+    assert payload["no_op"] is True
+
+
+async def test_git_retag_branch_not_found_fails_before_confirmation(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.get_tag.return_value = {"name": "zz-icx-verify-1", "commit": {"id": "old111"}}
+    mock_client.list_branches.return_value = []
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                result = await dispatch_git_tool("git_retag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "zz-icx-verify-1", "branch": "ghost",
+                })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "not found" in payload["error"]
+
+
+async def test_git_retag_reports_previous_target_when_recreate_fails_after_delete(tmp_git_repo_with_remote):
+    """Partial-failure case: delete succeeds, recreate then fails - the tag no
+    longer exists, so the error MUST carry the exact commit to recover it manually."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+
+    mock_client = AsyncMock()
+    mock_client.get_tag.return_value = {"name": "zz-icx-verify-1", "commit": {"id": "old111"}}
+    mock_client.list_branches.return_value = [{"name": "main", "commit": {"id": "new222"}}]
+    mock_client.get_repository_file.return_value = _SAMPLE_CI_YAML
+    mock_client.create_tag.side_effect = RuntimeError("network blip")
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.mcp_tools.project_path_from_remote_url", return_value="group/project"):
+            with patch("icx_engine.git.mcp_tools.GitLabClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__.return_value = mock_client
+                first = await dispatch_git_tool("git_retag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "zz-icx-verify-1", "branch": "main",
+                })
+                token = json.loads(first[0].text)["token"]
+                second = await dispatch_git_tool("git_retag", {
+                    "repo_path": str(tmp_git_repo_with_remote), "tag_name": "zz-icx-verify-1", "branch": "main",
+                    "confirm_token": token,
+                })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is False
+    assert "old111" in payload["error"]
+    mock_client.delete_tag.assert_awaited_once()
+
+
+async def test_git_retag_missing_branch_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_retag", {"repo_path": "/fake/repo", "tag_name": "x"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "branch" in payload["error"]

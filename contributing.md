@@ -8,8 +8,9 @@ documentation - makes a real difference.
 
 The highest-value contributions right now:
 
-1. **New connectors** - GitHub Issues, GitLab Issues, Linear, Asana, Jira Data Center.
-   Each connector opens ICX to a whole new user base.
+1. **New work-tracker connectors** - GitHub Issues, GitLab Issues, Linear, Asana, Jira Data Center
+   (distinct from the already-built GitLab git-workflow integration - see `src/icx_engine/gitlab/`
+   and `src/icx_engine/git/`). Each connector opens ICX to a whole new user base.
 2. **Bug fixes** - If you hit an error, chances are others will too.
 3. **Documentation improvements** - Clear docs lower the barrier for everyone.
 4. **Test coverage** - More edge cases caught early.

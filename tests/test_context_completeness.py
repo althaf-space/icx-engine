@@ -63,10 +63,23 @@ def test_tiers_high_medium_low():
     assert scored["lonely.py"].tier == "low"
 
 
-def test_prior_fix_boosts_to_high():
-    cands = fan_out(["seed.py"], grep=lambda: [("x.py", "match")])
-    scored = {s.path: s for s in fuse_rank(cands, prior_fix={"x.py"})}
-    assert scored["x.py"].tier == "high"                           # prior-fix -> high, top boost
+def test_prior_fix_alone_is_advisory_not_blocking():
+    """Regression: a file a past ticket merely touched, with no other signal tying it to
+    the current change, must be advisory (medium) - never blocking on its own. Memory
+    overlap alone flagging unrelated files (a JPA entity, a config file) as blocking misses
+    on an unrelated one-line UI fix was a real, reported false-positive."""
+    cands = fan_out(["seed.py"], memory=lambda: [("x.py", "similar past ticket")])
+    scored = {s.path: s for s in fuse_rank(cands)}
+    assert scored["x.py"].tier == "medium"
+    assert scored["x.py"].score >= 4.0                              # still scored/boosted, just not blocking
+
+
+def test_memory_combined_with_another_signal_still_reaches_high():
+    """Genuine multi-signal agreement (memory PLUS e.g. a grep hit on the same file) still
+    promotes to high/blocking - only a signal-alone case is downgraded to advisory."""
+    cands = fan_out(["seed.py"], grep=lambda: [("x.py", "match")], memory=lambda: [("x.py", "similar past ticket")])
+    scored = {s.path: s for s in fuse_rank(cands)}
+    assert scored["x.py"].tier == "high"
     assert scored["x.py"].score >= 4.0
 
 

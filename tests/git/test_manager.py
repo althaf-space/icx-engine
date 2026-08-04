@@ -80,6 +80,141 @@ def test_confirm_parent_branch_rejects_nonexistent_branch(tmp_git_repo_with_remo
         mgr.confirm_parent_branch("does-not-exist-anywhere")
 
 
+# -- _auth_env: systemic fix - every network call routes through one place --
+
+def test_manager_lazily_resolves_gitlab_conn_via_config_manager_when_not_constructed_with_one(
+    tmp_git_repo_with_remote, monkeypatch,
+):
+    """The actual fix for "the auth fix only covered push, not fetch/ls-remote": a
+    manager built with no gitlab_conn (every existing call site) must still resolve
+    one itself, lazily, the first time _auth_env() is called - not rely on every
+    caller remembering to pass one in."""
+    from unittest.mock import patch
+    from icx_engine.models.config import GitLabConnection
+
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    monkeypatch.setattr(
+        "icx_engine.git.manager.remote_url",
+        lambda repo, remote="origin": "https://gitlab.example.com/group/project.git",
+    )
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        env = mgr._auth_env()
+    assert env is not None
+    assert env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+
+
+def test_manager_auth_env_resolution_is_cached_after_first_call(tmp_git_repo_with_remote):
+    """ConfigManager.load() must only be hit once per manager instance, not once per
+    network call - resolve_parent_branch alone makes 3 network calls (fetch + two
+    remote_branch_exists) that would otherwise triple the config lookups."""
+    from unittest.mock import patch
+
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = None
+        mgr._auth_env()
+        mgr._auth_env()
+        mgr._auth_env()
+    assert mock_cfg_cls.load.call_count == 1
+
+
+def test_manager_constructed_with_explicit_gitlab_conn_skips_config_manager_lookup(tmp_git_repo_with_remote):
+    from unittest.mock import patch
+    from icx_engine.models.config import GitLabConnection
+
+    conn = GitLabConnection(name="x", url="https://gitlab.example.com", token="glpat-x")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote, gitlab_conn=conn)
+    mgr.validate()
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mgr._auth_env()
+    mock_cfg_cls.load.assert_not_called()
+
+
+def test_resolve_parent_branch_passes_auth_env_to_fetch_and_remote_branch_exists(
+    tmp_git_repo_with_remote, monkeypatch,
+):
+    """The precise bug from the CCBSS incident: git_create_mr's own fetch/ls-remote
+    calls (via resolve_parent_branch's fetch, and confirm_parent_branch's
+    remote_branch_exists) were still running with no credential at all even after
+    push was fixed. This proves both now receive the computed auth env."""
+    from unittest.mock import Mock, patch
+    from icx_engine.models.config import GitLabConnection
+
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    monkeypatch.setattr(
+        "icx_engine.git.manager.remote_url",
+        lambda repo, remote="origin": "https://gitlab.example.com/group/project.git",
+    )
+    mock_fetch = Mock()
+    mock_remote_branch_exists = Mock(return_value=True)
+    monkeypatch.setattr("icx_engine.git.manager.fetch", mock_fetch)
+    monkeypatch.setattr("icx_engine.git.manager.remote_branch_exists", mock_remote_branch_exists)
+    monkeypatch.setattr("icx_engine.git.manager.read_repo_settings", lambda root: {"parent_branch": "main"})
+
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        mgr.resolve_parent_branch()
+
+    fetch_env = mock_fetch.call_args.kwargs["extra_env"]
+    exists_env = mock_remote_branch_exists.call_args.kwargs["extra_env"]
+    assert fetch_env is not None and fetch_env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    assert exists_env == fetch_env
+
+
+def test_confirm_parent_branch_passes_auth_env_to_remote_branch_exists(tmp_git_repo_with_remote, monkeypatch):
+    from unittest.mock import Mock, patch
+    from icx_engine.models.config import GitLabConnection
+
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    monkeypatch.setattr(
+        "icx_engine.git.manager.remote_url",
+        lambda repo, remote="origin": "https://gitlab.example.com/group/project.git",
+    )
+    mock_exists = Mock(return_value=True)
+    monkeypatch.setattr("icx_engine.git.manager.remote_branch_exists", mock_exists)
+    monkeypatch.setattr("icx_engine.git.manager.write_repo_settings", lambda root, **kw: None)
+
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        mgr.confirm_parent_branch("main")
+
+    env = mock_exists.call_args.kwargs["extra_env"]
+    assert env is not None and env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+
+
+def test_sync_with_remote_passes_auth_env_to_fetch(tmp_git_repo_with_remote, monkeypatch):
+    from unittest.mock import Mock, patch
+    from icx_engine.models.config import GitLabConnection
+
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    monkeypatch.setattr(
+        "icx_engine.git.manager.remote_url",
+        lambda repo, remote="origin": "https://gitlab.example.com/group/project.git",
+    )
+    mock_fetch = Mock()
+    monkeypatch.setattr("icx_engine.git.manager.fetch", mock_fetch)
+
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    with patch("icx_engine.config_manager.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        try:
+            mgr.sync_with_remote()
+        except Exception:
+            pass
+
+    env = mock_fetch.call_args.kwargs["extra_env"]
+    assert env is not None and env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+
+
 from icx_engine.git.gitcmd import current_branch, checkout, create_branch_from
 from icx_engine.git.manager import DirtyTreeStatus, BranchStartResult
 
@@ -279,6 +414,47 @@ def test_stage_and_commit_ticketless_needs_no_key(tmp_git_repo):
     mgr.validate()
     result = mgr.stage_and_commit(["x.txt"], "Refactor helper for clarity", ticket_key=None)
     assert len(result.sha) == 40
+
+
+def test_stage_and_commit_syncs_backup_latest_to_new_commit(tmp_git_repo):
+    """The actual requirement this fixes: the backup must always be in sync with
+    the latest commit, not just refreshed before a risky reverse-merge attempt."""
+    from icx_engine.git.gitcmd import local_branch_exists
+    (tmp_git_repo / "x.txt").write_text("x", encoding="utf-8")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    result = mgr.stage_and_commit(["x.txt"], "ABC-1 add x.txt", ticket_key="ABC-1")
+    assert local_branch_exists(tmp_git_repo, "backup-latest/ABC-1") is True
+    backup_sha = subprocess.run(
+        ["git", "rev-parse", "backup-latest/ABC-1"], cwd=str(tmp_git_repo),
+        check=True, stdout=subprocess.PIPE, text=True,
+    ).stdout.strip()
+    assert backup_sha == result.sha
+
+
+def test_stage_and_commit_second_commit_moves_backup_latest_forward(tmp_git_repo):
+    (tmp_git_repo / "x.txt").write_text("x", encoding="utf-8")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    mgr.stage_and_commit(["x.txt"], "ABC-1 add x.txt", ticket_key="ABC-1")
+
+    (tmp_git_repo / "y.txt").write_text("y", encoding="utf-8")
+    result2 = mgr.stage_and_commit(["y.txt"], "ABC-1 add y.txt", ticket_key="ABC-1")
+
+    backup_sha = subprocess.run(
+        ["git", "rev-parse", "backup-latest/ABC-1"], cwd=str(tmp_git_repo),
+        check=True, stdout=subprocess.PIPE, text=True,
+    ).stdout.strip()
+    assert backup_sha == result2.sha
+
+
+def test_stage_and_commit_ticketless_uses_branch_slug_for_backup_key(tmp_git_repo):
+    from icx_engine.git.gitcmd import local_branch_exists
+    (tmp_git_repo / "x.txt").write_text("x", encoding="utf-8")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    mgr.stage_and_commit(["x.txt"], "Refactor helper for clarity", ticket_key=None)
+    assert local_branch_exists(tmp_git_repo, "backup-latest/main") is True
 
 
 from icx_engine.git.manager import ReverseMergeResult
@@ -579,6 +755,52 @@ def _gitlab_conn() -> GitLabConnection:
     return GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
 
 
+# -- _gitlab_push_auth_env: the actual push-credential fix -------------------
+
+def test_gitlab_push_auth_env_builds_basic_auth_header_for_matching_https_origin():
+    from icx_engine.git.manager import _gitlab_push_auth_env
+    import base64
+    env = _gitlab_push_auth_env(_gitlab_conn(), "https://gitlab.example.com/group/project.git")
+    assert env is not None
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    expected = "Authorization: Basic " + base64.b64encode(b"oauth2:glpat-x").decode()
+    assert env["GIT_CONFIG_VALUE_0"] == expected
+
+
+def test_gitlab_push_auth_env_none_for_ssh_origin():
+    from icx_engine.git.manager import _gitlab_push_auth_env
+    env = _gitlab_push_auth_env(_gitlab_conn(), "git@gitlab.example.com:group/project.git")
+    assert env is None
+
+
+def test_gitlab_push_auth_env_none_for_mismatched_host():
+    from icx_engine.git.manager import _gitlab_push_auth_env
+    env = _gitlab_push_auth_env(_gitlab_conn(), "https://some-other-gitlab.internal/group/project.git")
+    assert env is None
+
+
+def test_gitlab_push_auth_env_none_when_no_token():
+    from icx_engine.git.manager import _gitlab_push_auth_env
+    conn = GitLabConnection(name="x", url="https://gitlab.example.com", token=None)
+    env = _gitlab_push_auth_env(conn, "https://gitlab.example.com/group/project.git")
+    assert env is None
+
+
+def test_gitlab_push_auth_env_none_when_gitlab_conn_is_none():
+    from icx_engine.git.manager import _gitlab_push_auth_env
+    assert _gitlab_push_auth_env(None, "https://gitlab.example.com/group/project.git") is None
+
+
+def test_gitlab_push_auth_env_adds_ssl_verify_false_entry_when_verify_tls_disabled():
+    from icx_engine.git.manager import _gitlab_push_auth_env
+    conn = GitLabConnection(name="x", url="https://gitlab.example.com", token="glpat-x", verify_tls=False)
+    env = _gitlab_push_auth_env(conn, "https://gitlab.example.com/group/project.git")
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert env["GIT_CONFIG_KEY_1"] == "http.sslVerify"
+    assert env["GIT_CONFIG_VALUE_1"] == "false"
+
+
 async def test_create_mr_for_ticket_resolves_project_and_calls_gitlab(tmp_git_repo_with_remote, monkeypatch):
     from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit, remote_url
     import subprocess
@@ -656,7 +878,7 @@ async def test_create_mr_for_ticket_pushes_feature_branch_before_creating_mr(tmp
             with pytest.raises(GitCommandError):
                 await mgr.create_mr_for_ticket("main", "ABC-2", "Fix thing", _gitlab_conn())
 
-    mock_push.assert_called_once_with(mgr.repo_root, "feature/x-ABC-2")
+    mock_push.assert_called_once_with(mgr.repo_root, "feature/x-ABC-2", extra_env=None)
     mock_call.assert_not_called()
 
 
@@ -685,6 +907,43 @@ async def test_create_mr_for_ticket_validates_connection_before_any_git_work(tmp
 
     mock_push.assert_not_called()
     mock_call.assert_not_called()
+
+
+async def test_create_mr_for_ticket_passes_gitlab_auth_env_to_fetch_and_push_for_matching_origin(
+    tmp_git_repo_with_remote, monkeypatch,
+):
+    """The actual push-credential fix: when the repo's origin host matches the connected
+    GitLab connection's host, fetch/push must receive a non-None extra_env (the injected
+    auth header) instead of running with no credential at all."""
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        "icx_engine.git.manager.remote_url",
+        lambda repo, remote="origin": "https://gitlab.example.com/group/project.git",
+    )
+    monkeypatch.setattr(
+        "icx_engine.git.manager.project_path_from_remote_url",
+        lambda url: "group/project",
+    )
+    mock_fetch = Mock()
+    mock_push = Mock()
+    monkeypatch.setattr("icx_engine.git.manager.fetch", mock_fetch)
+    monkeypatch.setattr("icx_engine.git.manager.push", mock_push)
+
+    mock_result = {"mr_iid": 9, "created": True, "merged": True, "refusal_reason": None}
+    with patch("icx_engine.git.manager.create_and_merge_mr", new=AsyncMock(return_value=mock_result)):
+        with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.validate.return_value = {"valid": True, "user": {"id": 42}}
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+            mgr.validate()
+            await mgr.create_mr_for_ticket("main", "ABC-9", "Fix thing", _gitlab_conn())
+
+    fetch_env = mock_fetch.call_args.kwargs["extra_env"]
+    push_env = mock_push.call_args.kwargs["extra_env"]
+    assert fetch_env is not None and fetch_env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    assert push_env == fetch_env
 
 
 def test_post_merge_cleanup_raises_when_mr_not_actually_merged(tmp_git_repo_with_remote, monkeypatch):

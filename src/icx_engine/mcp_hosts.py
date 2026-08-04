@@ -451,9 +451,16 @@ types through ICX - this applies on every message, independent of whether /icx-b
    if ICX has a connector for it, use ICX. If ICX does not but you have your own connector/
    tool for it, use that. If neither is available, tell the user to fetch/paste it
    themselves - never fabricate its content.
+6. WORKSTATUS time-tracking requests (timesheets, clock in/out, attendance, or logging time
+   against a project/task) - PREFER ICX's own `mcp__icx__workstatus_*` tools when applicable.
+   This is a SOFT preference, not the same mandate as 1-5: Workstatus coverage is partial
+   (~24 endpoints implemented; some actions may not be covered yet), so fall back to another
+   approach if ICX doesn't support the specific action needed - never block the user's request
+   waiting on ICX alone.
 
-ICX is the single interface for all of the above whenever it is connected. Skip only when
-ICX is genuinely not connected.
+Items 1-5 above are mandatory whenever ICX is connected - never bypass them. Item 6
+(Workstatus) is a preference given partial tool coverage, not a hard mandate. Skip any item
+only when ICX is genuinely not connected.
 
 BOOSTING a request into a CTO-grade working spec is a SEPARATE, on-demand action - run
 `/icx-boost <request>` (or call `mcp__icx__icx_boost` directly) only when explicitly
@@ -498,6 +505,9 @@ _SONAR_RE = re.compile(
     r"\b(sonar|sonarqube|quality.gate|code.smell|static.analysis|vulnerabilit|"
     r"code.quality|coverage.report)\b", re.IGNORECASE
 )
+_WORKSTATUS_RE = re.compile(
+    r"\b(workstatus|time.?sheets?|clock.?(?:in|out)|time.?tracking)\b", re.IGNORECASE
+)
 
 _TICKET_DIRECTIVE = (
     "[ICX ROUTING - MANDATORY WHEN APPLICABLE]\n"
@@ -523,6 +533,16 @@ _SONAR_DIRECTIVE = (
     "vulnerabilities, static-analysis findings, coverage report). IF ICX is connected, use the ICX "
     "mcp__icx__sonar_* tools (start with sonar_status / sonar_report) - do not fetch Sonar data "
     "another way. IF this is not about code quality, or ICX is not connected, ignore this note."
+)
+
+_WORKSTATUS_DIRECTIVE = (
+    "[ICX WORKSTATUS - SUGGESTED WHEN APPLICABLE]\n"
+    "This looks like a Workstatus time-tracking request (timesheet, clock in/out, time tracking). "
+    "IF ICX is connected, PREFER its mcp__icx__workstatus_* tools for this. This is a SOFT "
+    "preference, not a hard mandate - Workstatus coverage is partial (~24 endpoints; some actions "
+    "may not be covered yet), so fall back to another approach if ICX doesn't support the specific "
+    "action needed, rather than blocking the user. IF this is not actually about Workstatus, or ICX "
+    "is not connected, ignore this note."
 )
 
 
@@ -583,6 +603,8 @@ def main():
             parts.append(_TESTING_DIRECTIVE)
         if _SONAR_RE.search(prompt):
             parts.append(_SONAR_DIRECTIVE)
+        if _WORKSTATUS_RE.search(prompt):
+            parts.append(_WORKSTATUS_DIRECTIVE)
         if not parts:
             return   # nothing to route - boost is on-demand only (/icx-boost), never injected here
         out = {

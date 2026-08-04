@@ -12,6 +12,8 @@ This is the complete reference for contributing to ICX. Read it before writing a
 4. [Data contracts - the three core models](#4-data-contracts--the-three-core-models)
 5. [Adding a new issue tracker connector](#5-adding-a-new-issue-tracker-connector)
 6. [Adding a new LLM provider](#6-adding-a-new-llm-provider)
+   - [6a. Adding a third-party integration](#6a-adding-a-third-party-integration)
+   - [6b. Workstatus integration (concrete example of 6a)](#6b-workstatus-integration-concrete-example-of-6a)
 7. [Memory Module](#7-memory-module)
    - [7a. Graph Module](#7a-graph-module)
    - [7b. Skills Module](#7b-skills-module)
@@ -31,24 +33,37 @@ teams. It connects to your work tracker, reads every item at full depth - descri
 attachments, screenshots, spreadsheets, audio and video - and delivers structured, high-fidelity
 context your AI can act on. Local memory captures every resolution so past fixes surface when a
 similar problem appears. Beyond issue context it builds a multi-language codebase knowledge graph,
-reads SonarQube code-quality findings, and drives AI-assisted testing - all exposed over MCP and the CLI.
+reads SonarQube code-quality findings, drives AI-assisted testing, automates the full git/GitLab
+workflow (branch, commit, reverse-merge, MR, tag/retag/delete-tag - all confirmation-gated, with a
+continuously-synced local backup branch), and integrates Workstatus time-tracking/attendance - all
+exposed over MCP and the CLI.
 
 ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
-- An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.),
-  exposing 31 tools: 2 analysis tools (`analyze_issue_fast`, `analyze_issue`), 1 agent-driven memory search (`memory_search`), 10 graph query tools, 4 historical memory tools, 4 memory/verification tools (`save_memory`, `record_verification`, `reinforce_memory_usage`, `get_memory_audit`), 3 testing tools (`start_testing_session`, `resume_testing_session`, `get_testing_session_status`), and 7 Sonar tools (`sonar_status`, `sonar_projects`, `sonar_branches`, `sonar_measures`, `sonar_quality_gate`, `sonar_findings`, `sonar_report`)
+- An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.), exposing
+  135 tools total - see readme.md's "The MCP tools" section for the full enumerated list (kept there
+  as the single source of truth to avoid two lists drifting apart). Broad families: analysis/memory/
+  skills/testing tools, 22 Sonar tools, 18 git-workflow tools, 9 GitLab read-only tools, 24 Workstatus
+  tools, 26 Jira write-back tools.
 
-The architecture is deliberately split along two axes:
+The architecture is deliberately split along several axes:
 
 | Axis | Abstraction | Where |
 |---|---|---|
 | Work tracker source | `ConnectorBase` ABC | `connectors/` |
 | AI analysis backend | `LLMProvider` ABC | `llm/` |
+| Git host (git-workflow automation) | `GitLifecycleManager` + `GitLabClient` | `git/`, `gitlab/` |
+| Time-tracking integration | `WorkstatusClient` | `workstatus/` |
 
-Both sides are pluggable by design. Adding a new work tracker or a new LLM provider follows the same pattern every time.
+Work tracker and LLM provider are pluggable by design - adding a new one of either follows the same
+pattern every time (Sections 5/6 below). Git-workflow/GitLab and Workstatus are not pluggable in the
+same sense (each is its own concrete integration, not an ABC with multiple implementations) - see
+Section 6a for the general "new integration" pattern they both follow.
 
-Currently supports: Jira Cloud.
+Currently supports: Jira Cloud as a work tracker; GitLab for git-workflow automation (stable) and
+read-only repo lookups; Workstatus for time-tracking/attendance (stable, reverse-engineered API - no
+public docs exist, see Section 6b).
 
 ---
 
@@ -94,7 +109,10 @@ ICX/
 |   |       +-- connector.py    # JiraConnector - implements ConnectorBase
 |   |       +-- client.py       # JiraClient - raw HTTP calls to Jira REST API: fetch (read), get_transitions/
 |   |       |                   # get_editmeta/transition_issue/update_fields (close-out write), list_issuetypes/
-|   |       |                   # get_createmeta_fields/create_issue/delete_issue (create/delete)
+|   |       |                   # get_createmeta_fields (both follow Jira's startAt/isLast pagination internally -
+|   |       |                   # a create screen with 50+ fields, or many issue types, silently truncated past page 1
+|   |       |                   # otherwise, indistinguishable from the field simply not existing)/create_issue/
+|   |       |                   # delete_issue (create/delete)
 |   |       +-- parser.py       # Jira API JSON -> RawIssueData
 |   |       +-- auth.py         # build_auth_header() for token and OAuth
 |   |       \-- oauth.py        # refresh_oauth_if_needed()
@@ -169,16 +187,81 @@ ICX/
 |   |   |                       # Includes read-only history helpers blame() (--line-porcelain, optional line_range),
 |   |   |                       # log() (relpath/limit/author/since filters), show_commit() (message + --name-status files),
 |   |   |                       # diff_between() (--numstat + --name-status between two refs, binary files -> None counts),
-|   |   |                       # push() (plain, non-force push, -u sets tracking branch on first push)
+|   |   |                       # push() (plain, non-force push, -u sets tracking branch on first push). fetch()/push()
+|   |   |                       # accept an optional extra_env dict, merged into the hardened subprocess env
+|   |   |                       # (credential.helper disabled, GIT_TERMINAL_PROMPT=0 - so an automated call never hangs
+|   |   |                       # on a prompt) - this is the plumbing manager._gitlab_push_auth_env uses to inject a
+|   |   |                       # GitLab auth header for network calls that need one; omitted, behavior is unchanged.
 |   |   +-- naming.py           # branch-name derivation from ticket key + summary
 |   |   +-- settings.py         # per-repo ICX settings file (parent branch, etc.)
-|   |   +-- safety.py           # backups + detect_leftover_state (self-heal from an interrupted prior run)
+|   |   +-- safety.py           # create_backup (timestamped snapshot, taken before a risky reverse-merge/
+|   |   |                       # conflict-resolution attempt only, kept as history via prune_old_backups) +
+|   |   |                       # sync_backup (a SEPARATE mechanism: the single, continuously-moving
+|   |   |                       # backup-latest/<key> pointer, moved to HEAD after every stage_and_commit -
+|   |   |                       # real gap fixed: a backup was previously only ever as fresh as the last
+|   |   |                       # risky-operation attempt, not the latest commit. Deliberately a different
+|   |   |                       # top-level prefix (backup-latest/, not backup/<key>-latest) so it can never
+|   |   |                       # collide with list_backups/prune_old_backups' backup/{ticket_key}-* glob) +
+|   |   |                       # detect_leftover_state (self-heal from an interrupted prior run). Both
+|   |   |                       # create_backup and sync_backup are local-only, never pushed - by design,
+|   |   |                       # so no remote branch-naming/protection rule ever sees them.
 |   |   +-- manager.py          # GitLifecycleManager - validate, resolve_parent_branch/confirm_parent_branch, dirty tree,
-|   |   |                       # start_branch, sync_with_remote, stage_and_commit, scan_staged_debug_leftovers,
+|   |   |                       # start_branch, sync_with_remote, stage_and_commit (calls safety.sync_backup after every
+|   |   |                       # commit - see safety.py's own note for why this is a separate mechanism from
+|   |   |                       # create_backup), scan_staged_debug_leftovers,
 |   |   |                       # reverse_merge_standard, start_conflict_resolution, complete/adopt/discard_scratch_resolution,
 |   |   |                       # build_mr_description, create_mr_for_ticket (validates the GitLab connection FIRST -
 |   |   |                       # fail fast on a bad token before any git work - then pushes the feature branch to
-|   |   |                       # origin before creating the MR: a branch must exist on the remote first), post_merge_cleanup
+|   |   |                       # origin before creating the MR: a branch must exist on the remote first), post_merge_cleanup.
+|   |   |                       #
+|   |   |                       # GitLab auth for git-network calls (fetch/ls-remote/push) - the fix for git push (and
+|   |   |                       # later, git_create_mr's own fetch/ls-remote) failing with "could not read Username" even
+|   |   |                       # with a valid GitLab connection: the connection's token was only ever used for GitLab's
+|   |   |                       # REST API (create_and_merge_mr, validate), never for raw git-over-HTTPS, since gitcmd.py
+|   |   |                       # deliberately disables credential.helper/terminal prompts on every git subprocess it runs
+|   |   |                       # without substituting anything in their place. First pass wired this into push only;
+|   |   |                       # that missed create_mr_for_ticket's own fetch+ls-remote calls (same failure, different
+|   |   |                       # subprocess) and the standalone git_push tool (bypasses create_mr_for_ticket entirely) -
+|   |   |                       # each gap only surfaced after a live retry reproduced the identical error on a path that
+|   |   |                       # "should" have already been fixed. Final design closes the whole class at once instead
+|   |   |                       # of per-call-site patching:
+|   |   |                       #   - __init__(repo_path, gitlab_conn=None) - gitlab_conn is optional and usually omitted;
+|   |   |                       #     every existing call site still just does GitLifecycleManager(Path(repo_path)).
+|   |   |                       #   - _auth_env(remote="origin") - THE single source of git-network auth for this class.
+|   |   |                       #     Lazily resolves gitlab_conn via ConfigManager.load().active_gitlab_connection() the
+|   |   |                       #     first time it's called if not given at construction (and caches it - one config
+|   |   |                       #     load per manager instance, not one per network call), then builds an
+|   |   |                       #     `Authorization: Basic base64("oauth2:<token>")` header via
+|   |   |                       #     _gitlab_push_auth_env(gitlab_conn, remote_url(...)), injected via
+|   |   |                       #     GIT_CONFIG_COUNT/KEY_n/VALUE_n env vars (git >=2.31) - never in the URL or argv, so
+|   |   |                       #     the token never appears in `git remote -v` or a process listing. Returns None
+|   |   |                       #     (falls back to whatever git credential already exists, i.e. today's behavior) for
+|   |   |                       #     an SSH origin, a host mismatch between origin and gitlab_conn.url (never send a
+|   |   |                       #     credential cross-host), or no token.
+|   |   |                       #   - EVERY method in this class that calls fetch/remote_branch_exists/push -
+|   |   |                       #     resolve_parent_branch, confirm_parent_branch, sync_with_remote, create_mr_for_ticket,
+|   |   |                       #     post_merge_cleanup - passes self._auth_env() as extra_env. A new method added later
+|   |   |                       #     that needs a git-network call gets this for free by calling self._auth_env(); there
+|   |   |                       #     is no longer a second, separate thing to remember to wire in.
+|   |   |                       #   - create_mr_for_ticket/post_merge_cleanup still take an explicit gitlab_conn argument
+|   |   |                       #     (required for their GitLabClient API calls - validate, create_and_merge_mr,
+|   |   |                       #     get_merge_request) - they assign it to self._gitlab_conn before calling
+|   |   |                       #     self._auth_env(), so the git-level auth and the API-level auth are guaranteed to be
+|   |   |                       #     the same resolved connection, never two independently-resolved ones that could
+|   |   |                       #     silently diverge.
+|   |   |                       #   - The standalone git_push tool (mcp_tools.py, cli_commands.py) calls
+|   |   |                       #     mgr._auth_env(remote) directly - no separate ConfigManager/ config-lookup logic
+|   |   |                       #     duplicated at the MCP/CLI layer anymore.
+|   |   |                       #
+|   |   |                       # Merging itself was never a raw git operation to begin with: create_and_merge_mr
+|   |   |                       # (gitlab/service.py) -> attempt_merge (gitlab/client.py) is a GitLab REST API call
+|   |   |                       # (`PUT /merge_requests/{iid}/merge`) - GitLab enforces protected-branch/approval rules
+|   |   |                       # server-side, and a refusal (e.g. HTTP 405 "Branch cannot be merged") comes back as a
+|   |   |                       # normal {"merged": false, "reason": ...} result, never bypassed
+|   |   |                       # (tests/gitlab/test_client.py:test_attempt_merge_refused_returns_reason_not_raise).
+|   |   |                       # post_merge_cleanup's own fast_forward call only runs AFTER GitLab confirms the MR is
+|   |   |                       # actually merged - it moves the local parent branch pointer to match, it is not itself
+|   |   |                       # a merge.
 |   |   +-- cli_commands.py     # git_app Typer group - `icx git status`, `icx git branch` (--ticket/--name/--parent,
 |   |   |                       # wraps start_branch), `icx git sync`, `icx git push` (--remote, plain push, prompts via
 |   |   |                       # typer.confirm before pushing), `icx git mr`, `icx git finish`, `icx git tag`,
@@ -194,22 +277,57 @@ ICX/
 |   |                           # branch - confirmation-gated)/git_push (confirmation-gated, same token pattern as
 |   |                           # stage_and_commit)/
 |   |                           # create_mr (validates the GitLab connection first, then pushes automatically before
-|   |                           # creating the MR)/finish_ticket/create_tag
-|   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag plus the read-only
-|   |                           # list_merge_requests/get_merge_request_changes/list_commits/compare), service.py
+|   |                           # creating the MR; pending_confirmation shows BOTH source_branch and parent_branch)/
+|   |                           # finish_ticket/create_tag (now validates BOTH the environment token and the proposed
+|   |                           # tag name against the project's real, live-fetched .gitlab-ci.yml before ever
+|   |                           # proposing anything - see gitlab/ci_tags.py below; degrades to a surfaced
+|   |                           # ci_check_error warning, never a hard block, if the CI file itself can't be fetched)
+|   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag/list_branches/
+|   |                           # list_pipelines/get_pipeline (pipeline detail + its jobs, one call)/get_job_trace/
+|   |                           # get_repository_file, plus the read-only list_merge_requests/
+|   |                           # get_merge_request_changes/list_commits/compare - all GET, no create/update/delete
+|   |                           # beyond the pre-existing create_tag/create_merge_request/attempt_merge), ci_tags.py
+|   |                           # (pure module: extract_tag_patterns/valid_environments/matches_any_pattern - parses a
+|   |                           # real .gitlab-ci.yml's `only:` regex-literal tag patterns, verified live against a real
+|   |                           # project's CI config; requires the new `pyyaml` dependency), service.py
 |   |                           # (connection + MR business logic + group_tags_by_environment/propose_next_tag/
 |   |                           # parse_tag_name), mcp_tools.py (GITLAB_TOOLS + dispatch_gitlab_tool() -
-|   |                           # gitlab_list_merge_requests/gitlab_mr_changes/gitlab_list_commits/gitlab_compare, all
-|   |                           # ungated - project resolved from either an explicit `project` argument or a `repo_path`
-|   |                           # local checkout's origin remote via project_path_from_remote_url()). Separate from
-|   |                           # work-tracker connectors (Section 8.1 of the design spec).
+|   |                           # gitlab_list_merge_requests/gitlab_mr_changes/gitlab_list_commits/gitlab_compare/
+|   |                           # gitlab_list_tags/gitlab_list_branches/gitlab_list_pipelines/gitlab_pipeline_status
+|   |                           # (pipeline + jobs in one call)/gitlab_job_log, ALL read-only/ungated - project
+|   |                           # resolved from either an explicit `project` argument or a `repo_path` local checkout's
+|   |                           # origin remote via project_path_from_remote_url()). Separate from work-tracker
+|   |                           # connectors (Section 8.1 of the design spec).
+|   +-- workstatus/             # Workstatus time-tracking/attendance integration - reverse-engineered API, no public
+|   |                           # docs exist (see Section 6b). config.py (WorkstatusConfig, registered via
+|   |                           # icx_engine.integrations - not the connectors/ registry, since Workstatus is not an
+|   |                           # issue tracker, kept only for legacy-migration secret resolution - see Section 6b),
+|   |                           # client.py (24 verified endpoints), service.py (add_connection/list_connections/
+|   |                           # remove_connection/set_active + ~25 endpoint functions, all via
+|   |                           # AppConfig.workstatus_connections/active_workstatus - full multi-connection parity
+|   |                           # with gitlab/sonar, reworked from an original single-instance design), mcp_tools.py
+|   |                           # (WORKSTATUS_TOOLS + dispatch_workstatus_tool()).
 |   +-- jira/                   # Jira WRITE-back (close-out + create/delete + comments + search + links/assignee +
 |   |   |                       # attachments) - independent of connectors/jira/'s ConnectorBase read pipeline,
 |   |   |                       # matching sonar/gitlab's own client+service shape.
-|   |   +-- service.py          # get_close_requirements (transitions+editmeta merge), apply_update (transition/fields/
+|   |   +-- service.py          # get_close_requirements (transitions+editmeta merge; include_allowed_values=False strips
+|   |   |                       # allowedValues - the full option catalogue per select-list field, sometimes 50-70+
+|   |   |                       # entries - from both editable_fields and each transition's own fields via
+|   |   |                       # _strip_allowed_values(), keeping required/schema; real fix for repeat calls during a
+|   |   |                       # multi-hop workflow walk re-sending the identical catalogue every hop; since_status
+|   |   |                       # (JIRA-3 diff-on-repeat) - pass a PRIOR call's returned status back in; if the issue's
+|   |   |                       # current status (always fetched via one get_issue_raw(fields=["status"]) call) still
+|   |   |                       # matches, transitions/editable_fields cannot have changed either (both depend only on
+|   |   |                       # status) - returns a compact {status, unchanged:true} instead of the full bundle),
+|   |   |                       # apply_update (transition/fields/
 |   |   |                       # comment; 400-validation-error -> needs_fields second-round shape, never raises for that
 |   |   |                       # case); list_issue_types/get_createmeta_fields (create-time analogs); create_issue
-|   |   |                       # (resolves connection by domain via _resolve_client_by_domain - no issue_key exists yet);
+|   |   |                       # (resolves connection by domain via _resolve_client_by_domain - no issue_key exists yet;
+|   |   |                       # fields.description, if given as a plain string, is auto-wrapped via _text_to_adf
+|   |   |                       # before the write - real gap fixed: Jira's REST API v3 requires description to be ADF,
+|   |   |                       # not a plain string, and a bare string used to be sent through unmodified and rejected
+|   |   |                       # with a generic validation error, forcing a "create bare, then comment" workaround;
+|   |   |                       # a caller that already passes an ADF dict is left untouched);
 |   |   |                       # delete_issue (resolves by issue_key via the existing _resolve_client, unchanged);
 |   |   |                       # list_comments/add_comment/edit_comment/delete_comment (comment CRUD, add/edit wrap
 |   |   |                       # plain text via _text_to_adf); search/get_issue (JQL search with an ICX-side hard cap
@@ -219,7 +337,10 @@ ICX/
 |   |   |                       # create_link resolves by its inward_key, delete_link takes issue_key purely to resolve a
 |   |   |                       # connection since Jira's DELETE .../issueLink/{id} is global and takes no issue key);
 |   |   |                       # set_assignee (its own endpoint, not folded into update_fields - "-1"=default assignee,
-|   |   |                       # None=unassign); upload_attachment/delete_attachment (attachment CRUD - upload resolves
+|   |   |                       # None=unassign); search_assignable_users (GET .../user/assignable/search - the
+|   |   |                       # set_assignee analog of list_issue_types/get_createmeta_fields for create_issue, a real
+|   |   |                       # lookup so account_id is never guessed for anyone other than the caller, since
+|   |   |                       # get_current_user only resolves the caller's own accountId); upload_attachment/delete_attachment (attachment CRUD - upload resolves
 |   |   |                       # by the given issue_key like any other write, delete_attachment takes issue_key purely
 |   |   |                       # to resolve a connection, the same reasoning as delete_link, since Jira's DELETE
 |   |   |                       # .../attachment/{id} is also global and takes no issue key); get_current_user/
@@ -254,6 +375,20 @@ ICX/
 |   |   |                       # delete fetch the worklog first via list_worklogs to compare author.accountId against
 |   |   |                       # whoami, same self-vs-other gating as watch)
 |   |   \-- mcp_tools.py        # JIRA_TOOLS + dispatch_jira_tool() - jira_get_close_requirements (ungated), jira_apply_update,
+|   |                           # jira_list_issue_types/jira_get_createmeta_fields (ungated, read-only) - the original fix
+|   |                           # for the "Severity" field-key-guessing bug (a display name like "Severity" is never the
+|   |                           # correct JSON key, only the real field id is), but jira_get_createmeta_fields's own
+|   |                           # description now marks it BEST-EFFORT ONLY, not the primary source: live testing on the
+|   |                           # real CCBSS/VOM projects showed createmeta returns COMPLETELY EMPTY there regardless of
+|   |                           # the pagination fix below - a documented Jira Cloud gap (team-managed projects are the
+|   |                           # known case), not something retrying or re-paginating fixes. jira_create_issue's own
+|   |                           # description was rewritten to match: the MANDATED fallback when createmeta is empty or
+|   |                           # missing a field is jira_get_close_requirements called on an EXISTING issue of the same
+|   |                           # project+issuetype (found via jira_search if none is already known) - its
+|   |                           # `editable_fields` (backed by Jira's editmeta endpoint, not createmeta) reliably returns
+|   |                           # the real field id and allowedValues (verified live: customfield_10045/Severity with
+|   |                           # Critical/Major/Minor/Trivial) even when createmeta returns nothing. Never a guess either
+|   |                           # way;
 |   |                           # jira_create_issue, jira_delete_issue (all three confirmation-gated, same token round-trip
 |   |                           # as git_stage_and_commit; jira_delete_issue's description carries an explicit
 |   |                           # permanent/no-undo/no-trash/no-recycle-bin warning - Jira Cloud has no recycle bin for
@@ -262,7 +397,11 @@ ICX/
 |   |                           # distinguish themselves from analyze_issue_fast/analyze_issue); jira_link_types/
 |   |                           # jira_link_create (ungated), jira_link_delete (gated - but its warning describes a
 |   |                           # dependency-visibility risk, not false permanence, since a Jira link CAN be recreated
-|   |                           # after deletion, unlike an issue/comment); jira_set_assignee (ungated); jira_attachment_upload
+|   |                           # after deletion, unlike an issue/comment); jira_set_assignee (ungated - description
+|   |                           # points to jira_search_assignable_users when the target account_id isn't already known);
+|   |                           # jira_search_assignable_users (ungated, read-only - the set_assignee analog of
+|   |                           # jira_list_issue_types/jira_get_createmeta_fields, so a real accountId is never guessed
+|   |                           # for anyone other than the caller); jira_attachment_upload
 |   |                           # (ungated - accepts EITHER file_path, ICX reads the file directly off local disk same as
 |   |                           # icx jira attach add, the reliable option for binary files since no agent-side encoding
 |   |                           # step is involved, OR content_base64 for in-memory-only content with no local path, decoded
@@ -728,6 +867,37 @@ A path is only ever **used** if it is a registered ICX project, or it was resolv
 
 **Commit-target safety check and push confirmation gate (2026-07-31):** two further active-confirmation additions, consistent with the parent-branch reversal above. (1) `git_stage_and_commit`'s no-token branch (`git/mcp_tools.py`) now reads the repo's stored parent branch via `git/settings.py:read_repo_settings()` (a pure local read, no network - `mgr.resolve_parent_branch()` is deliberately not called here, since that fetches and would slow down every commit) and compares it to the current branch. When they match, the `pending_confirmation` response sets `on_parent_branch: true` and swaps in a stronger instruction warning the human that they are about to commit directly on the parent/shared branch and suggesting `git_start_branch` first - it never blocks the commit, the human can still choose to proceed; the `confirm_token` execute branch is completely unchanged. (2) `git_push` was previously plain and ungated (a real gap - a push is not locally destructive but does mutate a shared remote); it now follows the same two-call `pending_confirmation`/`confirm_token` pattern as `git_stage_and_commit`, showing branch and remote before executing `gitcmd.push()`. `icx git push` (`git/cli_commands.py`) gained the CLI-side equivalent - a `typer.confirm()` prompt showing the branch and remote before pushing, matching `icx git mr`/`icx git finish`'s existing style.
 
+**`git_create_mr` confirmation now shows source AND target branch, not target only (real gap found live):** the `pending_confirmation` payload previously carried `parent_branch` (target) but never the current feature branch it merges FROM - its own instruction text said "show the human the ticket, summary, and target branch," source omitted entirely. Fixed: `source_branch` (via `current_branch(mgr.repo_root)`) is now included alongside `parent_branch`, and the instruction explicitly says to show both. `git_finish_ticket`'s payload already carried both `feature_branch` and `parent_branch` - only its instruction text was tightened to name both explicitly. `git_stage_and_commit` was already fine (a commit has no target-branch concept, its own `branch` field is the whole picture).
+
+**`stage_and_commit` now syncs a live backup on every commit, not just before a risky reverse-merge (real gap found live):** `create_backup` (see `safety.py`) only ever ran immediately before `reverse_merge_standard`/`start_conflict_resolution` - a backup could trail behind by however many ordinary commits happened since the last risky-operation attempt. `stage_and_commit` now calls `safety.sync_backup(repo, branch, ticket_key or slugify(branch))` after every successful commit, moving `backup-latest/<key>` to the new commit. Deliberately additive, not a replacement: `create_backup`'s timestamped point-in-time snapshots (kept as history via `prune_old_backups`) are completely untouched by this change.
+
+**`git_create_tag` validates against the project's REAL, live `.gitlab-ci.yml` before proposing anything (real gap closed via authorized live read-only research):** the reported bug - a free-text environment (`DEV`, wrong case) got accepted silently and the resulting tag triggered no pipeline at all, a silent no-op - was confirmed and fixed using real, read-only GitLab API calls against an actual project (list_projects/list_tags/list_branches/pipelines/`.gitlab-ci.yml` content), explicitly authorized as read-only-only, no create/update/delete. The real captured `.gitlab-ci.yml` uses `only:` lists of Ruby-style regex-literal strings (`/^v\d+\.\d+\.\d+-dev-.../`) with a fixed literal environment token (`dev`, `qa` - both lowercase only) embedded between version/date regex groups - confirming the exact reported symptom. `gitlab/ci_tags.py` (new, pure, no I/O) parses these: `extract_tag_patterns` pulls every `only:`-list regex-literal string across all jobs (non-regex entries like `merge_requests` are skipped); `valid_environments` extracts the literal hyphen-delimited token from each pattern (a heuristic matching the ONE real pattern shape observed, not a general CI-YAML spec parser); `matches_any_pattern` regex-matches a candidate tag name against every extracted pattern. `git_create_tag`'s no-token branch (`git/mcp_tools.py`) now: (1) fetches `.gitlab-ci.yml` live via the new `GitLabClient.get_repository_file` at the target `branch`; (2) rejects `environment` outright if it matches none of the real environments found (case-insensitive) - the error names the real values; (3) if `environment` DOES match case-insensitively but not exactly (e.g. `DEV`), NORMALIZES it to the real lowercase form before generating the tag, rather than either silently building a dead tag or erroring a second time over the identical typo; (4) checks the final proposed/override tag name against every real pattern and REFUSES (not silently creates) if none match, unless `override_ci_check=true` is passed; (5) if the CI file itself can't be fetched (`ci_check_error` in the response), degrades to a surfaced warning - genuine uncertainty is never silently treated as "validated", but a live-fetch hiccup never hard-blocks either. `ci_pipeline_will_trigger` (`true`/`false`/`null`-if-uncheckable) is now a field on every `pending_confirmation` response. GIT-4 also closed here: when `previous_tag` is `null`, the response now carries an explicit `warning` field saying this can mean the environment name itself is wrong, not "genuinely the first tag ever" - previously a bare `null` with no distinguishing signal.
+
+**`git_delete_tag`/`git_retag` (GIT-5/GIT-6), verified live against a real, disposable, non-CI-matching tag - user-authorized exception to the otherwise-strict no-create/no-delete research rule:** `GitLabClient` gained `get_tag`/`delete_tag`. Both new tools follow `git_create_tag`'s hard-gate shape exactly. `git_delete_tag` fetches the real tag first via `get_tag` (fails cleanly if it doesn't exist - never silently no-ops) and shows `target_commit` before any delete. `git_retag` (atomic delete+recreate under the same name at a new ref, NOT for new tags) resolves the new ref's real tip via `list_branches` (never guesses), fetches the real `.gitlab-ci.yml` to report `ci_pipeline_will_trigger` the same way `git_create_tag` does, and flags `no_op: true` when the new target equals the old one. Partial-failure handling: if the delete succeeds but recreation then fails, the error carries the ORIGINAL target commit sha so the tag can be recreated manually - a genuine risk of any delete+create pair, surfaced rather than hidden. Live verification (2026-08-03, project `magik/development/cvm/ncell-np-cvm-int-ncel/frontend/cvm-magik-ui`, id 13162): created a throwaway tag `zz-icx-verify-1` at `development`'s tip after confirming via `ci_tags.matches_any_pattern` that the name matches none of the project's real dev/qa CI trigger patterns (zero pipelines triggered, confirmed via `list_pipelines`); `git_retag`'s no-token preview correctly resolved `previous_target`/`new_target` against `feature/bugfix-NCELL-1905`'s real tip and `ci_pipeline_will_trigger=false`. The confirm-token (actual delete) step was blocked by Claude Code's own auto-mode Bash safety classifier, independent of and in addition to the user's chat authorization - the mocked test suite is full coverage for the mutating path; the leftover throwaway tag needs manual cleanup or a Bash permission grant to finish live-verifying the delete itself.
+
+**New read-only GitLab lookups (`gitlab/client.py` + `gitlab/mcp_tools.py`), closing GIT-1/GIT-9/GIT-7:** `list_branches` (`gitlab_list_branches` MCP tool - real branch list with protected/default/last-commit-date, so a parent/base branch is never proposed from guesswork), `list_tags` was already implemented client-side but never exposed as a standalone tool - now is (`gitlab_list_tags` - mandatory-before-`git_create_tag`, per its own tool description), `list_pipelines`/`get_pipeline`/`get_job_trace` (`gitlab_list_pipelines`/`gitlab_pipeline_status`/`gitlab_job_log` - lets the agent check whether a pipeline actually ran/passed and read a failed job's real log, instead of inferring pass/fail from push+merge timing alone, which previously produced a false "Branch cannot be merged" reading for a pipeline that simply hadn't started yet). All five are GET-only, UNGATED, follow the exact `project`-or-`repo_path` resolution pattern the four pre-existing `gitlab_*` tools already use (`_resolve_project`) - no new resolution logic, no write capability added anywhere in this set. New dependency: `pyyaml>=6.0` (declared in `pyproject.toml`) for `ci_tags.py`'s YAML parsing - previously only present as an undeclared transitive dependency of another package, now explicit since first-party code imports it directly.
+
+**`jira_transition_path(issue, target_status)` - investigated with a real, live, read-only Jira connection, CONFIRMED BLOCKED, not a guess:** both `GET /workflowscheme/project` and `GET /workflow/search` (the only ways to read a project's full status-transition graph rather than just the transitions available from one issue's CURRENT status, which `get_transitions`/`get_close_requirements` already expose) returned `401: Unauthorized; scope does not match` against this deployment's real Jira OAuth connection. This is an OAuth app scope-grant issue (Jira Cloud app configuration - the connected app was never granted the admin-level workflow-read scope), not a per-call permission check ICX can route around or retry past. Building `jira_transition_path` from `get_transitions` results captured empirically off live sample issues per status (rather than the authoritative workflow scheme) was considered and rejected - it would silently give WRONG paths wherever the real workflow has issue-type-specific variations or conditional transitions, which is worse than not having the tool at all. Stays open until either the connected OAuth app is re-granted broader scope, or a different verified approach is found - not attempted with a guess in the meantime.
+
+**`jira_get_close_requirements`'s `since_status` param (JIRA-3, diff-on-repeat):** JIRA-2 (`include_allowed_values=False`) already removed the biggest repeat-call cost (the option catalogue); this closes the remaining gap in the same "status-walk" scenario (`get_close_requirements` -> `apply_update` -> `get_close_requirements` again) - when the intervening update only changed a field, not the status, the transitions/editable_fields returned the second time are byte-identical to the first, since both are purely a function of the issue's current workflow status. `get_close_requirements` now always fetches the current status first via one lightweight `get_issue_raw(fields=["status"])` call and includes it as `status` on every response. Passing a prior response's `status` back as `since_status`: if it still matches, returns a compact `{issue_key, status, unchanged: true, note}` instead of the full bundle; if it doesn't match (a real transition happened), returns the full bundle as before. Pure ICX-side logic, no live verification needed beyond the existing mocked test coverage - `get_issue_raw`/`get_transitions`/`get_editmeta` were each already independently live-verified.
+
+**X-1/X-2/X-3/X-5 cross-cutting generalization - audited, PARTIALLY closed, rest deliberately deferred (not silently dropped):**
+- X-1 (every write returns the real created/updated object): audited above (WS-2 entry) - Workstatus's specific bug class does not generalize; no further code needed.
+- X-2 (server-side truncation beyond `graph_find_context`): count-based caps already exist independently in several places (`jira/service.py:search`'s `_MAX_SEARCH_RESULTS=100`, Workstatus's `lean`/pagination params, `sonar_findings`/`sonar_report`'s existing `limit` params) but none of them use `graph_find_context`'s specific token-budget char-counting truncation pattern - replicating that pattern to every large-list tool is real, scoped work of its own (each tool's response shape differs enough that a shared helper needs its own design pass), not done this session.
+- X-3 (batch approval for a declared multi-step plan): not built - every confirmation-gated tool in this codebase (`git_*`/`jira_apply_update`/`jira_delete_issue`/etc.) still requires its own individual `pending_confirmation`/`confirm_token` round-trip even when several are declared upfront as one plan. A real architecture change (a plan-level token covering N sub-actions), not attempted without its own design proposal first.
+- X-5 (convention-discovery pattern generalized beyond git tags): `git_create_tag`/`git_retag`'s live `.gitlab-ci.yml` fetch-and-validate approach is the only place this pattern is implemented; extending it elsewhere (e.g. Jira issue-type/field conventions per project) would need its own per-domain "what's the real convention source" research, not generalized as pure refactoring.
+
+All four remain open, explicitly scoped, next-session work - not attempted here to avoid a rushed, under-tested generalization across many tools in one pass.
+
+**TEST-1..4 (testing-gate architecture: DOM-crawl census pollution, ID/name
+mapping, repeated payload re-injection, "test premise was wrong" outcome) -
+NOT attempted this session:** this is a genuinely separate, large piece of
+the testing-session state machine (`mcp_server.py`'s `start_testing_session`/
+`resume_testing_session` gate flow), deserving its own scoped design proposal
+(per this project's own CLAUDE.md workflow: understand -> propose -> confirm
+-> implement) rather than being folded into this already-large git/workstatus/
+jira pass. Left open for a dedicated follow-up session.
+
 **Enforcement tiers.** Two distinct guarantees, do not conflate them:
 - **Hard (cannot be bypassed by any editor):** the path/build behaviors are enforced in Python - `GraphManager.resolve_project()` raises on an unregistered path, `_handle_analyze_issue()` drops unregistered paths and never triggers a build. No agent prompt can defeat these; they are code.
 - **Advisory (agent may ignore):** "use ICX, never another tracker MCP" is a tool-description instruction. No MCP server can hard-block another MCP from any editor - this ceiling is the same for every editor. The instruction is the strongest available lever and reaches all editors via the tool description.
@@ -815,7 +985,7 @@ The orchestration is shared: `boost/service.py:build_boost_brief(prompt, repo_pa
 
 **How the boost wording was chosen (A/B, no fake tuning):** the corpus is requirement-coverage on 22 prompts tagged by `difficulty` (15 underspecified vague one-liners = the real-user case where a raw answer misses implicit requirements, 5 hard, 2 easy near-ceiling contrast). `run_benchmark(generate, boost, corpus, repeats)` averages `repeats` single-shot runs to cut model variance so the numbers are trustworthy. `boost/variants.py` holds candidate boosted-prompt wordings; they were A/B'd head-to-head on the real model (raw computed once and reused across variants; 429/empty retried with backoff so rate limits never score a false 0). The winner - variant `forgets` ("a rushed answer forgets the hard parts; do NOT skip any of these" + a per-archetype completeness checklist, leading with the task, not a process scaffold) - measured +34% requirement coverage on underspecified prompts vs +20% for the plain checklist and -10% for the old process-scaffold prepend. That wording is now `compose_boosted_prompt`. KEY LESSON: prepending a process scaffold to a single-shot answer HURTS (the model answers the scaffold, not the task); leading with the task + a "don't skip the hard parts" completeness checklist HELPS. The `hard`/`easy` classes sit near their coverage ceiling, so boost shows little/no lift there - reported honestly, never tuned to fake-positive.
 
-**Context-completeness engine (`context_completeness.py`) + `lock_plan` spec-lock:** to raise first-pass ticket accuracy, the agent must lock its file set BEFORE coding. `fan_out(seeds, graph=, grep=, semantic=, memory=)` gathers candidates from four injected signals (ICX makes no LLM call - the MCP layer wires real providers via `_context_signals`: graph blast-radius/co-change, `expand_via_grep`, graph `find_context`, memory `find_by_file`); each candidate records which signals hit it + why. `fuse_rank` scores by signal-agreement + centrality + recency + prior-fix and assigns tiers (high = >=2 signals OR a structural graph tie OR a prior-fix file; medium = semantic; low = grep-only). `miss_check(chosen, scored, justifications)` blocks on any HIGH-tier candidate the plan omitted and did not justify (medium/low advisory); `coverage` = high-tier covered / total. The `lock_plan` MCP tool runs this, stores the locked plan per session, and returns `{ok, coverage, blocking_missed, advisory_missed}`; the analyze descriptions carry RULE 3b ("do NOT write code until lock_plan returns ok") and the numbered sequence lists it at step 17, before testing. Pure + guarded: a missing graph / empty memory degrades to fewer signals, never an error. This is the highest-leverage lever against wrong-scope first attempts (missed callers/co-changes/prior-fix files). `expand.py:union_rank` remains for the testing flow; the engine generalizes the same idea with more signals + the miss-check.
+**Context-completeness engine (`context_completeness.py`) + `lock_plan` spec-lock:** to raise first-pass ticket accuracy, the agent must lock its file set BEFORE coding. `fan_out(seeds, graph=, grep=, semantic=, memory=)` gathers candidates from four injected signals (ICX makes no LLM call - the MCP layer wires real providers via `_context_signals`: graph blast-radius/co-change, `expand_via_grep`, graph `find_context`, memory `find_by_file`); each candidate records which signals hit it + why. `fuse_rank` scores by signal-agreement + centrality + recency + prior-fix and assigns tiers (high = >=2 signals OR a structural graph tie; medium = semantic OR prior-fix/memory ALONE; low = grep-only). **Real gap fixed, reported live:** prior-fix/memory used to be bundled into the same "blocks alone" bucket as a graph tie (`_STRUCTURAL_SIGNALS` used to be `{"graph", "memory"}`) - a file some WHOLLY UNRELATED past ticket happened to touch (a JPA entity, `application.properties`, a route config) got flagged as a blocking miss on an unrelated one-line UI fix, forcing a justification for every such file regardless of actual relevance. `_STRUCTURAL_SIGNALS` is now `{"graph"}` only; prior-fix/memory overlap is still scored prominently (`_W_PRIOR_FIX`) and still reaches "high" when combined with a real second signal (`len(non_seed) >= 2`) - it just never blocks alone anymore. Graph dependency (an actual structural tie) still blocks unconditionally, as it should. `miss_check(chosen, scored, justifications)` blocks on any HIGH-tier candidate the plan omitted and did not justify (medium/low advisory); `coverage` = high-tier covered / total. The `lock_plan` MCP tool runs this, stores the locked plan per session, and returns `{ok, coverage, blocking_missed, advisory_missed}`; the analyze descriptions carry RULE 3b ("do NOT write code until lock_plan returns ok") and the numbered sequence lists it at step 17, before testing. Pure + guarded: a missing graph / empty memory degrades to fewer signals, never an error. This is the highest-leverage lever against wrong-scope first attempts (missed callers/co-changes/prior-fix files). `expand.py:union_rank` remains for the testing flow; the engine generalizes the same idea with more signals + the miss-check.
 
 **Definition-of-Done verification gate (v0.4.1 Phase 1):** `analyze_issue` appends a DEFINITION OF DONE block to `_icx_next`: a checklist derived from the analysis (`verification.py:build_dod_checklist`) plus a recommended verification layer set from a risk tier (`compute_risk_tier` -> `recommend_layers`; RECOMMENDATION only - the user selects at the gate, human-in-loop). The agent must prove each item, then call `record_verification` with `{issue_key, dod_items:[{check, method, passed, command, output}], self_review_note, layers_run}`. `verification.py:validate_evidence` accepts only when every item has a non-empty command + output + `passed=true`; `build_confidence_report` returns a confidence score + dimensions + remaining risks. An accepted record is stored in the session. `save_memory` then REFUSES `outcome_verified=true` unless an accepted record exists, OR `verified_by_human=true` is passed (the manual override lane). All knobs have best-practice defaults (`DEFAULT_TIER=medium`, `DEFAULT_TIER_LAYERS`, `DEFAULT_PERF_THRESHOLDS`); the layer is fully guarded (`_apply_dod`) and degrades to prior behavior on any error. `response["dod"]` echoes the checklist + recommended layers. (Later phases add the runner engine that produces the evidence; Phase 1 works with agent run-and-observe.)
 
@@ -868,9 +1038,9 @@ The file is fully ICX-owned (never merged with user content, unlike the rules fi
 
 **MCP prompts primitive (`mcp_server.py`) - native auto-surfacing where the MCP spec's `prompts` capability is supported:** `@server.list_prompts()` / `@server.get_prompt()` expose a single prompt named `icx-boost` (see `_list_prompts`/`_get_prompt`), which calls the same `_boosted()` helper as the `icx_boost` tool and returns the auto-refined brief as the prompt's message content - so invoking the prompt runs the SAME deterministic code the tool runs, not a model-discretionary suggestion. Editor research (2026): Claude Code and VS Code Copilot Chat auto-surface a server's declared prompts as slash commands (`/mcp__icx__icx-boost`, `/icx.icx-boost` respectively) - confirmed working; Cursor lists them but parameterized prompts are confirmed buggy (forum-reported, unresolved); Windsurf's support is doc-claimed but unconfirmed; Codex and Aider/Zed do not support the MCP `prompts` primitive at all. This is why the native command file above (not the MCP prompt) is the primary, uniform `/icx-boost` entry point across all 6 hosts - the MCP prompt is a free bonus surface where the editor happens to support it.
 
-**ICX enforcement (all editors) - ticket/testing/sonar routing, NOT boost:** `MCPHost.enforces` (True for every supported host) gates the enforcement installed by `install_enforcement(host)` on `icx mcp setup` and torn down by `remove_enforcement(host)` on `icx mcp remove`. This is now a SEPARATE, narrower concern from boost (see the command-file section above) - it covers only the three high-precision, always-on triggers: a work-tracker ticket reference -> `analyze_issue_fast`, a testing request -> `start_testing_session`, a Sonar/code-quality request -> the `sonar_*` tools. `MCPHost.enforce_kind` picks the mechanism per editor (verified against each editor's 2026 docs): `"hook"` for Claude Code (a hard pre-agent `UserPromptSubmit` hook + CLAUDE.md); `"rules"` for the rest, which write the ICX rule into that editor's documented global-rules file - Windsurf `~/.codeium/windsurf/memories/global_rules.md`, Codex `~/.codex/AGENTS.md`, Antigravity `~/.gemini/GEMINI.md` (fixed from an earlier incorrect `AGENTS.md` assumption - Antigravity's own global rules file is GEMINI.md), Cursor `~/.cursor/rules/icx.mdc`, VS Code `<cwd>/.github/copilot-instructions.md`. The rules-file path is instruction-based. HONEST caveat surfaced for Cursor: it does not natively guarantee global file-rules (official: feature request, no ETA 2026), so `MCPHost.rules_note` tells the user to add a one-line User Rule in Settings if the file is not picked up. This is where ALL MCP-related setup lives - there is no separate hook command. For Claude Code specifically, two idempotent, merge-safe layers so a ticket/testing/sonar request is always routed correctly, with no "use icx" needed:
-- **UserPromptSubmit hook:** a standalone pure-stdlib detector (`_HOOK_SCRIPT`) is written to `~/.icx/hooks/icx-boost-gate.py`; a keyed group (identified via `_is_icx_hook_group`, which matches the current filename AND the legacy `icx-ticket-gate.py` for clean migration) is merged into `~/.claude/settings.json` UserPromptSubmit, preserving all other hooks. It stays SILENT unless the prompt matches one of three patterns: a work-tracker ticket (`_is_ticket` -> `mcp__icx__analyze_issue_fast`), a testing request (`_TESTING_RE`: test/qa/coverage/e2e/check-a-screen -> `mcp__icx__start_testing_session`), or a code-quality request (`_SONAR_RE`: sonar/quality-gate/code-smell/vulnerability -> the `mcp__icx__sonar_*` tools) - it no longer injects any boost directive (that was the old, retired every-message mandate). Each directive self-neutralizes if the match is a false positive or ICX is not connected. Pure stdlib, no ICX import, no per-prompt subprocess to ICX. The command uses `sys.executable` so a working Python is guaranteed at hook time. `_write_hook_script` deletes any legacy hook file, and `remove_enforcement` deletes both current and legacy - so an existing install migrates cleanly on the next `icx mcp setup`/`icx mcp remove`.
-- **CLAUDE.md / global-rules block:** a marker-delimited block (`_RULE_START`/`_RULE_END`, `_RULE_BLOCK`) mandating ICX as the single channel for FOUR always-on jobs - (1) work-tracker ticket -> `analyze_issue_fast`, (2) testing an app/screen/UI/API -> `start_testing_session`, (3) code quality / SonarQube -> `sonar_*` tools, (4) any git operation (status/branch/commit/sync/push/MR/tag) -> `git_repo_status` first, then `git_*`/`gitlab_*` tools, never a raw git command - plus a fifth item covering any OTHER pasted/ticket-embedded URL (use ICX's connector if it has one, else the agent's own connector, else tell the user), inserted into the editor's rules file (`~/.claude/CLAUDE.md` for Claude, the global-rules file for the others), replaced in place on re-run, stripped on remove; surrounding user content is preserved. The block also POINTS to `/icx-boost` as the separate, on-demand way to boost a request - it no longer mandates calling it on every message.
+**ICX enforcement (all editors) - ticket/testing/sonar/git routing, NOT boost:** `MCPHost.enforces` (True for every supported host) gates the enforcement installed by `install_enforcement(host)` on `icx mcp setup` and torn down by `remove_enforcement(host)` on `icx mcp remove`. This is now a SEPARATE, narrower concern from boost (see the command-file section above) - it covers five high-precision, MANDATORY, always-on triggers (work-tracker ticket -> `analyze_issue_fast`, testing -> `start_testing_session`, Sonar/code-quality -> `sonar_*`, git operations -> `git_repo_status` first then `git_*`/`gitlab_*`, any other pasted URL -> ICX's connector if it has one) plus ONE SOFT-preference trigger (Workstatus time-tracking -> `workstatus_*`, only "prefer", never "never bypass" - Workstatus coverage is partial, so the directive explicitly tells the agent to fall back to another approach rather than block the user). `MCPHost.enforce_kind` picks the mechanism per editor (verified against each editor's 2026 docs): `"hook"` for Claude Code (a hard pre-agent `UserPromptSubmit` hook + CLAUDE.md); `"rules"` for the rest, which write the ICX rule into that editor's documented global-rules file - Windsurf `~/.codeium/windsurf/memories/global_rules.md`, Codex `~/.codex/AGENTS.md`, Antigravity `~/.gemini/GEMINI.md` (fixed from an earlier incorrect `AGENTS.md` assumption - Antigravity's own global rules file is GEMINI.md), Cursor `~/.cursor/rules/icx.mdc`, VS Code `<cwd>/.github/copilot-instructions.md`. The rules-file path is instruction-based. HONEST caveat surfaced for Cursor: it does not natively guarantee global file-rules (official: feature request, no ETA 2026), so `MCPHost.rules_note` tells the user to add a one-line User Rule in Settings if the file is not picked up. This is where ALL MCP-related setup lives - there is no separate hook command. For Claude Code specifically, two idempotent, merge-safe layers so a ticket/testing/sonar/git/workstatus request is always routed correctly, with no "use icx" needed:
+- **UserPromptSubmit hook:** a standalone pure-stdlib detector (`_HOOK_SCRIPT`) is written to `~/.icx/hooks/icx-boost-gate.py`; a keyed group (identified via `_is_icx_hook_group`, which matches the current filename AND the legacy `icx-ticket-gate.py` for clean migration) is merged into `~/.claude/settings.json` UserPromptSubmit, preserving all other hooks. It stays SILENT unless the prompt matches one of four patterns: a work-tracker ticket (`_is_ticket` -> `mcp__icx__analyze_issue_fast`), a testing request (`_TESTING_RE`: test/qa/coverage/e2e/check-a-screen -> `mcp__icx__start_testing_session`), a code-quality request (`_SONAR_RE`: sonar/quality-gate/code-smell/vulnerability -> the `mcp__icx__sonar_*` tools), or a Workstatus request (`_WORKSTATUS_RE`: workstatus/timesheet/clock in-out/time tracking -> the softer, non-mandatory `_WORKSTATUS_DIRECTIVE`, `mcp__icx__workstatus_*`) - it no longer injects any boost directive (that was the old, retired every-message mandate). Each directive self-neutralizes if the match is a false positive or ICX is not connected. Pure stdlib, no ICX import, no per-prompt subprocess to ICX. The command uses `sys.executable` so a working Python is guaranteed at hook time. `_write_hook_script` deletes any legacy hook file, and `remove_enforcement` deletes both current and legacy - so an existing install migrates cleanly on the next `icx mcp setup`/`icx mcp remove`.
+- **CLAUDE.md / global-rules block:** a marker-delimited block (`_RULE_START`/`_RULE_END`, `_RULE_BLOCK`) mandating ICX as the single channel for FIVE always-on, MANDATORY jobs - (1) work-tracker ticket -> `analyze_issue_fast`, (2) testing an app/screen/UI/API -> `start_testing_session`, (3) code quality / SonarQube -> `sonar_*` tools, (4) any git operation (status/branch/commit/sync/push/MR/tag) -> `git_repo_status` first, then `git_*`/`gitlab_*` tools, never a raw git command, (5) any OTHER pasted/ticket-embedded URL (use ICX's connector if it has one, else the agent's own connector, else tell the user) - plus a SIXTH item (Workstatus time-tracking -> `workstatus_*`) that is explicitly a soft preference, not a mandate, since Workstatus coverage is partial (~24 endpoints; see the Workstatus integration section) - the block itself states "Items 1-5 above are mandatory... Item 6 (Workstatus) is a preference given partial tool coverage, not a hard mandate" so the distinction survives even outside this doc. Inserted into the editor's rules file (`~/.claude/CLAUDE.md` for Claude, the global-rules file for the others), replaced in place on re-run, stripped on remove; surrounding user content is preserved. The block also POINTS to `/icx-boost` as the separate, on-demand way to boost a request - it no longer mandates calling it on every message.
 Both layers are guarded per-step - a failure installing enforcement warns but never aborts MCP registration. The `icx boost brief` CLI (P4) remains available for a custom/non-standard hook.
 
 **Graceful fallback when an ICX integration is not connected (`_ICX_FALLBACK`):** routing is mandatory but never a dead end. When the agent routes a ticket to `analyze_issue_fast` or a code-quality request to a `sonar_*` tool and the integration is not configured, the tool returns a structured error PLUS a `fallback` instruction (from `_ICX_FALLBACK(kind, connect_cmd)`) that encodes the same 3-tier intelligence as the boost link handling: (1) tell the user it is not enabled and to connect ICX (`icx connection --add` / `icx sonar --add`) - the preferred path; (2) if the agent has its own connector/MCP for that target, use it meanwhile; (3) otherwise proceed with the normal flow and note the ICX integration is off - never fabricate the data. So ICX stays the preferred channel, but a missing connector degrades cleanly to the agent's own tools or the normal flow rather than blocking. Link enrichment in the boost brief already applies the same tiers per link (`boost/links.py`: `icx_tool` when ICX has a connected connector, `icx_connect_needed` when ICX has it but it is off, `agent_fetch` when ICX has none - e.g. Figma).
@@ -1123,7 +1293,11 @@ ICX makes no LLM calls anywhere in the agent-type path: the authoring, running, 
 
 **Built-in security cases (`analyzers/security_cases.py`):** for `api`, security is not a separate runner - `to_api_spec.materialize_api_spec` writes the OWASP/nuclei-style cases directly into the generated hurl spec, per endpoint: 8 injection classes (SQLi/NoSQL/command/template/path/LDAP/XPath/CRLF - each asserts `status < 500` AND `body not contains` a set of engine-error leak markers), mass-assignment (privilege fields like `isAdmin`/`role:admin` merged into the body must not 500), broken-auth (auth-gated endpoint without credentials must be 401/403), object-level robustness (`sec_objid` - for a path with an id token, an out-of-band id `999999999` must not 500/leak, IDOR-adjacent), plus one app-wide response-header audit (`X-Content-Type-Options`/`X-Frame-Options`/`Content-Security-Policy`/`Strict-Transport-Security`/`Referrer-Policy` must exist). For `agent`, the equivalent cases (XSS injection into every free-text field including search/filter boxes, SQLi-shaped probes, reflected XSS via URL params) are no longer ICX-generated - they are a mandatory "Security" section in `rules_defaults/author_flow.md` that the agent's own Playwright test must cover.
 
-**Native static security (`testing/security/`, always-on, no external scanner, no extra installer):** in addition to the runtime DAST above, `node_local_run` runs a deterministic static scan of the repo source via `fold_into_result(res, repo)` and attaches it to `res['security']` (guarded - a scan failure never affects the run). Three scanners: `secrets.py` (regex ruleset for cloud keys / private keys / tokens + a high-entropy hardcoded-credential heuristic, with the secret value masked out of the report snippet so it is never re-leaked); `sast.py` (SAST-lite - real Python `ast` rules for `eval`/`exec`/`shell=True`/`verify=False`/weak-hash/`pickle.loads`/unsafe-`yaml.load`/`DEBUG=True`, plus a cross-language regex sink set for `innerHTML`/`dangerouslySetInnerHTML`/`document.write`/`eval`, wildcard CORS, SQL string-concat, PHP `system/exec`, Java `Runtime.exec`, cleartext HTTP); `sca.py` (parses requirements.txt/package.json/pom.xml/go.mod, flags unpinned/wildcard versions, and matches each dependency against an OPTIONAL offline advisory file - `ICX_SCA_ADVISORY` env or `.icx-advisories.json`). Findings are severity-graded (critical/high/medium/low), sorted most-severe-first, deduped, and rendered as their own "Security scan" section in the human report. Honest ceiling (documented in the report): rule/AST matching, not full taint-flow; offline/manifest dependency checks, not a live CVE feed.
+**Native static security (`testing/security/`, always-on, no external scanner, no extra installer):** in addition to the runtime DAST above, `node_local_run` runs a deterministic static scan of the repo source via `fold_into_result(res, repo)` and attaches it to `res['security']` (guarded - a scan failure never affects the run). Three scanners: `secrets.py` (regex ruleset for cloud keys / private keys / tokens + a high-entropy hardcoded-credential heuristic, with the secret value masked out of the report snippet so it is never re-leaked); `sast.py` (SAST-lite - real Python `ast` rules for `eval`/`exec`/`shell=True`/`verify=False`/weak-hash/`pickle.loads`/unsafe-`yaml.load`/`DEBUG=True`, plus a cross-language regex sink set for `innerHTML`/`dangerouslySetInnerHTML`/`document.write`/`eval`, wildcard CORS, SQL string-concat, PHP `system/exec`, Java `Runtime.exec`, cleartext HTTP); `sca.py` (parses requirements.txt/package.json/pom.xml/go.mod, flags unpinned/wildcard versions, and matches each dependency against an OPTIONAL offline advisory file - `ICX_SCA_ADVISORY` env or `.icx-advisories.json`). Findings are severity-graded (critical/high/medium/low/info), sorted most-severe-first, deduped, and rendered as their own "Security scan" section in the human report. Honest ceiling (documented in the report): rule/AST matching, not full taint-flow; offline/manifest dependency checks, not a live CVE feed.
+
+**False-positive tightening on the two heuristic-heaviest scanners** (the exact-token rules above - cloud keys, private keys, etc - needed no change):
+- `secrets.py`'s `hardcoded-credential` entropy heuristic: raised the firing threshold 3.0 -> 3.5 bits/char and added a 12-char floor (below that length, 3.5 bits/char is mathematically unreachable anyway, so the floor mostly just documents the intent); added a substring placeholder-marker match (`_PLACEHOLDER_MARKER` - catches `"testpassword123"`, `"fake_key_1"`, not just a pure exact-value match like the old `test`/`dummy`/`sample` whole-value list); added `_looks_non_secret_format` to exclude UUIDs and git SHAs (both routinely high-entropy, neither a secret); added `_is_test_path` - a value that still clears every other bar inside `tests/`, `specs/`, `fixtures/`, `mocks/`, `__tests__/`, or a `test_*`/`*_test.*` filename is still reported (a real secret can genuinely leak into a fixture) but at `info` severity instead of `high`, so deliberate test credentials stop drowning out production findings.
+- `sca.py`'s unpinned-dependency check: a bounded semver/Maven range (`^1.2.3`, `~1.2.3`, `~=1.4`, `>=1.0,<2.0`, a Maven `[1.0,2.0)` bracket) is now its own `ranged-dependency` finding at `info` severity via `_classify_spec` - previously identical to a bare wildcard. True floating specs (`*`, `x`, `latest`, Maven `LATEST`/`RELEASE`, or no version at all) keep the original `unpinned-dependency`/`low` finding unchanged.
 
 **Test-quality advisory (`testing/quality_advisory.py`, always-on, wired in `node_local_run` via `fold_quality(res, repo)`):** surfaces the three quality layers (`perf.py`/`regression.py`/`mutation.py`) onto `res['quality']` for the report, for every test type including `agent`. Each block reports REAL data when its inputs exist, else an honest `{"status": "skipped", "reason": ...}` - never a faked number. `regression` always runs on a git repo: `git diff --name-only HEAD` (read-only) x discovered test files -> `select_regression_targets` -> the test files relevant to the change. `perf` runs `compare_performance` only when `ICX_PERF_BEFORE`/`ICX_PERF_AFTER` (inline JSON or a file path) are provided, flagging any metric past its threshold. `mutation` is opt-in (a real mutation run needs the tool installed and takes minutes-hours) - the advisory parses + gates a report given via `ICX_MUTATION_REPORT` (+ `ICX_MUTATION_LANG`), else it is skipped with that reason. The report renders a "Test quality" section (`_quality_section`) with one card per layer, real numbers or the not-run reason. Fully guarded; a failure never affects the run. All generated hurl (`api`) is validated against the real hurl binary.
 
@@ -1730,6 +1904,325 @@ The existing **testing (`test_max_iterations`, `agent_max_steps`) and Sonar
 with existing config files and stored secrets. New integrations must use the
 registry, not new `AppConfig` fields.
 
+**Critical gotcha, learned building the first real consumer of this pattern
+(Workstatus, Section 6b): `register_integration()` must run BEFORE any
+`ConfigManager.load()`/`save()` call in the process, or the secret-field
+routing in `config_manager.py` silently no-ops and plaintext secrets get
+written to `config.json`.** `cli.py` and `mcp_server.py` both do `import
+icx_engine.workstatus  # noqa: F401` at module load time for exactly this
+reason - copy that pattern for any new integration, don't rely on a lazy
+import somewhere inside a command body.
+
+Also: build the dict stored in `AppConfig.integrations[name]` by hand (each
+field explicitly), never via `MyConfig(...).model_dump()`. `model_dump()`
+respects `Field(..., exclude=True)` and strips those fields immediately -
+before `ConfigManager.save()`'s generic secret-routing loop ever runs, so it
+finds nothing to route to the keyring. This mirrors why
+`gitlab_connections`/`sonar_connections` manually re-inject their `token`
+field into the dumped dict inside `config_manager.py` instead of trusting
+`model_dump()` - the same trap, just generic-integration-shaped instead of
+hardcoded.
+
+---
+
+## 6b. Workstatus integration (concrete example of 6a)
+
+Workstatus (workstatus.io) is a time-tracking/attendance SaaS - **it has no
+public API documentation, no OpenAPI/Postman spec, and no SDK.** Every fact
+below was captured live via an authenticated browser session (fetch/XHR
+interceptor injected in-page, values sanitized before being read back - see
+the session that built this integration for the full method). Nothing here
+is guessed; gaps are marked UNVERIFIED rather than filled in.
+
+**Why `integrations.py`, not `connectors/`:** `ConnectorBase`/`RawIssueData`
+is shaped for "fetch one ticket by key" (issue_key, priority, status,
+due_date...). Workstatus is a time-tracking domain (clock-in/out, timesheets,
+attendance) with no natural mapping onto that contract, and `models/output.py`
+is explicitly closed to new platform-specific fields (Section 5's "What NOT
+to touch"). `client.py`/`service.py` follow GitLab/Sonar's shape exactly at
+the transport/business-logic layer.
+
+**Config storage - HISTORY**: originally single-instance, stored via the
+generic `integrations.py` registry (`AppConfig.integrations["workstatus"]`,
+one hosted-SaaS account per user, reasoned as "not a self-hosted server an
+operator points at multiple named instances of"). Reworked to full
+multi-connection parity with GitLab/Sonar (`workstatus_connections: dict[str,
+WorkstatusConnection]` + `active_workstatus`, `models/config.py`) after
+real-world use turned up wanting more than one account (e.g. work + personal)
+switchable the same way as any other connection - the original one-account
+reasoning didn't hold up. `integrations.py`'s registration for "workstatus"
+(`workstatus/__init__.py`) is kept **solely** for backward-compatible loading:
+`AppConfig._migrate_legacy_workstatus` (a `model_validator(mode="after")`)
+promotes any existing `integrations["workstatus"]` entry into
+`workstatus_connections["default"]` + `active_workstatus="default"` on load,
+by which point `ConfigManager.load()` has already resolved its
+`authorization`/`sd_token` from the keyring (via `integration_secret_fields`
+looking up the still-registered `WorkstatusConfig` model) - so an
+already-configured connection survives the upgrade with no re-paste needed.
+`workstatus/service.py`'s `_make_client`/`status()` read
+`cfg.active_workstatus_connection()` exclusively; nothing reads
+`cfg.integration("workstatus")` anymore.
+
+**Base URL - VERIFIED:** `https://web-api.workstatus.io/api/v5/` - REST,
+versioned, separate host from the `app.workstatus.io` SPA. Response envelope
+is consistently `{code, message, data}`.
+
+**Browser-fingerprint headers - UNVERIFIED but evidence-driven:**
+`client.py:_headers()` sends `Origin`/`Referer` (`https://app.workstatus.io`),
+`User-Agent` (a realistic Chrome UA string), `Accept-Language`, and the
+Chrome-specific `sec-ch-ua`/`sec-ch-ua-mobile`/`sec-ch-ua-platform`/
+`Sec-Fetch-Dest`/`Sec-Fetch-Mode`/`Sec-Fetch-Site` client-hint headers on
+every call. Workstatus has no public API - `web-api.workstatus.io` is only
+ever meant to be called from `app.workstatus.io`'s own browser session, very
+plausibly behind bot-detection middleware that rejects non-browser-shaped
+traffic with a blanket 403 independent of whether the session token itself is
+valid. Origin/Referer alone (first attempt) did not resolve a live-reproduced
+403: a freshly-pasted, never-reused Authorization/SDToken pair still failed on
+two unrelated endpoints (`notifications/unread-count`,
+`table/view/project/list`), ruling out credential staleness and a
+per-endpoint permission gate. A real captured browser cURL for this same API
+(same session) was then compared directly against what this client sends -
+the most conspicuous gap: httpx's own default `User-Agent: python-httpx/...`,
+an immediate "this is a script" signal, plus the complete absence of the
+Sec-Fetch-*/Sec-CH-UA set a real Chrome request always carries (browser-
+enforced, unforgeable by page JS in an actual browser - but nothing stops an
+HTTP client from sending them as literal header values). Costs nothing if
+this still isn't the actual cause (Workstatus simply ignores any header it
+doesn't check) - genuinely UNVERIFIED without live access, not something this
+codebase can confirm on its own. If a live retry still 403s after this, the
+next thing to check is whether the account/role itself carries a blanket API
+restriction Workstatus enforces server-side regardless of header shape - at
+that point it stops being an ICX-side fixable problem.
+
+**Auth - VERIFIED (headers), UNVERIFIED (login body):** every authenticated
+call carries `Authorization`, `UserID`, `OrgID`, `SDToken`, `deviceType`.
+`SDToken` is generated client-side and already present on the LOGIN request
+itself (`POST /api/v5/login`, preceded by `POST /api/v5/captcha/generate`) -
+it is not something the server issues at login. The login request's own body
+schema (field names for email/password) was never captured, only its
+endpoint and headers - so this connector does **not** implement login. Instead
+`icx workstatus --add` prompts for the four header values, pasted by the user
+from their own browser session's Network tab - the same shape as Jira's
+token connector (a pre-issued credential), not an interactive login flow.
+Each prompt wants the EXACT header VALUE as DevTools shows it, verbatim -
+`client.py:80` sends `self._authorization` through unmodified, with no
+`Bearer `/scheme prefix added or stripped, so if the captured Authorization
+header's value includes `Bearer `, that prefix is part of what gets pasted,
+not something to omit - the "add" flow's own prompt text says so directly.
+Connections also appear in `icx status` (a "Workstatus Connections" table -
+`#`/name/user_id/org_id/auth-set-or-missing/`[ACTIVE]` columns, same shape as
+the Sonar/GitLab tables).
+
+**Implemented (fully verified request + response) - `workstatus/client.py`:**
+24 endpoints total, captured across three live capture sessions.
+
+**Response envelope is NOT perfectly uniform** - most endpoints use
+`{code, message, data}`, but project listing uses `{code, message, result}`
+(a Laravel-style paginator: `current_page, data, from, last_page, per_page,
+to, total, links, next_page_url, prev_page_url`), `get/task/list` uses
+`{status, message, data:{<paginator>}}` (note `status` not `code`), and
+`timesheets/view`/`edit/timesheet/{id}` nest the WHOLE envelope one level
+deeper under a `response` key: `{response: {code, message, data}}`.
+`client.py:_data()` unwraps `response` first if present, then takes a `key`
+param (`"data"` or `"result"`) per endpoint rather than assuming one shape
+everywhere.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/notifications/unread-count` | response `{data:{count}}`; doubles as the connection health check (no dedicated validate endpoint exists) |
+| POST | `/member/myprofile` | response includes `bankinginformation`/`paypal_account`/`razorpay_account`/`stripe_account_id` - this is a full HRIS profile, not just time-tracking |
+| POST | `/timesheet/add` | request body UPDATED 2026-08-03 (see below): `{billable, date, deviceId, deviceType, from, ip_address, member_id, notes:{note}, organization_id, os_version, project_id, client_id, reason, source_type, time_type, to, todo_id, activity, time_mode, duration, togglenotes, togglereason}`. `deviceId` has no verified generation algorithm - a random UUID is used per client instance. **Real bug, fixed**: observed live, HTTP 200 with an empty `data` body when the write silently failed server-side - an in-band failure signal `_raise_for_workstatus` never catches (it only inspects the status code). `client.py:add_timesheet` now raises `WorkstatusError` when `data` comes back empty instead of returning `{}` as if it were a created entry - previously reported false success on a failed write |
+| POST | `/table/view/project/list` | paginated project list; envelope nests under `result`, not `data`. `page` accepted as a query-string param (Laravel's `paginate()` reads it by framework convention - not endpoint-specific behavior that needed live capture). `lean=True` (client-level flag, not a Workstatus param) strips any list/dict-valued field from each row post-response - real symptom fixed: each row embeds a full member roster (100+ users with email/avatar/pivot rows), ~50KB+ per project even when the caller only needs id/name |
+| POST | `/project/detailsview` | one project's details; response `data` is a one-item list, client unwraps to the item |
+| POST | `/project/budget-analytics` | margin/budget/profit-loss analytics for one project |
+| POST | `/get/task/list` | paginated task list, filterable by status/priority/tags/milestone/assignee/etc; envelope uses `status` not `code`. `page` accepted as a query-string param (same Laravel convention as project list) - no per-page override param exposed, since one was never captured live for this endpoint specifically. `search` is UNVERIFIED to filter server-side: the captured body always sent `search_option: ""` (empty), and Workstatus's behavior with a real `search_option` value was never observed live - passing `search` alone may silently return the full unfiltered list |
+| POST | `/get/taskstatus/list` | task statuses defined for a project |
+| POST | `/list/milestone` | milestones for a project |
+| POST | `/task/checklist/list` | checklist items for one task |
+| POST | `/members/lists` | member/employee list, filterable by team/department/role/online-status |
+| POST | `/team/list` | team list |
+| POST | `/attendance/list` | day-by-day attendance/check-in-out entries for a date range |
+| POST | `/member/attendance/stats` | summary attendance stats (days present/absent, avg hours) for a date range |
+| POST | `/timesheets/viewTimesheet/list` | logged timesheet entries for a date range, with activity/overtime/location filters |
+| POST | `/timesheet/client/list` | clients billable via timesheets |
+| POST | `/reports/weeklyreportall` | weekly hours/activity/earnings report |
+| POST | `/reports/timesheet-submission/kpis` | timesheet submission/approval KPI summary (missing/pending/approved counts) |
+| POST | `/reports/timesheet-submission/table` | per-member timesheet submission/approval table, paginated |
+| POST | `/expense/filtered-data` | recorded expenses for a date range, paginated |
+| POST | `/list/invoices` | invoices, paginated, with paid/open/overdue totals |
+| POST | `/payroll/report/list` | payroll report for a date range, paginated |
+| POST | `/timesheets/view` | one timesheet entry's full detail (member/project/task/date/times/OS/location/IP/reason/notes); envelope nests under a `response` key |
+| POST | `/edit/timesheet/{id}` | edit an existing manual entry - auto-saves per field change in the web UI; requires an `updatedFields` diff descriptor; envelope also nests under `response` |
+
+**Time format (WS-3, CONFIRMED via a live read, not just the one earlier write
+capture):** a real `timesheets/viewTimesheet/list` read for an existing entry
+shows the SAME dual representation on read as on write - `from_time`/`to_time`
+top-level fields are 24-hour `"YYYY-MM-DD HH:MM:SS"` (e.g.
+`"2026-07-01 11:15:00"`), while `interval.from`/`interval.to` are the 12-hour
+display format with lowercase am/pm (e.g. `"11:15 am"`/`"07:15 pm"`) - exactly
+what `add_timesheet`'s `from_time`/`to_time` params expect to send. This
+cross-verifies the write-side format captured earlier from a single submission
+- it is no longer unverified-beyond-one-case for the format itself (the
+`source_type`/`time_type`/`time_mode`/`activity` enum VALUES remain unverified,
+see below - only the time STRING FORMAT is now confirmed on both sides).
+
+**WS-2/X-1 audit (generalize "every write returns the real created/updated
+object", checked against every write path in git/gitlab/jira/workstatus):**
+`add_timesheet`'s bug class - an HTTP 200 response whose body is syntactically
+valid JSON but semantically empty (`{code:200, data:{}}`), silently read as
+success - is Workstatus-specific, not a general pattern. Jira's write methods
+(`add_comment`/`edit_comment`/`create_issue`/`add_worklog`/`edit_worklog`/
+`upload_attachment`/etc, `connectors/jira/client.py`) all call
+`_check_write_status()` before touching the body, and Jira Cloud's REST v3
+contract always returns the real created/updated object on 2xx - an
+unexpectedly empty body there raises a `JSONDecodeError` on `response.json()`
+naturally, it does not silently parse into `{}`. GitLab's write methods
+(`create_tag`/`create_merge_request`/`attempt_merge`, `gitlab/client.py`)
+follow the same shape - `attempt_merge` even has an explicit try/except around
+`resp.json()` specifically to convert a malformed 200 body into a raised
+`GitLabError` rather than a silent pass. No second instance of Workstatus's
+specific failure mode was found - it does not generalize further.
+
+**WS-10 (`workstatus_delete_timesheet`) - CONFIRMED BLOCKED, same rule:** no
+delete endpoint for a manual timesheet entry was ever captured live - only
+`edit/timesheet/{id}` (auto-save per field) was observed, and the row-level
+three-dot menu was found to offer only "View timesheet" (see the mutability
+note above), with no delete action ever seen. Inferring a path like
+`delete/timesheet/{id}` by pattern-matching `edit/timesheet/{id}` would be
+exactly the kind of fabricated payload/path this section's own rule forbids -
+a wrong guess here is a DELETE call, worse to get wrong than a GET. Not built.
+Re-attempt only after a live capture confirms the real path (if one exists at
+all - the UI evidence so far suggests entries may not be deletable by a
+regular member account, only editable).
+
+**WS-6 (`workstatus_my_tasks`) and WS-8 (`workstatus_can_log(date)`) -
+CONFIRMED BLOCKED, not skipped:** neither a cross-project "my tasks" endpoint
+nor a per-date submission-lock check was ever captured live, and this session's
+attempt to capture them via the Chrome extension found it not connected -
+`tabs_context_mcp` returned "Browser extension is not connected." Path or
+payload was NOT invented for either: `list_tasks`'s existing `memberIds`/
+`worked_by_members` fields are scoped to ONE `project_id` (required), so they
+cannot serve as a cross-project "my tasks" substitute without guessing whether
+Workstatus exposes an unscoped variant. For "can a date still be logged",
+`timesheets/viewTimesheet/list` (`list_timesheets`) already returns an
+`approval_status` field per entry and `timesheet_submission_kpis`/
+`timesheet_submission_table` (already implemented) surface missing/pending/
+approved counts - the closest real signal available today - but whether
+`add_timesheet` is actually server-rejected against an approved/locked date
+was never observed, so a dedicated `can_log` tool would be encoding a guessed
+rule, not a verified one. Re-attempt via a live browser capture (Chrome
+extension connected, real My Tasks / calendar-lock UI navigated) before
+building either tool.
+
+**`add_timesheet`'s HTTP-200-empty-body write failure - ROOT CAUSE FOUND
+(2026-08-03), payload shape corrected:** even after WS-1 made the empty
+response an honest raised error (rather than a false success), the entry
+still consistently failed to create against a genuinely assigned task, across
+every from_time/to_time format, date format, and billable permutation tried.
+A second, independently-supplied real submission example (correct host,
+correct headers, correct `organization_id: 8570`) surfaced the actual gaps:
+(1) `from`/`to` need the FULL `"YYYY-MM-DD HH:MM:SS"` datetime string, not the
+12-hour `"10:00 am"` display format the original single capture had
+documented - that display format was only ever independently confirmed as a
+READ-side representation (`interval.from`/`interval.to`, see the time-format
+entry above), never as accepted on write; (2) `deviceType`/`os_version`/
+`togglenotes`/`togglereason` were missing from the body entirely - not
+invented fields, they already existed, live-verified, in `edit_timesheet`'s
+own captured shape, just never ported to this sibling "manual timesheet"
+endpoint, which almost certainly shares the same backend validator; (3)
+`duration` is now optional, defaulting to `""` - the real example sends it
+empty, consistent with Workstatus computing duration itself from `from`/`to`;
+(4) `source_type`/`time_type`/`time_mode` defaults changed from `1`/`1`/`1` to
+`3`/`4`/`0`, matching the human's own confirmed-working historical entries
+rather than the single earlier submission the original defaults came from.
+Still UNVERIFIED beyond these two data points - no enum-list endpoint exists
+to confirm the source_type/time_type/time_mode values are universally
+correct - override if a different value is confirmed needed. `duration` moved
+from required to optional at both the client and MCP tool schema level;
+`project_id`/`todo_id`/`date`/`from_time`/`to_time`/`reason` remain required.
+
+**Catalogued but NOT implemented** (path + method confirmed live, request
+body never captured - implementing would mean guessing field names, which
+breaks the "never fabricate payloads" rule): custom fields with values,
+comments, subtask/child-task listing, milestone member dropdown, estimated-hour
+log history, invite-member/share-invite-link, timesheet member-timezone lookup,
+organization role list, various settings/designation/timezone/currency/shift-
+schedule lookups, budgets list (Financials tab returned empty for this
+account - no real payload observed), invoicing detail. Extend
+`client.py`/`service.py`/`mcp_tools.py` one endpoint at a time as each one's
+request body gets captured and verified; do not add a wrapper for a path
+whose body is still a guess.
+
+**Not observed at all:** screenshots/activity-capture endpoints, webhooks (no
+UI surface for configuring them was found, consistent with the public-web
+research finding that Workstatus webhooks are undocumented), the actual
+clock-in/clock-out write call (no reachable web UI control for it on a
+regular member account - likely desktop/mobile-app only for this org's plan).
+
+**Timesheet entry mutability - CORRECTED (superseding an earlier wrong
+finding):** the row-level three-dot menu offers only "View timesheet" for
+both an auto-tracked and a manually-created entry - that part was right.
+What was missed the first time: clicking "View timesheet" opens a modal
+where every field is individually editable via its own "Click to Edit"
+pencil icon (per-field, not one big form) - **and it auto-saves on every
+single field change, no separate Save button.** Confirmed live by capturing
+two real `POST /api/v5/edit/timesheet/{id}` calls (one accidental Start Time
+change, one revert of it), both round-tripped correctly and the entry ended
+up back at its original values. `client.py`/`service.py` now implement
+`get_timesheet`/`edit_timesheet`.
+
+Two fields in the edit request have field NAMES verified but exact required
+VALUES not fully pinned down: `type` in the `timesheets/view` request body
+(defaulted to `"manual"`, matching this connector's own entries - unconfirmed
+for auto-tracked ones), and the `from`/`to` time string format in the edit
+body (assumed to match `add_timesheet`'s `"10:00 am"` convention, since both
+belong to the same entity - not independently confirmed byte-for-byte).
+`updatedFields` is a required diff descriptor -
+`[{field_name, previous_value, new_value}]` - mirroring exactly what the
+Manual Time Edit report's audit trail displays; the server expects an
+explicit change description, not just the new state, so callers must supply
+it (typically after a `get_timesheet()` call to know the "previous" values).
+
+Delete still has no known path: the Manual Time Edit report's summary does
+have an "HOURS DELETED" column, so deletion exists as a concept somewhere
+(likely admin-only), but no delete control was found in the edit modal
+either - it appears to be edit-only, not delete-capable, for a regular
+member role.
+
+**Config model (`models/config.py`):** `WorkstatusConnection` - `name`,
+`user_id`, `org_id`, `device_type` (plain), `authorization`/`sd_token`
+(`str | None = Field(default=None, exclude=True)`, keyring-routed under
+`workstatus_conn_authorization:<name>`/`workstatus_conn_sd_token:<name>` -
+two secret fields per connection, unlike GitLab's one `token`).
+`AppConfig.workstatus_connections: dict[str, WorkstatusConnection]` +
+`active_workstatus: str | None`, `active_workstatus_connection()` resolves
+the active one - identical shape to `gitlab_connections`/`active_gitlab`.
+`workstatus/config.py`'s `WorkstatusConfig` (the pre-rework single-instance
+model) still exists and is still registered via `icx_engine.integrations`,
+but ONLY for the legacy-migration secret-resolution path described above -
+no current code path constructs it.
+
+**Service layer (`workstatus/service.py`):** `add_connection(name, user_id,
+org_id, authorization, sd_token, device_type, make_active, cfg)`,
+`list_connections()`, `remove_connection(name)`, `set_active(name)` - direct
+mirrors of `gitlab/service.py`'s functions of the same name. `_make_client`
+(the single choke point all other ~25 service functions funnel through) and
+`status()` both resolve via `cfg.active_workstatus_connection()`.
+
+**CLI:** `icx workstatus --add` (interactive: connection name, the four
+header values, active-or-not - same shape as `icx gitlab --add`),
+`icx workstatus --list`/`--active <name|index>`/`--remove <name|index>` (full
+parity with `icx sonar`/`icx gitlab`, index resolved against `icx status`'s
+numbering via `_workstatus_resolve_name`), `icx workstatus status` (active
+connection only), `icx workstatus profile`, `icx workstatus unread`,
+`icx workstatus add-time` (creates a REAL entry - confirm details first).
+
+**MCP tools:** `workstatus_unread_notifications`, `workstatus_my_profile`,
+`workstatus_add_timesheet` - all resolve the active connection via
+`_make_client`, unaffected by which connection is active at call time (no
+per-tool connection-name parameter, matching how `sonar_*`/most `gitlab_*`
+tools implicitly use the active connection too).
+
 ---
 
 ## 7. Memory Module
@@ -2015,6 +2508,8 @@ Path normalisation: `_norm(path)` replaces `\` with `/` and lowercases. Applied 
 MCP tools: `memory_find_by_file` and `memory_get_hotspots` run inside the memory executor thread via `_find_by_file_sync` and `_get_hotspots_sync`.
 CLI commands: `icx memory by-file <PATH> [--project PROJ]` and `icx memory hotspots [--project PROJ] [--top N]`.
 
+**`_find_by_file_sync` excludes `save_context_vector` (real gap fixed, reported live):** it used to `model_dump()` each `MemoryEntry` in full, inlining the raw 384-float embedding on every result - no MCP caller can use a raw vector, pure payload weight on every `memory_find_by_file` call. Now `model_dump(exclude={"save_context_vector"})`. `memory_search` (via `query_smart`) was never affected - it already builds an explicit, curated result dict that never included the vector field.
+
 ### Auto pattern detection (`memory/patterns.py`)
 
 `detect_patterns(entries)` is a pure function that scans a list of `MemoryEntry` objects for statistical patterns. No ML required. Returns `[]` when fewer than 3 entries are available (insufficient signal).
@@ -2293,7 +2788,7 @@ Only clusters with 2+ files are shown in the index - single-file clusters are no
 
 | Method | Returns | Description |
 |---|---|---|
-| `find_context(task)` | `list[ContextResult]` | Score-ranked files relevant to a task description (TF-IDF-style scoring boosted by node importance) |
+| `find_context(task)` | `list[ContextResult]` | Score-ranked files relevant to a task description (TF-IDF-style scoring boosted by node importance). `token_budget`/`min_confidence`/`source_root` are accepted for backward compatibility but UNUSED here - returns every scored file unconditionally, no cap. **Real gap fixed at the MCP boundary, reported live**: this no-op previously meant `graph_find_context` responses could blow past 700K+ chars on a single call (all scored files, unbounded), forcing the caller to spill to disk and parse externally. `mcp_server.py`'s `graph_find_context` dispatch now truncates the serialized result list to `token_budget` via a coarse ~4-chars-per-token estimate before returning (`total_matched`/`truncated`/`note` fields added when truncation happens) - deliberately done at the MCP layer, not inside `find_context` itself, so this function's own ranking/selection contract for other callers is untouched. |
 | `get_call_chain(node_id)` | `CallChain` | Upstream callers + downstream callees for a node, BFS-limited to depth 3 |
 | `get_impact(node_id)` | `ImpactResult` | All dependents (direct + transitive) grouped by edge confidence tier |
 | `get_subsystem(file_path)` | `SubsystemResult` | Community containing the file, with core files and cross-cluster connections |
@@ -2392,7 +2887,7 @@ When `show_traceback=True` (triggered by the `--traceback` CLI flag) it also for
 
 The `_GUIDANCE` dict maps every `ICXError` subclass to `(why_text, how_text)`. Unknown exception types (bare `ICXError` or non-ICX exceptions) fall back to `"Unexpected error."` / `"Pass --debug --traceback for full details."`.
 
-**Context-aware `AuthError` guidance:** `render_icx_error` applies a secondary check when the caught exception is `AuthError`. It lowercases the exception message and checks for AI provider keywords (`"gemini"`, `"openai"`, `"anthropic"`, `"xai"`, `"nim"`, `"grok"`). If any keyword matches, the `How:` guidance is overridden to `"Run \`icx model --add\` to update your AI credentials."` instead of the default Jira connection guidance. This ensures the user always sees the precise recovery command for the specific service that failed.
+**Context-aware `AuthError` guidance:** `render_icx_error` applies a secondary check when the caught exception is `AuthError`. It lowercases the exception message and checks for AI provider keywords (`"gemini"`, `"openai"`, `"anthropic"`, `"xai"`, `"nim"`, `"grok"`) first, then Workstatus (`"workstatus"`) - `elif`, not a second independent `if`, since an AI-provider match should never be overridden by an unrelated keyword also appearing in the message. If the AI keywords match, `How:` becomes `"Run \`icx model --add\` to update your AI credentials."`; if `"workstatus"` matches instead, `How:` becomes `"Run \`icx workstatus --add\` to re-enter your session credentials."`. Real bug this fixed: every Workstatus `AuthError` (401/403 from `workstatus/client.py`) fell through to the default Jira-connection guidance (`icx connection --add`) - the wrong command, since Workstatus isn't in `AppConfig.connections` at all. Without a keyword match, `AuthError` still falls back to that default - correct for Jira/GitLab/Sonar's own `AuthError`s, which is why this is additive `elif` branches on top of the default, not a replacement.
 
 For `ContextBuildError`, `exc.raw_output` is appended below the panel when `show_traceback=True` - showing the raw LLM response that failed to parse. It is hidden otherwise to keep normal error output clean.
 

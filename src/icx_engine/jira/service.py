@@ -14,9 +14,11 @@ from `analyze_issue_fast`/`analyze_issue`'s full LLM analysis; both UNGATED.
 `link_types`/`create_link`/`delete_link` are issue-link CRUD (`link_types` is
 a global lookup resolved by domain, like `create_issue`/`search`;
 `create_link` resolves by its `inward_key`; `delete_link` takes an
-`issue_key` purely to resolve a connection, see its own docstring) and
-`set_assignee` sets/clears/resets an issue's assignee - all plain
-pass-throughs, GATED reasoning (only `delete_link` is gated) lives at the
+`issue_key` purely to resolve a connection, see its own docstring),
+`set_assignee` sets/clears/resets an issue's assignee, and
+`search_assignable_users` discovers real accountIds for it (so assigning to
+someone other than the caller is never a guess) - all plain pass-throughs,
+GATED reasoning (only `delete_link` is gated) lives at the
 MCP/CLI layer. `upload_attachment`/`delete_attachment` are the attachment
 CRUD pair (`delete_attachment` takes `issue_key` purely to resolve a
 connection, the same reasoning as `delete_link` - see its own docstring);
@@ -154,18 +156,77 @@ def _format_started_for_jira(started: datetime | str) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + dt.strftime("%z")
 
 
-async def get_close_requirements(issue_key: str) -> dict:
+def _strip_allowed_values(fields: dict) -> dict:
+    """Drop the `allowedValues` key from each field's metadata dict, keeping
+    `required`/`schema`/etc. `allowedValues` is the expensive part - the full
+    option catalogue for select-list fields (every Functionality/Component/
+    Issue Category value, sometimes 50-70+ entries) - useful the FIRST time a
+    caller needs to know what a field will accept, pure repeated bulk on every
+    later call in the same workflow-walk once that catalogue is already known."""
+    return {
+        key: {k: v for k, v in meta.items() if k != "allowedValues"} if isinstance(meta, dict) else meta
+        for key, meta in fields.items()
+    }
+
+
+async def get_close_requirements(
+    issue_key: str, include_allowed_values: bool = True, since_status: str | None = None,
+) -> dict:
     """Discover what `issue_key` needs to close out: available workflow
     transitions (with per-transition required fields) and the fields editable
-    on the issue right now. Both calls run concurrently."""
+    on the issue right now. Both calls run concurrently.
+
+    `include_allowed_values=False` strips `allowedValues` (the full option
+    catalogue for select-list fields) from every field's metadata, in both
+    `editable_fields` and each transition's own `fields` - `required`/`schema`
+    are kept either way. Pass False on repeat calls once the catalogue from an
+    earlier call in the same session is already known - the catalogue itself
+    doesn't change between calls on the same issue moments apart.
+
+    `since_status` (JIRA-3, diff-on-repeat): pass the `status` value returned
+    by a PRIOR call to this function for the same issue. The current status is
+    always fetched first (one lightweight `get_issue_raw(fields=["status"])`
+    call); if it still matches `since_status`, the available transitions and
+    editable fields have not changed either (both are a function of the
+    issue's current workflow status), so this returns a compact
+    `{"issue_key", "status", "unchanged": True}` instead of re-fetching and
+    re-returning the full transitions/editable_fields bundle - the real
+    repeat-call cost in a status-walk loop (get_close_requirements ->
+    apply_update -> get_close_requirements again) when the update in between
+    only changed a field, not the status. Omit `since_status` (or pass a value
+    that no longer matches, e.g. after a real transition) to get the full
+    bundle as before - always includes `status` in the response either way,
+    so the caller has the value to pass next time."""
     config = ConfigManager.load()
     client = await _resolve_client(issue_key, config)
+    current = await client.get_issue_raw(issue_key, fields=["status"])
+    current_status = (current.get("fields") or {}).get("status", {}).get("name")
+
+    if since_status is not None and since_status == current_status:
+        return {
+            "issue_key": issue_key,
+            "status": current_status,
+            "unchanged": True,
+            "note": (
+                "Status has not changed since since_status was captured - available transitions "
+                "and editable fields are unchanged too (both depend only on current status). "
+                "Call again without since_status to get the full bundle if genuinely needed."
+            ),
+        }
+
     transitions, editable_fields = await asyncio.gather(
         client.get_transitions(issue_key),
         client.get_editmeta(issue_key),
     )
+    if not include_allowed_values:
+        editable_fields = _strip_allowed_values(editable_fields)
+        transitions = [
+            {**t, "fields": _strip_allowed_values(t["fields"])} if isinstance(t.get("fields"), dict) else t
+            for t in transitions
+        ]
     return {
         "issue_key": issue_key,
+        "status": current_status,
         "transitions": transitions,
         "editable_fields": editable_fields,
     }
@@ -260,9 +321,18 @@ async def create_issue(
     `domain` instead via `_resolve_client_by_domain` - works unchanged for
     the common single-connection/default-connection case; pass `domain` only
     when genuinely ambiguous (multiple Jira connections, no default set).
-    """
+
+    `fields["description"]`, if given as a plain string, is auto-wrapped via
+    `_text_to_adf` before the write - Jira's REST API v3 requires `description`
+    to be ADF (a structured doc object), not a plain string; sending a bare
+    string is rejected with a generic validation error. Mirrors exactly how
+    `add_comment`/`edit_comment` already wrap their own body text. A caller
+    that already passes a dict for `description` (i.e. already-ADF) is left
+    untouched."""
     config = ConfigManager.load()
     client = await _resolve_client_by_domain(domain, config)
+    if fields and isinstance(fields.get("description"), str):
+        fields = {**fields, "description": _text_to_adf(fields["description"])}
     issue_key = await client.create_issue(project, issuetype, summary, extra_fields=fields)
     return {
         "ok": True,
@@ -437,6 +507,17 @@ async def set_assignee(issue_key: str, account_id: str | None = None) -> dict:
     client = await _resolve_client(issue_key, config)
     await client.set_assignee(issue_key, account_id)
     return {"ok": True, "issue_key": issue_key, "account_id": account_id}
+
+
+async def search_assignable_users(issue_key: str, query: str = "") -> list[dict]:
+    """Discover real accountIds assignable to `issue_key`, optionally narrowed
+    by `query` - the set_assignee analog of list_issue_types/get_createmeta_fields
+    for create_issue: a real lookup so account_id is never guessed for anyone
+    other than the caller (get_current_user only covers self). A plain
+    pass-through via `_resolve_client(issue_key, config)`."""
+    config = ConfigManager.load()
+    client = await _resolve_client(issue_key, config)
+    return await client.search_assignable_users(issue_key, query)
 
 
 async def upload_attachment(

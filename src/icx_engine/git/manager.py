@@ -6,10 +6,12 @@ logic serves both front doors)."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from icx_engine.git.gitcmd import (
     is_git_repo, repo_root, fetch, remote_branch_exists, default_remote_head_branch,
@@ -20,11 +22,12 @@ from icx_engine.git.gitcmd import (
     commits_since, changed_files_since, remote_url, file_exists_at_ref, push,
 )
 from icx_engine.git.naming import (
-    derive_branch_name, ticketless_branch_name, parse_ticket_key_from_branch,
+    derive_branch_name, ticketless_branch_name, parse_ticket_key_from_branch, slugify,
 )
 from icx_engine.git.settings import read_repo_settings, write_repo_settings
 from icx_engine.git.safety import (
     detect_leftover_state, LeftoverState, create_backup, create_scratch_branch, prune_old_backups,
+    sync_backup,
 )
 from icx_engine.gitlab.client import GitLabClient, project_path_from_remote_url
 from icx_engine.gitlab.service import create_and_merge_mr
@@ -34,6 +37,48 @@ class GitWorkflowError(RuntimeError):
     """Raised for any lifecycle precondition failure - never for a git
     subprocess failure directly (those raise GitCommandError); this is the
     higher-level error the CLI/MCP layers catch and report to the human."""
+
+
+def _gitlab_push_auth_env(gitlab_conn, origin_url: str) -> dict[str, str] | None:
+    """Build extra env vars that make a `fetch`/`push` subprocess authenticate
+    to GitLab with `gitlab_conn`'s stored personal access token - the real fix
+    for git push failing with 'could not read Username' even though ICX's own
+    GitLab connection is valid: that token was only ever used for GitLab's
+    REST API (create_and_merge_mr, validate), never for raw git-over-HTTPS,
+    since gitcmd.py deliberately disables credential.helper and terminal
+    prompts on every git subprocess it runs (so an automated call never hangs
+    on a prompt) without substituting anything in their place.
+
+    Injected via GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n (git
+    >=2.31) as an `http.extraheader` - never in the remote URL or argv, so the
+    token never shows up in `git remote -v` or a process listing.
+
+    Returns None (no injection - caller's fetch/push behaves exactly as
+    before, relying on whatever git credential already exists) when:
+    - `origin_url` is not http(s) - an SSH remote authenticates via the
+      user's own SSH key, a separate credential path this never touches.
+    - `origin_url`'s host does not match `gitlab_conn.url`'s host - never
+      send a credential to a remote it wasn't configured for.
+    - `gitlab_conn` has no token.
+    """
+    if not gitlab_conn or not gitlab_conn.token:
+        return None
+    origin_parsed = urlparse(origin_url)
+    if origin_parsed.scheme not in ("http", "https"):
+        return None
+    conn_parsed = urlparse(gitlab_conn.url)
+    if origin_parsed.netloc.lower() != conn_parsed.netloc.lower():
+        return None
+
+    basic = base64.b64encode(f"oauth2:{gitlab_conn.token}".encode()).decode()
+    entries = [("http.extraheader", f"Authorization: Basic {basic}")]
+    if not gitlab_conn.verify_tls:
+        entries.append(("http.sslVerify", "false"))
+    env = {"GIT_CONFIG_COUNT": str(len(entries))}
+    for i, (key, value) in enumerate(entries):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    return env
 
 
 _DEBUG_PATTERNS = (
@@ -141,9 +186,14 @@ _API_PATH_RE = re.compile(r"(^|/)(controllers?|routes?|api)/|openapi", re.IGNORE
 
 
 class GitLifecycleManager:
-    def __init__(self, repo_path: Path):
+    def __init__(self, repo_path: Path, gitlab_conn=None):
         self._repo_path = Path(repo_path)
         self._repo_root: Path | None = None
+        # None means "not resolved yet", not "no connection" - _auth_env()
+        # lazily resolves via ConfigManager the first time it's needed and
+        # caches the result, so a caller never has to remember to pass one in.
+        self._gitlab_conn = gitlab_conn
+        self._gitlab_conn_resolved = gitlab_conn is not None
 
     def validate(self) -> Path:
         if not is_git_repo(self._repo_path):
@@ -159,16 +209,31 @@ class GitLifecycleManager:
             raise GitWorkflowError("validate() must be called before using this manager.")
         return self._repo_root
 
+    def _auth_env(self, remote: str = "origin") -> dict[str, str] | None:
+        """The single source of git-network auth for every fetch/remote_branch_exists/
+        push call this manager makes. Exists so a new method never has to remember to
+        wire this in separately - the exact failure mode that first shipped this fix
+        only for push, then had to be patched again for git_create_mr's own fetch/
+        ls-remote calls, which were still running with no credential at all. Every
+        network call in this class must route through here instead of computing its
+        own auth env."""
+        if not self._gitlab_conn_resolved:
+            from icx_engine.config_manager import ConfigManager  # noqa: PLC0415
+            self._gitlab_conn = ConfigManager.load().active_gitlab_connection()
+            self._gitlab_conn_resolved = True
+        return _gitlab_push_auth_env(self._gitlab_conn, remote_url(self.repo_root, remote))
+
     def check_leftover_state(self) -> LeftoverState:
         return detect_leftover_state(self.repo_root)
 
     def resolve_parent_branch(self) -> ParentResolution:
-        fetch(self.repo_root)
+        auth_env = self._auth_env()
+        fetch(self.repo_root, extra_env=auth_env)
         stored = read_repo_settings(self.repo_root).get("parent_branch")
-        if stored and remote_branch_exists(self.repo_root, stored):
+        if stored and remote_branch_exists(self.repo_root, stored, extra_env=auth_env):
             return ParentResolution(status="resolved", parent_branch=stored)
 
-        if remote_branch_exists(self.repo_root, "development"):
+        if remote_branch_exists(self.repo_root, "development", extra_env=auth_env):
             return ParentResolution(status="needs_confirmation", proposed_default="development")
 
         head = default_remote_head_branch(self.repo_root)
@@ -176,7 +241,7 @@ class GitLifecycleManager:
         return ParentResolution(status="needs_manual_pick", available_branches=available)
 
     def confirm_parent_branch(self, chosen: str) -> None:
-        if not remote_branch_exists(self.repo_root, chosen):
+        if not remote_branch_exists(self.repo_root, chosen, extra_env=self._auth_env()):
             raise GitWorkflowError(
                 f"Branch '{chosen}' does not exist on origin. Check the name and try again."
             )
@@ -210,7 +275,7 @@ class GitLifecycleManager:
 
     def sync_with_remote(self, remote: str = "origin") -> SyncResult:
         branch = current_branch(self.repo_root)
-        fetch(self.repo_root, remote=remote)
+        fetch(self.repo_root, remote=remote, extra_env=self._auth_env(remote))
         before = head_sha(self.repo_root)
         try:
             fast_forward(self.repo_root, branch, remote=remote)
@@ -246,6 +311,9 @@ class GitLifecycleManager:
         stage_files(self.repo_root, files)
         warnings = self.scan_staged_debug_leftovers()
         sha = commit(self.repo_root, cleaned)
+        branch = current_branch(self.repo_root)
+        backup_key = ticket_key or slugify(branch)
+        sync_backup(self.repo_root, branch, backup_key)
         return CommitResult(sha=sha, debug_warnings=warnings)
 
     def _pop_stash_or_explain(self) -> None:
@@ -424,9 +492,12 @@ class GitLifecycleManager:
             )
         assignee_id = identity["user"]["id"]
 
+        self._gitlab_conn = gitlab_conn
+        self._gitlab_conn_resolved = True
+        auth_env = self._auth_env()
         feature_branch = current_branch(self.repo_root)
-        fetch(self.repo_root)
-        push(self.repo_root, feature_branch)
+        fetch(self.repo_root, extra_env=auth_env)
+        push(self.repo_root, feature_branch, extra_env=auth_env)
         description_sections = self.build_mr_description(parent_branch)
         description = (
             f"## Change summary\n{description_sections.change_summary}\n\n"
@@ -458,6 +529,8 @@ class GitLifecycleManager:
         project_path = project_path_from_remote_url(origin)
         if project_path is None:
             raise GitWorkflowError(f"Could not resolve a GitLab project from origin remote '{origin}'.")
+        self._gitlab_conn = gitlab_conn
+        self._gitlab_conn_resolved = True
 
         async def _check_merged() -> bool:
             async with GitLabClient(gitlab_conn.url, gitlab_conn.token, gitlab_conn.verify_tls) as client:
@@ -479,7 +552,7 @@ class GitLifecycleManager:
         touched = changed_files_since(self.repo_root, parent_branch) if local_branch_exists(self.repo_root, feature_branch) else []
 
         checkout(self.repo_root, parent_branch)
-        fetch(self.repo_root)
+        fetch(self.repo_root, extra_env=self._auth_env())
         fast_forward(self.repo_root, parent_branch)
 
         if touched:

@@ -800,7 +800,7 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 101
+    assert len(tools) == 135
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
@@ -823,13 +823,27 @@ async def test_list_tools_returns_all_tools():
         "git_stage_and_commit", "git_push",
         "git_reverse_merge", "git_get_conflict", "git_complete_resolution",
         "git_adopt_resolution", "git_discard_scratch",
-        "git_create_mr", "git_finish_ticket", "git_create_tag",
+        "git_create_mr", "git_finish_ticket", "git_create_tag", "git_delete_tag", "git_retag",
         "gitlab_list_merge_requests", "gitlab_mr_changes", "gitlab_list_commits", "gitlab_compare",
+        "gitlab_list_tags", "gitlab_list_branches", "gitlab_list_pipelines",
+        "gitlab_pipeline_status", "gitlab_job_log",
+        "workstatus_unread_notifications", "workstatus_my_profile", "workstatus_add_timesheet",
+        "workstatus_list_projects", "workstatus_get_project", "workstatus_project_budget_analytics",
+        "workstatus_list_tasks", "workstatus_list_task_statuses", "workstatus_list_milestones",
+        "workstatus_list_task_checklist", "workstatus_list_members", "workstatus_list_teams",
+        "workstatus_attendance_list", "workstatus_attendance_stats",
+        "workstatus_list_timesheets", "workstatus_list_timesheet_clients",
+        "workstatus_weekly_report", "workstatus_timesheet_submission_kpis",
+        "workstatus_timesheet_submission_table", "workstatus_list_expenses",
+        "workstatus_list_invoices", "workstatus_payroll_report",
+        "workstatus_get_timesheet", "workstatus_edit_timesheet",
         "jira_get_close_requirements", "jira_apply_update",
+        "jira_list_issue_types", "jira_get_createmeta_fields",
         "jira_create_issue", "jira_delete_issue",
         "jira_comment_list", "jira_comment_add", "jira_comment_edit", "jira_comment_delete",
         "jira_search", "jira_get_issue",
         "jira_link_types", "jira_link_create", "jira_link_delete", "jira_set_assignee",
+        "jira_search_assignable_users",
         "jira_attachment_upload", "jira_attachment_delete",
         "jira_get_current_user", "jira_list_watchers", "jira_list_worklogs",
         "jira_set_watcher", "jira_worklog_add", "jira_worklog_edit", "jira_worklog_delete",
@@ -845,7 +859,7 @@ async def test_git_tool_descriptions_follow_sonar_use_when_must_convention():
         tools = await _list_tools()
 
     git_tools = [t for t in tools if t.name.startswith("git_")]
-    assert len(git_tools) == 16
+    assert len(git_tools) == 18
     for tool in git_tools:
         assert "USE WHEN" in tool.description, f"{tool.name} missing 'USE WHEN'"
         assert "MUST" in tool.description, f"{tool.name} missing 'MUST'"
@@ -2548,6 +2562,71 @@ async def test_graph_find_context_nonexistent_path_returns_error():
     assert data.get("status") == "error"
 
 
+async def test_graph_find_context_truncates_to_token_budget(monkeypatch, tmp_path):
+    """Real bug fixed: find_context's own token_budget param is a documented no-op -
+    it returned every scored file unconditionally, producing 700K+ char single-call
+    responses. This proves the MCP-layer truncation actually caps output size."""
+    from icx_engine import mcp_server
+    from icx_engine.graph.query import ContextResult
+
+    fake_graph_json = tmp_path / "graph.json"
+    fake_graph_json.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        mcp_server, "_resolve_graph_path",
+        lambda raw_path: ("/proj", "proj-id", None),
+    )
+    monkeypatch.setattr("icx_engine.graph.storage.graph_path", lambda project_id: fake_graph_json)
+
+    class _FakeQuerier:
+        def find_context(self, **kwargs):
+            # Each result's `reason` is padded to make its serialized size predictable
+            # and large enough that only a handful fit in a small token_budget.
+            return [
+                ContextResult(
+                    file=f"src/file_{i}.py", node_id=f"node_{i}", score=1.0 - i * 0.001,
+                    role_tag="service", degree=1, reason="x" * 500,
+                )
+                for i in range(200)
+            ]
+
+    monkeypatch.setattr(mcp_server, "_cached_querier", lambda graph_json: _FakeQuerier())
+
+    result = await mcp_server._call_tool("graph_find_context", {
+        "project_path": "/proj", "task": "auth token expiry", "token_budget": 500,
+    })
+    data = json.loads(result[0].text)
+    assert data["status"] == "ok"
+    assert data["total_matched"] == 200
+    assert len(data["results"]) < 200
+    assert data["truncated"] is True
+    assert "token_budget" in data["note"]
+
+
+async def test_graph_find_context_no_truncation_note_when_everything_fits(monkeypatch, tmp_path):
+    from icx_engine import mcp_server
+    from icx_engine.graph.query import ContextResult
+
+    fake_graph_json = tmp_path / "graph.json"
+    fake_graph_json.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "_resolve_graph_path", lambda raw_path: ("/proj", "proj-id", None))
+    monkeypatch.setattr("icx_engine.graph.storage.graph_path", lambda project_id: fake_graph_json)
+
+    class _FakeQuerier:
+        def find_context(self, **kwargs):
+            return [ContextResult(file="src/a.py", node_id="n1", score=1.0, role_tag="service", degree=1, reason="short")]
+
+    monkeypatch.setattr(mcp_server, "_cached_querier", lambda graph_json: _FakeQuerier())
+
+    result = await mcp_server._call_tool("graph_find_context", {
+        "project_path": "/proj", "task": "auth token expiry", "token_budget": 8000,
+    })
+    data = json.loads(result[0].text)
+    assert data["status"] == "ok"
+    assert len(data["results"]) == 1
+    assert data["total_matched"] == 1
+    assert "truncated" not in data
+
+
 def test_degraded_graph_response_shape():
     """No-graph/stale is non-blocking: warn the user + fall back to native tools,
     never stop-and-wait."""
@@ -3069,6 +3148,30 @@ async def test_memory_find_by_file_returns_empty_structure():
     assert "results" in data
     assert "count" in data
     assert data["count"] == 0
+
+
+def test_find_by_file_sync_excludes_raw_embedding_vector(monkeypatch):
+    """Real bug fixed: memory_find_by_file used to inline the raw 384-float
+    save_context_vector embedding on every result - no MCP caller can use it,
+    pure payload weight."""
+    from icx_engine import mcp_server
+    from icx_engine.memory.schema import MemoryEntry
+
+    entry = MemoryEntry(
+        id="e1", issue_key="ABC-1", project_key="ABC", source_type="jira",
+        issue_type="Bug", summary="s", problem_description="p", resolution_note="r",
+        files_changed=["src/auth/token.py"], resolution_confirmed=True, saved_at="2026-01-01",
+        save_context_vector=[0.1] * 384,
+    )
+    monkeypatch.setattr(mcp_server, "_ensure_memory_manager", lambda: object())
+    monkeypatch.setattr(
+        "icx_engine.memory.bridge.find_work_items_by_file",
+        lambda file_path, mem, project_key=None: [entry],
+    )
+    result = mcp_server._find_by_file_sync("src/auth/token.py", None)
+    assert len(result) == 1
+    assert "save_context_vector" not in result[0]
+    assert result[0]["issue_key"] == "ABC-1"
 
 
 # -- memory_get_patterns -------------------------------------------------------

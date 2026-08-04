@@ -150,38 +150,59 @@ class JiraClient:
             )
             self._check_write_status(response)
 
+    async def _get_createmeta_page(self, client: httpx.AsyncClient, url: str, start_at: int) -> dict:
+        response = await client.get(
+            url,
+            params={"startAt": start_at, "maxResults": 100},
+            headers={
+                "Authorization": self._auth_header,
+                "Accept": "application/json",
+            },
+        )
+        check_http_status(response)
+        return response.json()
+
     async def list_issuetypes(self, project: str) -> list[dict]:
         """GET .../issue/createmeta/{project}/issuetypes - the issue types
-        available for creation in this project, each with at least id/name."""
+        available for creation in this project, each with at least id/name.
+        Paginated by Jira (default page size 50) - looped here via startAt/
+        isLast so a project with more issue types than one page never silently
+        truncates the result."""
+        url = f"{self._base_url}/issue/createmeta/{quote(project, safe='')}/issuetypes"
+        values: list[dict] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{self._base_url}/issue/createmeta/{quote(project, safe='')}/issuetypes",
-                headers={
-                    "Authorization": self._auth_header,
-                    "Accept": "application/json",
-                },
-            )
-            check_http_status(response)
-            return response.json().get("values", [])
+            while True:
+                page = await self._get_createmeta_page(client, url, len(values))
+                page_values = page.get("values", [])
+                values.extend(page_values)
+                if page.get("isLast", True) or not page_values:
+                    break
+        return values
 
     async def get_createmeta_fields(self, project: str, issuetype_id: str) -> dict:
         """GET .../issue/createmeta/{project}/issuetypes/{issuetype_id} - the
         create-time analog of get_editmeta: fields required/available to
-        create an issue of this type. Jira returns these as a `values` list;
-        re-keyed here by `fieldId` so the returned shape mirrors
-        get_editmeta's (dict of field-key -> field-info with 'required')."""
+        create an issue of this type. Jira returns these as a paginated
+        `values` list (default page size 50, `isLast`/startAt-driven) - looped
+        here so a create screen with more than 50 fields (common once a
+        project has many custom fields on a shared/global screen) never
+        silently drops fields past the first page, which otherwise looks
+        exactly like the field never being discoverable at all. Re-keyed by
+        `fieldId` so the returned shape mirrors get_editmeta's (dict of
+        field-key -> field-info with 'required')."""
+        url = (
+            f"{self._base_url}/issue/createmeta/{quote(project, safe='')}"
+            f"/issuetypes/{quote(issuetype_id, safe='')}"
+        )
+        values: list[dict] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{self._base_url}/issue/createmeta/{quote(project, safe='')}"
-                f"/issuetypes/{quote(issuetype_id, safe='')}",
-                headers={
-                    "Authorization": self._auth_header,
-                    "Accept": "application/json",
-                },
-            )
-            check_http_status(response)
-            values = response.json().get("values", [])
-            return {v["fieldId"]: v for v in values if "fieldId" in v}
+            while True:
+                page = await self._get_createmeta_page(client, url, len(values))
+                page_values = page.get("values", [])
+                values.extend(page_values)
+                if page.get("isLast", True) or not page_values:
+                    break
+        return {v["fieldId"]: v for v in values if "fieldId" in v}
 
     async def create_issue(
         self, project: str, issuetype: str, summary: str, extra_fields: dict | None = None,
@@ -470,6 +491,28 @@ class JiraClient:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 f"{self._base_url}/issue/{key}/watchers",
+                headers={
+                    "Authorization": self._auth_header,
+                    "Accept": "application/json",
+                },
+            )
+            check_http_status(response)
+            return response.json()
+
+    async def search_assignable_users(self, issue_key: str, query: str = "") -> list[dict]:
+        """GET .../user/assignable/search - users assignable to `issue_key`,
+        optionally narrowed by `query` (name/email substring). Exists so
+        jira_set_assignee has a real discovery path for assigning to someone
+        OTHER than the caller (get_current_user only covers "assign to self") -
+        a raw accountId for another person previously had no way to be
+        resolved except guessing. A plain read, check_http_status alone."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            params: dict = {"issueKey": issue_key}
+            if query:
+                params["query"] = query
+            response = await client.get(
+                f"{self._base_url}/user/assignable/search",
+                params=params,
                 headers={
                     "Authorization": self._auth_header,
                     "Accept": "application/json",

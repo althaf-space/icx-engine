@@ -52,6 +52,7 @@ _GUIDANCE: dict[type, tuple[str, str]] = {
 }
 
 _AI_AUTH_KEYWORDS = ("gemini", "openai", "anthropic", "xai", "nim", "grok")
+_WORKSTATUS_AUTH_KEYWORDS = ("workstatus",)
 
 
 def render_icx_error(
@@ -73,6 +74,9 @@ def render_icx_error(
         if any(kw in msg for kw in _AI_AUTH_KEYWORDS):
             why = "Authentication or permission failure from the AI provider."
             how = "Run `icx model --add` to update your AI credentials."
+        elif any(kw in msg for kw in _WORKSTATUS_AUTH_KEYWORDS):
+            why = "Authentication or permission failure from Workstatus."
+            how = "Run `icx workstatus --add` to re-enter your session credentials."
 
     body = (
         f"[bold]What:[/bold] {exc}\n"

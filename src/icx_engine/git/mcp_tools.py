@@ -12,7 +12,7 @@ from icx_engine.config_manager import ConfigManager
 from icx_engine.confirm import issue_token, verify_token
 from icx_engine.git.manager import GitLifecycleManager
 from icx_engine.git.settings import read_repo_settings
-from icx_engine.gitlab import service as gitlab_service
+from icx_engine.gitlab import ci_tags, service as gitlab_service
 from icx_engine.gitlab.client import GitLabClient, project_path_from_remote_url
 from icx_engine.mcp_server import _ICX_FALLBACK
 from icx_engine.skills.hints import attach_skill_hint
@@ -33,6 +33,8 @@ _PUSH_TOOL = "git_push"
 _CREATE_MR_TOOL = "git_create_mr"
 _FINISH_TICKET_TOOL = "git_finish_ticket"
 _CREATE_TAG_TOOL = "git_create_tag"
+_DELETE_TAG_TOOL = "git_delete_tag"
+_RETAG_TOOL = "git_retag"
 
 GIT_TOOLS: list[Tool] = [
     Tool(
@@ -165,7 +167,10 @@ GIT_TOOLS: list[Tool] = [
             "current branch is this repo's confirmed parent/shared branch, the pending_confirmation "
             "response sets on_parent_branch=true and the instruction warns the human before they "
             "commit directly there - it never blocks the commit, only strengthens the warning; the "
-            "human can still choose to commit on the parent branch anyway. Requires a "
+            "human can still choose to commit on the parent branch anyway. On success, a local-only "
+            "backup-latest/<ticket-or-branch-slug> branch is moved to the new commit automatically - "
+            "this keeps a fallback pointer in sync with every commit, never trailing behind; it is "
+            "never pushed, no separate confirmation needed for it. Requires a "
             "valid git repository at repo_path."
         ),
         inputSchema={
@@ -318,8 +323,10 @@ GIT_TOOLS: list[Tool] = [
             "USE WHEN the human wants to open a merge request for the current feature branch: "
             "MUST create (or reuse an existing open) merge request for the current feature branch "
             "and attempt one immediate merge. CONFIRMATION-GATED: first call (no confirm_token) "
-            "returns pending_confirmation plus a token - show the human the ticket/summary/parent "
-            "branch, get explicit agreement, then call again with confirm_token. If parent_branch "
+            "returns pending_confirmation plus a token - show the human BOTH source_branch (the "
+            "current feature branch this MR merges FROM) and parent_branch (the target it merges "
+            "INTO), plus ticket/summary, get explicit agreement, then call again with confirm_token. "
+            "If parent_branch "
             "is omitted, it is ALWAYS confirmed with the human, every call - never silently "
             "reused, even if one was confirmed for this repo before. Returns "
             "status='confirm_remembered' (with the previously-confirmed value as proposed_default, "
@@ -372,14 +379,27 @@ GIT_TOOLS: list[Tool] = [
     Tool(
         name=_CREATE_TAG_TOOL,
         description=(
-            "USE WHEN the human wants to tag a build for a specific environment: MUST create a "
-            "GitLab tag for that chosen environment (server-side, no local push needed). "
-            "CONFIRMATION-GATED and a HARD GATE: the first call (no confirm_token) returns "
-            "pending_confirmation with previous_tag and proposed_tag - you MUST show both to the "
-            "human and get explicit agreement (or a tag_name_override they specify instead) "
-            "before calling again with confirm_token. 'Latest tag' is always scoped to the chosen "
-            "environment only - never assume which environment the human means. Requires an "
-            "active GitLab connection."
+            "USE WHEN the human wants to tag a build for a specific environment: MUST call "
+            "gitlab_list_tags first to see this project's REAL existing tag names/environments - "
+            "never invent an environment token (e.g. 'DEV') from guesswork. MUST create a "
+            "GitLab tag for that chosen environment (server-side, no local push needed). Before "
+            "proposing anything, this tool fetches the project's real .gitlab-ci.yml (at `branch`) "
+            "and REJECTS an `environment` that matches none of its real tag-trigger patterns "
+            "(case-insensitive) - the error names the real values found. It also checks the "
+            "PROPOSED tag name against those same patterns and REFUSES to proceed if no CI pattern "
+            "would match (creating such a tag builds nothing - a silent no-op) unless "
+            "`override_ci_check=true` is passed. If the CI file itself can't be fetched, this "
+            "degrades to a `ci_check_error` warning rather than blocking - show it to the human, "
+            "never silently treat it as validated. CONFIRMATION-GATED and a HARD GATE: the first "
+            "call (no confirm_token) returns pending_confirmation with previous_tag and "
+            "proposed_tag, plus `ci_pipeline_will_trigger` (true/false/null-if-uncheckable) - you "
+            "MUST show all of this to the human and get explicit agreement (or a tag_name_override "
+            "they specify instead) before calling again with confirm_token. If previous_tag is "
+            "null, the response carries an explicit `warning` - this can mean the environment name "
+            "is WRONG, not that it's genuinely the first tag ever for it; relay that warning, don't "
+            "treat null as a mere footnote. 'Latest tag' is always scoped to the chosen environment "
+            "only - never assume which environment the human means. Requires an active GitLab "
+            "connection."
         ),
         inputSchema={
             "type": "object",
@@ -388,9 +408,67 @@ GIT_TOOLS: list[Tool] = [
                 "environment": {"type": "string"},
                 "branch": {"type": "string"},
                 "tag_name_override": {"type": "string"},
+                "override_ci_check": {"type": "boolean"},
                 "confirm_token": {"type": "string"},
             },
             "required": ["repo_path", "environment", "branch"],
+        },
+    ),
+    Tool(
+        name=_DELETE_TAG_TOOL,
+        description=(
+            "USE WHEN the human explicitly wants a specific existing GitLab tag permanently "
+            "removed: MUST call gitlab_list_tags first to confirm the exact real tag name - never "
+            "guess or assume one exists. This fetches the REAL tag from GitLab first (fails with a "
+            "clear 'not found' error, never silently no-ops, if it doesn't exist) and reports its "
+            "target commit sha before anything is deleted. CONFIRMATION-GATED and a HARD GATE: the "
+            "first call (no confirm_token) returns pending_confirmation with tag_name and "
+            "target_commit - you MUST show both to the human and get explicit agreement before "
+            "calling again with confirm_token. Deleting a tag does NOT touch the commit or any "
+            "branch it pointed at - only the tag reference itself is removed, permanently (GitLab "
+            "has no tag recycle bin) - a new tag with the same name can be created again later "
+            "pointing at any ref, but this exact tag object cannot be recovered. Requires an active "
+            "GitLab connection."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "tag_name": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "tag_name"],
+        },
+    ),
+    Tool(
+        name=_RETAG_TOOL,
+        description=(
+            "USE WHEN the human wants an EXISTING tag moved to point at a different ref (e.g. "
+            "re-triggering a build from a newer commit under the same tag name) - NOT for creating "
+            "a brand-new tag (use git_create_tag for that). Atomically deletes the existing tag and "
+            "recreates it under the same name against the new `branch`. MUST call gitlab_list_tags "
+            "first to confirm tag_name really exists - fails with a clear error if it doesn't "
+            "(suggests git_create_tag instead). CONFIRMATION-GATED and a HARD GATE: the first call "
+            "(no confirm_token) returns pending_confirmation with tag_name, previous_target (the "
+            "tag's current commit sha), new_target (the real tip commit of `branch`, resolved via a "
+            "live branch lookup - never guessed), and `ci_pipeline_will_trigger` "
+            "(true/false/null-if-uncheckable, from the project's real .gitlab-ci.yml) - if "
+            "previous_target equals new_target this is a no-op, say so plainly. Show all of this to "
+            "the human and get explicit agreement before calling again with confirm_token. If the "
+            "delete succeeds but recreation then fails for any reason, the response reports the "
+            "ORIGINAL target commit sha so the tag can be recreated manually at that exact commit - "
+            "this is a genuine partial-failure risk of a delete+create pair, surfaced rather than "
+            "hidden. Requires an active GitLab connection."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "tag_name": {"type": "string"},
+                "branch": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "tag_name", "branch"],
         },
     ),
 ]
@@ -800,7 +878,7 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             mgr.validate()
             branch = current_branch(mgr.repo_root)
             remote = payload["remote"]
-            gitcmd.push(mgr.repo_root, branch, remote=remote)
+            gitcmd.push(mgr.repo_root, branch, remote=remote, extra_env=mgr._auth_env(remote))
             return _ok({"branch": branch, "remote": remote, "pushed": True})
         except Exception as exc:
             return _err(str(exc))
@@ -820,6 +898,8 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                     return _err("ticket_summary is required and must be a non-empty string.")
                 mgr = GitLifecycleManager(Path(repo_path))
                 mgr.validate()
+                from icx_engine.git.gitcmd import current_branch
+                source_branch = current_branch(mgr.repo_root)
                 given_parent = arguments.get("parent_branch")
                 if not given_parent:
                     return _needs_parent_branch(mgr)
@@ -831,8 +911,10 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                     "token": token,
                     "ticket_key": ticket_key,
                     "ticket_summary": ticket_summary,
+                    "source_branch": source_branch,
                     "parent_branch": parent_branch,
-                    "instruction": "Show the human the ticket, summary, and target branch. Only call "
+                    "instruction": "Show the human the ticket, summary, SOURCE branch, and TARGET "
+                                   "(parent) branch - confirm both, not just the target. Only call "
                                    "this tool again with confirm_token set once they explicitly agree.",
                 }))]
             payload = verify_token(confirm_token, "create_mr")
@@ -882,8 +964,10 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                     "token": token,
                     "feature_branch": feature_branch,
                     "parent_branch": parent_branch,
-                    "instruction": "Show the human which feature branch is about to be cleaned up. "
-                                   "Only call again with confirm_token once they agree.",
+                    "instruction": "Show the human the SOURCE (feature_branch, about to be deleted "
+                                   "locally) and TARGET (parent_branch, whose local pointer moves "
+                                   "forward) - confirm both. Only call again with confirm_token once "
+                                   "they agree.",
                 }))]
             payload = verify_token(confirm_token, "finish_ticket")
             if payload is None:
@@ -932,23 +1016,84 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                     async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
                         return await client.list_tags(project_path)
 
+                # Fetch the project's real .gitlab-ci.yml and validate BOTH the environment
+                # token and the proposed tag name against it, before ever proposing anything -
+                # real bug fixed: a free-text environment (e.g. "DEV") used to be accepted
+                # silently, and the resulting tag triggered no pipeline at all (CI only
+                # matches lowercase "dev"/"qa" tag patterns) - a silent no-op, the most
+                # expensive kind of success. ci_check degrades to a warning (never a hard
+                # block) if the CI file itself can't be fetched - genuine uncertainty is
+                # surfaced, not guessed away.
+                ci_yaml_text: str | None = None
+                ci_check_error: str | None = None
+                try:
+                    async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                        ci_yaml_text = await client.get_repository_file(project_path, ".gitlab-ci.yml", branch)
+                except Exception as exc:
+                    ci_check_error = str(exc)
+
+                if ci_yaml_text is not None:
+                    real_envs = ci_tags.valid_environments(ci_yaml_text)
+                    if real_envs and environment.lower() not in real_envs:
+                        return _err(
+                            f"'{environment}' does not match any tag-triggering environment in this "
+                            f"project's .gitlab-ci.yml on branch '{branch}'. Real values found: "
+                            f"{sorted(real_envs)}. Pass one of those (case-insensitive), or if this is "
+                            "intentional (e.g. a brand-new environment CI doesn't know about yet), "
+                            "confirm with the human before proceeding - creating this tag would trigger "
+                            "no pipeline."
+                        )
+                    if real_envs and environment.lower() in real_envs:
+                        # Normalize to the real observed casing (always lowercase in every captured
+                        # pattern) BEFORE generating the tag - real bug this prevents: "DEV"/"QA"
+                        # passing the environment check case-insensitively but then producing a
+                        # wrong-case tag (e.g. v0.0.1-DEV-...) that matches no CI pattern anyway,
+                        # since CI patterns are case-sensitive. Silently correcting the case here is
+                        # strictly better than erroring a second time over what is really the same typo.
+                        environment = environment.lower()
+
                 grouped = gitlab_service.group_tags_by_environment(await _list_tags())
                 latest = grouped.get(environment, [None])[0] if grouped.get(environment) else None
                 proposed = arguments.get("tag_name_override") or gitlab_service.propose_next_tag(environment, latest)
 
+                ci_match = ci_tags.matches_any_pattern(proposed, ci_yaml_text) if ci_yaml_text is not None else None
+                if ci_match is False and not arguments.get("override_ci_check"):
+                    return _err(
+                        f"Proposed tag '{proposed}' does not match any tag-triggering pattern in this "
+                        f"project's .gitlab-ci.yml on branch '{branch}' - creating it would build NOTHING "
+                        "(a silent no-op, not a conflict or error). Show the human this exact reason. If "
+                        "they want to create it anyway, call again with override_ci_check=true (no "
+                        "confirm_token) to get a token for it."
+                    )
+
                 token = issue_token("create_tag", {**arguments, "project_path": project_path})
-                return [TextContent(type="text", text=json.dumps({
+                response = {
                     "status": "pending_confirmation",
                     "token": token,
                     "environment": environment,
                     "previous_tag": latest.name if latest else None,
                     "proposed_tag": proposed,
                     "branch": branch,
+                    "ci_pipeline_will_trigger": ci_match,
                     "instruction": "Show the human the environment, previous_tag, proposed_tag, and "
                                    "branch. If they want a different exact name, call again (no token) "
                                    "with tag_name_override set. Only call again with confirm_token once "
                                    "they explicitly approve the tag shown.",
-                }))]
+                }
+                if latest is None:
+                    response["warning"] = (
+                        f"No prior tags found for environment '{environment}' on this project - this "
+                        "could mean the environment name is wrong (verify it against a real "
+                        ".gitlab-ci.yml / gitlab_list_tags output) rather than genuinely being the first "
+                        "tag ever created for it."
+                    )
+                if ci_check_error:
+                    response["ci_check_error"] = (
+                        f"Could not fetch .gitlab-ci.yml to validate this tag would trigger a pipeline: "
+                        f"{ci_check_error}. Proceeding is possible but unverified - tell the human this "
+                        "check could not run."
+                    )
+                return [TextContent(type="text", text=json.dumps(response))]
             except Exception as exc:
                 return _err(str(exc))
         try:
@@ -974,6 +1119,146 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
 
             result = await _create()
             return _ok({"tag": result["name"], "branch": payload["branch"]})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _DELETE_TAG_TOOL:
+        confirm_token = arguments.get("confirm_token")
+        if not confirm_token:
+            repo_path = arguments.get("repo_path")
+            if not repo_path or not isinstance(repo_path, str):
+                return _err("repo_path is required and must be a non-empty string.")
+            tag_name = arguments.get("tag_name")
+            if not tag_name or not isinstance(tag_name, str):
+                return _err("tag_name is required and must be a non-empty string.")
+            try:
+                mgr = GitLifecycleManager(Path(repo_path))
+                mgr.validate()
+                conn = ConfigManager.load().active_gitlab_connection()
+                if conn is None:
+                    return _no_gitlab_connection_err()
+                from icx_engine.git.gitcmd import remote_url
+                project_path = project_path_from_remote_url(remote_url(mgr.repo_root))
+                if project_path is None:
+                    return _err("Could not resolve a GitLab project from origin remote.")
+                async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                    tag = await client.get_tag(project_path, tag_name)
+                target_commit = (tag.get("commit") or {}).get("id") or tag.get("target")
+                token = issue_token("delete_tag", {**arguments, "project_path": project_path})
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "pending_confirmation",
+                    "token": token,
+                    "tag_name": tag_name,
+                    "target_commit": target_commit,
+                    "instruction": "Show the human the exact tag_name and its target_commit. This "
+                                   "permanently deletes the tag object (never the commit/branch it "
+                                   "points at) - GitLab has no tag recycle bin. Only call again with "
+                                   "confirm_token once they explicitly agree.",
+                }))]
+            except Exception as exc:
+                return _err(str(exc))
+        try:
+            payload = verify_token(confirm_token, "delete_tag")
+            if payload is None:
+                return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+            conn = ConfigManager.load().active_gitlab_connection()
+            if conn is None:
+                return _no_gitlab_connection_err()
+            async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                await client.delete_tag(payload["project_path"], payload["tag_name"])
+            return _ok({"deleted": payload["tag_name"]})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _RETAG_TOOL:
+        confirm_token = arguments.get("confirm_token")
+        if not confirm_token:
+            repo_path = arguments.get("repo_path")
+            if not repo_path or not isinstance(repo_path, str):
+                return _err("repo_path is required and must be a non-empty string.")
+            tag_name = arguments.get("tag_name")
+            if not tag_name or not isinstance(tag_name, str):
+                return _err("tag_name is required and must be a non-empty string.")
+            branch = arguments.get("branch")
+            if not branch or not isinstance(branch, str):
+                return _err("branch is required and must be a non-empty string.")
+            try:
+                mgr = GitLifecycleManager(Path(repo_path))
+                mgr.validate()
+                conn = ConfigManager.load().active_gitlab_connection()
+                if conn is None:
+                    return _no_gitlab_connection_err()
+                from icx_engine.git.gitcmd import remote_url
+                project_path = project_path_from_remote_url(remote_url(mgr.repo_root))
+                if project_path is None:
+                    return _err("Could not resolve a GitLab project from origin remote.")
+                async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                    old_tag = await client.get_tag(project_path, tag_name)
+                    branches = await client.list_branches(project_path, search=branch)
+                    matching = [b for b in branches if b.get("name") == branch]
+                    if not matching:
+                        return _err(
+                            f"Branch '{branch}' not found on this project via gitlab_list_branches - "
+                            "verify the real branch name before retagging."
+                        )
+                    new_target = (matching[0].get("commit") or {}).get("id")
+                    ci_yaml_text: str | None = None
+                    ci_check_error: str | None = None
+                    try:
+                        ci_yaml_text = await client.get_repository_file(project_path, ".gitlab-ci.yml", branch)
+                    except Exception as exc:
+                        ci_check_error = str(exc)
+                previous_target = (old_tag.get("commit") or {}).get("id") or old_tag.get("target")
+                ci_match = ci_tags.matches_any_pattern(tag_name, ci_yaml_text) if ci_yaml_text is not None else None
+                token = issue_token("retag", {
+                    "repo_path": repo_path, "tag_name": tag_name, "branch": branch,
+                    "project_path": project_path, "previous_target": previous_target,
+                })
+                response = {
+                    "status": "pending_confirmation",
+                    "token": token,
+                    "tag_name": tag_name,
+                    "previous_target": previous_target,
+                    "new_target": new_target,
+                    "no_op": previous_target == new_target,
+                    "ci_pipeline_will_trigger": ci_match,
+                    "instruction": "Show the human tag_name, previous_target, and new_target - if "
+                                   "no_op is true, this retag changes nothing, tell them plainly. "
+                                   "This deletes then recreates the tag - if recreation fails after "
+                                   "delete succeeds, the response will report previous_target so the "
+                                   "tag can be recreated manually at that exact commit. Only call "
+                                   "again with confirm_token once they explicitly agree.",
+                }
+                if ci_check_error:
+                    response["ci_check_error"] = (
+                        f"Could not fetch .gitlab-ci.yml to validate this retag would trigger a "
+                        f"pipeline: {ci_check_error}. Proceeding is possible but unverified."
+                    )
+                return [TextContent(type="text", text=json.dumps(response))]
+            except Exception as exc:
+                return _err(str(exc))
+        try:
+            payload = verify_token(confirm_token, "retag")
+            if payload is None:
+                return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+            conn = ConfigManager.load().active_gitlab_connection()
+            if conn is None:
+                return _no_gitlab_connection_err()
+            async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
+                await client.delete_tag(payload["project_path"], payload["tag_name"])
+                try:
+                    result = await client.create_tag(payload["project_path"], payload["tag_name"], payload["branch"])
+                except Exception as exc:
+                    return _err(
+                        f"Retag failed AFTER the old tag was already deleted: {exc}. The tag "
+                        f"'{payload['tag_name']}' no longer exists. Its previous target commit was "
+                        f"{payload['previous_target']} - recreate it manually at that exact commit "
+                        "with git_create_tag's tag_name_override if this was unintended."
+                    )
+            return _ok({
+                "tag": result["name"], "branch": payload["branch"],
+                "previous_target": payload["previous_target"],
+            })
         except Exception as exc:
             return _err(str(exc))
 

@@ -69,9 +69,11 @@ def _reject_path_traversal(relpath: str, param: str) -> None:
         raise GitCommandError(f"{param} must not contain '..' segments: {relpath!r}")
 
 
-def _safe_git_env() -> dict[str, str]:
+def _safe_git_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
     env.update(_GIT_SAFE_ENV)
+    if extra_env:
+        env.update(extra_env)
     return env
 
 
@@ -80,17 +82,21 @@ def _run_git(
     args: list[str],
     timeout: float = _DEFAULT_TIMEOUT,
     allowed_returncodes: set[int] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a git command in `repo`. Raises GitCommandError unless the return
     code is 0 or explicitly listed in `allowed_returncodes` (used by callers
     like `remote_branch_exists` where a non-zero code is a meaningful result,
-    not a failure)."""
+    not a failure). `extra_env` (if given) is merged in on top of the hardened
+    base env - used by `fetch`/`push` to inject a GitLab auth header for
+    network calls that need one, without touching the credential.helper/
+    terminal-prompt hardening itself."""
     ok_codes = {0} | (allowed_returncodes or set())
     try:
         result = subprocess.run(
             [*_GIT_BASE_CMD, *args],
             cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL, timeout=timeout, env=_safe_git_env(),
+            stdin=subprocess.DEVNULL, timeout=timeout, env=_safe_git_env(extra_env),
             **_GIT_POPEN_KW,
         )
     except subprocess.TimeoutExpired as exc:
@@ -133,17 +139,19 @@ def current_branch(repo: Path) -> str:
     return _stdout(result)
 
 
-def fetch(repo: Path, remote: str = "origin") -> None:
+def fetch(repo: Path, remote: str = "origin", extra_env: dict[str, str] | None = None) -> None:
     _reject_option_like(remote, "remote")
-    _run_git(repo, ["fetch", remote], timeout=60.0)
+    _run_git(repo, ["fetch", remote], timeout=60.0, extra_env=extra_env)
 
 
-def remote_branch_exists(repo: Path, branch: str, remote: str = "origin") -> bool:
+def remote_branch_exists(
+    repo: Path, branch: str, remote: str = "origin", extra_env: dict[str, str] | None = None,
+) -> bool:
     _reject_option_like(branch, "branch")
     _reject_option_like(remote, "remote")
     result = _run_git(
         repo, ["ls-remote", "--exit-code", "--heads", remote, branch],
-        timeout=30.0, allowed_returncodes={2},
+        timeout=30.0, allowed_returncodes={2}, extra_env=extra_env,
     )
     return result.returncode == 0
 
@@ -276,17 +284,22 @@ def commit(repo: Path, message: str) -> str:
     return head_sha(repo)
 
 
-def push(repo: Path, branch: str, remote: str = "origin", set_upstream: bool = True) -> None:
+def push(
+    repo: Path, branch: str, remote: str = "origin", set_upstream: bool = True,
+    extra_env: dict[str, str] | None = None,
+) -> None:
     """Plain, non-force push of `branch` to `remote`. `set_upstream` passes `-u`
     to set the tracking branch on first push - harmless to repeat on subsequent
-    pushes."""
+    pushes. `extra_env` (see `manager._gitlab_push_auth_env`) injects a GitLab
+    auth header for hosts that require one - omitted entirely, this behaves
+    exactly as before (relies on whatever git credential already exists)."""
     _reject_option_like(branch, "branch")
     _reject_option_like(remote, "remote")
     args = ["push"]
     if set_upstream:
         args += ["-u"]
     args += [remote, branch]
-    _run_git(repo, args, timeout=60.0)
+    _run_git(repo, args, timeout=60.0, extra_env=extra_env)
 
 
 def remote_url(repo: Path, remote: str = "origin") -> str:

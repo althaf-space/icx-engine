@@ -750,3 +750,60 @@ def test_push_rejects_option_like_before_subprocess_spawn(tmp_git_repo, monkeypa
     monkeypatch.setattr(gitcmd.subprocess, "run", _boom)
     with pytest.raises(GitCommandError):
         push(tmp_git_repo, _OPTION_LIKE)
+
+
+# Task: extra_env - GitLab auth-header injection plumbing for fetch/push
+
+def test_safe_git_env_merges_extra_env_on_top_of_hardened_base():
+    from icx_engine.git.gitcmd import _safe_git_env, _GIT_SAFE_ENV
+    env = _safe_git_env({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraheader"})
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    for key, value in _GIT_SAFE_ENV.items():
+        assert env[key] == value
+
+
+def test_safe_git_env_with_no_extra_env_matches_prior_behavior():
+    from icx_engine.git.gitcmd import _safe_git_env
+    env = _safe_git_env()
+    assert env == _safe_git_env(None)
+
+
+def test_fetch_forwards_extra_env_to_subprocess(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git import gitcmd
+    captured = {}
+    real_run = gitcmd.subprocess.run
+
+    def _spy(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(gitcmd.subprocess, "run", _spy)
+    fetch(tmp_git_repo_with_remote, extra_env={"GIT_CONFIG_COUNT": "0"})
+    assert captured["env"]["GIT_CONFIG_COUNT"] == "0"
+
+
+def test_push_forwards_extra_env_to_subprocess(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git import gitcmd
+    captured = {}
+    real_run = gitcmd.subprocess.run
+
+    def _spy(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(gitcmd.subprocess, "run", _spy)
+    create_branch_from(tmp_git_repo_with_remote, "feature/push-with-env", "main")
+    checkout(tmp_git_repo_with_remote, "feature/push-with-env")
+    push(tmp_git_repo_with_remote, "feature/push-with-env", extra_env={"GIT_CONFIG_COUNT": "0"})
+    assert captured["env"]["GIT_CONFIG_COUNT"] == "0"
+
+
+def test_push_with_no_extra_env_still_works_against_real_remote(tmp_git_repo_with_remote):
+    """No regression for the common case - local/SSH remotes never compute an
+    auth env at all (manager._gitlab_push_auth_env returns None), so push must
+    keep working exactly as before when extra_env is omitted."""
+    create_branch_from(tmp_git_repo_with_remote, "feature/push-no-env", "main")
+    checkout(tmp_git_repo_with_remote, "feature/push-no-env")
+    push(tmp_git_repo_with_remote, "feature/push-no-env")
+    assert remote_branch_exists(tmp_git_repo_with_remote, "feature/push-no-env") is True

@@ -194,7 +194,7 @@ def git_push(
     if not typer.confirm("Proceed?", default=True):
         console.print("Cancelled.")
         return
-    push(mgr.repo_root, branch, remote=remote)
+    push(mgr.repo_root, branch, remote=remote, extra_env=mgr._auth_env(remote))
     console.print(f"[green]Pushed '{branch}' to {remote}.[/green]")
 
 
