@@ -72,6 +72,12 @@ class MCPHost:
     detect_path: Path
     config_format: str  # "json" | "toml"
     extra_config_paths: tuple[Path, ...] = ()
+    # Additional install-detection locations checked alongside detect_path (OR, not AND) - a host
+    # is considered installed if ANY of these exists. Needed when an editor migrated its config dir
+    # (e.g. Windsurf -> Devin Desktop): detect_path alone might name only the OLD dir, so a
+    # new-install-only user (never had the old dir) would be missed and silently fall back to
+    # cwd/.mcp.json instead of writing to their real config.
+    extra_detect_paths: tuple[Path, ...] = ()
     mcp_key: str = "mcpServers"    # JSON key the MCP server entry is nested under (VS Code uses "servers")
     entry_type: str | None = None  # optional "type" field the entry needs (VS Code stdio servers: "stdio")
     enforces: bool = False        # install ICX-first ticket/testing/sonar routing enforcement
@@ -207,6 +213,10 @@ def list_hosts() -> list[MCPHost]:
             home / ".codeium" / "windsurf",
             "json",
             extra_config_paths=(home / ".codeium" / "windsurf" / "mcp_config.json",),
+            # detect_path above is the OLD pre-migration dir - a machine with ONLY the new Devin
+            # Desktop installed (never had old Windsurf) would otherwise be missed entirely. Detecting
+            # either the old dir OR the new Devin config dir covers both populations.
+            extra_detect_paths=(_devin_config_dir(),),
             enforces=True, enforce_kind="rules",
             rules_path=home / ".codeium" / "windsurf" / "memories" / "global_rules.md",
             command_path=home / ".codeium" / "windsurf" / "global_workflows" / "icx-boost.md",
@@ -251,9 +261,16 @@ def list_hosts() -> list[MCPHost]:
     ]
 
 
+def _is_installed(host: MCPHost) -> bool:
+    """A host is considered installed if its primary detect_path exists OR any
+    extra_detect_paths entry exists - covers a migrated editor (e.g. Windsurf -> Devin
+    Desktop) where either the old-only or new-only population would otherwise be missed."""
+    return host.detect_path.exists() or any(p.exists() for p in host.extra_detect_paths)
+
+
 def detect_installed_hosts() -> list[MCPHost]:
     """Hosts whose install directory exists on this machine."""
-    return [h for h in list_hosts() if h.detect_path.exists()]
+    return [h for h in list_hosts() if _is_installed(h)]
 
 
 def get_host(name: str) -> MCPHost | None:
@@ -267,9 +284,10 @@ def write_icx_entry(host: MCPHost) -> WriteResult:
     """Write (or overwrite) the ICX entry in a host's MCP config file.
 
     Returns WriteResult(path, fallback=False) on success.
-    Returns WriteResult(cwd/.mcp.json, fallback=True) when detect_path is absent.
+    Returns WriteResult(cwd/.mcp.json, fallback=True) when neither detect_path nor any
+    extra_detect_paths entry exists.
     """
-    if not host.detect_path.exists():
+    if not _is_installed(host):
         fallback_path = Path.cwd() / ".mcp.json"
         _write_json(fallback_path)
         return WriteResult(path=fallback_path, fallback=True)

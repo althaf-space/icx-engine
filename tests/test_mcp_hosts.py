@@ -18,6 +18,7 @@ from icx_engine.mcp_hosts import (
     remove_enforcement,
     install_boost_command,
     remove_boost_command,
+    detect_installed_hosts,
     _HOOK_FILENAME,
     _RULE_START,
     _RULE_END,
@@ -231,6 +232,33 @@ def test_windsurf_remove_cleans_old_path_even_when_new_path_never_created(fake_h
     assert not new_path.exists()
     assert remove_icx_entry(get_host("windsurf")) is True
     assert "icx" not in json.loads(old_path.read_text())["mcpServers"]
+
+
+def test_windsurf_detected_when_only_old_dir_exists(fake_home):
+    (fake_home / ".codeium" / "windsurf").mkdir(parents=True)
+    assert get_host("windsurf") in detect_installed_hosts()
+
+
+def test_windsurf_detected_when_only_new_devin_dir_exists(fake_home):
+    """The gap this closes: detect_path alone named only the OLD dir - a machine with ONLY
+    the new Devin Desktop installed (never had old Windsurf) was previously missed entirely."""
+    _devin_dir(fake_home).mkdir(parents=True)
+    assert not (fake_home / ".codeium" / "windsurf").exists()
+    assert get_host("windsurf") in detect_installed_hosts()
+
+
+def test_windsurf_not_detected_when_neither_dir_exists(fake_home):
+    assert get_host("windsurf") not in detect_installed_hosts()
+
+
+def test_windsurf_write_succeeds_when_only_new_devin_dir_exists(fake_home):
+    """Real write (not the cwd/.mcp.json fallback) must happen for a new-Devin-only install."""
+    _devin_dir(fake_home).mkdir(parents=True)
+    result = write_icx_entry(get_host("windsurf"))
+    assert result.fallback is False
+    new_path = _devin_dir(fake_home) / "mcp_config.json"
+    assert new_path.exists()
+    assert json.loads(new_path.read_text())["mcpServers"]["icx"]
 
 
 # -- shipped detector script behavior -----------------------------------------
