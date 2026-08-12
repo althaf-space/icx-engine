@@ -2240,3 +2240,134 @@ async def test_git_conflict_abort_invalid_token_returns_error(tmp_git_repo):
     })
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
+
+
+# Task: git_check_branch_name_policy/git_set_branch_policy + policy wiring into
+# git_start_branch/git_push/git_create_mr
+
+async def test_git_check_branch_name_policy_default_allows_ticketless(tmp_git_repo, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    result = await dispatch_git_tool("git_check_branch_name_policy", {
+        "repo_path": str(tmp_git_repo), "branch_name": "feature/no-ticket-here",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["valid"] is True
+    assert payload["require_ticket_suffix"] is False
+
+
+async def test_git_check_branch_name_policy_missing_branch_name_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_branch_name_policy", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "branch_name" in payload["error"]
+
+
+async def test_git_set_branch_policy_persists_and_affects_check(tmp_git_repo, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+
+    set_result = await dispatch_git_tool("git_set_branch_policy", {
+        "repo_path": str(tmp_git_repo), "require_ticket_in_branch_name": True,
+    })
+    assert json.loads(set_result[0].text)["ok"] is True
+
+    check_result = await dispatch_git_tool("git_check_branch_name_policy", {
+        "repo_path": str(tmp_git_repo), "branch_name": "feature/no-ticket-here",
+    })
+    payload = json.loads(check_result[0].text)
+    assert payload["valid"] is False
+    assert payload["require_ticket_suffix"] is True
+    assert "Missing JIRA/ticket identifier" in payload["reason"]
+
+    ok_check = await dispatch_git_tool("git_check_branch_name_policy", {
+        "repo_path": str(tmp_git_repo), "branch_name": "feature/has-ticket-ABC-1",
+    })
+    assert json.loads(ok_check[0].text)["valid"] is True
+
+
+async def test_git_set_branch_policy_missing_field_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_set_branch_policy", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "require_ticket_in_branch_name" in payload["error"]
+
+
+async def test_git_set_branch_policy_wrong_type_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_set_branch_policy", {
+        "repo_path": str(tmp_git_repo), "require_ticket_in_branch_name": "yes",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+
+
+async def test_git_start_branch_refuses_ticketless_when_policy_requires_ticket(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    await dispatch_git_tool("git_set_branch_policy", {
+        "repo_path": str(tmp_git_repo_with_remote), "require_ticket_in_branch_name": True,
+    })
+    result = await dispatch_git_tool("git_start_branch", {
+        "repo_path": str(tmp_git_repo_with_remote), "ticket_key": None,
+        "summary_or_preferred_name": "Refactor auth module", "parent_branch": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "Missing JIRA/ticket identifier" in payload["error"]
+    from icx_engine.git.gitcmd import local_branch_exists
+    assert local_branch_exists(tmp_git_repo_with_remote, "feature/refactor-auth-module") is False
+
+
+async def test_git_start_branch_succeeds_with_ticket_when_policy_requires_it(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    await dispatch_git_tool("git_set_branch_policy", {
+        "repo_path": str(tmp_git_repo_with_remote), "require_ticket_in_branch_name": True,
+    })
+    result = await dispatch_git_tool("git_start_branch", {
+        "repo_path": str(tmp_git_repo_with_remote), "ticket_key": "ABC-1",
+        "summary_or_preferred_name": "Fix login", "parent_branch": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["branch_name"] == "feature/fix-login-ABC-1"
+
+
+async def test_git_push_refuses_when_current_branch_violates_policy(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    await dispatch_git_tool("git_set_branch_policy", {
+        "repo_path": str(tmp_git_repo_with_remote), "require_ticket_in_branch_name": True,
+    })
+    create_branch_from(tmp_git_repo_with_remote, "feature/legacy-no-ticket", "main")
+    checkout(tmp_git_repo_with_remote, "feature/legacy-no-ticket")
+
+    result = await dispatch_git_tool("git_push", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "Missing JIRA/ticket identifier" in payload["error"]
+    assert "token" not in payload  # refused before any token was issued
+
+
+async def test_git_create_mr_refuses_when_source_branch_violates_policy(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    await dispatch_git_tool("git_set_branch_policy", {
+        "repo_path": str(tmp_git_repo_with_remote), "require_ticket_in_branch_name": True,
+    })
+    create_branch_from(tmp_git_repo_with_remote, "feature/legacy-no-ticket", "main")
+    checkout(tmp_git_repo_with_remote, "feature/legacy-no-ticket")
+
+    result = await dispatch_git_tool("git_create_mr", {
+        "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
+        "ticket_key": None, "ticket_summary": "Fix login",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "Missing JIRA/ticket identifier" in payload["error"]

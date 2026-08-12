@@ -52,6 +52,8 @@ _CONFLICT_TAKE_THEIRS_TOOL = "git_conflict_take_theirs"
 _CONFLICT_APPLY_RESOLUTION_TOOL = "git_conflict_apply_resolution"
 _CONFLICT_MARK_RESOLVED_TOOL = "git_conflict_mark_resolved"
 _CONFLICT_ABORT_TOOL = "git_conflict_abort"
+_CHECK_BRANCH_POLICY_TOOL = "git_check_branch_name_policy"
+_SET_BRANCH_POLICY_TOOL = "git_set_branch_policy"
 
 GIT_TOOLS: list[Tool] = [
     Tool(
@@ -95,7 +97,12 @@ GIT_TOOLS: list[Tool] = [
             "previously-confirmed value as proposed_default, a one-tap default to confirm back), "
             "'needs_confirmation' (with a proposed_default), or 'needs_manual_pick' (with "
             "available_branches) - ask the human, then call again with parent_branch set to their "
-            "answer. Requires a valid git repository at repo_path."
+            "answer. If this repo has require_ticket_in_branch_name enabled (see "
+            "git_set_branch_policy/git_check_branch_name_policy - default OFF, preserves ticketless "
+            "branches unless a repo explicitly opts in) and ticket_key is null, this REFUSES before "
+            "creating anything, with an error naming the expected pattern - never creates a locally "
+            "valid branch a remote pre-receive hook will then reject. Requires a valid git "
+            "repository at repo_path."
         ),
         inputSchema={
             "type": "object",
@@ -890,6 +897,47 @@ GIT_TOOLS: list[Tool] = [
             "required": ["repo_path"],
         },
     ),
+    Tool(
+        name=_CHECK_BRANCH_POLICY_TOOL,
+        description=(
+            "USE WHEN a candidate branch name needs validating BEFORE calling git_start_branch (or "
+            "before pushing an already-existing branch) - e.g. deciding whether to ask the human "
+            "for a ticket key first. Validates branch_name against this repo's configured policy - "
+            "require_ticket_suffix in the response reflects the actual per-repo setting (see "
+            "git_set_branch_policy), never guessed. Reuses the exact same trailing-ticket-key "
+            "pattern naming.py already parses branch names with - one source of truth, no separate "
+            "org-specific pattern invented here. valid=false includes a reason formatted as "
+            "'Invalid branch name / Expected pattern / Received / Missing JIRA/ticket identifier' - "
+            "show this verbatim to the human. Read-only, UNGATED. Requires a valid git repository "
+            "at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"repo_path": {"type": "string"}, "branch_name": {"type": "string"}},
+            "required": ["repo_path", "branch_name"],
+        },
+    ),
+    Tool(
+        name=_SET_BRANCH_POLICY_TOOL,
+        description=(
+            "USE WHEN the human wants this repo to require (or stop requiring) a trailing ticket "
+            "key on every feature branch ICX creates or pushes - e.g. after a remote pre-receive "
+            "hook rejected a ticketless branch ICX created successfully locally. Defaults OFF for "
+            "every repo (preserves the existing, documented ticketless-branch feature) - this is "
+            "the only way to turn it on; ICX never infers an org's real policy automatically. "
+            "Purely local - writes this repo's ICX settings file, never touches git or GitLab. Not "
+            "destructive, trivially reversible (call again with the opposite value) - NOT "
+            "confirmation-gated. Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "require_ticket_in_branch_name": {"type": "boolean"},
+            },
+            "required": ["repo_path", "require_ticket_in_branch_name"],
+        },
+    ),
 ]
 
 
@@ -1387,6 +1435,9 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 mgr = GitLifecycleManager(Path(repo_path))
                 mgr.validate()
                 branch = current_branch(mgr.repo_root)
+                policy = mgr.check_branch_name_policy(branch)
+                if not policy.valid:
+                    return _err(policy.reason)
                 token = issue_token("push", {**arguments, "remote": remote})
                 return [TextContent(type="text", text=json.dumps({
                     "status": "pending_confirmation",
@@ -1430,6 +1481,9 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 mgr.validate()
                 from icx_engine.git.gitcmd import current_branch
                 source_branch = current_branch(mgr.repo_root)
+                policy = mgr.check_branch_name_policy(source_branch)
+                if not policy.valid:
+                    return _err(policy.reason)
                 given_parent = arguments.get("parent_branch")
                 if not given_parent:
                     return _needs_parent_branch(mgr)
@@ -2202,6 +2256,45 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             mgr.validate()
             aborted = gitcmd.abort_in_progress_operation(mgr.repo_root)
             return _ok({"aborted": aborted, "conflict_state": gitcmd.conflict_state(mgr.repo_root)})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _CHECK_BRANCH_POLICY_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        branch_name = arguments.get("branch_name")
+        if not branch_name or not isinstance(branch_name, str):
+            return _err("branch_name is required and must be a non-empty string.")
+        try:
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            policy = mgr.check_branch_name_policy(branch_name)
+            return _ok({
+                "valid": policy.valid,
+                "branch": policy.branch,
+                "require_ticket_suffix": policy.require_ticket_suffix,
+                "reason": policy.reason,
+                "expected_pattern": policy.expected_pattern,
+                "missing_ticket": policy.missing_ticket,
+            })
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _SET_BRANCH_POLICY_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        if "require_ticket_in_branch_name" not in arguments:
+            return _err("require_ticket_in_branch_name is required and must be a boolean.")
+        require_ticket = arguments.get("require_ticket_in_branch_name")
+        if not isinstance(require_ticket, bool):
+            return _err("require_ticket_in_branch_name must be a boolean.")
+        try:
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            mgr.set_branch_name_policy(require_ticket)
+            return _ok({"require_ticket_in_branch_name": require_ticket})
         except Exception as exc:
             return _err(str(exc))
 

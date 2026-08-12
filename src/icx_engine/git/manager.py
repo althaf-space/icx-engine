@@ -25,6 +25,7 @@ from icx_engine.git.gitcmd import (
 from icx_engine.git.naming import (
     derive_branch_name, ticketless_branch_name, parse_ticket_key_from_branch, slugify,
 )
+from icx_engine.git.policy import validate_branch_name, BranchPolicyResult
 from icx_engine.git.settings import read_repo_settings, write_repo_settings
 from icx_engine.git.safety import (
     detect_leftover_state, LeftoverState, create_backup, create_scratch_branch, prune_old_backups,
@@ -272,6 +273,17 @@ class GitLifecycleManager:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         stash_push(self.repo_root, f"icx:{ticket_key}:{timestamp}")
 
+    def check_branch_name_policy(self, branch_name: str) -> BranchPolicyResult:
+        """Validates branch_name against this repo's configured naming policy -
+        require_ticket_in_branch_name (git/settings.py, default False - preserves
+        the existing ticketless-branch feature for repos that never opted into
+        stricter enforcement). See git/policy.py for what "valid" means."""
+        require_ticket = bool(read_repo_settings(self.repo_root).get("require_ticket_in_branch_name", False))
+        return validate_branch_name(branch_name, require_ticket_suffix=require_ticket)
+
+    def set_branch_name_policy(self, require_ticket_in_branch_name: bool) -> None:
+        write_repo_settings(self.repo_root, require_ticket_in_branch_name=require_ticket_in_branch_name)
+
     def start_branch(
         self, ticket_key: str | None, summary_or_preferred_name: str, parent_branch: str,
     ) -> BranchStartResult:
@@ -279,6 +291,9 @@ class GitLifecycleManager:
             derive_branch_name(ticket_key, summary_or_preferred_name)
             if ticket_key else ticketless_branch_name(summary_or_preferred_name)
         )
+        policy = self.check_branch_name_policy(branch_name)
+        if not policy.valid:
+            raise GitWorkflowError(policy.reason)
         if local_branch_exists(self.repo_root, branch_name):
             checkout(self.repo_root, branch_name)
             return BranchStartResult(branch_name=branch_name, created=False, switched_to_existing=True)

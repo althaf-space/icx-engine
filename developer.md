@@ -220,6 +220,16 @@ ICX/
 |   |   |                       # exception to "no rebase": it only ever backs one out, never starts/continues/
 |   |   |                       # drives one).
 |   |   +-- naming.py           # branch-name derivation from ticket key + summary
+|   |   +-- policy.py           # validate_branch_name(branch, require_ticket_suffix, pattern_description) -
+|   |   |                       # configurable branch-name policy validation, no org-specific values hardcoded.
+|   |   |                       # Reuses naming.py's own parse_ticket_key_from_branch as the sole "has a ticket
+|   |   |                       # suffix" check - one source of truth, never a second regex that could drift.
+|   |   |                       # require_ticket_suffix is always passed in explicit (this module never reads
+|   |   |                       # config) - manager.check_branch_name_policy() is the config-aware wrapper, reading
+|   |   |                       # git/settings.py's require_ticket_in_branch_name (default False - preserves the
+|   |   |                       # existing ticketless-branch feature; a repo opts in explicitly via
+|   |   |                       # git_set_branch_policy after e.g. a real remote pre-receive hook rejection, ICX
+|   |   |                       # never infers an org's real policy automatically).
 |   |   +-- settings.py         # per-repo ICX settings file (parent branch, etc.)
 |   |   +-- safety.py           # create_backup (timestamped snapshot, taken before a risky reverse-merge/
 |   |   |                       # conflict-resolution attempt only, kept as history via prune_old_backups) +
@@ -273,6 +283,14 @@ ICX/
 |   |   |                       # branch (reads real index stages 2/3 regardless), but said it did; the confusion
 |   |   |                       # this fixed was in the docstring only, the function itself always worked for any
 |   |   |                       # in-progress conflict.
+|   |   |                       #
+|   |   |                       # check_branch_name_policy(branch_name)/set_branch_name_policy(require_ticket_in_
+|   |   |                       # branch_name) - the config-aware wrapper around git/policy.py's pure
+|   |   |                       # validate_branch_name(). start_branch() now calls check_branch_name_policy() on
+|   |   |                       # the branch name it derives BEFORE ever creating it (raises GitWorkflowError with
+|   |   |                       # policy.reason - the exact "Invalid branch name / Expected pattern / Received /
+|   |   |                       # Missing JIRA/ticket identifier" text - if invalid) - never creates a locally-valid
+|   |   |                       # branch a remote pre-receive hook would then reject.
 |   |   |                       #
 |   |   |                       # GitLab auth for git-network calls (fetch/ls-remote/push) - the fix for git push (and
 |   |   |                       # later, git_create_mr's own fetch/ls-remote) failing with "could not read Username" even
@@ -374,7 +392,13 @@ ICX/
 |   |                           # currently in conflicted_files(); use git_stage_and_commit afterward, as its own
 |   |                           # separate gate, to commit)/git_conflict_abort (confirmation-gated - detects
 |   |                           # merge/cherry-pick/rebase from real on-disk state via
-|   |                           # gitcmd.abort_in_progress_operation(), never assumes merge specifically)
+|   |                           # gitcmd.abort_in_progress_operation(), never assumes merge specifically)/
+|   |                           # git_check_branch_name_policy (read-only, ungated)/git_set_branch_policy (local
+|   |                           # settings write only, not confirmation-gated - trivially reversible). git_push and
+|   |                           # git_create_mr both now call mgr.check_branch_name_policy() on the branch about to
+|   |                           # be pushed BEFORE issuing a confirm_token - a policy violation refuses outright
+|   |                           # (same hard-gate shape as git_delete_branch's unique_commits pre-check), never lets
+|   |                           # a locally-valid-but-policy-violating branch reach a token, let alone a real push.
 |   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag/list_branches/
 |   |                           # list_pipelines/get_pipeline (pipeline detail + its jobs, one call)/get_job_trace/
 |   |                           # get_repository_file, plus the read-only list_merge_requests/

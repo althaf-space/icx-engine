@@ -270,6 +270,51 @@ def test_start_branch_switches_to_existing_instead_of_recreating(tmp_git_repo_wi
     assert current_branch(tmp_git_repo_with_remote) == "feature/fix-login-timeout-ABC-123"
 
 
+def test_check_branch_name_policy_defaults_to_not_requiring_ticket(tmp_git_repo, tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    result = mgr.check_branch_name_policy("feature/no-ticket-here")
+    assert result.valid is True
+    assert result.require_ticket_suffix is False
+
+
+def test_set_branch_name_policy_then_check_enforces_ticket_requirement(tmp_git_repo, tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    mgr.set_branch_name_policy(True)
+    result = mgr.check_branch_name_policy("feature/no-ticket-here")
+    assert result.valid is False
+    assert result.missing_ticket is True
+    assert "Missing JIRA/ticket identifier" in result.reason
+
+    ok_result = mgr.check_branch_name_policy("feature/has-ticket-ABC-1")
+    assert ok_result.valid is True
+
+
+def test_start_branch_raises_when_policy_requires_ticket_and_none_given(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    mgr.set_branch_name_policy(True)
+    with pytest.raises(GitWorkflowError, match="Missing JIRA/ticket identifier"):
+        mgr.start_branch(None, "Refactor auth module", "main")
+    # never created the invalid branch locally
+    from icx_engine.git.gitcmd import local_branch_exists as _lbe
+    assert _lbe(tmp_git_repo_with_remote, "feature/refactor-auth-module") is False
+
+
+def test_start_branch_succeeds_with_ticket_even_when_policy_requires_it(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    mgr.set_branch_name_policy(True)
+    result = mgr.start_branch("ABC-123", "Fix login timeout", "main")
+    assert result.branch_name == "feature/fix-login-timeout-ABC-123"
+    assert result.created is True
+
+
 def test_current_ticket_key_parses_from_branch_name(tmp_git_repo_with_remote):
     create_branch_from(tmp_git_repo_with_remote, "feature/fix-login-timeout-ABC-123", "main")
     checkout(tmp_git_repo_with_remote, "feature/fix-login-timeout-ABC-123")
