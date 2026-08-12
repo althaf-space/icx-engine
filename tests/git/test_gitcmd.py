@@ -807,3 +807,178 @@ def test_push_with_no_extra_env_still_works_against_real_remote(tmp_git_repo_wit
     checkout(tmp_git_repo_with_remote, "feature/push-no-env")
     push(tmp_git_repo_with_remote, "feature/push-no-env")
     assert remote_branch_exists(tmp_git_repo_with_remote, "feature/push-no-env") is True
+
+
+# Task: diff_worktree - local uncommitted diff (staged/unstaged/combined)
+from icx_engine.git.gitcmd import diff_worktree
+
+
+def test_diff_worktree_staged_reports_only_index_changes(tmp_git_repo):
+    (tmp_git_repo / "staged.txt").write_text("staged content\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "unstaged.txt").write_text("unstaged content\n", encoding="utf-8")
+    result = diff_worktree(tmp_git_repo, mode="staged")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == {"staged.txt"}
+
+
+def test_diff_worktree_unstaged_reports_only_worktree_changes(tmp_git_repo):
+    (tmp_git_repo / "staged.txt").write_text("staged content\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "README.md").write_text("changed but not staged\n", encoding="utf-8")
+    result = diff_worktree(tmp_git_repo, mode="unstaged")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == {"README.md"}
+
+
+def test_diff_worktree_combined_reports_staged_and_unstaged_together(tmp_git_repo):
+    (tmp_git_repo / "staged.txt").write_text("staged content\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "README.md").write_text("changed but not staged\n", encoding="utf-8")
+    result = diff_worktree(tmp_git_repo, mode="combined")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == {"staged.txt", "README.md"}
+
+
+def test_diff_worktree_scopes_to_one_relpath(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a\n", encoding="utf-8")
+    (tmp_git_repo / "b.txt").write_text("b\n", encoding="utf-8")
+    result = diff_worktree(tmp_git_repo, mode="combined", relpath="a.txt")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == set()  # untracked files never show up in `git diff` - only tracked changes do
+
+
+def test_diff_worktree_unstaged_scoped_to_relpath_excludes_other_files(tmp_git_repo):
+    (tmp_git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+    (tmp_git_repo / "extra.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["extra.txt"])
+    result = diff_worktree(tmp_git_repo, mode="unstaged", relpath="README.md")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == {"README.md"}
+
+
+def test_diff_worktree_rejects_invalid_mode(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        diff_worktree(tmp_git_repo, mode="bogus")
+
+
+def test_diff_worktree_rejects_path_traversal_relpath(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        diff_worktree(tmp_git_repo, mode="combined", relpath="../outside.txt")
+
+
+# Task: structured_status - rich staged/unstaged/untracked/deleted/renamed/conflicted/ahead/behind
+from icx_engine.git.gitcmd import structured_status
+
+
+def test_structured_status_clean_repo_reports_empty_buckets(tmp_git_repo):
+    result = structured_status(tmp_git_repo)
+    assert result["staged"] == []
+    assert result["unstaged"] == []
+    assert result["untracked"] == []
+    assert result["deleted"] == []
+    assert result["renamed"] == []
+    assert result["conflicted"] == []
+    assert result["ahead"] == 0
+    assert result["behind"] == 0
+    assert result["current_branch"] == "main"
+
+
+def test_structured_status_reports_staged_and_unstaged_separately(tmp_git_repo):
+    (tmp_git_repo / "staged.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+    result = structured_status(tmp_git_repo)
+    staged_paths = {e["path"]: e["status"] for e in result["staged"]}
+    unstaged_paths = {e["path"]: e["status"] for e in result["unstaged"]}
+    assert staged_paths == {"staged.txt": "added"}
+    assert unstaged_paths == {"README.md": "modified"}
+
+
+def test_structured_status_reports_untracked_file(tmp_git_repo):
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    result = structured_status(tmp_git_repo)
+    assert result["untracked"] == ["new.txt"]
+
+
+def test_structured_status_reports_staged_deletion(tmp_git_repo):
+    import subprocess
+    subprocess.run(["git", "rm", "README.md"], cwd=str(tmp_git_repo), check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = structured_status(tmp_git_repo)
+    assert result["deleted"] == ["README.md"]
+    staged_paths = {e["path"]: e["status"] for e in result["staged"]}
+    assert staged_paths == {"README.md": "deleted"}
+
+
+def test_structured_status_reports_staged_rename(tmp_git_repo):
+    import subprocess
+    subprocess.run(["git", "mv", "README.md", "RENAMED.md"], cwd=str(tmp_git_repo), check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = structured_status(tmp_git_repo)
+    assert result["renamed"] == [{"from": "README.md", "to": "RENAMED.md"}]
+
+
+def test_structured_status_reports_conflicted_file_during_merge(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="status_conflict_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    result = structured_status(clone)
+    assert result["conflicted"] == ["README.md"]
+
+
+def test_structured_status_reports_upstream_and_ahead_behind(tmp_git_repo_with_remote):
+    (tmp_git_repo_with_remote / "local.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["local.txt"])
+    commit(tmp_git_repo_with_remote, "ABC-1 local only commit")
+    result = structured_status(tmp_git_repo_with_remote)
+    assert result["upstream"] == "origin/main"
+    assert result["ahead"] == 1
+    assert result["behind"] == 0
+
+
+def test_structured_status_no_upstream_defaults_ahead_behind_to_zero(tmp_git_repo):
+    result = structured_status(tmp_git_repo)
+    assert result["upstream"] is None
+    assert result["ahead"] == 0
+    assert result["behind"] == 0
+
+
+# Task: read_file_at_ref - read-only file content at any ref
+from icx_engine.git.gitcmd import read_file_at_ref
+
+
+def test_read_file_at_ref_returns_content_at_head(tmp_git_repo):
+    content = read_file_at_ref(tmp_git_repo, "HEAD", "README.md")
+    assert content == "hello\n"
+
+
+def test_read_file_at_ref_returns_content_at_branch(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/x-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/x-ABC-1")
+    (tmp_git_repo / "README.md").write_text("changed on feature\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "ABC-1 change readme")
+    assert read_file_at_ref(tmp_git_repo, "main", "README.md") == "hello\n"
+    assert read_file_at_ref(tmp_git_repo, "feature/x-ABC-1", "README.md") == "changed on feature\n"
+
+
+def test_read_file_at_ref_raises_for_missing_path(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        read_file_at_ref(tmp_git_repo, "HEAD", "does_not_exist.txt")
+
+
+def test_read_file_at_ref_raises_for_unresolvable_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        read_file_at_ref(tmp_git_repo, "not-a-real-ref", "README.md")
+
+
+def test_read_file_at_ref_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        read_file_at_ref(tmp_git_repo, _OPTION_LIKE, "README.md")
+
+
+def test_read_file_at_ref_rejects_path_traversal(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        read_file_at_ref(tmp_git_repo, "HEAD", "../outside.txt")

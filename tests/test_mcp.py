@@ -800,7 +800,7 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 135
+    assert len(tools) == 136
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
@@ -837,6 +837,7 @@ async def test_list_tools_returns_all_tools():
         "workstatus_timesheet_submission_table", "workstatus_list_expenses",
         "workstatus_list_invoices", "workstatus_payroll_report",
         "workstatus_get_timesheet", "workstatus_edit_timesheet",
+        "workstatus_recent_project_tasks",
         "jira_get_close_requirements", "jira_apply_update",
         "jira_list_issue_types", "jira_get_createmeta_fields",
         "jira_create_issue", "jira_delete_issue",

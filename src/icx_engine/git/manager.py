@@ -329,18 +329,22 @@ class GitLifecycleManager:
             ) from exc
 
     def reverse_merge_standard(
-        self, parent_branch: str, ticket_key: str, remote: str = "origin",
+        self, parent_branch: str, ticket_key: str | None, remote: str = "origin",
     ) -> ReverseMergeResult:
         """Standard path (design spec Section 7.1): stash if dirty, merge parent
         into the current branch, pop the stash back. On conflict, abort the
         merge completely and still pop the stash back before returning - the
-        feature branch is never left in a conflicted or half-stashed state."""
+        feature branch is never left in a conflicted or half-stashed state.
+        ticket_key is nullable - when absent, backup/stash naming falls back
+        to a slug of the current branch (same fallback as stage_and_commit)."""
         fetch(self.repo_root, remote=remote)
-        create_backup(self.repo_root, current_branch(self.repo_root), ticket_key)
+        branch = current_branch(self.repo_root)
+        backup_key = ticket_key or slugify(branch)
+        create_backup(self.repo_root, branch, backup_key)
 
         was_dirty = len(dirty_files(self.repo_root)) > 0
         if was_dirty:
-            self.stash_dirty_tree(ticket_key)
+            self.stash_dirty_tree(backup_key)
 
         try:
             try:
@@ -357,7 +361,7 @@ class GitLifecycleManager:
                 self._pop_stash_or_explain()
 
     def start_conflict_resolution(
-        self, parent_branch: str, ticket_key: str, remote: str = "origin",
+        self, parent_branch: str, ticket_key: str | None, remote: str = "origin",
     ) -> ScratchSession:
         """Escalation path (design spec Section 7.2 steps 2-4): back up the
         current branch, stash if dirty, create a disposable scratch branch off
@@ -366,16 +370,18 @@ class GitLifecycleManager:
         untouched. Any stashed work is popped back onto the SCRATCH branch
         (not feature) once the merge attempt completes, so it sits alongside
         whatever conflict-resolution work happens there rather than being lost
-        or left stranded on feature."""
+        or left stranded on feature. ticket_key is nullable - see
+        reverse_merge_standard's docstring for the fallback naming."""
         feature_branch = current_branch(self.repo_root)
-        create_backup(self.repo_root, feature_branch, ticket_key)
+        backup_key = ticket_key or slugify(feature_branch)
+        create_backup(self.repo_root, feature_branch, backup_key)
 
         was_dirty = len(dirty_files(self.repo_root)) > 0
         if was_dirty:
-            self.stash_dirty_tree(ticket_key)
+            self.stash_dirty_tree(backup_key)
 
         try:
-            scratch_branch = create_scratch_branch(self.repo_root, feature_branch, ticket_key)
+            scratch_branch = create_scratch_branch(self.repo_root, feature_branch, backup_key)
             try:
                 merge_ref(self.repo_root, f"{remote}/{parent_branch}")
             except GitCommandError:
@@ -464,7 +470,7 @@ class GitLifecycleManager:
         )
 
     async def create_mr_for_ticket(
-        self, parent_branch: str, ticket_key: str, ticket_summary: str, gitlab_conn,
+        self, parent_branch: str, ticket_key: str | None, ticket_summary: str, gitlab_conn,
     ) -> CreateMrResult:
         """MR creation + one immediate merge attempt (design spec Section 8.3-
         8.4). Order matters and is deliberate: resolve the GitLab project from
@@ -472,7 +478,9 @@ class GitLifecycleManager:
         never guesses) -> validate the GitLab connection (one cheap request,
         fails fast on a bad token before any git work) -> push the feature
         branch to origin (the branch must exist on the remote before GitLab
-        can create an MR from it) -> create/reuse + attempt merge."""
+        can create an MR from it) -> create/reuse + attempt merge. ticket_key
+        is nullable - the MR title is just ticket_summary with no prefix when
+        absent, never a manufactured ticket id."""
         origin = remote_url(self.repo_root)
         project_path = project_path_from_remote_url(origin)
         if project_path is None:
@@ -508,9 +516,10 @@ class GitLifecycleManager:
             f"## Rollback notes\n{description_sections.rollback_notes}\n"
         )
 
+        title = f"{ticket_key} {ticket_summary}" if ticket_key else ticket_summary
         result = await create_and_merge_mr(
             gitlab_conn, project_path, feature_branch, parent_branch,
-            f"{ticket_key} {ticket_summary}", description, assignee_id,
+            title, description, assignee_id,
         )
         return CreateMrResult(
             mr_iid=result["mr_iid"], created=result["created"],
@@ -518,7 +527,7 @@ class GitLifecycleManager:
         )
 
     def post_merge_cleanup(
-        self, parent_branch: str, feature_branch: str, ticket_key: str,
+        self, parent_branch: str, feature_branch: str, ticket_key: str | None,
         delete_backups: bool, gitlab_conn, mr_iid: int,
     ) -> CleanupResult:
         """Post-merge cleanup (design spec Section 8.6). Never trusts the
@@ -575,6 +584,7 @@ class GitLifecycleManager:
 
         backups_deleted: list[str] = []
         if delete_backups:
-            backups_deleted = prune_old_backups(self.repo_root, ticket_key, keep=0)
+            backup_key = ticket_key or slugify(feature_branch)
+            backups_deleted = prune_old_backups(self.repo_root, backup_key, keep=0)
 
         return CleanupResult(parent_branch=parent_branch, feature_branch_deleted=deleted, backups_deleted=backups_deleted)

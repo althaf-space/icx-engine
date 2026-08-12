@@ -42,9 +42,9 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.), exposing
-  135 tools total - see readme.md's "The MCP tools" section for the full enumerated list (kept there
+  136 tools total - see readme.md's "The MCP tools" section for the full enumerated list (kept there
   as the single source of truth to avoid two lists drifting apart). Broad families: analysis/memory/
-  skills/testing tools, 22 Sonar tools, 18 git-workflow tools, 9 GitLab read-only tools, 24 Workstatus
+  skills/testing tools, 22 Sonar tools, 18 git-workflow tools, 9 GitLab read-only tools, 25 Workstatus
   tools, 26 Jira write-back tools.
 
 The architecture is deliberately split along several axes:
@@ -187,7 +187,14 @@ ICX/
 |   |   |                       # Includes read-only history helpers blame() (--line-porcelain, optional line_range),
 |   |   |                       # log() (relpath/limit/author/since filters), show_commit() (message + --name-status files),
 |   |   |                       # diff_between() (--numstat + --name-status between two refs, binary files -> None counts),
-|   |   |                       # push() (plain, non-force push, -u sets tracking branch on first push). fetch()/push()
+|   |   |                       # diff_worktree() (mode='staged'/'unstaged'/'combined' - the working tree/index side
+|   |   |                       # diff_between() cannot express; shares the _diff_stats() helper with diff_between()),
+|   |   |                       # structured_status() (`git status --porcelain=v2 --branch` - staged/unstaged/untracked/
+|   |   |                       # deleted/renamed/conflicted buckets plus ahead/behind/upstream; v2's fixed-width XY codes
+|   |   |                       # and 1/2/u/? line-type prefixes disambiguate staged vs unstaged vs conflicted, unlike
+|   |   |                       # v1's dirty_files()), read_file_at_ref() (read-only content of ref:relpath - HEAD,
+|   |   |                       # MERGE_HEAD, a branch, or a sha), push() (plain, non-force push, -u sets tracking branch
+|   |   |                       # on first push). fetch()/push()
 |   |   |                       # accept an optional extra_env dict, merged into the hardened subprocess env
 |   |   |                       # (credential.helper disabled, GIT_TERMINAL_PROMPT=0 - so an automated call never hangs
 |   |   |                       # on a prompt) - this is the plumbing manager._gitlab_push_auth_env uses to inject a
@@ -213,6 +220,12 @@ ICX/
 |   |   |                       # build_mr_description, create_mr_for_ticket (validates the GitLab connection FIRST -
 |   |   |                       # fail fast on a bad token before any git work - then pushes the feature branch to
 |   |   |                       # origin before creating the MR: a branch must exist on the remote first), post_merge_cleanup.
+|   |   |                       #
+|   |   |                       # ticket_key is nullable throughout - reverse_merge_standard/start_conflict_resolution/
+|   |   |                       # create_mr_for_ticket/post_merge_cleanup all accept `str | None`. When absent, backup/
+|   |   |                       # stash/scratch-branch naming falls back to slugify(branch) instead (same fallback
+|   |   |                       # stage_and_commit already used) - never a manufactured ticket id. create_mr_for_ticket's
+|   |   |                       # MR title is ticket_summary alone (no prefix) when ticket_key is None.
 |   |   |                       #
 |   |   |                       # GitLab auth for git-network calls (fetch/ls-remote/push) - the fix for git push (and
 |   |   |                       # later, git_create_mr's own fetch/ls-remote) failing with "could not read Username" even
@@ -267,18 +280,28 @@ ICX/
 |   |   |                       # typer.confirm before pushing), `icx git mr`, `icx git finish`, `icx git tag`,
 |   |   |                       # `icx git blame <FILE>` (--from-line/--to-line), `icx git log`
 |   |   |                       # (--file/--author/--since/--limit), `icx git show <SHA>`, `icx git diff <REF_A> <REF_B>`
-|   |   \-- mcp_tools.py        # GIT_TOOLS + dispatch_git_tool() - repo_status/git_start_branch (wraps start_branch,
-|   |                           # NOT confirmation-gated)/git_blame/git_log/git_show_commit/git_diff
-|   |                           # (all four read-only, ungated)/stage_and_commit (confirmation-gated; response also
+|   |   \-- mcp_tools.py        # GIT_TOOLS + dispatch_git_tool() - repo_status (now also returns structured_status()'s
+|   |                           # staged/unstaged/untracked/deleted/renamed/conflicted/ahead/behind/upstream, alongside the
+|   |                           # original dirty/dirty_files/leftover-state fields)/git_start_branch (wraps start_branch,
+|   |                           # NOT confirmation-gated)/git_blame/git_log/git_show_commit/git_diff/git_diff_worktree
+|   |                           # (mode='staged'/'unstaged'/'combined', optional relpath - local uncommitted diff, distinct
+|   |                           # from git_diff's ref-to-ref-only comparison)
+|   |                           # (all read-only, ungated)/stage_and_commit (confirmation-gated; response also
 |   |                           # carries on_parent_branch - true when the branch about to be committed to is this
 |   |                           # repo's confirmed parent/shared branch, strengthening the warning shown to the human
-|   |                           # without ever blocking the commit)/reverse_merge/get_conflict/
+|   |                           # without ever blocking the commit)/reverse_merge (ticket_key nullable - required key,
+|   |                           # null value allowed, same "required(arguments) but nullable(value)" pattern as
+|   |                           # stage_and_commit, forcing an explicit null rather than a silently omitted key)/
+|   |                           # get_conflict/git_read_file_at_ref (read-only content of any ref:path - HEAD,
+|   |                           # MERGE_HEAD, a branch, or a sha; no network call)/
 |   |                           # complete_resolution/adopt_resolution/discard_scratch (force-deletes the scratch
 |   |                           # branch - confirmation-gated)/git_push (confirmation-gated, same token pattern as
 |   |                           # stage_and_commit)/
-|   |                           # create_mr (validates the GitLab connection first, then pushes automatically before
-|   |                           # creating the MR; pending_confirmation shows BOTH source_branch and parent_branch)/
-|   |                           # finish_ticket/create_tag (now validates BOTH the environment token and the proposed
+|   |                           # create_mr (ticket_key nullable, same pattern as reverse_merge - validates the GitLab
+|   |                           # connection first, then pushes automatically before creating the MR; pending_confirmation
+|   |                           # shows BOTH source_branch and parent_branch)/
+|   |                           # finish_ticket (ticket_key nullable, same pattern)/create_tag (now validates BOTH the
+|   |                           # environment token and the proposed
 |   |                           # tag name against the project's real, live-fetched .gitlab-ci.yml before ever
 |   |                           # proposing anything - see gitlab/ci_tags.py below; degrades to a surfaced
 |   |                           # ci_check_error warning, never a hard block, if the CI file itself can't be fetched)
@@ -2116,6 +2139,20 @@ rule, not a verified one. Re-attempt via a live browser capture (Chrome
 extension connected, real My Tasks / calendar-lock UI navigated) before
 building either tool.
 
+**`recent_project_tasks` - added to avoid blind full-list browsing:**
+`list_tasks`'s `search` param is UNVERIFIED to filter server-side (see its
+own docstring) - a project can have hundreds of tasks across dozens of
+pages, so finding one task by name with no working filter means paging
+through the entire list. `list_timesheets` already returns each entry's
+`project:{id,name}` and `todo:{id,name}` for free, so
+`recent_project_tasks(lookback_days=90)` does ONE `list_timesheets` call
+over a lookback window, dedupes to distinct `(project_id, todo_id)` pairs
+keeping the most recent `date` per pair, and returns them sorted
+most-recent-first. Not a cache, not new storage - purely a derived view of
+data already fetched for another endpoint. `workstatus_add_timesheet`'s and
+`workstatus_list_tasks`'s tool descriptions both point callers at this first,
+before a full `list_projects`/`list_tasks` browse.
+
 **`add_timesheet`'s HTTP-200-empty-body write failure - ROOT CAUSE FOUND
 (2026-08-03), payload shape corrected:** even after WS-1 made the empty
 response an honest raised error (rather than a false success), the entry
@@ -2208,8 +2245,10 @@ no current code path constructs it.
 org_id, authorization, sd_token, device_type, make_active, cfg)`,
 `list_connections()`, `remove_connection(name)`, `set_active(name)` - direct
 mirrors of `gitlab/service.py`'s functions of the same name. `_make_client`
-(the single choke point all other ~25 service functions funnel through) and
+(the single choke point all other ~26 service functions funnel through) and
 `status()` both resolve via `cfg.active_workstatus_connection()`.
+`recent_project_tasks(lookback_days=90)` is the one function here that isn't
+a thin `client.py` passthrough - see the finding above.
 
 **CLI:** `icx workstatus --add` (interactive: connection name, the four
 header values, active-or-not - same shape as `icx gitlab --add`),

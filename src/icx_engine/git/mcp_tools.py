@@ -23,9 +23,11 @@ _BLAME_TOOL = "git_blame"
 _LOG_TOOL = "git_log"
 _SHOW_COMMIT_TOOL = "git_show_commit"
 _DIFF_TOOL = "git_diff"
+_DIFF_WORKTREE_TOOL = "git_diff_worktree"
 _STAGE_AND_COMMIT_TOOL = "git_stage_and_commit"
 _REVERSE_MERGE_TOOL = "git_reverse_merge"
 _GET_CONFLICT_TOOL = "git_get_conflict"
+_READ_FILE_AT_REF_TOOL = "git_read_file_at_ref"
 _COMPLETE_RESOLUTION_TOOL = "git_complete_resolution"
 _ADOPT_RESOLUTION_TOOL = "git_adopt_resolution"
 _DISCARD_SCRATCH_TOOL = "git_discard_scratch"
@@ -207,9 +209,32 @@ GIT_TOOLS: list[Tool] = [
             "properties": {
                 "repo_path": {"type": "string"},
                 "parent_branch": {"type": "string"},
-                "ticket_key": {"type": "string"},
+                "ticket_key": {"type": ["string", "null"]},
             },
             "required": ["repo_path", "ticket_key"],
+        },
+    ),
+    Tool(
+        name=_DIFF_WORKTREE_TOOL,
+        description=(
+            "USE WHEN the human wants to see LOCAL uncommitted changes - what's staged, what's "
+            "still unstaged, or everything uncommitted combined - as opposed to git_diff (which "
+            "only compares two existing refs/branches/commits, never the working tree or index). "
+            "MUST call with mode set to 'staged' (index vs HEAD - what the next commit would "
+            "contain), 'unstaged' (working tree vs index - changes not yet staged), or 'combined' "
+            "(working tree vs HEAD - every uncommitted change, staged or not). Pass relpath to "
+            "scope to one file, omit for every changed file. Returns the same per-file "
+            "status/insertions/deletions shape as git_diff. Read-only, UNGATED. Requires a valid "
+            "git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "mode": {"type": "string", "enum": ["staged", "unstaged", "combined"]},
+                "relpath": {"type": "string"},
+            },
+            "required": ["repo_path", "mode"],
         },
     ),
     Tool(
@@ -224,6 +249,26 @@ GIT_TOOLS: list[Tool] = [
         inputSchema={"type": "object",
                      "properties": {"repo_path": {"type": "string"}, "file": {"type": "string"}},
                      "required": ["repo_path", "file"]},
+    ),
+    Tool(
+        name=_READ_FILE_AT_REF_TOOL,
+        description=(
+            "USE WHEN the human or agent needs a file's exact content at a specific point in git "
+            "history - HEAD, MERGE_HEAD (mid-conflict), a branch, origin/<branch>, or a commit sha "
+            "- e.g. diagnosing a dependency-pin mismatch or inspecting what a merge would bring "
+            "in. MUST call with ref and path. Read-only, local, no network call. Fails clearly if "
+            "ref does not resolve or path does not exist at that ref. Requires a valid git "
+            "repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "ref": {"type": "string"},
+                "path": {"type": "string"},
+            },
+            "required": ["repo_path", "ref", "path"],
+        },
     ),
     Tool(
         name=_COMPLETE_RESOLUTION_TOOL,
@@ -332,14 +377,16 @@ GIT_TOOLS: list[Tool] = [
             "status='confirm_remembered' (with the previously-confirmed value as proposed_default, "
             "a one-tap default to confirm back), 'needs_confirmation' (with a proposed_default), or "
             "'needs_manual_pick' (with available_branches) - ask the human, then call again with "
-            "parent_branch set to their answer. Requires an active GitLab connection."
+            "parent_branch set to their answer. ticket_key is nullable - pass null if there is no "
+            "ticket; the MR title is then just ticket_summary with no prefix, never a manufactured "
+            "ticket id. Requires an active GitLab connection."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "repo_path": {"type": "string"},
                 "parent_branch": {"type": "string"},
-                "ticket_key": {"type": "string"},
+                "ticket_key": {"type": ["string", "null"]},
                 "ticket_summary": {"type": "string"},
                 "confirm_token": {"type": "string"},
             },
@@ -359,7 +406,9 @@ GIT_TOOLS: list[Tool] = [
             "this repo before. Returns status='confirm_remembered' (with the previously-confirmed "
             "value as proposed_default, a one-tap default to confirm back), 'needs_confirmation' "
             "(with a proposed_default), or 'needs_manual_pick' (with available_branches) - ask "
-            "the human, then call again with parent_branch set to their answer. Requires an "
+            "the human, then call again with parent_branch set to their answer. ticket_key is "
+            "nullable - pass null if there is no ticket (used only for backup naming when "
+            "delete_backups is set; never invent a ticket id). Requires an "
             "active GitLab connection."
         ),
         inputSchema={
@@ -368,7 +417,7 @@ GIT_TOOLS: list[Tool] = [
                 "repo_path": {"type": "string"},
                 "parent_branch": {"type": "string"},
                 "feature_branch": {"type": "string"},
-                "ticket_key": {"type": "string"},
+                "ticket_key": {"type": ["string", "null"]},
                 "mr_iid": {"type": "integer"},
                 "delete_backups": {"type": "boolean"},
                 "confirm_token": {"type": "string"},
@@ -527,9 +576,11 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
         try:
             mgr = GitLifecycleManager(Path(repo_path))
             mgr.validate()
+            from icx_engine.git import gitcmd
             from icx_engine.git.gitcmd import current_branch
             dirty_status = mgr.check_dirty_tree()
             leftover = mgr.check_leftover_state()
+            rich = gitcmd.structured_status(mgr.repo_root)
             return _ok(attach_skill_hint({
                 "current_branch": current_branch(mgr.repo_root),
                 "dirty": dirty_status.dirty,
@@ -538,6 +589,15 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 "scratch_branches": leftover.scratch_branches,
                 "icx_stashes": leftover.icx_stashes,
                 "merge_in_progress": leftover.merge_in_progress,
+                "staged": rich["staged"],
+                "unstaged": rich["unstaged"],
+                "untracked": rich["untracked"],
+                "deleted": rich["deleted"],
+                "renamed": rich["renamed"],
+                "conflicted": rich["conflicted"],
+                "ahead": rich["ahead"],
+                "behind": rich["behind"],
+                "upstream": rich["upstream"],
             }, "safe-git-workflow", rank_prompt="git workflow branch commit merge", archetype="git"))
         except Exception as exc:
             return _err(str(exc))
@@ -644,6 +704,25 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
         except Exception as exc:
             return _err(str(exc))
 
+    if name == _DIFF_WORKTREE_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        mode = arguments.get("mode")
+        if mode not in ("staged", "unstaged", "combined"):
+            return _err("mode is required and must be 'staged', 'unstaged', or 'combined'.")
+        relpath = arguments.get("relpath")
+        if relpath is not None and not isinstance(relpath, str):
+            return _err("relpath must be a string.")
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            result = gitcmd.diff_worktree(mgr.repo_root, mode=mode, relpath=relpath)
+            return _ok(result)
+        except Exception as exc:
+            return _err(str(exc))
+
     if name == _STAGE_AND_COMMIT_TOOL:
         try:
             confirm_token = arguments.get("confirm_token")
@@ -706,9 +785,11 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
         repo_path = arguments.get("repo_path")
         if not repo_path or not isinstance(repo_path, str):
             return _err("repo_path is required and must be a non-empty string.")
+        if "ticket_key" not in arguments:
+            return _err("ticket_key is required (pass null if there is no ticket).")
         ticket_key = arguments.get("ticket_key")
-        if not ticket_key or not isinstance(ticket_key, str):
-            return _err("ticket_key is required and must be a non-empty string.")
+        if ticket_key is not None and not isinstance(ticket_key, str):
+            return _err("ticket_key must be a string or null.")
         try:
             mgr = GitLifecycleManager(Path(repo_path))
             mgr.validate()
@@ -741,6 +822,25 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             mgr.validate()
             payload = mgr.get_conflict(conflict_file)
             return _ok({"file": payload.file, "ours": payload.ours, "theirs": payload.theirs})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _READ_FILE_AT_REF_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        ref = arguments.get("ref")
+        if not ref or not isinstance(ref, str):
+            return _err("ref is required and must be a non-empty string.")
+        file_path = arguments.get("path")
+        if not file_path or not isinstance(file_path, str):
+            return _err("path is required and must be a non-empty string.")
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            content = gitcmd.read_file_at_ref(mgr.repo_root, ref, file_path)
+            return _ok({"ref": ref, "path": file_path, "content": content})
         except Exception as exc:
             return _err(str(exc))
 
@@ -890,9 +990,11 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 repo_path = arguments.get("repo_path")
                 if not repo_path or not isinstance(repo_path, str):
                     return _err("repo_path is required and must be a non-empty string.")
+                if "ticket_key" not in arguments:
+                    return _err("ticket_key is required (pass null if there is no ticket).")
                 ticket_key = arguments.get("ticket_key")
-                if not ticket_key or not isinstance(ticket_key, str):
-                    return _err("ticket_key is required and must be a non-empty string.")
+                if ticket_key is not None and not isinstance(ticket_key, str):
+                    return _err("ticket_key must be a string or null.")
                 ticket_summary = arguments.get("ticket_summary")
                 if not ticket_summary or not isinstance(ticket_summary, str):
                     return _err("ticket_summary is required and must be a non-empty string.")
@@ -945,9 +1047,11 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 feature_branch = arguments.get("feature_branch")
                 if not feature_branch or not isinstance(feature_branch, str):
                     return _err("feature_branch is required and must be a non-empty string.")
+                if "ticket_key" not in arguments:
+                    return _err("ticket_key is required (pass null if there is no ticket).")
                 ticket_key = arguments.get("ticket_key")
-                if not ticket_key or not isinstance(ticket_key, str):
-                    return _err("ticket_key is required and must be a non-empty string.")
+                if ticket_key is not None and not isinstance(ticket_key, str):
+                    return _err("ticket_key must be a string or null.")
                 mr_iid = arguments.get("mr_iid")
                 if not isinstance(mr_iid, int) or isinstance(mr_iid, bool):
                     return _err("mr_iid is required and must be an integer.")

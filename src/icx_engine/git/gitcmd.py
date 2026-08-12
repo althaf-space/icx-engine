@@ -394,6 +394,17 @@ def file_exists_at_ref(repo: Path, ref: str, relpath: str) -> bool:
     return result.returncode == 0
 
 
+def read_file_at_ref(repo: Path, ref: str, relpath: str) -> str:
+    """Read relpath's exact content at ref - HEAD, MERGE_HEAD (mid-conflict),
+    a branch, a remote-tracking ref, or a commit sha. Read-only, local, no
+    network. Raises GitCommandError if ref does not resolve or relpath does
+    not exist there."""
+    _reject_option_like(ref, "ref")
+    _reject_path_traversal(relpath, "relpath")
+    result = _run_git(repo, ["show", f"{ref}:{relpath}"])
+    return result.stdout.decode("utf-8", errors="replace")
+
+
 def conflict_versions(repo: Path, relpath: str) -> tuple[str, str]:
     """Return (ours, theirs) content for a conflicted file, read from the
     merge index stages (stage 2 = ours, stage 3 = theirs) - works only while
@@ -527,16 +538,19 @@ def show_commit(repo: Path, sha: str) -> dict:
     }
 
 
-def diff_between(repo: Path, ref_a: str, ref_b: str) -> dict:
-    """Per-file status plus insertions/deletions between two refs. Combines
-    `--numstat` (counts) and `--name-status` (status codes) - numstat alone has
-    no status field. Rename detection is disabled on both calls so paths line up
-    1:1 between the two outputs. Binary files report `insertions`/`deletions` as
-    None (numstat prints '-' for them, not a number)."""
-    _reject_option_like(ref_a, "ref_a")
-    _reject_option_like(ref_b, "ref_b")
-    numstat_result = _run_git(repo, ["diff", "--no-renames", "--numstat", ref_a, ref_b])
-    namestatus_result = _run_git(repo, ["diff", "--no-renames", "--name-status", ref_a, ref_b])
+def _diff_stats(repo: Path, base_args: list[str], relpath: str | None) -> dict:
+    """Shared implementation for diff_between/diff_worktree - per-file status
+    plus insertions/deletions. Combines `--numstat` (counts) and
+    `--name-status` (status codes) - numstat alone has no status field. Rename
+    detection is disabled on both calls so paths line up 1:1 between the two
+    outputs. Binary files report `insertions`/`deletions` as None (numstat
+    prints '-' for them, not a number)."""
+    path_args: list[str] = []
+    if relpath is not None:
+        _reject_path_traversal(relpath, "relpath")
+        path_args = ["--", relpath]
+    numstat_result = _run_git(repo, [*base_args, "--numstat", *path_args])
+    namestatus_result = _run_git(repo, [*base_args, "--name-status", *path_args])
     numstat_out = _stdout(numstat_result)
     namestatus_out = _stdout(namestatus_result)
 
@@ -572,3 +586,110 @@ def diff_between(repo: Path, ref_a: str, ref_b: str) -> dict:
             "deletions": deletions,
         })
     return {"files": files}
+
+
+def diff_between(repo: Path, ref_a: str, ref_b: str) -> dict:
+    """Per-file status plus insertions/deletions between two refs (both
+    committed - use diff_worktree for anything involving the working tree or
+    the index)."""
+    _reject_option_like(ref_a, "ref_a")
+    _reject_option_like(ref_b, "ref_b")
+    return _diff_stats(repo, ["diff", "--no-renames", ref_a, ref_b], relpath=None)
+
+
+def diff_worktree(repo: Path, mode: str = "combined", relpath: str | None = None) -> dict:
+    """Local, uncommitted diff - diff_between only ever compares two existing
+    refs, never the working tree or index. mode='staged' is index vs HEAD
+    (what the next commit would contain), 'unstaged' is working tree vs index
+    (changes not yet staged), 'combined' is working tree vs HEAD (every
+    uncommitted change, staged or not). relpath scopes to one file; omitted
+    means every changed file. Same per-file shape as diff_between."""
+    if mode == "staged":
+        base_args = ["diff", "--no-renames", "--cached"]
+    elif mode == "unstaged":
+        base_args = ["diff", "--no-renames"]
+    elif mode == "combined":
+        base_args = ["diff", "--no-renames", "HEAD"]
+    else:
+        raise GitCommandError(f"mode must be 'staged', 'unstaged', or 'combined', got {mode!r}")
+    return _diff_stats(repo, base_args, relpath)
+
+
+_STATUS_CODE_NAMES = {
+    "M": "modified", "A": "added", "D": "deleted",
+    "R": "renamed", "C": "copied", "T": "type_changed", "U": "unmerged",
+}
+
+
+def structured_status(repo: Path) -> dict:
+    """Full working-tree status via `git status --porcelain=v2 --branch` -
+    v2's fixed-width XY codes and dedicated line-type prefixes (1/2/u/?) let
+    staged vs unstaged vs conflicted be told apart unambiguously, unlike v1's
+    single ambiguous leading-space format (dirty_files() above). branch.ab is
+    only present when an upstream is configured - ahead/behind default to 0
+    and upstream to None otherwise."""
+    result = _run_git(repo, ["status", "--porcelain=v2", "--branch"])
+    out = _stdout(result)
+
+    branch: str | None = None
+    upstream: str | None = None
+    ahead = 0
+    behind = 0
+    staged: list[dict] = []
+    unstaged: list[dict] = []
+    untracked: list[str] = []
+    renamed: list[dict] = []
+    conflicted: list[str] = []
+    deleted: set[str] = set()
+
+    for line in out.splitlines():
+        if line.startswith("# branch.head "):
+            branch = line[len("# branch.head "):]
+        elif line.startswith("# branch.upstream "):
+            upstream = line[len("# branch.upstream "):]
+        elif line.startswith("# branch.ab "):
+            for token in line[len("# branch.ab "):].split():
+                if token.startswith("+"):
+                    ahead = int(token[1:])
+                elif token.startswith("-"):
+                    behind = int(token[1:])
+        elif line.startswith("1 "):
+            fields = line.split(" ", 8)
+            xy, path = fields[1], _unquote_git_path(fields[8])
+            staged_code, unstaged_code = xy[0], xy[1]
+            if staged_code != ".":
+                staged.append({"path": path, "status": _STATUS_CODE_NAMES.get(staged_code, staged_code)})
+                if staged_code == "D":
+                    deleted.add(path)
+            if unstaged_code != ".":
+                unstaged.append({"path": path, "status": _STATUS_CODE_NAMES.get(unstaged_code, unstaged_code)})
+                if unstaged_code == "D":
+                    deleted.add(path)
+        elif line.startswith("2 "):
+            fields = line.split(" ", 9)
+            staged_code, unstaged_code = fields[1][0], fields[1][1]
+            new_path, _, old_path = fields[9].partition("\t")
+            new_path, old_path = _unquote_git_path(new_path), _unquote_git_path(old_path)
+            renamed.append({"from": old_path, "to": new_path})
+            if staged_code != ".":
+                staged.append({"path": new_path, "status": _STATUS_CODE_NAMES.get(staged_code, staged_code)})
+            if unstaged_code != ".":
+                unstaged.append({"path": new_path, "status": _STATUS_CODE_NAMES.get(unstaged_code, unstaged_code)})
+        elif line.startswith("u "):
+            fields = line.split(" ", 10)
+            conflicted.append(_unquote_git_path(fields[10]))
+        elif line.startswith("? "):
+            untracked.append(_unquote_git_path(line[2:]))
+
+    return {
+        "current_branch": branch,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+        "deleted": sorted(deleted),
+        "renamed": renamed,
+        "conflicted": conflicted,
+    }

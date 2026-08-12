@@ -546,6 +546,16 @@ def test_reverse_merge_standard_stash_pop_conflict_raises_clear_error(tmp_git_re
     assert stash_list != ""
 
 
+def test_reverse_merge_standard_nullable_ticket_key_falls_back_to_branch_slug(tmp_git_repo_with_remote):
+    _feature_branch_diverged_from_parent(tmp_git_repo_with_remote, conflicting=False)
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.reverse_merge_standard("main", None)
+    assert result == ReverseMergeResult(status="clean", conflicted_files=[])
+    from icx_engine.git.safety import list_backups
+    assert list_backups(tmp_git_repo_with_remote, "feature-x-abc-1") != []
+
+
 from icx_engine.git.manager import ScratchSession, ConflictPayload
 
 
@@ -575,6 +585,15 @@ def test_start_conflict_resolution_leaves_feature_branch_untouched(tmp_git_repo_
     # tip never moved without fighting that (correct) git safety behavior.
     feature_sha_after = _stdout(_run_git(tmp_git_repo_with_remote, ["rev-parse", "feature/x-ABC-1"]))
     assert feature_sha_after == feature_sha_before
+
+
+def test_start_conflict_resolution_nullable_ticket_key_falls_back_to_branch_slug(tmp_git_repo_with_remote):
+    _feature_branch_diverged_from_parent(tmp_git_repo_with_remote, conflicting=True)
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    session = mgr.start_conflict_resolution("main", None)
+    assert session.scratch_branch.startswith("scratch/feature-x-abc-1-")
+    assert session.conflicted_files == ["README.md"]
 
 
 def test_start_conflict_resolution_handles_dirty_tree_overlapping_the_conflict(tmp_git_repo_with_remote):
@@ -836,6 +855,29 @@ async def test_create_mr_for_ticket_resolves_project_and_calls_gitlab(tmp_git_re
     assert "add a.txt" in call_kwargs.args[5]
 
 
+async def test_create_mr_for_ticket_nullable_ticket_key_omits_prefix_from_title(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-nope", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-nope")
+    (tmp_git_repo_with_remote / "a.txt").write_text("a", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["a.txt"])
+    gitcmd_commit(tmp_git_repo_with_remote, "fix: add a.txt")
+
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+    mock_result = {"mr_iid": 7, "created": True, "merged": False, "refusal_reason": None}
+    with patch("icx_engine.git.manager.create_and_merge_mr", new=AsyncMock(return_value=mock_result)) as mock_call:
+        with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.validate.return_value = {"valid": True, "user": {"id": 42}}
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+            mgr.validate()
+            await mgr.create_mr_for_ticket("main", None, "Fix login timeout", _gitlab_conn())
+
+    # No manufactured ticket id prefix - the title is exactly ticket_summary.
+    assert mock_call.call_args.args[4] == "Fix login timeout"
+
+
 async def test_create_mr_for_ticket_raises_when_remote_not_gitlab(tmp_git_repo_with_remote, monkeypatch):
     monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: None)
     mgr = GitLifecycleManager(tmp_git_repo_with_remote)
@@ -991,6 +1033,39 @@ def test_post_merge_cleanup_deletes_feature_branch_when_mr_confirmed_merged(tmp_
 
     assert result.feature_branch_deleted is True
     assert local_branch_exists(tmp_git_repo_with_remote, "feature/x-ABC-1") is False
+
+
+def test_post_merge_cleanup_nullable_ticket_key_uses_branch_slug_for_backup_prune(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit
+    import subprocess
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-nope", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-nope")
+    (tmp_git_repo_with_remote / "a.txt").write_text("a", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["a.txt"])
+    gitcmd_commit(tmp_git_repo_with_remote, "fix: add a.txt")
+    subprocess.run(["git", "push", "origin", "feature/x-nope:main"], cwd=str(tmp_git_repo_with_remote), check=True)
+    checkout(tmp_git_repo_with_remote, "main")
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+
+    with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get_merge_request.return_value = {"state": "merged"}
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        with patch("icx_engine.git.manager.asyncio") as mock_asyncio:
+            import asyncio as real_asyncio
+            mock_asyncio.run = real_asyncio.run
+            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+            mgr.validate()
+            checkout(tmp_git_repo_with_remote, "feature/x-nope")
+            # No ticket_key - must not raise (e.g. globbing "backup/None-*") and must
+            # complete cleanup using a slug of feature_branch instead.
+            result = mgr.post_merge_cleanup(
+                "main", "feature/x-nope", None, delete_backups=True,
+                gitlab_conn=_gitlab_conn(), mr_iid=5,
+            )
+
+    assert result.feature_branch_deleted is True
+    assert result.backups_deleted == []
 
 
 def test_post_merge_cleanup_raises_when_file_genuinely_missing_after_fast_forward(tmp_git_repo_with_remote, monkeypatch):

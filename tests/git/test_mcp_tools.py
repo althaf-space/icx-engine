@@ -34,6 +34,27 @@ async def test_git_repo_status_tool_reports_clean_repo(tmp_git_repo):
     assert payload["dirty"] is False
 
 
+async def test_git_repo_status_reports_rich_structured_fields(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import stage_files
+    (tmp_git_repo / "staged.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "untracked.txt").write_text("y", encoding="utf-8")
+
+    result = await dispatch_git_tool("git_repo_status", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    staged_paths = {e["path"] for e in payload["staged"]}
+    assert staged_paths == {"staged.txt"}
+    assert payload["untracked"] == ["untracked.txt"]
+    assert payload["deleted"] == []
+    assert payload["renamed"] == []
+    assert payload["conflicted"] == []
+    assert payload["ahead"] == 0
+    assert payload["behind"] == 0
+    assert payload["upstream"] is None
+
+
 async def test_git_repo_status_attaches_safe_git_workflow_skill_hint(tmp_git_repo):
     from icx_engine.git.mcp_tools import dispatch_git_tool
     from icx_engine.skills.schema import SkillEntry
@@ -420,6 +441,34 @@ async def test_git_reverse_merge_reports_clean(tmp_git_repo_with_remote, tmp_pat
     assert payload["status"] == "clean"
 
 
+async def test_git_reverse_merge_nullable_ticket_key_succeeds(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-nope", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-nope")
+    (tmp_git_repo_with_remote / "feature_only.txt").write_text("f", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["feature_only.txt"])
+    commit(tmp_git_repo_with_remote, "fix: feature change")
+
+    result = await dispatch_git_tool("git_reverse_merge", {
+        "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main", "ticket_key": None,
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["status"] == "clean"
+
+
+async def test_git_reverse_merge_ticket_key_wrong_type_returns_named_error(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_reverse_merge", {
+        "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main", "ticket_key": 123,
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "ticket_key" in payload["error"]
+
+
 async def test_git_reverse_merge_reports_conflict_with_scratch_branch(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
     from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit
@@ -506,6 +555,41 @@ async def test_git_create_mr_confirmation_gated_and_executes(tmp_git_repo_with_r
     assert payload["merged"] is True
 
 
+async def test_git_create_mr_nullable_ticket_key_executes(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    mock_result = type("R", (), {"mr_iid": 6, "created": True, "merged": False, "refusal_reason": None})()
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.manager.GitLifecycleManager.create_mr_for_ticket", new=AsyncMock(return_value=mock_result)) as mock_create:
+            first = await dispatch_git_tool("git_create_mr", {
+                "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
+                "ticket_key": None, "ticket_summary": "Fix login",
+            })
+            token = json.loads(first[0].text)["token"]
+            second = await dispatch_git_tool("git_create_mr", {
+                "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
+                "ticket_key": None, "ticket_summary": "Fix login", "confirm_token": token,
+            })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    mock_create.assert_called_once()
+    assert mock_create.call_args.args[1] is None
+
+
+async def test_git_create_mr_ticket_key_wrong_type_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_create_mr", {
+        "repo_path": "/fake/repo", "ticket_key": 123, "ticket_summary": "Fix login",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "ticket_key" in payload["error"]
+
+
 async def test_git_create_mr_pending_confirmation_shows_source_branch(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     """Real bug fixed: the confirmation payload used to show only parent_branch
     (the target) and never the source (current feature branch) - the instruction
@@ -570,6 +654,44 @@ async def test_git_finish_ticket_confirmation_gated_and_executes(tmp_git_repo_wi
     payload = json.loads(second[0].text)
     assert payload["ok"] is True
     assert payload["feature_branch_deleted"] is True
+
+
+async def test_git_finish_ticket_nullable_ticket_key_executes(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    mock_result = type("R", (), {"parent_branch": "main", "feature_branch_deleted": True, "backups_deleted": []})()
+    from icx_engine.models.config import GitLabConnection
+    conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+
+    with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
+        with patch("icx_engine.git.manager.GitLifecycleManager.post_merge_cleanup", return_value=mock_result) as mock_cleanup:
+            first = await dispatch_git_tool("git_finish_ticket", {
+                "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
+                "feature_branch": "feature/x-nope", "ticket_key": None,
+                "delete_backups": True, "mr_iid": 5,
+            })
+            token = json.loads(first[0].text)["token"]
+            second = await dispatch_git_tool("git_finish_ticket", {
+                "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
+                "feature_branch": "feature/x-nope", "ticket_key": None,
+                "delete_backups": True, "mr_iid": 5, "confirm_token": token,
+            })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    mock_cleanup.assert_called_once()
+    assert mock_cleanup.call_args.args[2] is None
+
+
+async def test_git_finish_ticket_ticket_key_wrong_type_returns_named_error(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_finish_ticket", {
+        "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
+        "feature_branch": "feature/x-ABC-1", "ticket_key": 123, "mr_iid": 5,
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "ticket_key" in payload["error"]
 
 
 async def test_git_create_mr_invalid_token_returns_error(tmp_git_repo_with_remote):
@@ -1312,6 +1434,87 @@ async def test_git_diff_missing_repo_path_returns_named_error():
     assert payload["ok"] is False
     assert "repo_path" in payload["error"]
     assert payload["error"] != "'repo_path'"
+
+
+async def test_git_diff_worktree_staged_mode_reports_only_index_changes(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import stage_files
+    (tmp_git_repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "README.md").write_text("unstaged change\n", encoding="utf-8")
+
+    result = await dispatch_git_tool("git_diff_worktree", {
+        "repo_path": str(tmp_git_repo), "mode": "staged",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    paths = {f["path"] for f in payload["files"]}
+    assert paths == {"staged.txt"}
+
+
+async def test_git_diff_worktree_combined_mode_scoped_to_relpath(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import stage_files
+    (tmp_git_repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "README.md").write_text("unstaged change\n", encoding="utf-8")
+
+    result = await dispatch_git_tool("git_diff_worktree", {
+        "repo_path": str(tmp_git_repo), "mode": "combined", "relpath": "README.md",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    paths = {f["path"] for f in payload["files"]}
+    assert paths == {"README.md"}
+
+
+async def test_git_diff_worktree_invalid_mode_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_diff_worktree", {
+        "repo_path": str(tmp_git_repo), "mode": "bogus",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "mode" in payload["error"]
+
+
+async def test_git_diff_worktree_missing_repo_path_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_diff_worktree", {"mode": "combined"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "repo_path" in payload["error"]
+
+
+async def test_git_read_file_at_ref_returns_content_at_head(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_read_file_at_ref", {
+        "repo_path": str(tmp_git_repo), "ref": "HEAD", "path": "README.md",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["content"] == "hello\n"
+    assert payload["ref"] == "HEAD"
+    assert payload["path"] == "README.md"
+
+
+async def test_git_read_file_at_ref_missing_path_raises_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_read_file_at_ref", {
+        "repo_path": str(tmp_git_repo), "ref": "HEAD", "path": "does_not_exist.txt",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+
+
+async def test_git_read_file_at_ref_missing_ref_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_read_file_at_ref", {
+        "repo_path": str(tmp_git_repo), "path": "README.md",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "ref" in payload["error"]
 
 
 async def test_git_create_tag_no_gitlab_connection_returns_fallback_hint_after_confirm(tmp_git_repo_with_remote):

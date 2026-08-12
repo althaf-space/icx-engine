@@ -8,6 +8,7 @@ single-instance storage) is migrated automatically into
 directly."""
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from icx_engine.config_manager import ConfigManager
@@ -235,6 +236,37 @@ async def list_timesheets(from_date: str, to_date: str, cfg: Any | None = None) 
     cfg = cfg or ConfigManager.load()
     async with _make_client(cfg) as client:
         return await client.list_timesheets(from_date, to_date)
+
+
+async def recent_project_tasks(lookback_days: int = 90, cfg: Any | None = None) -> list[dict]:
+    """Cheap 'what have I logged against lately' shortcut - ONE list_timesheets
+    call over a lookback window, deduped to distinct (project, task) pairs,
+    most-recent-first. Exists so a caller isn't forced into a blind
+    list_projects + full-pagination list_tasks browse (list_tasks's `search`
+    doesn't filter server-side - see client.py's list_tasks docstring) just
+    to find a project/task the human has already logged time against."""
+    cfg = cfg or ConfigManager.load()
+    end = date.today()
+    start = end - timedelta(days=lookback_days)
+    async with _make_client(cfg) as client:
+        raw = await client.list_timesheets(start.isoformat(), end.isoformat())
+    entries = raw.get("timeSheetList") or []
+    seen: dict[tuple[int, int], dict] = {}
+    for entry in entries:
+        project = entry.get("project") or {}
+        todo = entry.get("todo") or {}
+        project_id, todo_id = project.get("id"), todo.get("id")
+        if project_id is None or todo_id is None:
+            continue
+        key = (project_id, todo_id)
+        last_used = entry.get("date", "")
+        if key not in seen or last_used > seen[key]["last_used"]:
+            seen[key] = {
+                "project_id": project_id, "project_name": project.get("name", ""),
+                "todo_id": todo_id, "todo_name": todo.get("name", ""),
+                "last_used": last_used,
+            }
+    return sorted(seen.values(), key=lambda row: row["last_used"], reverse=True)
 
 
 async def list_timesheet_clients(cfg: Any | None = None) -> list:
