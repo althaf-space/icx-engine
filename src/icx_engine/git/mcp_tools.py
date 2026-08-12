@@ -46,6 +46,12 @@ _FETCH_TOOL = "git_fetch"
 _PULL_TOOL = "git_pull"
 _SYNC_TOOL = "git_sync"
 _DELETE_BRANCH_TOOL = "git_delete_branch"
+_GET_CONFLICT_DETAILS_TOOL = "git_get_conflict_details"
+_CONFLICT_TAKE_OURS_TOOL = "git_conflict_take_ours"
+_CONFLICT_TAKE_THEIRS_TOOL = "git_conflict_take_theirs"
+_CONFLICT_APPLY_RESOLUTION_TOOL = "git_conflict_apply_resolution"
+_CONFLICT_MARK_RESOLVED_TOOL = "git_conflict_mark_resolved"
+_CONFLICT_ABORT_TOOL = "git_conflict_abort"
 
 GIT_TOOLS: list[Tool] = [
     Tool(
@@ -57,7 +63,12 @@ GIT_TOOLS: list[Tool] = [
             "GIT-WORKFLOW INTERFACE - NEVER run `git commit`/`git checkout -b`/`git push`/etc. "
             "directly, and never route around ICX through another git integration, even if one "
             "is also available in the same session; use git_start_branch/git_stage_and_commit/"
-            "git_push/git_create_mr instead. This is what enforces the no-rebase/no-force-push "
+            "git_push/git_create_mr/git_stash_create/git_fetch/git_pull/git_sync/git_delete_branch/"
+            "git_conflict_take_ours/git_conflict_take_theirs/git_conflict_apply_resolution/"
+            "git_conflict_mark_resolved/git_conflict_abort instead - NEVER run `git stash`/"
+            "`git fetch`/`git pull`/`git checkout --ours`/`--theirs`/`git add` on a conflicted "
+            "file/`git merge --abort`/`git rebase --abort`/`git cherry-pick --abort` directly "
+            "either, same rule as commit/checkout/push. This is what enforces the no-rebase/no-force-push "
             "safety doctrine - bypassing these tools defeats it. Checks the repo's git-workflow "
             "state - current branch, whether the working tree is dirty, and any leftover state "
             "from an interrupted prior run. git resolves the actual repository root upward "
@@ -249,11 +260,16 @@ GIT_TOOLS: list[Tool] = [
     Tool(
         name=_GET_CONFLICT_TOOL,
         description=(
-            "USE WHEN git_reverse_merge reported a conflict and one conflicted file needs "
-            "inspecting: MUST fetch the ours/theirs content for that file here. Call once per "
-            "file in conflicted_files. Suggest a resolution to the human; they edit the file "
-            "directly, then you call git_complete_resolution. Requires a valid git repository at "
-            "repo_path."
+            "USE WHEN a conflict needs inspecting and only whole-file ours/theirs content is "
+            "needed - use git_get_conflict_details instead for base content and per-hunk line "
+            "numbers. Works for ANY in-progress conflict, not just one git_reverse_merge produced - "
+            "reads real index stages, so a manual `git merge`/`git pull`, a rebase, or a "
+            "cherry-pick conflict inspects identically; never assumes ICX started it. Call once per "
+            "file in conflicted_files. On ICX's own scratch-branch flow, suggest a resolution to the "
+            "human; they edit the file directly, then you call git_complete_resolution - for an "
+            "in-place conflict (no scratch branch), use git_conflict_take_ours/take_theirs/"
+            "apply_resolution + git_conflict_mark_resolved instead. Requires a valid git repository "
+            "at repo_path."
         ),
         inputSchema={"type": "object",
                      "properties": {"repo_path": {"type": "string"}, "file": {"type": "string"}},
@@ -544,7 +560,8 @@ GIT_TOOLS: list[Tool] = [
         name=_STASH_CREATE_TOOL,
         description=(
             "USE WHEN the human wants to set aside uncommitted changes without committing them - "
-            "e.g. before pulling/syncing with a dirty tree. MUST call with message. Stashes staged, "
+            "e.g. before pulling/syncing with a dirty tree. MUST call this via ICX - NEVER run `git "
+            "stash push`/`git stash` directly yourself. Stashes staged, "
             "unstaged, AND untracked changes together (matches git_repo_status's dirty_files scope) "
             "- NOT confirmation-gated, nothing is lost by stashing (git_stash_list/apply/pop can "
             "always retrieve it). Requires a valid git repository at repo_path."
@@ -571,6 +588,7 @@ GIT_TOOLS: list[Tool] = [
         description=(
             "USE WHEN the human wants a stash's changes back in the working tree WITHOUT removing "
             "it from the stash list - use git_stash_pop instead to apply-and-remove in one step. "
+            "MUST call this via ICX - NEVER run `git stash apply` directly yourself. "
             "Call git_stash_list first to get the exact ref if not applying the most recent (default "
             "stash@{0}). Fails clearly (never silently drops data) if applying would conflict with "
             "the current working tree. NOT confirmation-gated - the stash itself is never lost even "
@@ -586,7 +604,8 @@ GIT_TOOLS: list[Tool] = [
         name=_STASH_POP_TOOL,
         description=(
             "USE WHEN the human wants a stash's changes back in the working tree AND removed from "
-            "the stash list in one step - use git_stash_apply instead to keep it in the list. Call "
+            "the stash list in one step - use git_stash_apply instead to keep it in the list. "
+            "MUST call this via ICX - NEVER run `git stash pop` directly yourself. Call "
             "git_stash_list first to get the exact ref if popping something other than the most "
             "recent (default stash@{0}). If popping conflicts with the current working tree, git "
             "keeps the stash in the list rather than losing it - the error says so. NOT "
@@ -603,7 +622,8 @@ GIT_TOOLS: list[Tool] = [
         name=_STASH_DROP_TOOL,
         description=(
             "USE WHEN the human explicitly wants a stash permanently discarded without ever "
-            "applying it. Call git_stash_list first to show the human the real message for the "
+            "applying it. MUST call this via ICX - NEVER run `git stash drop` directly yourself. "
+            "Call git_stash_list first to show the human the real message for the "
             "exact ref about to be dropped - never guess which stash they mean. CONFIRMATION-GATED: "
             "the first call (no confirm_token) returns pending_confirmation with ref and message - "
             "show both to the human and get explicit agreement before calling again with "
@@ -625,7 +645,8 @@ GIT_TOOLS: list[Tool] = [
         description=(
             "USE WHEN the human wants to download remote refs WITHOUT touching the working tree or "
             "any local branch - git_fetch only updates remote-tracking refs (origin/<branch>), it "
-            "never changes what's checked out. Use git_pull/git_sync instead to actually integrate "
+            "never changes what's checked out. MUST call this via ICX - NEVER run `git fetch` "
+            "directly yourself. Use git_pull/git_sync instead to actually integrate "
             "those changes into the current branch. Read-only w.r.t. the working tree, UNGATED. "
             "Pass ref to fetch one specific branch instead of everything, prune=true to also delete "
             "local remote-tracking refs for branches removed on the remote. Requires a valid git "
@@ -646,7 +667,8 @@ GIT_TOOLS: list[Tool] = [
         name=_PULL_TOOL,
         description=(
             "USE WHEN the human wants the CURRENT branch brought up to date with its OWN remote "
-            "counterpart (plain `git pull` semantics) - use git_reverse_merge instead to bring a "
+            "counterpart (plain `git pull` semantics) - MUST call this via ICX, NEVER run `git pull` "
+            "directly yourself; use git_reverse_merge instead to bring a "
             "DIFFERENT parent/target branch's changes in. strategy='ff-only' (default) refuses "
             "(status='diverged_needs_merge') rather than ever creating a merge commit - the safe "
             "default. strategy='merge' performs a real, conflict-capable merge (never rebase) with "
@@ -672,7 +694,8 @@ GIT_TOOLS: list[Tool] = [
         name=_SYNC_TOOL,
         description=(
             "USE WHEN the human just says 'sync my branch' / 'update from remote' with no further "
-            "detail - a one-shot, opinionated convenience wrapper: fetches, stashes any dirty "
+            "detail - MUST call this via ICX, NEVER run `git pull`/`git fetch`/`git stash` directly "
+            "yourself. A one-shot, opinionated convenience wrapper: fetches, stashes any dirty "
             "working tree automatically, integrates the current branch's own remote counterpart via "
             "a real conflict-capable merge (equivalent to git_pull with strategy='merge'), and "
             "restores the stash afterward - all in one call, same safety net as git_reverse_merge/"
@@ -727,6 +750,146 @@ GIT_TOOLS: list[Tool] = [
             "required": ["repo_path", "branch", "target"],
         },
     ),
+    Tool(
+        name=_GET_CONFLICT_DETAILS_TOOL,
+        description=(
+            "USE WHEN a conflicted file needs full inspection beyond ours/theirs alone - base "
+            "(common-ancestor) content, and every conflict hunk with exact start_line/end_line plus "
+            "its own ours/theirs text, matching what a human sees open in an editor. Works for ANY "
+            "in-progress conflict regardless of what caused it - ICX's own git_reverse_merge/"
+            "git_pull/git_sync scratch-branch quarantine, a manual `git merge`/`git pull`, a rebase, "
+            "or a cherry-pick - NEVER assumes ICX started it. base is null when no common ancestor "
+            "exists for this path (e.g. an add/add conflict); ours/theirs are null on the deleting "
+            "side of a delete/modify conflict. Also returns conflict_state (CONFLICT_DETECTED/"
+            "STAGED/CLEAN) - a live label computed fresh from real repo state every call, never "
+            "stored. Read-only, UNGATED. Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"repo_path": {"type": "string"}, "file": {"type": "string"}},
+            "required": ["repo_path", "file"],
+        },
+    ),
+    Tool(
+        name=_CONFLICT_TAKE_OURS_TOOL,
+        description=(
+            "USE WHEN the human has decided, for ONE specific conflicted file, that the OURS side "
+            "is fully correct and the THEIRS side should be discarded entirely for that file - use "
+            "git_conflict_apply_resolution instead if neither side alone is correct. MUST call this "
+            "via ICX - NEVER run `git checkout --ours` directly yourself. Resolves the file's "
+            "on-disk content to its ours version - does NOT stage it (still shows as unmerged until "
+            "git_conflict_mark_resolved). CONFIRMATION-GATED: the first call (no confirm_token) shows "
+            "the human the file and the exact ours content that will replace the current conflicted "
+            "content - only call again with confirm_token once they explicitly agree. NEVER combine "
+            "this with staging or committing in the same call - each stays a separate, inspectable "
+            "step. Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "file": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "file"],
+        },
+    ),
+    Tool(
+        name=_CONFLICT_TAKE_THEIRS_TOOL,
+        description=(
+            "USE WHEN the human has decided, for ONE specific conflicted file, that the THEIRS side "
+            "is fully correct and the OURS side should be discarded entirely for that file - use "
+            "git_conflict_apply_resolution instead if neither side alone is correct. MUST call this "
+            "via ICX - NEVER run `git checkout --theirs` directly yourself. Resolves the file's "
+            "on-disk content to its theirs version - does NOT stage it (still shows as unmerged "
+            "until git_conflict_mark_resolved). CONFIRMATION-GATED: the first call (no confirm_token) "
+            "shows the human the file and the exact theirs content that will replace the current "
+            "conflicted content - only call again with confirm_token once they explicitly agree. "
+            "NEVER combine this with staging or committing in the same call. Requires a valid git "
+            "repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "file": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "file"],
+        },
+    ),
+    Tool(
+        name=_CONFLICT_APPLY_RESOLUTION_TOOL,
+        description=(
+            "USE WHEN a conflicted file's ENTIRE content needs replacing with a specific hand- or "
+            "agent-resolved version that the human has reviewed - use this instead of "
+            "git_conflict_take_ours/take_theirs when neither side alone is correct (e.g. the real "
+            "fix combines parts of both, or is neither). MUST call this via ICX - resolved_content "
+            "IS the full new file content, not a patch or a diff. Does NOT stage it. "
+            "CONFIRMATION-GATED: the first call (no confirm_token) returns a unified diff between "
+            "the CURRENT on-disk (still-conflicted) content and resolved_content - show this diff to "
+            "the human, get explicit agreement, then call again with confirm_token. NEVER combine "
+            "with staging or committing in the same call. Requires a valid git repository at "
+            "repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "file": {"type": "string"},
+                "resolved_content": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "file", "resolved_content"],
+        },
+    ),
+    Tool(
+        name=_CONFLICT_MARK_RESOLVED_TOOL,
+        description=(
+            "USE WHEN every conflicted file the human wants resolved right now has already been "
+            "fixed (via git_conflict_take_ours/take_theirs/apply_resolution, or the human editing "
+            "them directly) and is ready to be staged - this is the STAGE step, deliberately "
+            "separate from committing; use git_stage_and_commit afterward for that, as its own "
+            "separate gate. MUST call this via ICX - NEVER run `git add` on a conflicted file "
+            "yourself. Hard-blocks (refuses, never issues a token) if ANY listed file still has "
+            "literal conflict-marker text, or is not currently an unmerged/conflicted path - never "
+            "stages a file this tool did not itself verify. CONFIRMATION-GATED: the first call (no "
+            "confirm_token) returns pending_confirmation listing exactly the files about to be "
+            "staged - show these to the human, get explicit agreement, then call again with "
+            "confirm_token. Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "files"],
+        },
+    ),
+    Tool(
+        name=_CONFLICT_ABORT_TOOL,
+        description=(
+            "USE WHEN the human wants to abandon an in-progress merge, cherry-pick, or rebase "
+            "ENTIRELY - not just one file, the whole operation - discarding all conflict-resolution "
+            "progress made so far and restoring the pre-operation state. Detects which of the three "
+            "is actually in progress from real repo state - NEVER assumes merge specifically. MUST "
+            "call this via ICX - NEVER run `git merge --abort`/`git cherry-pick --abort`/"
+            "`git rebase --abort` directly yourself. This never rewrites history and never starts, "
+            "continues, or drives a rebase - it only ever backs one out. Real content-losing "
+            "operation for any resolution work not yet committed - CONFIRMATION-GATED: the first "
+            "call (no confirm_token) shows the human which operation and which conflicted files are "
+            "about to be abandoned, get explicit agreement, then call again with confirm_token. "
+            "Fails clearly if nothing is actually in progress - never silently no-ops. Requires a "
+            "valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"repo_path": {"type": "string"}, "confirm_token": {"type": "string"}},
+            "required": ["repo_path"],
+        },
+    ),
 ]
 
 
@@ -771,6 +934,64 @@ def _needs_parent_branch(mgr: GitLifecycleManager) -> list[TextContent]:
                        "(proposed_default/available_branches are suggestions, not decisions). "
                        "Call this tool again with parent_branch set to their answer.",
     }))]
+
+
+def _dispatch_take_side(arguments: dict, side: str) -> list[TextContent]:
+    """Shared implementation for git_conflict_take_ours/take_theirs - identical shape
+    except which index stage (2=ours, 3=theirs) is resolved onto the working tree."""
+    action = f"conflict_take_{side}"
+    confirm_token = arguments.get("confirm_token")
+    if not confirm_token:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        file = arguments.get("file")
+        if not file or not isinstance(file, str):
+            return _err("file is required and must be a non-empty string.")
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            if file not in gitcmd.conflicted_files(mgr.repo_root):
+                return _err(
+                    f"'{file}' is not currently a conflicted path. Call git_repo_status or "
+                    "git_get_conflict_details to see real conflicted files."
+                )
+            stage = 2 if side == "ours" else 3
+            content = gitcmd.conflict_stage(mgr.repo_root, file, stage)
+            if content is None:
+                return _err(
+                    f"'{file}' has no {side} content for this conflict (e.g. it was added or "
+                    "deleted on that side) - nothing to take."
+                )
+            token = issue_token(action, {"repo_path": repo_path, "file": file})
+            return [TextContent(type="text", text=json.dumps({
+                "status": "pending_confirmation",
+                "token": token,
+                "file": file,
+                "side": side,
+                "content": content,
+                "instruction": f"Show the human the file and the exact {side} content that will "
+                               "replace the current conflicted content on disk (not staged, not "
+                               "committed). Only call again with confirm_token once they explicitly "
+                               "agree.",
+            }))]
+        except Exception as exc:
+            return _err(str(exc))
+    try:
+        payload = verify_token(confirm_token, action)
+        if payload is None:
+            return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+        from icx_engine.git import gitcmd
+        mgr = GitLifecycleManager(Path(payload["repo_path"]))
+        mgr.validate()
+        gitcmd.checkout_conflict_side(mgr.repo_root, payload["file"], side)
+        return _ok({
+            "file": payload["file"], "resolved_to": side,
+            "conflict_state": gitcmd.conflict_state(mgr.repo_root),
+        })
+    except Exception as exc:
+        return _err(str(exc))
 
 
 async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | None:
@@ -1799,6 +2020,188 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 "branch": result.branch, "local_deleted": result.local_deleted,
                 "remote_deleted": result.remote_deleted, "unique_commits": result.unique_commits,
             })
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _GET_CONFLICT_DETAILS_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        conflict_file = arguments.get("file")
+        if not conflict_file or not isinstance(conflict_file, str):
+            return _err("file is required and must be a non-empty string.")
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            base = gitcmd.conflict_stage(mgr.repo_root, conflict_file, 1)
+            ours = gitcmd.conflict_stage(mgr.repo_root, conflict_file, 2)
+            theirs = gitcmd.conflict_stage(mgr.repo_root, conflict_file, 3)
+            hunks = gitcmd.parse_conflict_hunks(mgr.repo_root, conflict_file)
+            return _ok({
+                "file": conflict_file, "base": base, "ours": ours, "theirs": theirs,
+                "hunks": hunks, "conflict_state": gitcmd.conflict_state(mgr.repo_root),
+            })
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _CONFLICT_TAKE_OURS_TOOL:
+        return _dispatch_take_side(arguments, "ours")
+
+    if name == _CONFLICT_TAKE_THEIRS_TOOL:
+        return _dispatch_take_side(arguments, "theirs")
+
+    if name == _CONFLICT_APPLY_RESOLUTION_TOOL:
+        confirm_token = arguments.get("confirm_token")
+        if not confirm_token:
+            repo_path = arguments.get("repo_path")
+            if not repo_path or not isinstance(repo_path, str):
+                return _err("repo_path is required and must be a non-empty string.")
+            conflict_file = arguments.get("file")
+            if not conflict_file or not isinstance(conflict_file, str):
+                return _err("file is required and must be a non-empty string.")
+            resolved_content = arguments.get("resolved_content")
+            if resolved_content is None or not isinstance(resolved_content, str):
+                return _err("resolved_content is required and must be a string.")
+            try:
+                from icx_engine.git import gitcmd
+                mgr = GitLifecycleManager(Path(repo_path))
+                mgr.validate()
+                if conflict_file not in gitcmd.conflicted_files(mgr.repo_root):
+                    return _err(
+                        f"'{conflict_file}' is not currently a conflicted path. Call "
+                        "git_repo_status or git_get_conflict_details to see real conflicted files."
+                    )
+                current_content = (mgr.repo_root / conflict_file).read_text(encoding="utf-8", errors="replace")
+                import difflib
+                diff = "".join(difflib.unified_diff(
+                    current_content.splitlines(keepends=True),
+                    resolved_content.splitlines(keepends=True),
+                    fromfile=f"{conflict_file} (current, conflicted)",
+                    tofile=f"{conflict_file} (proposed resolution)",
+                ))
+                token = issue_token("conflict_apply_resolution", {
+                    "repo_path": repo_path, "file": conflict_file, "resolved_content": resolved_content,
+                })
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "pending_confirmation",
+                    "token": token,
+                    "file": conflict_file,
+                    "diff": diff,
+                    "instruction": "Show the human this diff between the current conflicted content "
+                                   "and the proposed resolution. Only call again with confirm_token "
+                                   "once they explicitly agree.",
+                }))]
+            except Exception as exc:
+                return _err(str(exc))
+        try:
+            payload = verify_token(confirm_token, "conflict_apply_resolution")
+            if payload is None:
+                return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(payload["repo_path"]))
+            mgr.validate()
+            (mgr.repo_root / payload["file"]).write_text(payload["resolved_content"], encoding="utf-8")
+            return _ok({
+                "file": payload["file"], "applied": True,
+                "conflict_state": gitcmd.conflict_state(mgr.repo_root),
+            })
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _CONFLICT_MARK_RESOLVED_TOOL:
+        confirm_token = arguments.get("confirm_token")
+        if not confirm_token:
+            repo_path = arguments.get("repo_path")
+            if not repo_path or not isinstance(repo_path, str):
+                return _err("repo_path is required and must be a non-empty string.")
+            files = arguments.get("files")
+            if not isinstance(files, list) or not files:
+                return _err("files is required and must be a non-empty list.")
+            try:
+                from icx_engine.git import gitcmd
+                mgr = GitLifecycleManager(Path(repo_path))
+                mgr.validate()
+                unmerged = set(gitcmd.conflicted_files(mgr.repo_root))
+                not_conflicted = [f for f in files if f not in unmerged]
+                if not_conflicted:
+                    return _err(
+                        "These files are not currently conflicted paths - refusing to stage them "
+                        f"here: {', '.join(not_conflicted)}. Use git_stage_and_commit for ordinary "
+                        "staging."
+                    )
+                remaining = gitcmd.find_conflict_markers(mgr.repo_root, files)
+                if remaining:
+                    bad_files = ", ".join(remaining.keys())
+                    return _err(
+                        f"Conflict markers still present in: {bad_files}. Resolve them fully before "
+                        "marking resolved."
+                    )
+                token = issue_token("conflict_mark_resolved", {"repo_path": repo_path, "files": files})
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "pending_confirmation",
+                    "token": token,
+                    "files": files,
+                    "instruction": "Show the human exactly these files about to be staged (not "
+                                   "committed). Only call again with confirm_token once they "
+                                   "explicitly agree.",
+                }))]
+            except Exception as exc:
+                return _err(str(exc))
+        try:
+            payload = verify_token(confirm_token, "conflict_mark_resolved")
+            if payload is None:
+                return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(payload["repo_path"]))
+            mgr.validate()
+            gitcmd.stage_files(mgr.repo_root, payload["files"])
+            return _ok({"staged": payload["files"], "conflict_state": gitcmd.conflict_state(mgr.repo_root)})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _CONFLICT_ABORT_TOOL:
+        confirm_token = arguments.get("confirm_token")
+        if not confirm_token:
+            repo_path = arguments.get("repo_path")
+            if not repo_path or not isinstance(repo_path, str):
+                return _err("repo_path is required and must be a non-empty string.")
+            try:
+                from icx_engine.git import gitcmd
+                mgr = GitLifecycleManager(Path(repo_path))
+                mgr.validate()
+                git_dir = mgr.repo_root / ".git"
+                if (git_dir / "MERGE_HEAD").exists():
+                    operation = "merge"
+                elif (git_dir / "CHERRY_PICK_HEAD").exists():
+                    operation = "cherry-pick"
+                elif (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+                    operation = "rebase"
+                else:
+                    return _err("No merge, cherry-pick, or rebase is currently in progress - nothing to abort.")
+                conflicted = gitcmd.conflicted_files(mgr.repo_root)
+                token = issue_token("conflict_abort", {"repo_path": repo_path})
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "pending_confirmation",
+                    "token": token,
+                    "operation": operation,
+                    "conflicted_files": conflicted,
+                    "instruction": f"Show the human that a {operation} is about to be COMPLETELY "
+                                   "abandoned, discarding all resolution progress on the listed "
+                                   "conflicted_files. Only call again with confirm_token once they "
+                                   "explicitly agree.",
+                }))]
+            except Exception as exc:
+                return _err(str(exc))
+        try:
+            payload = verify_token(confirm_token, "conflict_abort")
+            if payload is None:
+                return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(payload["repo_path"]))
+            mgr.validate()
+            aborted = gitcmd.abort_in_progress_operation(mgr.repo_root)
+            return _ok({"aborted": aborted, "conflict_state": gitcmd.conflict_state(mgr.repo_root)})
         except Exception as exc:
             return _err(str(exc))
 

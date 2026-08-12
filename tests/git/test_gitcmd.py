@@ -1177,3 +1177,249 @@ def test_delete_remote_branch_rejects_option_like_branch(tmp_git_repo):
 def test_delete_remote_branch_rejects_option_like_remote(tmp_git_repo):
     with pytest.raises(GitCommandError):
         delete_remote_branch(tmp_git_repo, "main", remote=_OPTION_LIKE)
+
+
+# Task: conflict_stage/parse_conflict_hunks/checkout_conflict_side/conflict_state/
+# abort_in_progress_operation - line-level conflict inspection + gated resolution primitives
+from icx_engine.git.gitcmd import (
+    conflict_stage, parse_conflict_hunks, checkout_conflict_side, conflict_state,
+    abort_in_progress_operation,
+)
+
+
+def test_conflict_stage_returns_base_ours_and_theirs(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="stage_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    assert conflict_stage(clone, "README.md", 1) == "hello\n"
+    assert conflict_stage(clone, "README.md", 2) == "local version\n"
+    assert conflict_stage(clone, "README.md", 3) == "remote version\n"
+
+
+def test_conflict_stage_returns_none_for_missing_base_on_add_add_conflict(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    clone = tmp_path / "add_add_clone"
+    subprocess.run(["git", "clone", str(tmp_git_repo_with_remote), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(clone), check=True)
+
+    (tmp_git_repo_with_remote / "new_both.txt").write_text("remote side\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["new_both.txt"])
+    commit(tmp_git_repo_with_remote, "PARENT-1 add new_both remote side")
+    subprocess.run(["git", "push"], cwd=str(tmp_git_repo_with_remote), check=True)
+
+    (clone / "new_both.txt").write_text("local side\n", encoding="utf-8")
+    stage_files(clone, ["new_both.txt"])
+    commit(clone, "ABC-1 add new_both local side")
+
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    assert conflict_stage(clone, "new_both.txt", 1) is None  # no common ancestor for this path
+    assert conflict_stage(clone, "new_both.txt", 2) == "local side\n"
+    assert conflict_stage(clone, "new_both.txt", 3) == "remote side\n"
+
+
+def test_conflict_stage_rejects_invalid_stage_number(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        conflict_stage(tmp_git_repo, "README.md", 4)
+
+
+def test_conflict_stage_rejects_path_traversal(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        conflict_stage(tmp_git_repo, "../outside.txt", 1)
+
+
+def test_parse_conflict_hunks_single_hunk(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="hunk_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    hunks = parse_conflict_hunks(clone, "README.md")
+    assert len(hunks) == 1
+    assert hunks[0]["ours"] == "local version"
+    assert hunks[0]["theirs"] == "remote version"
+    assert hunks[0]["start_line"] == 1
+    on_disk = (clone / "README.md").read_text(encoding="utf-8")
+    on_disk_lines = on_disk.splitlines()
+    assert on_disk_lines[hunks[0]["start_line"] - 1].startswith("<<<<<<<")
+    assert on_disk_lines[hunks[0]["end_line"] - 1].startswith(">>>>>>>")
+
+
+def test_parse_conflict_hunks_multiple_hunks_in_one_file(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    lines = [f"line{i}" for i in range(1, 13)]
+    (tmp_git_repo_with_remote / "multi.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["multi.txt"])
+    commit(tmp_git_repo_with_remote, "PARENT-1 add multi.txt")
+    subprocess.run(["git", "push"], cwd=str(tmp_git_repo_with_remote), check=True)
+
+    clone = tmp_path / "multi_hunk_clone"
+    subprocess.run(["git", "clone", str(tmp_git_repo_with_remote), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(clone), check=True)
+
+    local_lines = list(lines)
+    local_lines[1] = "local-line2"
+    local_lines[9] = "local-line10"
+    (clone / "multi.txt").write_text("\n".join(local_lines) + "\n", encoding="utf-8")
+    stage_files(clone, ["multi.txt"])
+    commit(clone, "ABC-1 local edits")
+
+    remote_lines = list(lines)
+    remote_lines[1] = "remote-line2"
+    remote_lines[9] = "remote-line10"
+    (tmp_git_repo_with_remote / "multi.txt").write_text("\n".join(remote_lines) + "\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["multi.txt"])
+    commit(tmp_git_repo_with_remote, "PARENT-2 remote edits")
+    subprocess.run(["git", "push"], cwd=str(tmp_git_repo_with_remote), check=True)
+
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    hunks = parse_conflict_hunks(clone, "multi.txt")
+    assert len(hunks) == 2
+    assert hunks[0]["ours"] == "local-line2"
+    assert hunks[0]["theirs"] == "remote-line2"
+    assert hunks[1]["ours"] == "local-line10"
+    assert hunks[1]["theirs"] == "remote-line10"
+    assert hunks[0]["end_line"] < hunks[1]["start_line"]
+
+
+def test_parse_conflict_hunks_empty_for_clean_file(tmp_git_repo):
+    assert parse_conflict_hunks(tmp_git_repo, "README.md") == []
+
+
+def test_parse_conflict_hunks_rejects_path_traversal(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        parse_conflict_hunks(tmp_git_repo, "../outside.txt")
+
+
+def test_checkout_conflict_side_ours_resolves_to_local_version(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="take_ours_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    checkout_conflict_side(clone, "README.md", "ours")
+    assert (clone / "README.md").read_text(encoding="utf-8") == "local version\n"
+    # still unmerged in the index until staged
+    assert "README.md" in conflicted_files(clone)
+
+
+def test_checkout_conflict_side_theirs_resolves_to_remote_version(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="take_theirs_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    checkout_conflict_side(clone, "README.md", "theirs")
+    assert (clone / "README.md").read_text(encoding="utf-8") == "remote version\n"
+
+
+def test_checkout_conflict_side_rejects_invalid_side(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        checkout_conflict_side(tmp_git_repo, "README.md", "bogus")
+
+
+def test_checkout_conflict_side_rejects_path_traversal(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        checkout_conflict_side(tmp_git_repo, "../outside.txt", "ours")
+
+
+def test_conflict_state_clean_on_fresh_repo(tmp_git_repo):
+    assert conflict_state(tmp_git_repo) == "CLEAN"
+
+
+def test_conflict_state_conflict_detected_mid_merge(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="state_conflict_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    assert conflict_state(clone) == "CONFLICT_DETECTED"
+
+
+def test_conflict_state_staged_after_resolving_and_staging(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="state_staged_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    checkout_conflict_side(clone, "README.md", "ours")
+    stage_files(clone, ["README.md"])
+    assert conflict_state(clone) == "STAGED"
+
+
+def test_conflict_state_clean_after_abort(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="state_abort_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    merge_abort(clone)
+    assert conflict_state(clone) == "CLEAN"
+
+
+def test_abort_in_progress_operation_aborts_merge(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="abort_merge_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    result = abort_in_progress_operation(clone)
+    assert result == "merge"
+    assert conflicted_files(clone) == []
+    assert not (clone / ".git" / "MERGE_HEAD").exists()
+
+
+def test_abort_in_progress_operation_raises_when_nothing_in_progress(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        abort_in_progress_operation(tmp_git_repo)
+
+
+def test_abort_in_progress_operation_aborts_cherry_pick(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/cp-source", "main")
+    checkout(tmp_git_repo, "feature/cp-source")
+    (tmp_git_repo / "README.md").write_text("cherry-pick version\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    sha = commit(tmp_git_repo, "ABC-1 cherry-pick change")
+    checkout(tmp_git_repo, "main")
+    (tmp_git_repo / "README.md").write_text("main version\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "PARENT-1 main change")
+
+    import subprocess
+    result = subprocess.run(["git", "cherry-pick", sha], cwd=str(tmp_git_repo),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode != 0  # real conflict
+    assert (tmp_git_repo / ".git" / "CHERRY_PICK_HEAD").exists()
+
+    aborted = abort_in_progress_operation(tmp_git_repo)
+    assert aborted == "cherry-pick"
+    assert not (tmp_git_repo / ".git" / "CHERRY_PICK_HEAD").exists()
+    assert conflicted_files(tmp_git_repo) == []
+
+
+def test_abort_in_progress_operation_aborts_rebase(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/rebase-source", "main")
+    checkout(tmp_git_repo, "feature/rebase-source")
+    (tmp_git_repo / "README.md").write_text("rebase version\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "ABC-1 rebase change")
+    checkout(tmp_git_repo, "main")
+    (tmp_git_repo / "README.md").write_text("main version\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "PARENT-1 main change")
+    checkout(tmp_git_repo, "feature/rebase-source")
+
+    import subprocess
+    result = subprocess.run(["git", "rebase", "main"], cwd=str(tmp_git_repo),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode != 0  # real conflict
+    rebase_in_progress = (tmp_git_repo / ".git" / "rebase-merge").exists() or \
+                          (tmp_git_repo / ".git" / "rebase-apply").exists()
+    assert rebase_in_progress
+
+    aborted = abort_in_progress_operation(tmp_git_repo)
+    assert aborted == "rebase"
+    assert not (tmp_git_repo / ".git" / "rebase-merge").exists()
+    assert not (tmp_git_repo / ".git" / "rebase-apply").exists()
+    assert conflicted_files(tmp_git_repo) == []

@@ -453,7 +453,11 @@ class GitLifecycleManager:
 
     def get_conflict(self, relpath: str) -> ConflictPayload:
         """Read ours/theirs content for one conflicted file on the CURRENTLY
-        checked-out branch (must be a scratch branch mid-conflict)."""
+        checked-out branch - reads real index stages (2=ours, 3=theirs), so
+        this works regardless of what produced the conflict: ICX's own
+        scratch-branch quarantine flow, a manual `git merge`/`git pull`, a
+        rebase, or a cherry-pick. Not scratch-branch-specific despite living
+        alongside that flow in this class."""
         ours, theirs = conflict_versions(self.repo_root, relpath)
         return ConflictPayload(file=relpath, ours=ours, theirs=theirs)
 

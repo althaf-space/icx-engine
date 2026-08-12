@@ -206,6 +206,19 @@ ICX/
 |   |   |                       # primitives: is_ancestor() (`merge-base --is-ancestor`), unique_commit_count()
 |   |   |                       # (`rev-list --count` - commits that would be lost), delete_remote_branch() (a real
 |   |   |                       # `push --delete`, routed through the same extra_env auth plumbing as push()/fetch()).
+|   |   |                       # Line-level conflict inspection + gated resolution primitives: conflict_stage()
+|   |   |                       # (one index stage - 1=base/2=ours/3=theirs - tolerant of a missing stage, unlike
+|   |   |                       # conflict_versions() which assumes ours+theirs both exist), parse_conflict_hunks()
+|   |   |                       # (parses ON-DISK <<<<<<</=======/>>>>>>> markers into start_line/end_line/ours/
+|   |   |                       # theirs per hunk - never a per-hunk base, since ICX never enables diff3-style
+|   |   |                       # conflictstyle), checkout_conflict_side() (`git checkout --ours`/`--theirs`, does
+|   |   |                       # NOT stage), conflict_state() (live CLEAN/CONFLICT_DETECTED/STAGED label computed
+|   |   |                       # fresh from real repo state every call - never stored, so it can't drift),
+|   |   |                       # abort_in_progress_operation() (detects merge/cherry-pick/rebase from real on-disk
+|   |   |                       # markers and aborts whichever is actually running - see this module's own
+|   |   |                       # docstring for why its one `git rebase --abort` call is a deliberate, narrow
+|   |   |                       # exception to "no rebase": it only ever backs one out, never starts/continues/
+|   |   |                       # drives one).
 |   |   +-- naming.py           # branch-name derivation from ticket key + summary
 |   |   +-- settings.py         # per-repo ICX settings file (parent branch, etc.)
 |   |   +-- safety.py           # create_backup (timestamped snapshot, taken before a risky reverse-merge/
@@ -255,6 +268,11 @@ ICX/
 |   |   |                       # is the current branch; refuses (force=True required) if unique_commit_count(branch,
 |   |   |                       # target) > 0 - replaces the manually-run `git merge-base --is-ancestor`/
 |   |   |                       # `git rev-list --count`. delete_local/delete_remote are independent.
+|   |   |                       #
+|   |   |                       # get_conflict()'s docstring was corrected - it never actually required a scratch
+|   |   |                       # branch (reads real index stages 2/3 regardless), but said it did; the confusion
+|   |   |                       # this fixed was in the docstring only, the function itself always worked for any
+|   |   |                       # in-progress conflict.
 |   |   |                       #
 |   |   |                       # GitLab auth for git-network calls (fetch/ls-remote/push) - the fix for git push (and
 |   |   |                       # later, git_create_mr's own fetch/ls-remote) failing with "could not read Username" even
@@ -342,7 +360,21 @@ ICX/
 |   |                           # git_sync (thin wrapper: mgr.pull(strategy='merge') always, one-shot "just sync me")/
 |   |                           # git_delete_branch (confirmation-gated once safety checks pass - computes
 |   |                           # unique_commits and refuses BEFORE issuing a token if >0 and force is not set;
-|   |                           # deleting the current branch is refused unconditionally, not force-overridable)
+|   |                           # deleting the current branch is refused unconditionally, not force-overridable)/
+|   |                           # git_get_conflict_details (read-only, ungated - base/ours/theirs + per-hunk
+|   |                           # start_line/end_line + live conflict_state; works for any in-progress conflict,
+|   |                           # never assumes ICX started it)/git_conflict_take_ours/git_conflict_take_theirs
+|   |                           # (confirmation-gated, share one private helper _dispatch_take_side - resolves
+|   |                           # on-disk content to one index stage via checkout_conflict_side, does NOT stage)/
+|   |                           # git_conflict_apply_resolution (confirmation-gated - pending_confirmation carries
+|   |                           # a difflib.unified_diff between current conflicted content and resolved_content,
+|   |                           # so the human reviews an actual diff, not just raw text; does NOT stage)/
+|   |                           # git_conflict_mark_resolved (confirmation-gated - the deliberate STAGE-only step,
+|   |                           # hard-blocks before any token if any file still has marker text OR is not
+|   |                           # currently in conflicted_files(); use git_stage_and_commit afterward, as its own
+|   |                           # separate gate, to commit)/git_conflict_abort (confirmation-gated - detects
+|   |                           # merge/cherry-pick/rebase from real on-disk state via
+|   |                           # gitcmd.abort_in_progress_operation(), never assumes merge specifically)
 |   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag/list_branches/
 |   |                           # list_pipelines/get_pipeline (pipeline detail + its jobs, one call)/get_job_trace/
 |   |                           # get_repository_file, plus the read-only list_merge_requests/

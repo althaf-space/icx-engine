@@ -8,11 +8,19 @@ module by design - see the design spec's safety doctrine
 (docs/superpowers/specs/2026-07-26-icx-git-workflow-design.md, Section 2).
 A real, conflict-capable merge exists here (`merge_ref`), but this module
 never interprets or resolves a conflict itself - a caller that gets a
-conflict must either abort (`merge_abort`) or hand it to the
-conflict-quarantine flow in `manager.py`; `gitcmd.py` only ever reports raw
-git state, never makes a resolution decision. `fast_forward`/`fast_forward_ref`
-are `--ff-only` and cannot conflict or create a merge commit - they are not
-"real" merges in this sense.
+conflict must either abort (`merge_abort`, or the operation-agnostic
+`abort_in_progress_operation`) or hand it to the conflict-quarantine flow in
+`manager.py`; `gitcmd.py` only ever reports raw git state, never makes a
+resolution decision. `fast_forward`/`fast_forward_ref` are `--ff-only` and
+cannot conflict or create a merge commit - they are not "real" merges in
+this sense.
+
+ONE explicit, narrow exception to "no rebase": `abort_in_progress_operation`
+may run `git rebase --abort` - but ONLY to back out of a rebase a human
+started outside ICX, never to start, continue, or otherwise drive one. An
+abort restores the pre-rebase state; it does not rewrite history the way a
+real rebase does. This module still never initiates, continues, or skips a
+rebase step anywhere.
 """
 from __future__ import annotations
 
@@ -444,11 +452,117 @@ def merge_abort(repo: Path) -> None:
     _run_git(repo, ["merge", "--abort"])
 
 
+def abort_in_progress_operation(repo: Path) -> str:
+    """Aborts whichever conflict-capable operation is actually in progress -
+    merge, cherry-pick, or rebase - detected from real on-disk state markers
+    (MERGE_HEAD/CHERRY_PICK_HEAD/rebase-merge or rebase-apply), never assumed
+    to be one specific flow. Returns which one was aborted. Raises
+    GitCommandError if none is in progress - nothing to abort. See this
+    module's docstring for why a rebase abort here does not violate the
+    no-rebase doctrine."""
+    git_dir = repo / ".git"
+    if (git_dir / "MERGE_HEAD").exists():
+        merge_abort(repo)
+        return "merge"
+    if (git_dir / "CHERRY_PICK_HEAD").exists():
+        _run_git(repo, ["cherry-pick", "--abort"])
+        return "cherry-pick"
+    if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+        _run_git(repo, ["rebase", "--abort"])
+        return "rebase"
+    raise GitCommandError("No merge, cherry-pick, or rebase is currently in progress - nothing to abort.")
+
+
 def conflicted_files(repo: Path) -> list[str]:
-    """Paths with unresolved merge conflicts (unmerged index entries)."""
+    """Paths with unresolved merge conflicts (unmerged index entries) -
+    reflects the CURRENT repo's real index state, regardless of whether ICX,
+    a manual `git merge`/`git pull`, a rebase, or a cherry-pick produced it."""
     result = _run_git(repo, ["diff", "--name-only", "--diff-filter=U"])
     out = _stdout(result)
     return [_unquote_git_path(line) for line in out.splitlines() if line]
+
+
+def conflict_state(repo: Path) -> str:
+    """Live, derived conflict-workflow state label - CLEAN/CONFLICT_DETECTED/
+    STAGED - computed fresh from real git state every call, never stored or
+    tracked separately (a stored tracker could drift from the real repo
+    state; this can't, since it IS the real repo state). STAGED means every
+    conflicted path has been staged (no more unmerged index entries) but an
+    operation is still in progress - the merge/cherry-pick/rebase itself has
+    not been committed/continued yet."""
+    if conflicted_files(repo):
+        return "CONFLICT_DETECTED"
+    git_dir = repo / ".git"
+    if (git_dir / "MERGE_HEAD").exists() or (git_dir / "CHERRY_PICK_HEAD").exists() or \
+            (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+        return "STAGED"
+    return "CLEAN"
+
+
+def conflict_stage(repo: Path, relpath: str, stage: int) -> str | None:
+    """Reads one index stage of a conflicted path - 1=base (common ancestor),
+    2=ours, 3=theirs. Tolerant of a missing stage (an add/add conflict has no
+    base; a delete/modify conflict has no ours or theirs on the deleting
+    side) - returns None rather than raising, unlike conflict_versions()
+    which assumes both ours/theirs exist (the only shape ICX's own
+    scratch-branch merge flow ever produces)."""
+    if stage not in (1, 2, 3):
+        raise GitCommandError(f"stage must be 1, 2, or 3, got {stage!r}")
+    _reject_path_traversal(relpath, "relpath")
+    result = _run_git(repo, ["show", f":{stage}:{relpath}"], allowed_returncodes={128})
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def parse_conflict_hunks(repo: Path, relpath: str) -> list[dict]:
+    """Parses relpath's ON-DISK conflict markers into structured hunks -
+    1-indexed start_line/end_line spanning the full `<<<<<<<` to `>>>>>>>`
+    block, plus ours/theirs text for each - exactly what a human would see
+    open in an editor. Assumes the standard 2-way marker style (`<<<<<<<` /
+    `=======` / `>>>>>>>`) - ICX never enables diff3-style base markers
+    (`|||||||`) for its own merges, so a per-hunk base section never has to
+    be parsed here (use conflict_stage(repo, relpath, 1) for the whole
+    file's base content instead)."""
+    _reject_path_traversal(relpath, "relpath")
+    text = (repo / relpath).read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    hunks: list[dict] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if not lines[i].startswith("<<<<<<<"):
+            i += 1
+            continue
+        start = i
+        i += 1
+        ours_lines: list[str] = []
+        while i < n and not lines[i].startswith("======="):
+            ours_lines.append(lines[i])
+            i += 1
+        i += 1  # skip the ======= separator
+        theirs_lines: list[str] = []
+        while i < n and not lines[i].startswith(">>>>>>>"):
+            theirs_lines.append(lines[i])
+            i += 1
+        hunks.append({
+            "start_line": start + 1,
+            "end_line": i + 1,
+            "ours": "\n".join(ours_lines),
+            "theirs": "\n".join(theirs_lines),
+        })
+        i += 1  # skip the >>>>>>> marker
+    return hunks
+
+
+def checkout_conflict_side(repo: Path, relpath: str, side: str) -> None:
+    """Resolves relpath's ON-DISK content to one side of an in-progress
+    conflict via `git checkout --ours`/`--theirs` - does NOT stage the
+    result (still shows as unmerged in the index until stage_files is
+    called) and does not touch any other file."""
+    if side not in ("ours", "theirs"):
+        raise GitCommandError(f"side must be 'ours' or 'theirs', got {side!r}")
+    _reject_path_traversal(relpath, "relpath")
+    _run_git(repo, ["checkout", f"--{side}", "--", relpath])
 
 
 def commits_since(repo: Path, base_ref: str) -> list[str]:

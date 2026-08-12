@@ -2024,3 +2024,219 @@ async def test_git_delete_branch_invalid_token_returns_error(tmp_git_repo):
     })
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
+
+
+# Task: git_get_conflict_details/git_conflict_take_ours/take_theirs/apply_resolution/
+# mark_resolved/abort - line-level conflict inspection + gated resolution tools
+
+def _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, name):
+    """A real, manually-caused merge conflict (NOT via any ICX tool) on README.md -
+    proves conflict inspection/resolution works regardless of what started the merge."""
+    import subprocess
+    clone = tmp_path / name
+    subprocess.run(["git", "clone", str(tmp_git_repo_with_remote), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(clone), check=True)
+
+    (tmp_git_repo_with_remote / "README.md").write_text("remote version\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(tmp_git_repo_with_remote), check=True)
+    subprocess.run(["git", "commit", "-m", "remote change"], cwd=str(tmp_git_repo_with_remote), check=True)
+    subprocess.run(["git", "push"], cwd=str(tmp_git_repo_with_remote), check=True)
+
+    (clone / "README.md").write_text("local version\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(clone), check=True)
+    subprocess.run(["git", "commit", "-m", "local change"], cwd=str(clone), check=True)
+
+    subprocess.run(["git", "fetch", "origin"], cwd=str(clone), check=True)
+    subprocess.run(["git", "merge", "--no-edit", "origin/main"], cwd=str(clone),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # expected to fail with a real conflict
+    return clone
+
+
+async def test_git_get_conflict_details_returns_base_ours_theirs_and_hunks(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "details_clone")
+    result = await dispatch_git_tool("git_get_conflict_details", {
+        "repo_path": str(clone), "file": "README.md",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["base"] == "hello\n"
+    assert payload["ours"] == "local version\n"
+    assert payload["theirs"] == "remote version\n"
+    assert len(payload["hunks"]) == 1
+    assert payload["hunks"][0]["ours"] == "local version"
+    assert payload["hunks"][0]["theirs"] == "remote version"
+    assert payload["conflict_state"] == "CONFLICT_DETECTED"
+
+
+async def test_git_get_conflict_details_missing_file_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_get_conflict_details", {"repo_path": "/fake/repo"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "file" in payload["error"]
+
+
+async def test_git_conflict_take_ours_confirmation_gated_and_executes(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "take_ours_clone")
+
+    first = await dispatch_git_tool("git_conflict_take_ours", {
+        "repo_path": str(clone), "file": "README.md",
+    })
+    first_payload = json.loads(first[0].text)
+    assert first_payload["status"] == "pending_confirmation"
+    assert first_payload["side"] == "ours"
+    assert first_payload["content"] == "local version\n"
+    token = first_payload["token"]
+
+    second = await dispatch_git_tool("git_conflict_take_ours", {
+        "repo_path": str(clone), "file": "README.md", "confirm_token": token,
+    })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert payload["resolved_to"] == "ours"
+    assert (clone / "README.md").read_text(encoding="utf-8") == "local version\n"
+    # not staged yet - conflict_state stays CONFLICT_DETECTED until git_conflict_mark_resolved
+    assert payload["conflict_state"] == "CONFLICT_DETECTED"
+
+
+async def test_git_conflict_take_ours_refuses_for_non_conflicted_file(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_conflict_take_ours", {
+        "repo_path": str(tmp_git_repo), "file": "README.md",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "not currently a conflicted path" in payload["error"]
+
+
+async def test_git_conflict_take_theirs_confirmation_gated_and_executes(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "take_theirs_clone")
+
+    first = await dispatch_git_tool("git_conflict_take_theirs", {
+        "repo_path": str(clone), "file": "README.md",
+    })
+    token = json.loads(first[0].text)["token"]
+    second = await dispatch_git_tool("git_conflict_take_theirs", {
+        "repo_path": str(clone), "file": "README.md", "confirm_token": token,
+    })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert (clone / "README.md").read_text(encoding="utf-8") == "remote version\n"
+
+
+async def test_git_conflict_apply_resolution_shows_diff_and_executes(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "apply_resolution_clone")
+
+    first = await dispatch_git_tool("git_conflict_apply_resolution", {
+        "repo_path": str(clone), "file": "README.md", "resolved_content": "combined version\n",
+    })
+    first_payload = json.loads(first[0].text)
+    assert first_payload["status"] == "pending_confirmation"
+    assert "combined version" in first_payload["diff"]
+    assert "<<<<<<<" in first_payload["diff"]  # shows the current conflicted content being replaced
+    token = first_payload["token"]
+
+    second = await dispatch_git_tool("git_conflict_apply_resolution", {
+        "repo_path": str(clone), "file": "README.md", "resolved_content": "combined version\n",
+        "confirm_token": token,
+    })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert (clone / "README.md").read_text(encoding="utf-8") == "combined version\n"
+
+
+async def test_git_conflict_apply_resolution_refuses_for_non_conflicted_file(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_conflict_apply_resolution", {
+        "repo_path": str(tmp_git_repo), "file": "README.md", "resolved_content": "x",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "not currently a conflicted path" in payload["error"]
+
+
+async def test_git_conflict_mark_resolved_confirmation_gated_and_executes(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "mark_resolved_clone")
+    (clone / "README.md").write_text("resolved content\n", encoding="utf-8")
+
+    first = await dispatch_git_tool("git_conflict_mark_resolved", {
+        "repo_path": str(clone), "files": ["README.md"],
+    })
+    first_payload = json.loads(first[0].text)
+    assert first_payload["status"] == "pending_confirmation"
+    assert first_payload["files"] == ["README.md"]
+    token = first_payload["token"]
+
+    second = await dispatch_git_tool("git_conflict_mark_resolved", {
+        "repo_path": str(clone), "files": ["README.md"], "confirm_token": token,
+    })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert payload["conflict_state"] == "STAGED"
+
+
+async def test_git_conflict_mark_resolved_refuses_when_markers_remain(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "markers_remain_clone")
+    result = await dispatch_git_tool("git_conflict_mark_resolved", {
+        "repo_path": str(clone), "files": ["README.md"],
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "Conflict markers still present" in payload["error"]
+
+
+async def test_git_conflict_mark_resolved_refuses_unrelated_file(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "unrelated_file_clone")
+    (clone / "unrelated.txt").write_text("not part of any conflict", encoding="utf-8")
+    result = await dispatch_git_tool("git_conflict_mark_resolved", {
+        "repo_path": str(clone), "files": ["unrelated.txt"],
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "not currently conflicted paths" in payload["error"]
+
+
+async def test_git_conflict_abort_confirmation_gated_and_executes(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "abort_clone")
+
+    first = await dispatch_git_tool("git_conflict_abort", {"repo_path": str(clone)})
+    first_payload = json.loads(first[0].text)
+    assert first_payload["status"] == "pending_confirmation"
+    assert first_payload["operation"] == "merge"
+    assert first_payload["conflicted_files"] == ["README.md"]
+    token = first_payload["token"]
+
+    second = await dispatch_git_tool("git_conflict_abort", {
+        "repo_path": str(clone), "confirm_token": token,
+    })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert payload["aborted"] == "merge"
+    assert payload["conflict_state"] == "CLEAN"
+
+
+async def test_git_conflict_abort_refuses_when_nothing_in_progress(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_conflict_abort", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "nothing to abort" in payload["error"]
+
+
+async def test_git_conflict_abort_invalid_token_returns_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_conflict_abort", {
+        "repo_path": str(tmp_git_repo), "confirm_token": "bogus",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
