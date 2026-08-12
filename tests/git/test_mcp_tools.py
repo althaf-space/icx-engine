@@ -2371,3 +2371,97 @@ async def test_git_create_mr_refuses_when_source_branch_violates_policy(tmp_git_
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
     assert "Missing JIRA/ticket identifier" in payload["error"]
+
+
+# Task: git_check_dependency_pins tool
+
+async def test_git_check_dependency_pins_auto_discovers_and_resolves_via_local_clone(tmp_git_repo, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import head_sha
+    sha = head_sha(tmp_git_repo)
+    (tmp_git_repo / "package.json").write_text(json.dumps({
+        "dependencies": {"graphs": f"git+https://gitlab.example.com/group/graphs.git#{sha}"},
+    }), encoding="utf-8")
+
+    result = await dispatch_git_tool("git_check_dependency_pins", {
+        "repo_path": str(tmp_git_repo), "target_ref": "main",
+        "dependency_name": "graphs", "dep_repo_path": str(tmp_git_repo),
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert len(payload["dependencies"]) == 1
+    dep = payload["dependencies"][0]
+    assert dep["status"] == "UP_TO_DATE"
+    assert dep["pin"]["name"] == "graphs"
+
+
+async def test_git_check_dependency_pins_explicit_manifests_list(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "requirements.txt").write_text(
+        "graphs @ git+https://github.com/group/graphs.git@abc123#egg=graphs\n", encoding="utf-8",
+    )
+    result = await dispatch_git_tool("git_check_dependency_pins", {
+        "repo_path": str(tmp_git_repo), "target_ref": "main", "manifests": ["requirements.txt"],
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert len(payload["dependencies"]) == 1
+    dep = payload["dependencies"][0]
+    assert dep["resolved"] is False
+    assert "github.com" in dep["reason"]
+
+
+async def test_git_check_dependency_pins_no_manifests_found_returns_empty_list(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_dependency_pins", {
+        "repo_path": str(tmp_git_repo), "target_ref": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["dependencies"] == []
+
+
+async def test_git_check_dependency_pins_missing_target_ref_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_dependency_pins", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "target_ref" in payload["error"]
+
+
+async def test_git_check_dependency_pins_dep_repo_path_requires_dependency_name(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_dependency_pins", {
+        "repo_path": str(tmp_git_repo), "target_ref": "main", "dep_repo_path": str(tmp_git_repo),
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "dependency_name" in payload["error"]
+
+
+async def test_git_check_dependency_pins_check_paths_requires_dependency_name(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_dependency_pins", {
+        "repo_path": str(tmp_git_repo), "target_ref": "main", "check_paths": ["x.py"],
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "dependency_name" in payload["error"]
+
+
+async def test_git_check_dependency_pins_missing_manifest_file_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_dependency_pins", {
+        "repo_path": str(tmp_git_repo), "target_ref": "main", "manifests": ["does_not_exist.json"],
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "does_not_exist.json" in payload["error"]
+
+
+async def test_git_check_dependency_pins_missing_repo_path_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_dependency_pins", {"target_ref": "main"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "repo_path" in payload["error"]

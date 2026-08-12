@@ -1423,3 +1423,30 @@ def test_abort_in_progress_operation_aborts_rebase(tmp_git_repo):
     assert not (tmp_git_repo / ".git" / "rebase-merge").exists()
     assert not (tmp_git_repo / ".git" / "rebase-apply").exists()
     assert conflicted_files(tmp_git_repo) == []
+
+
+# Task: resolve_ref - tolerant ref-to-sha resolution for dependency-pin analysis
+from icx_engine.git.gitcmd import resolve_ref, head_sha
+
+
+def test_resolve_ref_resolves_branch_name(tmp_git_repo):
+    assert resolve_ref(tmp_git_repo, "main") == head_sha(tmp_git_repo)
+
+
+def test_resolve_ref_resolves_full_sha(tmp_git_repo):
+    sha = head_sha(tmp_git_repo)
+    assert resolve_ref(tmp_git_repo, sha) == sha
+
+
+def test_resolve_ref_resolves_short_sha(tmp_git_repo):
+    sha = head_sha(tmp_git_repo)
+    assert resolve_ref(tmp_git_repo, sha[:8]) == sha
+
+
+def test_resolve_ref_returns_none_for_unresolvable_ref(tmp_git_repo):
+    assert resolve_ref(tmp_git_repo, "not-a-real-ref") is None
+
+
+def test_resolve_ref_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        resolve_ref(tmp_git_repo, _OPTION_LIKE)

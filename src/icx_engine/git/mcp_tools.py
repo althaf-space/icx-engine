@@ -54,6 +54,7 @@ _CONFLICT_MARK_RESOLVED_TOOL = "git_conflict_mark_resolved"
 _CONFLICT_ABORT_TOOL = "git_conflict_abort"
 _CHECK_BRANCH_POLICY_TOOL = "git_check_branch_name_policy"
 _SET_BRANCH_POLICY_TOOL = "git_set_branch_policy"
+_CHECK_DEPENDENCY_PINS_TOOL = "git_check_dependency_pins"
 
 GIT_TOOLS: list[Tool] = [
     Tool(
@@ -936,6 +937,47 @@ GIT_TOOLS: list[Tool] = [
                 "require_ticket_in_branch_name": {"type": "boolean"},
             },
             "required": ["repo_path", "require_ticket_in_branch_name"],
+        },
+    ),
+    Tool(
+        name=_CHECK_DEPENDENCY_PINS_TOOL,
+        description=(
+            "USE WHEN diagnosing whether a git-VCS dependency (package.json/requirements*.txt/"
+            "pyproject.toml pinning a package to a git commit/branch/tag) is stale relative to that "
+            "dependency's OWN target branch - e.g. 'is graphs pinned to an old commit of "
+            "development?'. Parses git dependency references from the given manifests - "
+            "auto-discovers package.json/requirements.txt/pyproject.toml at repo_path's root if "
+            "manifests is omitted. Supports npm's git+https/git+ssh/git:// spec form, pip/poetry's "
+            "git+scheme://...@ref form (with or without #egg=name), and poetry's "
+            "{git=..., rev=|branch=|tag=...} inline-table form - does NOT parse gitlab:/github: npm "
+            "shorthand or TOML via a real parser (regex-based, deliberately narrow; unsupported "
+            "manifest types are skipped, not treated as an error). For each pin found, resolves the "
+            "pinned ref and target_ref to real commits - via a LOCAL clone (pass dep_repo_path, only "
+            "meaningful together with dependency_name to disambiguate which dependency it's for) if "
+            "one is checked out, else via an ACTIVE GITLAB CONNECTION matching that dependency's own "
+            "host (checked across every configured connection, not just the active one) - a "
+            "dependency on a host with neither is reported resolved=false with a clear reason, never "
+            "guessed (no GitHub/Bitbucket client exists here). target_ref applies to every dependency "
+            "checked in one call - if different dependencies need different target branches, call "
+            "this once per dependency_name. check_paths (only meaningful with dependency_name) "
+            "additionally reports missing_paths - which of those paths don't exist at the target "
+            "commit, e.g. confirming 'pinned commit is missing the ./graphs path the consumer "
+            "imports'. Each result's status: UP_TO_DATE/BEHIND (commits_behind counted)/INCOMPATIBLE "
+            "(history diverged from target, or a checked path is missing)/UNRESOLVED (resolved=false "
+            "- see reason). Read-only, UNGATED - makes no local or remote mutation. Requires a valid "
+            "git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "target_ref": {"type": "string"},
+                "manifests": {"type": "array", "items": {"type": "string"}},
+                "dependency_name": {"type": "string"},
+                "dep_repo_path": {"type": "string"},
+                "check_paths": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["repo_path", "target_ref"],
         },
     ),
 ]
@@ -2295,6 +2337,47 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             mgr.validate()
             mgr.set_branch_name_policy(require_ticket)
             return _ok({"require_ticket_in_branch_name": require_ticket})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _CHECK_DEPENDENCY_PINS_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        target_ref = arguments.get("target_ref")
+        if not target_ref or not isinstance(target_ref, str):
+            return _err("target_ref is required and must be a non-empty string.")
+        dependency_name = arguments.get("dependency_name")
+        dep_repo_path_arg = arguments.get("dep_repo_path")
+        check_paths = arguments.get("check_paths")
+        if dep_repo_path_arg and not dependency_name:
+            return _err("dep_repo_path requires dependency_name to disambiguate which dependency it applies to.")
+        if check_paths and not dependency_name:
+            return _err("check_paths requires dependency_name to disambiguate which dependency it applies to.")
+        try:
+            from icx_engine.git import deps
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            manifest_names = arguments.get("manifests")
+            if manifest_names is None:
+                manifest_names = [
+                    n for n in ("package.json", "requirements.txt", "pyproject.toml")
+                    if (mgr.repo_root / n).exists()
+                ]
+            manifests = {}
+            for manifest_name in manifest_names:
+                manifest_path = mgr.repo_root / manifest_name
+                if not manifest_path.exists():
+                    return _err(f"Manifest '{manifest_name}' does not exist at repo_path.")
+                manifests[manifest_name] = manifest_path.read_text(encoding="utf-8", errors="replace")
+
+            connections = list(ConfigManager.load().gitlab_connections.values())
+            reports = await deps.check_dependency_pins(
+                manifests, target_ref, dependency_name=dependency_name,
+                dep_repo_path=Path(dep_repo_path_arg) if dep_repo_path_arg else None,
+                check_paths=check_paths, gitlab_connections=connections,
+            )
+            return _ok({"dependencies": [deps.report_to_dict(r) for r in reports]})
         except Exception as exc:
             return _err(str(exc))
 

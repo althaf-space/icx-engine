@@ -218,7 +218,9 @@ ICX/
 |   |   |                       # markers and aborts whichever is actually running - see this module's own
 |   |   |                       # docstring for why its one `git rebase --abort` call is a deliberate, narrow
 |   |   |                       # exception to "no rebase": it only ever backs one out, never starts/continues/
-|   |   |                       # drives one).
+|   |   |                       # drives one). resolve_ref() (`rev-parse --verify <ref>^{commit}` - tolerant
+|   |   |                       # branch/tag/full-or-short-sha to full-sha resolution, returns None rather than
+|   |   |                       # raising for an unresolvable ref) backs deps.py's dependency-pin analysis below.
 |   |   +-- naming.py           # branch-name derivation from ticket key + summary
 |   |   +-- policy.py           # validate_branch_name(branch, require_ticket_suffix, pattern_description) -
 |   |   |                       # configurable branch-name policy validation, no org-specific values hardcoded.
@@ -230,6 +232,30 @@ ICX/
 |   |   |                       # existing ticketless-branch feature; a repo opts in explicitly via
 |   |   |                       # git_set_branch_policy after e.g. a real remote pre-receive hook rejection, ICX
 |   |   |                       # never infers an org's real policy automatically).
+|   |   +-- deps.py             # Dependency-pin analysis - DependencyPin/DependencyPinReport dataclasses;
+|   |   |                       # parse_package_json_git_deps/parse_requirements_txt_git_deps/
+|   |   |                       # parse_pyproject_toml_git_deps (regex-based, deliberately narrow - npm's
+|   |   |                       # git+https/git+ssh/git:// spec form, pip/poetry's git+scheme://...@ref form incl.
+|   |   |                       # #egg=name, poetry's {git=..., rev=|branch=|tag=...} inline-table form; no
+|   |   |                       # gitlab:/github: npm shorthand, no real TOML parser); parse_manifest_git_deps()
+|   |   |                       # dispatches by basename, raises ValueError for anything else (callers skip, never
+|   |   |                       # treat as an error). Resolving the DEPENDENCY's own repo (never the consumer's -
+|   |   |                       # that's just where the manifest lives) - resolve_via_local_clone() (reuses
+|   |   |                       # gitcmd.resolve_ref/is_ancestor/unique_commit_count/file_exists_at_ref directly,
+|   |   |                       # real ancestor/distance checks) or resolve_via_gitlab() (reuses
+|   |   |                       # gitlab/client.py's list_commits/compare/get_repository_file - no new external
+|   |   |                       # client added) - _find_matching_gitlab_connection() checks every configured
+|   |   |                       # connection's host, not just the active one, since a dependency can live on a
+|   |   |                       # different GitLab host than the consuming project. Neither available (e.g. a
+|   |   |                       # GitHub-hosted dependency, no client for that host) -> resolved=False with a clear
+|   |   |                       # reason, never guessed. check_dependency_pins() is the orchestrator: parses every
+|   |   |                       # manifest, optional dependency_name filter (required to make dep_repo_path/
+|   |   |                       # check_paths unambiguous when more than one pin exists), picks local-clone vs
+|   |   |                       # GitLab per pin, never both. status: UP_TO_DATE (equal, and every check_paths entry
+|   |   |                       # exists at target) / BEHIND (ancestor, commits_behind counted) / INCOMPATIBLE
+|   |   |                       # (history diverged from target, OR any check_paths entry missing at target -
+|   |   |                       # e.g. "pinned commit is missing the ./graphs path") / left resolved=False when
+|   |   |                       # neither ref resolves.
 |   |   +-- settings.py         # per-repo ICX settings file (parent branch, etc.)
 |   |   +-- safety.py           # create_backup (timestamped snapshot, taken before a risky reverse-merge/
 |   |   |                       # conflict-resolution attempt only, kept as history via prune_old_backups) +
@@ -398,7 +424,15 @@ ICX/
 |   |                           # git_create_mr both now call mgr.check_branch_name_policy() on the branch about to
 |   |                           # be pushed BEFORE issuing a confirm_token - a policy violation refuses outright
 |   |                           # (same hard-gate shape as git_delete_branch's unique_commits pre-check), never lets
-|   |                           # a locally-valid-but-policy-violating branch reach a token, let alone a real push.
+|   |                           # a locally-valid-but-policy-violating branch reach a token, let alone a real push./
+|   |                           # git_check_dependency_pins (read-only, ungated - makes no local or remote mutation;
+|   |                           # auto-discovers package.json/requirements.txt/pyproject.toml at repo_path's root if
+|   |                           # manifests is omitted; dep_repo_path/check_paths both require dependency_name to
+|   |                           # disambiguate when more than one pin is found - enforced before deps.py is even
+|   |                           # called; resolves via deps.check_dependency_pins(), which itself picks local-clone
+|   |                           # vs the first GitLab connection - across every configured connection via
+|   |                           # ConfigManager.load().gitlab_connections.values(), not just the active one -
+|   |                           # whose host matches each dependency's own parsed URL host)
 |   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag/list_branches/
 |   |                           # list_pipelines/get_pipeline (pipeline detail + its jobs, one call)/get_job_trace/
 |   |                           # get_repository_file, plus the read-only list_merge_requests/

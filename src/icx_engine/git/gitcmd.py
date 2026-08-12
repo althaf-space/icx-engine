@@ -335,6 +335,18 @@ def unique_commit_count(repo: Path, branch: str, target: str) -> int:
     return int(_stdout(result))
 
 
+def resolve_ref(repo: Path, ref: str) -> str | None:
+    """Resolves ref (branch/tag/full or short sha/anything git understands)
+    to its full commit sha - tolerant of an unresolvable ref (returns None
+    rather than raising), used by dependency-pin analysis to check a pinned
+    ref against a target branch without assuming either exists."""
+    _reject_option_like(ref, "ref")
+    result = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], allowed_returncodes={128})
+    if result.returncode != 0:
+        return None
+    return _stdout(result)
+
+
 def find_conflict_markers(repo: Path, relpaths: list[str]) -> dict[str, list[str]]:
     """Scan each given file's ON-DISK content (not git-tracked state) for
     literal conflict-marker lines. Universal, language-agnostic check (design
