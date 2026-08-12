@@ -533,7 +533,7 @@ async def test_git_reverse_merge_reports_conflict_with_scratch_branch(tmp_git_re
 
 async def test_git_create_mr_confirmation_gated_and_executes(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
-    mock_result = type("R", (), {"mr_iid": 5, "created": True, "merged": True, "refusal_reason": None})()
+    mock_result = type("R", (), {"mr_iid": 5, "created": True, "merged": True, "merge_status": "MERGEABLE", "refusal_reason": None})()
     from icx_engine.models.config import GitLabConnection
     conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
     monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
@@ -557,7 +557,7 @@ async def test_git_create_mr_confirmation_gated_and_executes(tmp_git_repo_with_r
 
 async def test_git_create_mr_nullable_ticket_key_executes(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
-    mock_result = type("R", (), {"mr_iid": 6, "created": True, "merged": False, "refusal_reason": None})()
+    mock_result = type("R", (), {"mr_iid": 6, "created": True, "merged": False, "merge_status": "BLOCKED", "refusal_reason": None})()
     from icx_engine.models.config import GitLabConnection
     conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
     monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
@@ -1740,3 +1740,287 @@ async def test_git_retag_missing_branch_returns_named_error():
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
     assert "branch" in payload["error"]
+
+
+# Task: git_stash_create/list/apply/pop/drop tools
+
+async def test_git_stash_create_and_list_round_trip(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    result = await dispatch_git_tool("git_stash_create", {
+        "repo_path": str(tmp_git_repo), "message": "before sync",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+
+    listed = await dispatch_git_tool("git_stash_list", {"repo_path": str(tmp_git_repo)})
+    stashes = json.loads(listed[0].text)["stashes"]
+    assert len(stashes) == 1
+    assert stashes[0]["ref"] == "stash@{0}"
+    assert stashes[0]["message"].endswith("before sync")
+
+
+async def test_git_stash_create_missing_message_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_stash_create", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "message" in payload["error"]
+
+
+async def test_git_stash_apply_restores_without_removing(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    await dispatch_git_tool("git_stash_create", {"repo_path": str(tmp_git_repo), "message": "keep"})
+
+    result = await dispatch_git_tool("git_stash_apply", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert (tmp_git_repo / "new.txt").exists()
+
+    listed = await dispatch_git_tool("git_stash_list", {"repo_path": str(tmp_git_repo)})
+    assert len(json.loads(listed[0].text)["stashes"]) == 1
+
+
+async def test_git_stash_pop_removes_after_restoring(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    await dispatch_git_tool("git_stash_create", {"repo_path": str(tmp_git_repo), "message": "pop me"})
+
+    result = await dispatch_git_tool("git_stash_pop", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert (tmp_git_repo / "new.txt").exists()
+
+    listed = await dispatch_git_tool("git_stash_list", {"repo_path": str(tmp_git_repo)})
+    assert json.loads(listed[0].text)["stashes"] == []
+
+
+async def test_git_stash_drop_confirmation_gated_and_executes(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    await dispatch_git_tool("git_stash_create", {"repo_path": str(tmp_git_repo), "message": "drop me"})
+
+    first = await dispatch_git_tool("git_stash_drop", {"repo_path": str(tmp_git_repo)})
+    first_payload = json.loads(first[0].text)
+    assert first_payload["status"] == "pending_confirmation"
+    assert first_payload["message"].endswith("drop me")
+    token = first_payload["token"]
+
+    second = await dispatch_git_tool("git_stash_drop", {
+        "repo_path": str(tmp_git_repo), "confirm_token": token,
+    })
+    assert json.loads(second[0].text)["ok"] is True
+
+    listed = await dispatch_git_tool("git_stash_list", {"repo_path": str(tmp_git_repo)})
+    assert json.loads(listed[0].text)["stashes"] == []
+
+
+async def test_git_stash_drop_without_confirmation_does_not_drop(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    await dispatch_git_tool("git_stash_create", {"repo_path": str(tmp_git_repo), "message": "still here"})
+    await dispatch_git_tool("git_stash_drop", {"repo_path": str(tmp_git_repo)})
+    listed = await dispatch_git_tool("git_stash_list", {"repo_path": str(tmp_git_repo)})
+    assert len(json.loads(listed[0].text)["stashes"]) == 1
+
+
+async def test_git_stash_drop_unknown_ref_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_stash_drop", {
+        "repo_path": str(tmp_git_repo), "ref": "stash@{5}",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+
+
+async def test_git_stash_drop_invalid_token_returns_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_stash_drop", {
+        "repo_path": str(tmp_git_repo), "confirm_token": "bogus",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+
+
+# Task: git_fetch/git_pull/git_sync tools
+
+async def test_git_fetch_succeeds_against_real_remote(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_fetch", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["fetched"] is True
+
+
+async def test_git_fetch_missing_repo_path_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_fetch", {})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "repo_path" in payload["error"]
+
+
+async def test_git_pull_ff_only_reports_up_to_date(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_pull", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["status"] == "up_to_date"
+
+
+async def test_git_pull_invalid_strategy_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_pull", {
+        "repo_path": str(tmp_git_repo), "strategy": "rebase",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "strategy" in payload["error"]
+
+
+async def test_git_pull_ticket_key_wrong_type_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_pull", {
+        "repo_path": str(tmp_git_repo), "strategy": "merge", "ticket_key": 123,
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "ticket_key" in payload["error"]
+
+
+async def test_git_sync_merges_diverged_own_remote_branch(tmp_git_repo_with_remote, tmp_path):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    import subprocess
+    bare_origin = tmp_path / "origin.git"
+    other_clone = tmp_path / "sync_other_clone"
+    subprocess.run(["git", "clone", str(bare_origin), str(other_clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(other_clone), check=True)
+    (other_clone / "remote_change.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "remote_change.txt"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "commit", "-m", "remote change"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "push"], cwd=str(other_clone), check=True)
+
+    (tmp_git_repo_with_remote / "local_change.txt").write_text("y", encoding="utf-8")
+
+    result = await dispatch_git_tool("git_sync", {
+        "repo_path": str(tmp_git_repo_with_remote), "ticket_key": "ABC-1",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["status"] == "merged"
+    assert (tmp_git_repo_with_remote / "remote_change.txt").exists()
+    assert (tmp_git_repo_with_remote / "local_change.txt").exists()  # stashed dirty tree restored
+
+
+async def test_git_sync_missing_repo_path_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_sync", {})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "repo_path" in payload["error"]
+
+
+# Task: git_delete_branch tool
+
+async def test_git_delete_branch_merged_branch_confirmation_gated_and_executes(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, local_branch_exists
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+
+    first = await dispatch_git_tool("git_delete_branch", {
+        "repo_path": str(tmp_git_repo), "branch": "feature/merged-ABC-1", "target": "main",
+    })
+    first_payload = json.loads(first[0].text)
+    assert first_payload["status"] == "pending_confirmation"
+    assert first_payload["unique_commits"] == 0
+    token = first_payload["token"]
+
+    second = await dispatch_git_tool("git_delete_branch", {
+        "repo_path": str(tmp_git_repo), "branch": "feature/merged-ABC-1", "target": "main",
+        "confirm_token": token,
+    })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert payload["local_deleted"] is True
+    assert local_branch_exists(tmp_git_repo, "feature/merged-ABC-1") is False
+
+
+async def test_git_delete_branch_refuses_unmerged_branch_before_issuing_token(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit, local_branch_exists
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    commit(tmp_git_repo, "ABC-1 unique commit")
+    checkout(tmp_git_repo, "main")
+
+    result = await dispatch_git_tool("git_delete_branch", {
+        "repo_path": str(tmp_git_repo), "branch": "feature/unmerged-ABC-1", "target": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "cannot be safely deleted" in payload["error"]
+    assert "token" not in payload  # never issued - refused outright
+    assert local_branch_exists(tmp_git_repo, "feature/unmerged-ABC-1") is True
+
+
+async def test_git_delete_branch_force_true_issues_token_for_unmerged_branch(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    commit(tmp_git_repo, "ABC-1 unique commit")
+    checkout(tmp_git_repo, "main")
+
+    first = await dispatch_git_tool("git_delete_branch", {
+        "repo_path": str(tmp_git_repo), "branch": "feature/unmerged-ABC-1", "target": "main", "force": True,
+    })
+    first_payload = json.loads(first[0].text)
+    assert first_payload["status"] == "pending_confirmation"
+    assert first_payload["unique_commits"] == 1
+    token = first_payload["token"]
+
+    second = await dispatch_git_tool("git_delete_branch", {
+        "repo_path": str(tmp_git_repo), "branch": "feature/unmerged-ABC-1", "target": "main",
+        "confirm_token": token,
+    })
+    assert json.loads(second[0].text)["ok"] is True
+
+
+async def test_git_delete_branch_refuses_current_branch(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    create_branch_from(tmp_git_repo, "feature/current-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/current-ABC-1")
+
+    result = await dispatch_git_tool("git_delete_branch", {
+        "repo_path": str(tmp_git_repo), "branch": "feature/current-ABC-1", "target": "main", "force": True,
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "currently checked-out" in payload["error"]
+
+
+async def test_git_delete_branch_missing_target_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_delete_branch", {
+        "repo_path": str(tmp_git_repo), "branch": "feature/x-ABC-1",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "target" in payload["error"]
+
+
+async def test_git_delete_branch_invalid_token_returns_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_delete_branch", {
+        "repo_path": str(tmp_git_repo), "confirm_token": "bogus",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False

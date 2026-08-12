@@ -982,3 +982,198 @@ def test_read_file_at_ref_rejects_option_like_ref(tmp_git_repo):
 def test_read_file_at_ref_rejects_path_traversal(tmp_git_repo):
     with pytest.raises(GitCommandError):
         read_file_at_ref(tmp_git_repo, "HEAD", "../outside.txt")
+
+
+# Task: stash_list/apply/drop, stash_pop(ref=...) - full stash API
+from icx_engine.git.gitcmd import stash_list, stash_apply, stash_drop
+
+
+def test_stash_list_empty_on_clean_repo(tmp_git_repo):
+    assert stash_list(tmp_git_repo) == []
+
+
+def test_stash_list_reports_message_and_ref_newest_first(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    stash_push(tmp_git_repo, "first stash")
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    stash_push(tmp_git_repo, "second stash")
+    stashes = stash_list(tmp_git_repo)
+    assert len(stashes) == 2
+    assert stashes[0]["ref"] == "stash@{0}"
+    assert stashes[0]["message"].endswith("second stash")
+    assert stashes[1]["ref"] == "stash@{1}"
+    assert stashes[1]["message"].endswith("first stash")
+
+
+def test_stash_apply_restores_changes_without_removing_stash(tmp_git_repo):
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    stash_push(tmp_git_repo, "keep me")
+    assert is_dirty(tmp_git_repo) is False
+    stash_apply(tmp_git_repo)
+    assert is_dirty(tmp_git_repo) is True
+    assert len(stash_list(tmp_git_repo)) == 1  # still there - apply never removes it
+
+
+def test_stash_apply_by_explicit_ref(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    stash_push(tmp_git_repo, "older")
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    stash_push(tmp_git_repo, "newer")
+    stash_apply(tmp_git_repo, "stash@{1}")
+    assert (tmp_git_repo / "a.txt").exists()
+    assert not (tmp_git_repo / "b.txt").exists()
+
+
+def test_stash_pop_with_explicit_ref_removes_only_that_stash(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    stash_push(tmp_git_repo, "older")
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    stash_push(tmp_git_repo, "newer")
+    stash_pop(tmp_git_repo, "stash@{1}")
+    assert (tmp_git_repo / "a.txt").exists()
+    remaining = stash_list(tmp_git_repo)
+    assert len(remaining) == 1
+    assert remaining[0]["message"].endswith("newer")
+
+
+def test_stash_pop_default_still_pops_top_stash(tmp_git_repo):
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    stash_push(tmp_git_repo, "top")
+    stash_pop(tmp_git_repo)
+    assert (tmp_git_repo / "new.txt").exists()
+    assert stash_list(tmp_git_repo) == []
+
+
+def test_stash_drop_removes_stash_permanently(tmp_git_repo):
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    stash_push(tmp_git_repo, "to drop")
+    stash_drop(tmp_git_repo)
+    assert stash_list(tmp_git_repo) == []
+    assert not (tmp_git_repo / "new.txt").exists()
+
+
+def test_stash_apply_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        stash_apply(tmp_git_repo, _OPTION_LIKE)
+
+
+def test_stash_drop_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        stash_drop(tmp_git_repo, _OPTION_LIKE)
+
+
+def test_stash_pop_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        stash_pop(tmp_git_repo, _OPTION_LIKE)
+
+
+# Task: fetch() ref/prune options
+def test_fetch_with_ref_updates_that_branchs_remote_tracking_ref(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    bare_origin = tmp_path / "origin.git"
+    clone = tmp_path / "clone_fetch_ref"
+    subprocess.run(["git", "clone", str(bare_origin), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    create_branch_from(tmp_git_repo_with_remote, "feature/only-remote", "main")
+    checkout(tmp_git_repo_with_remote, "feature/only-remote")
+    (tmp_git_repo_with_remote / "extra.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["extra.txt"])
+    commit(tmp_git_repo_with_remote, "ABC-1 extra")
+    subprocess.run(["git", "push", "origin", "feature/only-remote"], cwd=str(tmp_git_repo_with_remote), check=True)
+    fetch(clone, ref="feature/only-remote")
+    result = subprocess.run(["git", "rev-parse", "--verify", "origin/feature/only-remote"],
+                             cwd=str(clone), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 0
+
+
+def test_fetch_with_prune_removes_deleted_remote_tracking_refs(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    # Clone from the shared BARE origin (tmp_path / "origin.git", set up by the
+    # tmp_git_repo_with_remote fixture) - not from tmp_git_repo_with_remote's own
+    # working copy, which would make this clone's "origin" a different, unrelated
+    # non-bare remote that a push to the real bare origin never touches.
+    bare_origin = tmp_path / "origin.git"
+    clone = tmp_path / "clone_fetch_prune"
+    subprocess.run(["git", "clone", str(bare_origin), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    create_branch_from(tmp_git_repo_with_remote, "feature/to-be-deleted", "main")
+    subprocess.run(["git", "push", "origin", "feature/to-be-deleted"], cwd=str(tmp_git_repo_with_remote), check=True)
+    fetch(clone)
+    result_before = subprocess.run(["git", "branch", "-r"], cwd=str(clone), check=True, stdout=subprocess.PIPE)
+    assert "feature/to-be-deleted" in result_before.stdout.decode()
+    subprocess.run(["git", "push", "origin", "--delete", "feature/to-be-deleted"], cwd=str(tmp_git_repo_with_remote), check=True)
+    fetch(clone, prune=True)
+    result_after = subprocess.run(["git", "branch", "-r"], cwd=str(clone), check=True, stdout=subprocess.PIPE)
+    assert "feature/to-be-deleted" not in result_after.stdout.decode()
+
+
+def test_fetch_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        fetch(tmp_git_repo, ref=_OPTION_LIKE)
+
+
+# Task: is_ancestor/unique_commit_count/delete_remote_branch - branch-delete safety primitives
+from icx_engine.git.gitcmd import is_ancestor, unique_commit_count, delete_remote_branch
+
+
+def test_is_ancestor_true_when_fully_merged(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    assert is_ancestor(tmp_git_repo, "feature/merged-ABC-1", "main") is True
+
+
+def test_is_ancestor_false_when_branch_has_unique_commits(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    commit(tmp_git_repo, "ABC-1 unique commit")
+    checkout(tmp_git_repo, "main")
+    assert is_ancestor(tmp_git_repo, "feature/unmerged-ABC-1", "main") is False
+
+
+def test_is_ancestor_rejects_option_like_refs(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        is_ancestor(tmp_git_repo, _OPTION_LIKE, "main")
+    with pytest.raises(GitCommandError):
+        is_ancestor(tmp_git_repo, "main", _OPTION_LIKE)
+
+
+def test_unique_commit_count_zero_when_fully_merged(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    assert unique_commit_count(tmp_git_repo, "feature/merged-ABC-1", "main") == 0
+
+
+def test_unique_commit_count_counts_unreachable_commits(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    for i in range(3):
+        (tmp_git_repo / f"f{i}.txt").write_text("x", encoding="utf-8")
+        stage_files(tmp_git_repo, [f"f{i}.txt"])
+        commit(tmp_git_repo, f"ABC-1 commit {i}")
+    assert unique_commit_count(tmp_git_repo, "feature/unmerged-ABC-1", "main") == 3
+
+
+def test_unique_commit_count_rejects_option_like_refs(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        unique_commit_count(tmp_git_repo, _OPTION_LIKE, "main")
+    with pytest.raises(GitCommandError):
+        unique_commit_count(tmp_git_repo, "main", _OPTION_LIKE)
+
+
+def test_delete_remote_branch_removes_it_from_remote(tmp_git_repo_with_remote):
+    create_branch_from(tmp_git_repo_with_remote, "feature/remote-delete-me", "main")
+    checkout(tmp_git_repo_with_remote, "feature/remote-delete-me")
+    push(tmp_git_repo_with_remote, "feature/remote-delete-me")
+    assert remote_branch_exists(tmp_git_repo_with_remote, "feature/remote-delete-me") is True
+    delete_remote_branch(tmp_git_repo_with_remote, "feature/remote-delete-me")
+    assert remote_branch_exists(tmp_git_repo_with_remote, "feature/remote-delete-me") is False
+
+
+def test_delete_remote_branch_rejects_option_like_branch(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        delete_remote_branch(tmp_git_repo, _OPTION_LIKE)
+
+
+def test_delete_remote_branch_rejects_option_like_remote(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        delete_remote_branch(tmp_git_repo, "main", remote=_OPTION_LIKE)

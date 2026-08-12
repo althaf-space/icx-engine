@@ -199,6 +199,13 @@ ICX/
 |   |   |                       # (credential.helper disabled, GIT_TERMINAL_PROMPT=0 - so an automated call never hangs
 |   |   |                       # on a prompt) - this is the plumbing manager._gitlab_push_auth_env uses to inject a
 |   |   |                       # GitLab auth header for network calls that need one; omitted, behavior is unchanged.
+|   |   |                       # fetch() also takes ref (fetch one branch) and prune (drop stale remote-tracking refs).
+|   |   |                       # Full stash API: stash_list() (%gd/%s via --format, ref+message per entry, newest
+|   |   |                       # first), stash_apply()/stash_drop() (explicit ref, default stash@{0}), stash_pop()
+|   |   |                       # now also takes an optional ref (was top-of-stack only). Branch-delete safety
+|   |   |                       # primitives: is_ancestor() (`merge-base --is-ancestor`), unique_commit_count()
+|   |   |                       # (`rev-list --count` - commits that would be lost), delete_remote_branch() (a real
+|   |   |                       # `push --delete`, routed through the same extra_env auth plumbing as push()/fetch()).
 |   |   +-- naming.py           # branch-name derivation from ticket key + summary
 |   |   +-- settings.py         # per-repo ICX settings file (parent branch, etc.)
 |   |   +-- safety.py           # create_backup (timestamped snapshot, taken before a risky reverse-merge/
@@ -225,7 +232,29 @@ ICX/
 |   |   |                       # create_mr_for_ticket/post_merge_cleanup all accept `str | None`. When absent, backup/
 |   |   |                       # stash/scratch-branch naming falls back to slugify(branch) instead (same fallback
 |   |   |                       # stage_and_commit already used) - never a manufactured ticket id. create_mr_for_ticket's
-|   |   |                       # MR title is ticket_summary alone (no prefix) when ticket_key is None.
+|   |   |                       # MR title is ticket_summary alone (no prefix) when ticket_key is None. Also now takes
+|   |   |                       # max_poll_attempts/poll_delay_seconds, passed through to create_and_merge_mr's bounded
+|   |   |                       # mergeability poll (gitlab/service.py).
+|   |   |                       #
+|   |   |                       # reverse_merge_standard's own fetch() now passes self._auth_env() too - it was the one
+|   |   |                       # network call in this class _auth_env's docstring had flagged as still missing (every
+|   |   |                       # other one - sync_with_remote/create_mr_for_ticket/post_merge_cleanup - already routed
+|   |   |                       # through it). Real fix for git_reverse_merge failing with "could not read Username" on
+|   |   |                       # an HTTPS origin despite a valid GitLab connection.
+|   |   |                       #
+|   |   |                       # pull(remote, strategy, ticket_key) - git pull's fetch+integrate step, scoped to the
+|   |   |                       # CURRENT branch's own remote counterpart (never a different parent branch).
+|   |   |                       # strategy='ff-only' (default) is sync_with_remote's existing behavior. strategy='merge'
+|   |   |                       # reuses reverse_merge_standard/start_conflict_resolution VERBATIM, passing the current
+|   |   |                       # branch itself as "parent_branch" - zero duplicated conflict-quarantine logic. Backs
+|   |   |                       # git_pull and git_sync (mcp_tools.py) - git_sync is a thin wrapper always calling
+|   |   |                       # strategy='merge', git_pull exposes strategy as a real choice, defaulting 'ff-only'.
+|   |   |                       #
+|   |   |                       # delete_branch_safely(branch, target, remote, delete_local, delete_remote, force) -
+|   |   |                       # refuses unconditionally (never force-overridable - a hard git constraint) if branch
+|   |   |                       # is the current branch; refuses (force=True required) if unique_commit_count(branch,
+|   |   |                       # target) > 0 - replaces the manually-run `git merge-base --is-ancestor`/
+|   |   |                       # `git rev-list --count`. delete_local/delete_remote are independent.
 |   |   |                       #
 |   |   |                       # GitLab auth for git-network calls (fetch/ls-remote/push) - the fix for git push (and
 |   |   |                       # later, git_create_mr's own fetch/ls-remote) failing with "could not read Username" even
@@ -304,7 +333,16 @@ ICX/
 |   |                           # environment token and the proposed
 |   |                           # tag name against the project's real, live-fetched .gitlab-ci.yml before ever
 |   |                           # proposing anything - see gitlab/ci_tags.py below; degrades to a surfaced
-|   |                           # ci_check_error warning, never a hard block, if the CI file itself can't be fetched)
+|   |                           # ci_check_error warning, never a hard block, if the CI file itself can't be fetched)/
+|   |                           # git_stash_create/git_stash_list/git_stash_apply/git_stash_pop (all four ungated -
+|   |                           # nothing is lost by stashing, and a conflicting apply/pop leaves the stash intact)/
+|   |                           # git_stash_drop (confirmation-gated - permanent, shows ref+message before the first
+|   |                           # token)/git_fetch (ungated - never touches the working tree)/git_pull (strategy=
+|   |                           # 'ff-only'|'merge', ungated - safe by construction, same reasoning as reverse_merge)/
+|   |                           # git_sync (thin wrapper: mgr.pull(strategy='merge') always, one-shot "just sync me")/
+|   |                           # git_delete_branch (confirmation-gated once safety checks pass - computes
+|   |                           # unique_commits and refuses BEFORE issuing a token if >0 and force is not set;
+|   |                           # deleting the current branch is refused unconditionally, not force-overridable)
 |   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag/list_branches/
 |   |                           # list_pipelines/get_pipeline (pipeline detail + its jobs, one call)/get_job_trace/
 |   |                           # get_repository_file, plus the read-only list_merge_requests/
@@ -314,7 +352,15 @@ ICX/
 |   |                           # real .gitlab-ci.yml's `only:` regex-literal tag patterns, verified live against a real
 |   |                           # project's CI config; requires the new `pyyaml` dependency), service.py
 |   |                           # (connection + MR business logic + group_tags_by_environment/propose_next_tag/
-|   |                           # parse_tag_name), mcp_tools.py (GITLAB_TOOLS + dispatch_gitlab_tool() -
+|   |                           # parse_tag_name; classify_merge_status() buckets a raw MR body's merge_status/
+|   |                           # detailed_merge_status into MERGEABLE/CONFLICTED/CHECKING/BLOCKED/UNKNOWN - any named
+|   |                           # non-conflict refusal reason (not_approved/need_rebase/ci_still_running/...) is
+|   |                           # BLOCKED, never misreported as CONFLICTED; wait_for_mergeable() bounded-polls one MR
+|   |                           # until terminal (max_attempts/delay_seconds, never indefinite); create_and_merge_mr()
+|   |                           # now treats a refusal right after creation as potentially transitional - GitLab
+|   |                           # computes mergeability async - polls via wait_for_mergeable and retries the merge
+|   |                           # EXACTLY ONCE if it settles on MERGEABLE, never retries a genuine CONFLICTED/BLOCKED),
+|   |                           # mcp_tools.py (GITLAB_TOOLS + dispatch_gitlab_tool() -
 |   |                           # gitlab_list_merge_requests/gitlab_mr_changes/gitlab_list_commits/gitlab_compare/
 |   |                           # gitlab_list_tags/gitlab_list_branches/gitlab_list_pipelines/gitlab_pipeline_status
 |   |                           # (pipeline + jobs in one call)/gitlab_job_log, ALL read-only/ungated - project

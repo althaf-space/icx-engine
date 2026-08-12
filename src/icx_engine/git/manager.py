@@ -20,6 +20,7 @@ from icx_engine.git.gitcmd import (
     head_sha, merge_ref, merge_abort, conflicted_files, stash_pop,
     conflict_versions, find_conflict_markers, fast_forward_ref, delete_branch,
     commits_since, changed_files_since, remote_url, file_exists_at_ref, push,
+    delete_remote_branch, unique_commit_count,
 )
 from icx_engine.git.naming import (
     derive_branch_name, ticketless_branch_name, parse_ticket_key_from_branch, slugify,
@@ -125,6 +126,13 @@ class SyncResult:
 
 
 @dataclass
+class PullResult:
+    status: str  # "up_to_date" | "fast_forwarded" | "merged" | "conflict" | "diverged_needs_merge"
+    conflicted_files: list[str] = field(default_factory=list)
+    scratch_branch: str | None = None
+
+
+@dataclass
 class DebugLeftover:
     file: str
     line: str
@@ -170,6 +178,7 @@ class CreateMrResult:
     mr_iid: int
     created: bool
     merged: bool
+    merge_status: str = "UNKNOWN"  # MERGEABLE | CONFLICTED | CHECKING | BLOCKED | UNKNOWN
     refusal_reason: str | None = None
 
 
@@ -178,6 +187,14 @@ class CleanupResult:
     parent_branch: str
     feature_branch_deleted: bool
     backups_deleted: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BranchDeleteResult:
+    branch: str
+    local_deleted: bool
+    remote_deleted: bool
+    unique_commits: int
 
 
 _MIGRATION_PATH_RE = re.compile(r"(^|/)migrations?/", re.IGNORECASE)
@@ -284,6 +301,36 @@ class GitLifecycleManager:
         after = head_sha(self.repo_root)
         return SyncResult(status="fast_forwarded" if after != before else "up_to_date")
 
+    def pull(
+        self, remote: str = "origin", strategy: str = "ff-only", ticket_key: str | None = None,
+    ) -> PullResult:
+        """git pull's fetch+integrate step, scoped to the CURRENT branch's own
+        remote-tracking counterpart (origin/<current-branch>) - never a
+        different parent branch (see reverse_merge_standard/git_reverse_merge
+        for that). strategy='ff-only' (default) is sync_with_remote's existing
+        safe behavior - refuses (status='diverged_needs_merge') rather than
+        ever creating a merge commit. strategy='merge' reuses
+        reverse_merge_standard/start_conflict_resolution verbatim, passing the
+        current branch itself as "parent_branch" - a clean divergence
+        auto-fast-forwards (git's own merge default), a real divergence
+        creates a merge commit, and a genuine conflict quarantines onto a
+        disposable scratch branch exactly like git_reverse_merge (same
+        backup-first, stash-if-dirty, conflict-quarantine safety net - never
+        rebase, forbidden by this module's safety doctrine)."""
+        if strategy not in ("ff-only", "merge"):
+            raise GitWorkflowError(f"strategy must be 'ff-only' or 'merge', got {strategy!r}")
+        if strategy == "ff-only":
+            sync_result = self.sync_with_remote(remote)
+            return PullResult(status=sync_result.status)
+        branch = current_branch(self.repo_root)
+        result = self.reverse_merge_standard(branch, ticket_key, remote=remote)
+        if result.status == "clean":
+            return PullResult(status="merged")
+        session = self.start_conflict_resolution(branch, ticket_key, remote=remote)
+        return PullResult(
+            status="conflict", conflicted_files=session.conflicted_files, scratch_branch=session.scratch_branch,
+        )
+
     def scan_staged_debug_leftovers(self) -> list[DebugLeftover]:
         findings: list[DebugLeftover] = []
         for filename, lines in added_lines_diff(self.repo_root).items():
@@ -336,8 +383,14 @@ class GitLifecycleManager:
         merge completely and still pop the stash back before returning - the
         feature branch is never left in a conflicted or half-stashed state.
         ticket_key is nullable - when absent, backup/stash naming falls back
-        to a slug of the current branch (same fallback as stage_and_commit)."""
-        fetch(self.repo_root, remote=remote)
+        to a slug of the current branch (same fallback as stage_and_commit).
+        Passes self._auth_env() to fetch - the real fix for git_reverse_merge
+        failing with "could not read Username" on an HTTPS origin even with a
+        valid GitLab connection: this was the one fetch call in this class
+        that _auth_env's own docstring warned about missing (every OTHER
+        network call - sync_with_remote, create_mr_for_ticket,
+        post_merge_cleanup - already routed through it)."""
+        fetch(self.repo_root, remote=remote, extra_env=self._auth_env(remote))
         branch = current_branch(self.repo_root)
         backup_key = ticket_key or slugify(branch)
         create_backup(self.repo_root, branch, backup_key)
@@ -471,6 +524,7 @@ class GitLifecycleManager:
 
     async def create_mr_for_ticket(
         self, parent_branch: str, ticket_key: str | None, ticket_summary: str, gitlab_conn,
+        max_poll_attempts: int = 5, poll_delay_seconds: float = 2.0,
     ) -> CreateMrResult:
         """MR creation + one immediate merge attempt (design spec Section 8.3-
         8.4). Order matters and is deliberate: resolve the GitLab project from
@@ -520,10 +574,11 @@ class GitLifecycleManager:
         result = await create_and_merge_mr(
             gitlab_conn, project_path, feature_branch, parent_branch,
             title, description, assignee_id,
+            max_poll_attempts=max_poll_attempts, poll_delay_seconds=poll_delay_seconds,
         )
         return CreateMrResult(
-            mr_iid=result["mr_iid"], created=result["created"],
-            merged=result["merged"], refusal_reason=result.get("refusal_reason"),
+            mr_iid=result["mr_iid"], created=result["created"], merged=result["merged"],
+            merge_status=result.get("merge_status", "UNKNOWN"), refusal_reason=result.get("refusal_reason"),
         )
 
     def post_merge_cleanup(
@@ -588,3 +643,44 @@ class GitLifecycleManager:
             backups_deleted = prune_old_backups(self.repo_root, backup_key, keep=0)
 
         return CleanupResult(parent_branch=parent_branch, feature_branch_deleted=deleted, backups_deleted=backups_deleted)
+
+    def delete_branch_safely(
+        self, branch: str, target: str, remote: str = "origin",
+        delete_local: bool = True, delete_remote: bool = False, force: bool = False,
+    ) -> BranchDeleteResult:
+        """Safety-gated branch deletion - never loses a commit silently.
+        Refuses unconditionally (never overridable by force - a hard git
+        constraint, not a judgment call) if branch is the currently
+        checked-out branch. Refuses (raises, force=True required to proceed)
+        if branch has commits not reachable from target - equivalent to the
+        manually-run `git merge-base --is-ancestor`/`git rev-list --count`
+        this replaces. delete_local/delete_remote are independent - either or
+        both."""
+        if current_branch(self.repo_root) == branch:
+            raise GitWorkflowError(
+                f"'{branch}' is the currently checked-out branch - switch to a different branch "
+                "before deleting it. This is a hard git constraint, not overridable by force."
+            )
+        unique = 0
+        if local_branch_exists(self.repo_root, branch):
+            unique = unique_commit_count(self.repo_root, branch, target)
+            if unique > 0 and not force:
+                raise GitWorkflowError(
+                    f"Branch '{branch}' cannot be safely deleted - {unique} commit(s) are not "
+                    f"reachable from '{target}' and would be lost. Use force=true only if you "
+                    "explicitly want to delete the branch anyway."
+                )
+        elif delete_local:
+            raise GitWorkflowError(f"Local branch '{branch}' does not exist - nothing to delete locally.")
+
+        local_deleted = False
+        if delete_local:
+            delete_branch(self.repo_root, branch, force=force)
+            local_deleted = True
+        remote_deleted = False
+        if delete_remote:
+            delete_remote_branch(self.repo_root, branch, remote=remote, extra_env=self._auth_env(remote))
+            remote_deleted = True
+        return BranchDeleteResult(
+            branch=branch, local_deleted=local_deleted, remote_deleted=remote_deleted, unique_commits=unique,
+        )

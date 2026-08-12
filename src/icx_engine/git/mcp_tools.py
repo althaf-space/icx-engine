@@ -37,6 +37,15 @@ _FINISH_TICKET_TOOL = "git_finish_ticket"
 _CREATE_TAG_TOOL = "git_create_tag"
 _DELETE_TAG_TOOL = "git_delete_tag"
 _RETAG_TOOL = "git_retag"
+_STASH_CREATE_TOOL = "git_stash_create"
+_STASH_LIST_TOOL = "git_stash_list"
+_STASH_APPLY_TOOL = "git_stash_apply"
+_STASH_POP_TOOL = "git_stash_pop"
+_STASH_DROP_TOOL = "git_stash_drop"
+_FETCH_TOOL = "git_fetch"
+_PULL_TOOL = "git_pull"
+_SYNC_TOOL = "git_sync"
+_DELETE_BRANCH_TOOL = "git_delete_branch"
 
 GIT_TOOLS: list[Tool] = [
     Tool(
@@ -379,7 +388,16 @@ GIT_TOOLS: list[Tool] = [
             "'needs_manual_pick' (with available_branches) - ask the human, then call again with "
             "parent_branch set to their answer. ticket_key is nullable - pass null if there is no "
             "ticket; the MR title is then just ticket_summary with no prefix, never a manufactured "
-            "ticket id. Requires an active GitLab connection."
+            "ticket id. A merge refusal right after creation is not final: GitLab computes "
+            "mergeability asynchronously, so a refusal while it is still CHECKING is polled (bounded "
+            "by max_poll_attempts/poll_delay_seconds, default 5 attempts / 2s apart - never "
+            "indefinitely) and the merge is retried exactly once if it settles on MERGEABLE. The "
+            "response's merge_status is one of MERGEABLE/CONFLICTED/CHECKING/BLOCKED/UNKNOWN - "
+            "CHECKING means it never left that state within the poll budget (raise "
+            "max_poll_attempts/poll_delay_seconds and retry rather than assuming failure); BLOCKED "
+            "covers every named non-conflict refusal (ci_still_running/not_approved/need_rebase/"
+            "discussions_not_resolved/draft_status/policies_denied/etc, from refusal_reason). "
+            "Requires an active GitLab connection."
         ),
         inputSchema={
             "type": "object",
@@ -388,6 +406,8 @@ GIT_TOOLS: list[Tool] = [
                 "parent_branch": {"type": "string"},
                 "ticket_key": {"type": ["string", "null"]},
                 "ticket_summary": {"type": "string"},
+                "max_poll_attempts": {"type": "integer"},
+                "poll_delay_seconds": {"type": "number"},
                 "confirm_token": {"type": "string"},
             },
             "required": ["repo_path", "ticket_key", "ticket_summary"],
@@ -518,6 +538,193 @@ GIT_TOOLS: list[Tool] = [
                 "confirm_token": {"type": "string"},
             },
             "required": ["repo_path", "tag_name", "branch"],
+        },
+    ),
+    Tool(
+        name=_STASH_CREATE_TOOL,
+        description=(
+            "USE WHEN the human wants to set aside uncommitted changes without committing them - "
+            "e.g. before pulling/syncing with a dirty tree. MUST call with message. Stashes staged, "
+            "unstaged, AND untracked changes together (matches git_repo_status's dirty_files scope) "
+            "- NOT confirmation-gated, nothing is lost by stashing (git_stash_list/apply/pop can "
+            "always retrieve it). Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"repo_path": {"type": "string"}, "message": {"type": "string"}},
+            "required": ["repo_path", "message"],
+        },
+    ),
+    Tool(
+        name=_STASH_LIST_TOOL,
+        description=(
+            "USE WHEN the human wants to see what's currently stashed in this repo. Returns every "
+            "stash newest-first, each with index, ref (the exact stash@{N} string to pass to "
+            "git_stash_apply/git_stash_pop/git_stash_drop), and message. Read-only, UNGATED. "
+            "Requires a valid git repository at repo_path."
+        ),
+        inputSchema={"type": "object", "properties": {"repo_path": {"type": "string"}},
+                     "required": ["repo_path"]},
+    ),
+    Tool(
+        name=_STASH_APPLY_TOOL,
+        description=(
+            "USE WHEN the human wants a stash's changes back in the working tree WITHOUT removing "
+            "it from the stash list - use git_stash_pop instead to apply-and-remove in one step. "
+            "Call git_stash_list first to get the exact ref if not applying the most recent (default "
+            "stash@{0}). Fails clearly (never silently drops data) if applying would conflict with "
+            "the current working tree. NOT confirmation-gated - the stash itself is never lost even "
+            "on failure. Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"repo_path": {"type": "string"}, "ref": {"type": "string"}},
+            "required": ["repo_path"],
+        },
+    ),
+    Tool(
+        name=_STASH_POP_TOOL,
+        description=(
+            "USE WHEN the human wants a stash's changes back in the working tree AND removed from "
+            "the stash list in one step - use git_stash_apply instead to keep it in the list. Call "
+            "git_stash_list first to get the exact ref if popping something other than the most "
+            "recent (default stash@{0}). If popping conflicts with the current working tree, git "
+            "keeps the stash in the list rather than losing it - the error says so. NOT "
+            "confirmation-gated - matches git_reverse_merge's own internal stash-pop behavior. "
+            "Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"repo_path": {"type": "string"}, "ref": {"type": "string"}},
+            "required": ["repo_path"],
+        },
+    ),
+    Tool(
+        name=_STASH_DROP_TOOL,
+        description=(
+            "USE WHEN the human explicitly wants a stash permanently discarded without ever "
+            "applying it. Call git_stash_list first to show the human the real message for the "
+            "exact ref about to be dropped - never guess which stash they mean. CONFIRMATION-GATED: "
+            "the first call (no confirm_token) returns pending_confirmation with ref and message - "
+            "show both to the human and get explicit agreement before calling again with "
+            "confirm_token. This is NOT recoverable through any ICX tool once dropped. Requires a "
+            "valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "ref": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path"],
+        },
+    ),
+    Tool(
+        name=_FETCH_TOOL,
+        description=(
+            "USE WHEN the human wants to download remote refs WITHOUT touching the working tree or "
+            "any local branch - git_fetch only updates remote-tracking refs (origin/<branch>), it "
+            "never changes what's checked out. Use git_pull/git_sync instead to actually integrate "
+            "those changes into the current branch. Read-only w.r.t. the working tree, UNGATED. "
+            "Pass ref to fetch one specific branch instead of everything, prune=true to also delete "
+            "local remote-tracking refs for branches removed on the remote. Requires a valid git "
+            "repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "remote": {"type": "string"},
+                "ref": {"type": "string"},
+                "prune": {"type": "boolean"},
+            },
+            "required": ["repo_path"],
+        },
+    ),
+    Tool(
+        name=_PULL_TOOL,
+        description=(
+            "USE WHEN the human wants the CURRENT branch brought up to date with its OWN remote "
+            "counterpart (plain `git pull` semantics) - use git_reverse_merge instead to bring a "
+            "DIFFERENT parent/target branch's changes in. strategy='ff-only' (default) refuses "
+            "(status='diverged_needs_merge') rather than ever creating a merge commit - the safe "
+            "default. strategy='merge' performs a real, conflict-capable merge (never rebase) with "
+            "the exact same backup-first/stash-if-dirty/conflict-quarantine safety net as "
+            "git_reverse_merge - a conflict returns status='conflict' plus scratch_branch and "
+            "conflicted_files; use git_get_conflict/git_complete_resolution/git_adopt_resolution to "
+            "finish, identically. NOT confirmation-gated - matches git_reverse_merge's own "
+            "ungated-because-safe-by-construction convention. ticket_key is nullable (backup/stash "
+            "naming only). Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "remote": {"type": "string"},
+                "strategy": {"type": "string", "enum": ["ff-only", "merge"]},
+                "ticket_key": {"type": ["string", "null"]},
+            },
+            "required": ["repo_path"],
+        },
+    ),
+    Tool(
+        name=_SYNC_TOOL,
+        description=(
+            "USE WHEN the human just says 'sync my branch' / 'update from remote' with no further "
+            "detail - a one-shot, opinionated convenience wrapper: fetches, stashes any dirty "
+            "working tree automatically, integrates the current branch's own remote counterpart via "
+            "a real conflict-capable merge (equivalent to git_pull with strategy='merge'), and "
+            "restores the stash afterward - all in one call, same safety net as git_reverse_merge/"
+            "git_pull (backup-first, never rebase, conflict quarantines onto a scratch branch rather "
+            "than ever touching the real branch destructively). A conflict returns status='conflict' "
+            "plus scratch_branch and conflicted_files; use git_get_conflict/git_complete_resolution/"
+            "git_adopt_resolution to finish. For anything more specific - a DIFFERENT target branch, "
+            "or explicit control over merge vs ff-only - use git_reverse_merge or git_pull directly "
+            "instead. NOT confirmation-gated, same reasoning as git_pull. ticket_key is nullable "
+            "(backup/stash naming only). Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "remote": {"type": "string"},
+                "ticket_key": {"type": ["string", "null"]},
+            },
+            "required": ["repo_path"],
+        },
+    ),
+    Tool(
+        name=_DELETE_BRANCH_TOOL,
+        description=(
+            "USE WHEN the human wants a branch deleted - local, remote, or both - e.g. after "
+            "merging without going through git_finish_ticket. NEVER run `git push origin --delete` "
+            "or `git branch -D` directly yourself. target is required - the branch that must still "
+            "contain every commit being deleted (e.g. the parent/development branch); the tool "
+            "computes unique_commits (commits on branch unreachable from target - would be LOST) "
+            "and REFUSES outright, before any token is even issued, if unique_commits > 0 and "
+            "force is not true. Deleting the CURRENT checked-out branch is refused unconditionally "
+            "- not overridable by force, a hard git constraint. CONFIRMATION-GATED (once safety "
+            "checks pass): the first call (no confirm_token) returns pending_confirmation with "
+            "branch, target, unique_commits, delete_local, and delete_remote - show all of this to "
+            "the human and get explicit agreement before calling again with confirm_token. "
+            "delete_local defaults true, delete_remote defaults false - set both explicitly for "
+            "full cleanup. Remote deletion is a real push (`--delete`) and equally permanent. "
+            "Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "branch": {"type": "string"},
+                "target": {"type": "string"},
+                "remote": {"type": "string"},
+                "delete_local": {"type": "boolean"},
+                "delete_remote": {"type": "boolean"},
+                "force": {"type": "boolean"},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "branch", "target"],
         },
     ),
 ]
@@ -1027,12 +1234,16 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 return _no_gitlab_connection_err()
             mgr = GitLifecycleManager(Path(payload["repo_path"]))
             mgr.validate()
+            max_poll_attempts = payload.get("max_poll_attempts") or 5
+            poll_delay_seconds = payload.get("poll_delay_seconds") or 2.0
             result = await mgr.create_mr_for_ticket(
                 payload["parent_branch"], payload["ticket_key"], payload["ticket_summary"], conn,
+                max_poll_attempts=max_poll_attempts, poll_delay_seconds=poll_delay_seconds,
             )
             return _ok({
                 "mr_iid": result.mr_iid, "created": result.created,
-                "merged": result.merged, "refusal_reason": result.refusal_reason,
+                "merged": result.merged, "merge_status": result.merge_status,
+                "refusal_reason": result.refusal_reason,
             })
         except Exception as exc:
             return _err(str(exc))
@@ -1362,6 +1573,231 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             return _ok({
                 "tag": result["name"], "branch": payload["branch"],
                 "previous_target": payload["previous_target"],
+            })
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _STASH_CREATE_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        message = arguments.get("message")
+        if not message or not isinstance(message, str):
+            return _err("message is required and must be a non-empty string.")
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            gitcmd.stash_push(mgr.repo_root, message)
+            return _ok({"stashed": True, "message": message})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _STASH_LIST_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            return _ok({"stashes": gitcmd.stash_list(mgr.repo_root)})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _STASH_APPLY_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        ref = arguments.get("ref") or "stash@{0}"
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            gitcmd.stash_apply(mgr.repo_root, ref)
+            return _ok({"applied": ref})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _STASH_POP_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        ref = arguments.get("ref")
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            gitcmd.stash_pop(mgr.repo_root, ref)
+            return _ok({"popped": ref or "stash@{0}"})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _STASH_DROP_TOOL:
+        confirm_token = arguments.get("confirm_token")
+        if not confirm_token:
+            repo_path = arguments.get("repo_path")
+            if not repo_path or not isinstance(repo_path, str):
+                return _err("repo_path is required and must be a non-empty string.")
+            ref = arguments.get("ref") or "stash@{0}"
+            try:
+                from icx_engine.git import gitcmd
+                mgr = GitLifecycleManager(Path(repo_path))
+                mgr.validate()
+                stashes = {s["ref"]: s["message"] for s in gitcmd.stash_list(mgr.repo_root)}
+                if ref not in stashes:
+                    return _err(f"No stash found at '{ref}'. Call git_stash_list to see real refs.")
+                token = issue_token("stash_drop", {"repo_path": repo_path, "ref": ref})
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "pending_confirmation",
+                    "token": token,
+                    "ref": ref,
+                    "message": stashes[ref],
+                    "instruction": "Show the human the exact ref and message of the stash about to "
+                                   "be PERMANENTLY discarded. Only call again with confirm_token once "
+                                   "they explicitly agree.",
+                }))]
+            except Exception as exc:
+                return _err(str(exc))
+        try:
+            payload = verify_token(confirm_token, "stash_drop")
+            if payload is None:
+                return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(payload["repo_path"]))
+            mgr.validate()
+            gitcmd.stash_drop(mgr.repo_root, payload["ref"])
+            return _ok({"dropped": payload["ref"]})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _FETCH_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        remote = arguments.get("remote") or "origin"
+        ref = arguments.get("ref")
+        prune = bool(arguments.get("prune", False))
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            gitcmd.fetch(mgr.repo_root, remote=remote, ref=ref, prune=prune, extra_env=mgr._auth_env(remote))
+            return _ok({"remote": remote, "ref": ref, "prune": prune, "fetched": True})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _PULL_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        remote = arguments.get("remote") or "origin"
+        strategy = arguments.get("strategy") or "ff-only"
+        if strategy not in ("ff-only", "merge"):
+            return _err("strategy must be 'ff-only' or 'merge'.")
+        ticket_key = arguments.get("ticket_key")
+        if ticket_key is not None and not isinstance(ticket_key, str):
+            return _err("ticket_key must be a string or null.")
+        try:
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            result = mgr.pull(remote=remote, strategy=strategy, ticket_key=ticket_key)
+            return _ok({
+                "status": result.status, "conflicted_files": result.conflicted_files,
+                "scratch_branch": result.scratch_branch,
+            })
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _SYNC_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        remote = arguments.get("remote") or "origin"
+        ticket_key = arguments.get("ticket_key")
+        if ticket_key is not None and not isinstance(ticket_key, str):
+            return _err("ticket_key must be a string or null.")
+        try:
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            result = mgr.pull(remote=remote, strategy="merge", ticket_key=ticket_key)
+            return _ok({
+                "status": result.status, "conflicted_files": result.conflicted_files,
+                "scratch_branch": result.scratch_branch,
+            })
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _DELETE_BRANCH_TOOL:
+        confirm_token = arguments.get("confirm_token")
+        if not confirm_token:
+            repo_path = arguments.get("repo_path")
+            if not repo_path or not isinstance(repo_path, str):
+                return _err("repo_path is required and must be a non-empty string.")
+            branch = arguments.get("branch")
+            if not branch or not isinstance(branch, str):
+                return _err("branch is required and must be a non-empty string.")
+            target = arguments.get("target")
+            if not target or not isinstance(target, str):
+                return _err(
+                    "target is required and must be a non-empty string - the branch that must "
+                    "still contain every commit being deleted."
+                )
+            remote = arguments.get("remote") or "origin"
+            delete_local = arguments.get("delete_local", True)
+            delete_remote = arguments.get("delete_remote", False)
+            force = bool(arguments.get("force", False))
+            try:
+                from icx_engine.git import gitcmd
+                mgr = GitLifecycleManager(Path(repo_path))
+                mgr.validate()
+                if gitcmd.current_branch(mgr.repo_root) == branch:
+                    return _err(
+                        f"'{branch}' is the currently checked-out branch - switch to a different "
+                        "branch before deleting it. Not overridable by force."
+                    )
+                branch_exists_locally = gitcmd.local_branch_exists(mgr.repo_root, branch)
+                if delete_local and not branch_exists_locally:
+                    return _err(f"Local branch '{branch}' does not exist - nothing to delete locally.")
+                unique = gitcmd.unique_commit_count(mgr.repo_root, branch, target) if branch_exists_locally else 0
+                if unique > 0 and not force:
+                    return _err(
+                        f"Branch '{branch}' cannot be safely deleted - {unique} commit(s) are not "
+                        f"reachable from '{target}' and would be lost. Call again with force=true "
+                        "(no confirm_token) if the human explicitly wants to delete it anyway."
+                    )
+                token = issue_token("delete_branch", {
+                    "repo_path": repo_path, "branch": branch, "target": target, "remote": remote,
+                    "delete_local": delete_local, "delete_remote": delete_remote, "force": force,
+                })
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "pending_confirmation",
+                    "token": token,
+                    "branch": branch,
+                    "target": target,
+                    "unique_commits": unique,
+                    "delete_local": delete_local,
+                    "delete_remote": delete_remote,
+                    "instruction": "Show the human branch, target, and unique_commits (commits that "
+                                   "would become unreachable if deleted). Only call again with "
+                                   "confirm_token once they explicitly agree.",
+                }))]
+            except Exception as exc:
+                return _err(str(exc))
+        try:
+            payload = verify_token(confirm_token, "delete_branch")
+            if payload is None:
+                return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+            mgr = GitLifecycleManager(Path(payload["repo_path"]))
+            mgr.validate()
+            result = mgr.delete_branch_safely(
+                payload["branch"], payload["target"], remote=payload["remote"],
+                delete_local=payload["delete_local"], delete_remote=payload["delete_remote"],
+                force=payload["force"],
+            )
+            return _ok({
+                "branch": result.branch, "local_deleted": result.local_deleted,
+                "remote_deleted": result.remote_deleted, "unique_commits": result.unique_commits,
             })
         except Exception as exc:
             return _err(str(exc))

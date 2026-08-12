@@ -139,9 +139,18 @@ def current_branch(repo: Path) -> str:
     return _stdout(result)
 
 
-def fetch(repo: Path, remote: str = "origin", extra_env: dict[str, str] | None = None) -> None:
+def fetch(
+    repo: Path, remote: str = "origin", ref: str | None = None, prune: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> None:
     _reject_option_like(remote, "remote")
-    _run_git(repo, ["fetch", remote], timeout=60.0, extra_env=extra_env)
+    args = ["fetch", remote]
+    if ref is not None:
+        _reject_option_like(ref, "ref")
+        args.append(ref)
+    if prune:
+        args.append("--prune")
+    _run_git(repo, args, timeout=60.0, extra_env=extra_env)
 
 
 def remote_branch_exists(
@@ -210,8 +219,45 @@ def stash_push(repo: Path, message: str) -> None:
     _run_git(repo, ["stash", "push", "-u", "-m", message])
 
 
-def stash_pop(repo: Path) -> None:
-    _run_git(repo, ["stash", "pop"])
+def stash_pop(repo: Path, ref: str | None = None) -> None:
+    """Pops `ref` (a `stash@{N}` string) if given, else the most recent stash
+    (`stash@{0}`) - backward compatible with every existing no-ref call."""
+    args = ["stash", "pop"]
+    if ref is not None:
+        _reject_option_like(ref, "ref")
+        args.append(ref)
+    _run_git(repo, args)
+
+
+def stash_list(repo: Path) -> list[dict]:
+    """Every stash, newest first (stash@{0} is always the most recent).
+    `ref` is the exact `stash@{N}` string to pass to stash_apply/stash_pop/
+    stash_drop; `message` is the stash's own label (the part after
+    'On <branch>: ' or 'WIP on <branch>: ')."""
+    result = _run_git(repo, ["stash", "list", "--format=%gd%x1f%s"])
+    out = _stdout(result)
+    stashes = []
+    for i, line in enumerate(out.splitlines()):
+        if not line:
+            continue
+        ref, _, message = line.partition("\x1f")
+        stashes.append({"index": i, "ref": ref, "message": message})
+    return stashes
+
+
+def stash_apply(repo: Path, ref: str = "stash@{0}") -> None:
+    """Applies `ref`'s changes to the working tree WITHOUT removing it from
+    the stash list - use stash_pop to apply-and-remove in one step."""
+    _reject_option_like(ref, "ref")
+    _run_git(repo, ["stash", "apply", ref])
+
+
+def stash_drop(repo: Path, ref: str = "stash@{0}") -> None:
+    """Permanently discards `ref` from the stash list - never call this
+    without the human's explicit confirmation, this is not recoverable
+    through any ICX tool."""
+    _reject_option_like(ref, "ref")
+    _run_git(repo, ["stash", "drop", ref])
 
 
 def create_branch_from(repo: Path, new_branch: str, start_point: str) -> None:
@@ -245,6 +291,40 @@ def fast_forward(repo: Path, branch: str, remote: str = "origin") -> None:
 def delete_branch(repo: Path, branch: str, force: bool = False) -> None:
     _reject_option_like(branch, "branch")
     _run_git(repo, ["branch", "-D" if force else "-d", branch])
+
+
+def delete_remote_branch(
+    repo: Path, branch: str, remote: str = "origin", extra_env: dict[str, str] | None = None,
+) -> None:
+    """Deletes `branch` on `remote` via a real push (`--delete`) - routes
+    through the same extra_env auth plumbing as push()/fetch(), rather than a
+    second, separately-authenticated code path."""
+    _reject_option_like(branch, "branch")
+    _reject_option_like(remote, "remote")
+    _run_git(repo, ["push", remote, "--delete", branch], timeout=60.0, extra_env=extra_env)
+
+
+def is_ancestor(repo: Path, ancestor_ref: str, descendant_ref: str) -> bool:
+    """True if every commit on ancestor_ref already exists on descendant_ref
+    - i.e. ancestor_ref could be deleted without losing any commit reachable
+    only from it."""
+    _reject_option_like(ancestor_ref, "ancestor_ref")
+    _reject_option_like(descendant_ref, "descendant_ref")
+    result = _run_git(
+        repo, ["merge-base", "--is-ancestor", ancestor_ref, descendant_ref], allowed_returncodes={1},
+    )
+    return result.returncode == 0
+
+
+def unique_commit_count(repo: Path, branch: str, target: str) -> int:
+    """Count of commits reachable from branch but not from target - what
+    would become unreachable (lost) if branch were deleted right now. Zero
+    means branch is fully merged into target (equivalent to
+    is_ancestor(branch, target) being True)."""
+    _reject_option_like(branch, "branch")
+    _reject_option_like(target, "target")
+    result = _run_git(repo, ["rev-list", "--count", f"{target}..{branch}"])
+    return int(_stdout(result))
 
 
 def find_conflict_markers(repo: Path, relpaths: list[str]) -> dict[str, list[str]]:
