@@ -221,7 +221,17 @@ class WorkstatusClient:
 
         `billable` is NOT mandatory - omitting it (None) sends an empty value
         rather than forcing a True/False default, so an entry is never
-        silently marked non-billable just because the caller didn't specify."""
+        silently marked non-billable just because the caller didn't specify.
+
+        `date` format CORRECTED (2026-08-13): must be `"YYYY-MM-DD"`, matching
+        the date component already used in `from_time`/`to_time` - NOT
+        `"DD-MM-YYYY"` as previously documented here. `"DD-MM-YYYY"` was tried
+        against a real submission (same project/task, only the date field
+        varying) and consistently produced the same empty-200 silent
+        failure; switching to `"YYYY-MM-DD"` with every other field held
+        identical succeeded immediately. This module never converts `date`
+        itself - it is passed straight through to the API body below, so the
+        caller (mcp_tools.py/cli.py) is the sole source of this format."""
         body = {
             "billable": billable if billable is not None else "",
             "date": date,
@@ -545,7 +555,10 @@ class WorkstatusClient:
         against, so treat the defaults as unverified beyond the captured case.
 
         `billable` is NOT mandatory - same reasoning as `add_timesheet`: omitting
-        it (None) sends an empty value rather than forcing a True/False default."""
+        it (None) sends an empty value rather than forcing a True/False default.
+
+        `date` format is the same `"YYYY-MM-DD"` as `add_timesheet` - see that
+        method's docstring for why (never `"DD-MM-YYYY"`)."""
         body = {
             "billable": billable if billable is not None else "", "date": date, "deviceId": self._device_id,
             "deviceType": self._device_type, "from": from_time, "ip_address": "",
