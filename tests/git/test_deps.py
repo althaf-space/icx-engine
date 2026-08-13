@@ -278,7 +278,10 @@ async def test_check_dependency_pins_no_match_reports_clear_reason():
     reports = await check_dependency_pins({"package.json": manifest}, target_ref="main", gitlab_connections=[])
     assert len(reports) == 1
     assert reports[0].resolved is False
-    assert "github.com" in reports[0].reason
+    # Assert against the structured, already-parsed host field - not a substring/URL
+    # check on the free-text reason, which CodeQL flags as incomplete URL sanitization
+    # (a domain substring can appear anywhere in an untrusted string).
+    assert reports[0].pin.host == "github.com"
     assert "does not match any active GitLab connection" in reports[0].reason
 
 

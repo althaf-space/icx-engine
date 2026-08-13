@@ -2408,7 +2408,9 @@ async def test_git_check_dependency_pins_explicit_manifests_list(tmp_git_repo):
     assert len(payload["dependencies"]) == 1
     dep = payload["dependencies"][0]
     assert dep["resolved"] is False
-    assert "github.com" in dep["reason"]
+    # Assert against the structured, already-parsed host field - not a substring/URL
+    # check on the free-text reason, which CodeQL flags as incomplete URL sanitization.
+    assert dep["pin"]["host"] == "github.com"
 
 
 async def test_git_check_dependency_pins_no_manifests_found_returns_empty_list(tmp_git_repo):
