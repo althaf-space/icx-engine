@@ -2465,3 +2465,116 @@ async def test_git_check_dependency_pins_missing_repo_path_returns_named_error()
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
     assert "repo_path" in payload["error"]
+
+
+# Task: git_restore_files tool
+
+async def test_git_restore_files_worktree_mode_confirmation_gated_and_executes(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import stage_files
+    (tmp_git_repo / "README.md").write_text("staged\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    (tmp_git_repo / "README.md").write_text("unstaged\n", encoding="utf-8")
+
+    first = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"],
+    })
+    first_payload = json.loads(first[0].text)
+    assert first_payload["status"] == "pending_confirmation"
+    assert first_payload["mode"] == "worktree"
+    assert first_payload["files"] == ["README.md"]
+    assert len(first_payload["diff"]) == 1
+    token = first_payload["token"]
+
+    second = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"], "confirm_token": token,
+    })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is True
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "staged\n"
+
+
+async def test_git_restore_files_staged_mode_unstages_only(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import stage_files
+    (tmp_git_repo / "README.md").write_text("staged\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    (tmp_git_repo / "README.md").write_text("unstaged\n", encoding="utf-8")
+
+    first = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"], "mode": "staged",
+    })
+    token = json.loads(first[0].text)["token"]
+    second = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"], "mode": "staged", "confirm_token": token,
+    })
+    assert json.loads(second[0].text)["ok"] is True
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "unstaged\n"
+
+
+async def test_git_restore_files_both_mode_fully_reverts(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import stage_files
+    (tmp_git_repo / "README.md").write_text("staged\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    (tmp_git_repo / "README.md").write_text("unstaged\n", encoding="utf-8")
+
+    first = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"], "mode": "both",
+    })
+    token = json.loads(first[0].text)["token"]
+    second = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"], "mode": "both", "confirm_token": token,
+    })
+    assert json.loads(second[0].text)["ok"] is True
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "hello\n"
+
+
+async def test_git_restore_files_diff_preview_scoped_to_requested_files_only(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+    (tmp_git_repo / "other.txt").write_text("x", encoding="utf-8")
+    from icx_engine.git.gitcmd import stage_files
+    stage_files(tmp_git_repo, ["other.txt"])
+
+    result = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"],
+    })
+    payload = json.loads(result[0].text)
+    assert [f["path"] for f in payload["diff"]] == ["README.md"]
+
+
+async def test_git_restore_files_missing_files_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_restore_files", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "files" in payload["error"]
+
+
+async def test_git_restore_files_invalid_mode_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"], "mode": "bogus",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "mode" in payload["error"]
+
+
+async def test_git_restore_files_invalid_token_returns_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"], "confirm_token": "bogus",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+
+
+async def test_git_restore_files_without_confirmation_does_not_restore(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+    await dispatch_git_tool("git_restore_files", {
+        "repo_path": str(tmp_git_repo), "files": ["README.md"],
+    })
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "changed\n"

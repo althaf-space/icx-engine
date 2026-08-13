@@ -374,6 +374,34 @@ def stage_files(repo: Path, files: list[str]) -> None:
     _run_git(repo, ["add", "--", *files])
 
 
+def restore_files(repo: Path, files: list[str], mode: str = "worktree", source: str | None = None) -> None:
+    """Discards changes to exactly these files - never a wildcard or '.',
+    same discipline as stage_files. mode='worktree' (default) restores the
+    working tree only (`git restore <file>` - unstaged changes discarded,
+    staged changes untouched). mode='staged' unstages only (`git restore
+    --staged <file>` - working tree untouched, only the index entry
+    reverts). mode='both' restores both (file fully reverts to source,
+    discarding staged AND unstaged changes). source (default None - git's
+    own default: index if staged, else HEAD) forces restoring from a
+    specific ref instead."""
+    if not files:
+        return
+    if mode not in ("worktree", "staged", "both"):
+        raise GitCommandError(f"mode must be 'worktree', 'staged', or 'both', got {mode!r}")
+    for f in files:
+        _reject_option_like(f, "files")
+    args = ["restore"]
+    if source is not None:
+        _reject_option_like(source, "source")
+        args.append(f"--source={source}")
+    if mode in ("staged", "both"):
+        args.append("--staged")
+    if mode in ("worktree", "both"):
+        args.append("--worktree")
+    args += ["--", *files]
+    _run_git(repo, args)
+
+
 def head_sha(repo: Path) -> str:
     result = _run_git(repo, ["rev-parse", "HEAD"])
     return _stdout(result)

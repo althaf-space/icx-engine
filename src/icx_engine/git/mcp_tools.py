@@ -55,6 +55,7 @@ _CONFLICT_ABORT_TOOL = "git_conflict_abort"
 _CHECK_BRANCH_POLICY_TOOL = "git_check_branch_name_policy"
 _SET_BRANCH_POLICY_TOOL = "git_set_branch_policy"
 _CHECK_DEPENDENCY_PINS_TOOL = "git_check_dependency_pins"
+_RESTORE_FILES_TOOL = "git_restore_files"
 
 GIT_TOOLS: list[Tool] = [
     Tool(
@@ -68,9 +69,10 @@ GIT_TOOLS: list[Tool] = [
             "is also available in the same session; use git_start_branch/git_stage_and_commit/"
             "git_push/git_create_mr/git_stash_create/git_fetch/git_pull/git_sync/git_delete_branch/"
             "git_conflict_take_ours/git_conflict_take_theirs/git_conflict_apply_resolution/"
-            "git_conflict_mark_resolved/git_conflict_abort instead - NEVER run `git stash`/"
-            "`git fetch`/`git pull`/`git checkout --ours`/`--theirs`/`git add` on a conflicted "
-            "file/`git merge --abort`/`git rebase --abort`/`git cherry-pick --abort` directly "
+            "git_conflict_mark_resolved/git_conflict_abort/git_restore_files instead - NEVER run "
+            "`git stash`/`git fetch`/`git pull`/`git checkout --ours`/`--theirs`/`git add` on a "
+            "conflicted file/`git merge --abort`/`git rebase --abort`/`git cherry-pick --abort`/"
+            "`git restore`/`git checkout -- <file>` directly "
             "either, same rule as commit/checkout/push. This is what enforces the no-rebase/no-force-push "
             "safety doctrine - bypassing these tools defeats it. Checks the repo's git-workflow "
             "state - current branch, whether the working tree is dirty, and any leftover state "
@@ -978,6 +980,35 @@ GIT_TOOLS: list[Tool] = [
                 "check_paths": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["repo_path", "target_ref"],
+        },
+    ),
+    Tool(
+        name=_RESTORE_FILES_TOOL,
+        description=(
+            "USE WHEN the human wants specific local changes discarded - one or more files "
+            "reverted to a clean state, NOT a commit or the whole working tree. MUST call this via "
+            "ICX - NEVER run `git restore`/`git checkout -- <file>` directly yourself. "
+            "mode='worktree' (default) discards only UNSTAGED changes (matches plain `git restore "
+            "<file>` - restores from the index if staged, else HEAD; staged changes are untouched). "
+            "mode='staged' unstages only (working tree untouched). mode='both' fully reverts the "
+            "file to HEAD - discards staged AND unstaged changes together. This is DESTRUCTIVE and "
+            "NOT automatically recoverable through any ICX tool once confirmed. CONFIRMATION-GATED: "
+            "the first call (no confirm_token) returns pending_confirmation with the exact files, "
+            "mode, and a diff of what would be discarded (same per-file status/insertions/deletions "
+            "shape as git_diff_worktree, scoped to mode and to exactly these files) - show this to "
+            "the human and get explicit agreement before calling again with confirm_token. NEVER "
+            "pass a wildcard - list every file explicitly, same discipline as git_stage_and_commit. "
+            "Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "mode": {"type": "string", "enum": ["worktree", "staged", "both"]},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "files"],
         },
     ),
 ]
@@ -2378,6 +2409,51 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 check_paths=check_paths, gitlab_connections=connections,
             )
             return _ok({"dependencies": [deps.report_to_dict(r) for r in reports]})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _RESTORE_FILES_TOOL:
+        confirm_token = arguments.get("confirm_token")
+        if not confirm_token:
+            repo_path = arguments.get("repo_path")
+            if not repo_path or not isinstance(repo_path, str):
+                return _err("repo_path is required and must be a non-empty string.")
+            files = arguments.get("files")
+            if not isinstance(files, list) or not files:
+                return _err("files is required and must be a non-empty list.")
+            mode = arguments.get("mode") or "worktree"
+            if mode not in ("worktree", "staged", "both"):
+                return _err("mode must be 'worktree', 'staged', or 'both'.")
+            try:
+                from icx_engine.git import gitcmd
+                mgr = GitLifecycleManager(Path(repo_path))
+                mgr.validate()
+                diff_mode = {"worktree": "unstaged", "staged": "staged", "both": "combined"}[mode]
+                full_diff = gitcmd.diff_worktree(mgr.repo_root, mode=diff_mode)
+                requested = set(files)
+                diff_files = [f for f in full_diff["files"] if f["path"] in requested]
+                token = issue_token("restore_files", {"repo_path": repo_path, "files": files, "mode": mode})
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "pending_confirmation",
+                    "token": token,
+                    "files": files,
+                    "mode": mode,
+                    "diff": diff_files,
+                    "instruction": "Show the human exactly these files, the mode, and the diff of "
+                                   "what would be discarded - this cannot be automatically undone. "
+                                   "Only call again with confirm_token once they explicitly agree.",
+                }))]
+            except Exception as exc:
+                return _err(str(exc))
+        try:
+            payload = verify_token(confirm_token, "restore_files")
+            if payload is None:
+                return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(payload["repo_path"]))
+            mgr.validate()
+            gitcmd.restore_files(mgr.repo_root, payload["files"], mode=payload["mode"])
+            return _ok({"restored": payload["files"], "mode": payload["mode"]})
         except Exception as exc:
             return _err(str(exc))
 

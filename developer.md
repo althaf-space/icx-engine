@@ -178,7 +178,7 @@ ICX/
 |   |   +-- storage.py          # SkillStorage: atomic read/write at ~/.icx/skills/, path-traversal guard
 |   |   +-- writer.py           # draft_skill_entry (agent-authored text -> SkillEntry), write_or_update (hash-guarded create/merge)
 |   |   +-- router.py           # rank_skills (free-text overlap), rank_skills_for_tags (structured tag overlap)
-|   |   +-- defaults.py         # curated catalog of 14 pre-installed default skills
+|   |   +-- defaults.py         # curated catalog of 15 pre-installed default skills
 |   |   +-- seed.py             # seed_default_skills(): writes/updates defaults, never overwrites a user edit
 |   |   \-- hints.py            # attach_skill_hint(): attaches one named default skill to a tool's own response
 |   +-- git/                    # git-workflow lifecycle engine - branch/sync/backup/commit, own CLI group + MCP
@@ -221,6 +221,10 @@ ICX/
 |   |   |                       # drives one). resolve_ref() (`rev-parse --verify <ref>^{commit}` - tolerant
 |   |   |                       # branch/tag/full-or-short-sha to full-sha resolution, returns None rather than
 |   |   |                       # raising for an unresolvable ref) backs deps.py's dependency-pin analysis below.
+|   |   |                       # restore_files(files, mode, source) - file-level discard, never a wildcard or '.'
+|   |   |                       # (same discipline as stage_files). mode='worktree' (default, `git restore <file>`)/
+|   |   |                       # 'staged' (`--staged`, unstage only)/'both' (`--staged --worktree`, full revert to
+|   |   |                       # source - default None lets git pick index-vs-HEAD itself).
 |   |   +-- naming.py           # branch-name derivation from ticket key + summary
 |   |   +-- policy.py           # validate_branch_name(branch, require_ticket_suffix, pattern_description) -
 |   |   |                       # configurable branch-name policy validation, no org-specific values hardcoded.
@@ -432,7 +436,11 @@ ICX/
 |   |                           # called; resolves via deps.check_dependency_pins(), which itself picks local-clone
 |   |                           # vs the first GitLab connection - across every configured connection via
 |   |                           # ConfigManager.load().gitlab_connections.values(), not just the active one -
-|   |                           # whose host matches each dependency's own parsed URL host)
+|   |                           # whose host matches each dependency's own parsed URL host)/git_restore_files
+|   |                           # (confirmation-gated - the pending_confirmation preview reuses git_diff_worktree's
+|   |                           # own logic internally (mode mapped worktree->unstaged/staged->staged/both->combined),
+|   |                           # filtered to exactly the requested files, so the human sees a real diff of what
+|   |                           # would be discarded, not just a file list)
 |   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag/list_branches/
 |   |                           # list_pipelines/get_pipeline (pipeline detail + its jobs, one call)/get_job_trace/
 |   |                           # get_repository_file, plus the read-only list_merge_requests/
@@ -3184,7 +3192,7 @@ Returns `{"status": "created"|"updated"|"skipped_user_edited", "name": ...}` fro
 
 ### Default (pre-installed) skills - agent-agnostic best practices
 
-`skills/defaults.py` ships a curated, static catalog of 14 default skills, written entirely in ICX's own words. They are seeded into every user's `~/.icx/skills/` store so any connected AI coding agent (Claude Code, Cursor, Windsurf, Copilot, etc.) gets consistent best-practice guidance with no manual setup - this is the mechanism, not a manually-maintained doc, that makes the guidance agent-agnostic.
+`skills/defaults.py` ships a curated, static catalog of 15 default skills, written entirely in ICX's own words. They are seeded into every user's `~/.icx/skills/` store so any connected AI coding agent (Claude Code, Cursor, Windsurf, Copilot, etc.) gets consistent best-practice guidance with no manual setup - this is the mechanism, not a manually-maintained doc, that makes the guidance agent-agnostic.
 
 **Catalog:**
 

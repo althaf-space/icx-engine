@@ -1450,3 +1450,73 @@ def test_resolve_ref_returns_none_for_unresolvable_ref(tmp_git_repo):
 def test_resolve_ref_rejects_option_like_ref(tmp_git_repo):
     with pytest.raises(GitCommandError):
         resolve_ref(tmp_git_repo, _OPTION_LIKE)
+
+
+# Task: restore_files - file-level discard, worktree/staged/both modes
+from icx_engine.git.gitcmd import restore_files, structured_status
+
+
+def _stage_then_dirty_readme(tmp_git_repo):
+    (tmp_git_repo / "README.md").write_text("staged\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    (tmp_git_repo / "README.md").write_text("unstaged\n", encoding="utf-8")
+
+
+def test_restore_files_worktree_mode_restores_from_index_leaves_staged(tmp_git_repo):
+    _stage_then_dirty_readme(tmp_git_repo)
+    restore_files(tmp_git_repo, ["README.md"], mode="worktree")
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "staged\n"
+    status = structured_status(tmp_git_repo)
+    assert status["unstaged"] == []
+    staged_paths = {e["path"]: e["status"] for e in status["staged"]}
+    assert staged_paths == {"README.md": "modified"}
+
+
+def test_restore_files_staged_mode_unstages_leaves_worktree(tmp_git_repo):
+    _stage_then_dirty_readme(tmp_git_repo)
+    restore_files(tmp_git_repo, ["README.md"], mode="staged")
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "unstaged\n"
+    status = structured_status(tmp_git_repo)
+    assert status["staged"] == []
+    unstaged_paths = {e["path"]: e["status"] for e in status["unstaged"]}
+    assert unstaged_paths == {"README.md": "modified"}
+
+
+def test_restore_files_both_mode_fully_reverts_to_head(tmp_git_repo):
+    _stage_then_dirty_readme(tmp_git_repo)
+    restore_files(tmp_git_repo, ["README.md"], mode="both")
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "hello\n"
+    status = structured_status(tmp_git_repo)
+    assert status["staged"] == []
+    assert status["unstaged"] == []
+
+
+def test_restore_files_multiple_files(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    stage_files(tmp_git_repo, ["a.txt", "b.txt"])
+    commit(tmp_git_repo, "add a and b")
+    (tmp_git_repo / "a.txt").write_text("a-changed", encoding="utf-8")
+    (tmp_git_repo / "b.txt").write_text("b-changed", encoding="utf-8")
+    restore_files(tmp_git_repo, ["a.txt", "b.txt"], mode="worktree")
+    assert (tmp_git_repo / "a.txt").read_text(encoding="utf-8") == "a"
+    assert (tmp_git_repo / "b.txt").read_text(encoding="utf-8") == "b"
+
+
+def test_restore_files_empty_list_is_noop(tmp_git_repo):
+    restore_files(tmp_git_repo, [])  # must not raise
+
+
+def test_restore_files_rejects_invalid_mode(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        restore_files(tmp_git_repo, ["README.md"], mode="bogus")
+
+
+def test_restore_files_rejects_option_like_file(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        restore_files(tmp_git_repo, [_OPTION_LIKE])
+
+
+def test_restore_files_rejects_option_like_source(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        restore_files(tmp_git_repo, ["README.md"], source=_OPTION_LIKE)

@@ -30,7 +30,7 @@ def test_default_skills_cover_expected_catalog():
         "systematic-debugging", "test-driven-development", "plan-before-code",
         "minimal-diff-discipline", "verification-before-completion", "code-review-before-merge",
         "ui-ux-accessibility-baseline", "comprehensive-test-authoring", "sonar-quality-review",
-        "ticket-context-analysis", "safe-git-workflow", "codebase-graph-navigation",
-        "testing-session-driver", "memory-effective-usage",
+        "ticket-context-analysis", "safe-git-workflow", "git-repository-safety-checks",
+        "codebase-graph-navigation", "testing-session-driver", "memory-effective-usage",
     }
     assert names == expected

@@ -251,25 +251,148 @@ DEFAULT_SKILLS: list[dict] = [
     },
     {
         "name": "safe-git-workflow",
-        "description": "Use for any git operation on a repository - status, commit, merge, or conflict resolution.",
-        "tags": ["git", "workflow", "safety"],
+        "description": (
+            "Drives any git/GitLab operation on a repository through ICX's own tools end-to-end - "
+            "status, branching, staging/committing, stashing, fetch/pull/sync, reverse-merge, "
+            "conflict inspection/resolution, MR creation, tagging, branch deletion, or "
+            "dependency-pin diagnosis. Use for the full workflow, not just one step."
+        ),
+        "tags": ["git", "workflow", "safety", "conflict", "dependency-pins", "gitlab"],
         "title": "Safe Git Workflow",
-        "when_to_use": "Before any git operation - status check, commit, merge, or conflict resolution.",
+        "when_to_use": (
+            "Before any git or GitLab operation - status check, branch creation, commit, stash, "
+            "sync, reverse-merge, conflict resolution, MR, tag, branch deletion, file restore, or "
+            "dependency-pin diagnosis."
+        ),
         "procedure": (
-            "1. Check the repository's current state first (branch, dirty tree, leftover state from "
-            "an interrupted prior run) before any other git action.\n"
-            "2. Never force-push, and never discard uncommitted work without confirming it is not needed.\n"
-            "3. When a merge conflict appears, resolve it - never discard one side to make it go away.\n"
-            "4. Stage and commit exactly the intended files, never a wildcard that could catch "
-            "unrelated changes.\n"
-            "5. Confirm with the user before any destructive or hard-to-reverse step."
+            "1. Always call git_repo_status first, before any other git_* tool and before running "
+            "any raw git command - never skip this even if you think you know the state. It reports "
+            "current branch, staged/unstaged/untracked/deleted/renamed/conflicted files, "
+            "ahead/behind/upstream, and leftover state (scratch branches, ICX stashes, "
+            "merge-in-progress) from an interrupted prior run.\n"
+            "2. Starting work: git_start_branch (never `git checkout -b`) - pass ticket_key or null "
+            "for a ticketless branch. If the repo has require_ticket_in_branch_name enabled "
+            "(git_check_branch_name_policy/git_set_branch_policy), a ticketless name is refused "
+            "before anything is created locally - never let an invalid name reach a real push.\n"
+            "3. Dirty tree before syncing: git_stash_create sets changes aside (never raw `git "
+            "stash`); git_stash_list/git_stash_apply/git_stash_pop retrieve them; git_stash_drop "
+            "(confirmation-gated) permanently discards one.\n"
+            "4. Updating from remote: git_fetch (download only, never touches the working tree), "
+            "git_pull (integrates the CURRENT branch's own remote counterpart, strategy='ff-only' "
+            "safe default or 'merge' for a real conflict-capable merge), or git_sync (one-shot: "
+            "fetch+stash+merge+restore, for a bare 'just sync me' request). Use git_reverse_merge "
+            "instead when bringing in a DIFFERENT parent/target branch into a feature branch.\n"
+            "5. Staging/committing: git_stage_and_commit with an explicit file list, never a "
+            "wildcard. ticket_key is nullable everywhere it appears - pass null rather than "
+            "inventing one to satisfy a schema.\n"
+            "6. Conflicts are inspected and resolved the same way regardless of what caused them - "
+            "ICX's own reverse-merge/pull/sync, a manual merge/pull, a rebase, or a cherry-pick: "
+            "git_get_conflict_details for base/ours/theirs plus per-hunk line numbers, then "
+            "git_conflict_take_ours/git_conflict_take_theirs/git_conflict_apply_resolution to fix "
+            "one file, git_conflict_mark_resolved to stage (hard-blocks if any marker remains or "
+            "the file isn't actually conflicted), then git_stage_and_commit to commit - each step "
+            "stays separate and gated, never combined into one call. git_conflict_abort backs out "
+            "of a merge/cherry-pick/rebase entirely when the human wants to abandon it.\n"
+            "7. Pushing/MR: git_push to share progress without an MR, git_create_mr to open (or "
+            "reuse) one and attempt an immediate merge - a refusal right after creation is polled "
+            "since GitLab computes mergeability asynchronously; merge_status tells you "
+            "MERGEABLE/CONFLICTED/CHECKING/BLOCKED/UNKNOWN, never treat a transient CHECKING as a "
+            "real failure.\n"
+            "8. Cleanup: git_finish_ticket once a merge is independently confirmed; "
+            "git_delete_branch for any other branch removal - it refuses a branch with commits "
+            "unreachable from the target unless force=true, and refuses the current branch "
+            "unconditionally.\n"
+            "9. Discarding local changes to specific files only (not a full sync): "
+            "git_restore_files - confirmation-gated, shows the exact diff about to be lost, mode "
+            "picks worktree/staged/both.\n"
+            "10. Diagnosing a stale pinned dependency (package.json/requirements.txt/pyproject.toml "
+            "pinning a package to a git ref): git_check_dependency_pins."
         ),
         "pitfalls": (
-            "Force-pushing over work that hasn't been reviewed. Resolving a conflict by discarding "
-            "changes instead of merging them. Staging everything with a wildcard and accidentally "
-            "committing unrelated or sensitive files."
+            "Running a raw git command (stash/fetch/pull/checkout --ours|--theirs/add on a "
+            "conflicted file/merge|rebase|cherry-pick --abort/restore/branch -D/push --delete) "
+            "instead of the matching ICX tool bypasses every safety net ICX provides, even when a "
+            "native connector or another integration also offers it. Inventing a ticket key to "
+            "satisfy a tool schema instead of passing null. Treating git_create_mr's transient "
+            "CHECKING mergeability as a real failure. Force-pushing or rebasing to rewrite history - "
+            "never available through ICX by design. Discarding a conflict by blindly taking one "
+            "side without actually reviewing base/ours/theirs first."
         ),
-        "verification": "The repo's status was checked first, only the intended files were staged, and no destructive command ran without confirmation.",
+        "verification": (
+            "git_repo_status was called first (and again after any state-changing step) and shows "
+            "the expected clean/staged/conflict state; only the intended files were touched; every "
+            "destructive step (stash drop, branch delete, conflict resolution, file restore, MR "
+            "creation) went through its confirm_token gate with the human's explicit agreement "
+            "shown first."
+        ),
+    },
+    {
+        "name": "git-repository-safety-checks",
+        "description": (
+            "Detects unsafe repository states before a git operation proceeds - dirty tree, "
+            "untracked files, uncommitted changes, unpushed commits, branch divergence, unresolved "
+            "conflicts, unsafe branch deletion, or accidental staging. Use as a pre-flight check "
+            "inside any git workflow (see safe-git-workflow), not a replacement for it."
+        ),
+        "tags": ["git", "safety", "pre-flight", "branch-deletion", "conflict"],
+        "title": "Git Repository Safety Checks",
+        "when_to_use": (
+            "Before any git operation that could lose work or affect a shared branch - "
+            "reverse-merge/pull/sync with a dirty tree, deleting a branch, staging files during "
+            "conflict resolution, discarding local changes, or abandoning a merge/cherry-pick/"
+            "rebase."
+        ),
+        "procedure": (
+            "1. Working-tree/index state: read git_repo_status's staged/unstaged/untracked/deleted/"
+            "renamed/conflicted fields individually - never assume a single 'dirty' boolean tells "
+            "you what kind of dirty it is.\n"
+            "2. Unpushed commits / divergence: git_repo_status's ahead/behind are both relative to "
+            "upstream - ahead>0 means local commits the remote doesn't have yet; behind>0 means the "
+            "reverse; both non-zero means diverged. git_pull(strategy='ff-only') correctly refuses "
+            "on divergence rather than silently creating a merge commit - read its status before "
+            "assuming a plain pull will work.\n"
+            "3. Before deleting ANY branch: git_delete_branch itself computes unique_commits "
+            "(commits unreachable from the target branch) and refuses outright, before issuing a "
+            "token, unless force=true - never run `git branch -D`/`git push --delete` to sidestep "
+            "this check, and never pass force=true without showing the human the unique_commits "
+            "count first.\n"
+            "4. Before staging during conflict resolution: git_conflict_mark_resolved hard-blocks "
+            "staging any file that still has literal conflict-marker text, or that isn't actually "
+            "an unmerged/conflicted path - reuse it instead of a bare git_stage_and_commit whenever "
+            "a conflict is in progress.\n"
+            "5. Before discarding local changes to specific files: git_restore_files always returns "
+            "a real diff of what would be lost and requires confirm_token - never treat this as "
+            "safe-by-default just because it's 'only files, not a branch.'\n"
+            "6. Before abandoning a merge/cherry-pick/rebase entirely: git_conflict_abort's "
+            "pending_confirmation names which operation and which conflicted files are about to be "
+            "abandoned - review that list even if you think you already know, since it reflects the "
+            "CURRENT real repo state, not necessarily what you expect (the operation may not have "
+            "been started by the current session at all).\n"
+            "7. Leftover state from an interrupted prior run - scratch branches, ICX-tagged stashes, "
+            "a merge still in progress - is reported by git_repo_status every time. Resolve or "
+            "discard it (git_discard_scratch/git_conflict_abort) before starting new work on the "
+            "same branch rather than layering a new operation on top of an unresolved one.\n"
+            "8. Force-push and rebase are never available through ICX by design, except "
+            "git_conflict_abort's own narrow, history-preserving `git rebase --abort` (which only "
+            "ever backs one out, never drives one) - if a workflow seems to require either, stop "
+            "and ask the human rather than reaching for raw git."
+        ),
+        "pitfalls": (
+            "Trusting a single dirty:true/false boolean instead of reading which files are staged "
+            "vs unstaged vs conflicted. Deleting a branch with raw `git branch -D` specifically to "
+            "sidestep git_delete_branch's unreachable-commit check. Reading only 'ahead' or only "
+            "'behind' and assuming that tells the full divergence story. Force-pushing or rebasing "
+            "because a raw git command felt faster than finding the right ICX tool. Passing "
+            "force=true to git_delete_branch without having shown the human the actual "
+            "unique_commits count first."
+        ),
+        "verification": (
+            "Every destructive action was preceded by actually reading the relevant preview field "
+            "(git_repo_status's status fields, git_get_conflict_details's conflict_state, "
+            "git_delete_branch's unique_commits, git_restore_files's diff, git_conflict_abort's "
+            "operation/conflicted_files) rather than assuming, and no raw git command bypassed the "
+            "matching ICX safety check."
+        ),
     },
     {
         "name": "codebase-graph-navigation",
