@@ -14,7 +14,9 @@ from icx_engine.gitlab.service import (
     create_and_merge_mr,
     classify_merge_status,
     wait_for_mergeable,
+    _pipeline_summary,
 )
+from icx_engine.gitlab.client import GitLabClient
 
 
 @respx.mock
@@ -238,7 +240,10 @@ async def test_create_and_merge_mr_reports_refusal_reason():
     # A refusal triggers a mergeability check (create_and_merge_mr no longer treats a refusal as
     # automatically final) - the MR's own detailed_merge_status decides the terminal bucket.
     respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5").mock(
-        return_value=httpx.Response(200, json={"iid": 5, "detailed_merge_status": "not_approved"})
+        return_value=httpx.Response(200, json={"iid": 5, "detailed_merge_status": "not_approved", "has_conflicts": False})
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[])
     )
     out = await create_and_merge_mr(
         _conn(), "group/project", "feature/x-ABC-1", "development", "ABC-1 fix login", "desc", assignee_id=42,
@@ -247,6 +252,8 @@ async def test_create_and_merge_mr_reports_refusal_reason():
     assert out["merged"] is False
     assert out["merge_status"] == "BLOCKED"
     assert "approval" in out["refusal_reason"].lower()
+    assert out["has_conflicts"] is False
+    assert out["pipeline"] is None
 
 
 def test_classify_merge_status_mergeable():
@@ -309,6 +316,86 @@ async def test_wait_for_mergeable_stops_at_max_attempts_still_checking():
     assert result["attempts"] == 3
 
 
+# -- _pipeline_summary --------------------------------------------------------
+
+@respx.mock
+async def test_pipeline_summary_no_pipeline_returns_none():
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with GitLabClient("https://gitlab.example.com", "glpat-x") as client:
+        result = await _pipeline_summary(client, "group/project", "feature/x")
+    assert result is None
+
+
+@respx.mock
+async def test_pipeline_summary_running_pipeline_no_job_lookup():
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[{"id": 42, "status": "running"}])
+    )
+    async with GitLabClient("https://gitlab.example.com", "glpat-x") as client:
+        result = await _pipeline_summary(client, "group/project", "feature/x")
+    assert result == {"id": 42, "status": "running"}
+
+
+@respx.mock
+async def test_pipeline_summary_failed_pipeline_names_the_failed_job():
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[{"id": 42, "status": "failed"}])
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines/42").mock(
+        return_value=httpx.Response(200, json={"id": 42, "status": "failed"})
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines/42/jobs").mock(
+        return_value=httpx.Response(200, json=[
+            {"id": 1, "name": "build", "status": "success"},
+            {"id": 2, "name": "test", "status": "failed"},
+        ])
+    )
+    async with GitLabClient("https://gitlab.example.com", "glpat-x") as client:
+        result = await _pipeline_summary(client, "group/project", "feature/x")
+    assert result == {"id": 42, "status": "failed", "failed_job_name": "test", "failed_job_id": 2}
+
+
+@respx.mock
+async def test_pipeline_summary_failed_pipeline_no_failed_job_found():
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[{"id": 42, "status": "failed"}])
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines/42").mock(
+        return_value=httpx.Response(200, json={"id": 42, "status": "failed"})
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines/42/jobs").mock(
+        return_value=httpx.Response(200, json=[{"id": 1, "name": "build", "status": "success"}])
+    )
+    async with GitLabClient("https://gitlab.example.com", "glpat-x") as client:
+        result = await _pipeline_summary(client, "group/project", "feature/x")
+    assert result == {"id": 42, "status": "failed"}
+
+
+@respx.mock
+async def test_pipeline_summary_list_pipelines_error_returns_none():
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(500, text="boom")
+    )
+    async with GitLabClient("https://gitlab.example.com", "glpat-x") as client:
+        result = await _pipeline_summary(client, "group/project", "feature/x")
+    assert result is None
+
+
+@respx.mock
+async def test_pipeline_summary_get_pipeline_error_returns_bare_summary():
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[{"id": 42, "status": "failed"}])
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines/42").mock(
+        return_value=httpx.Response(500, text="boom")
+    )
+    async with GitLabClient("https://gitlab.example.com", "glpat-x") as client:
+        result = await _pipeline_summary(client, "group/project", "feature/x")
+    assert result == {"id": 42, "status": "failed"}
+
+
 @respx.mock
 async def test_create_and_merge_mr_retries_merge_once_after_checking_resolves_to_mergeable():
     respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(return_value=httpx.Response(200, json=[]))
@@ -354,7 +441,16 @@ async def test_create_and_merge_mr_never_retries_merge_on_genuine_conflict():
         side_effect=_merge_side_effect
     )
     respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5").mock(
-        return_value=httpx.Response(200, json={"iid": 5, "merge_status": "cannot_be_merged"})
+        return_value=httpx.Response(200, json={"iid": 5, "merge_status": "cannot_be_merged", "has_conflicts": True})
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[{"id": 99, "status": "failed"}])
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines/99").mock(
+        return_value=httpx.Response(200, json={"id": 99, "status": "failed"})
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines/99/jobs").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "name": "test", "status": "failed"}])
     )
     out = await create_and_merge_mr(
         _conn(), "group/project", "feature/x-ABC-1", "development", "ABC-1 fix login", "desc",
@@ -363,6 +459,8 @@ async def test_create_and_merge_mr_never_retries_merge_on_genuine_conflict():
     assert out["merged"] is False
     assert out["merge_status"] == "CONFLICTED"
     assert merge_attempts["count"] == 1  # never retried - a real conflict, not a transitional state
+    assert out["has_conflicts"] is True
+    assert out["pipeline"] == {"id": 99, "status": "failed", "failed_job_name": "test", "failed_job_id": 7}
 
 
 from icx_engine.gitlab.service import parse_tag_name, group_tags_by_environment, propose_next_tag

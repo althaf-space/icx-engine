@@ -224,7 +224,21 @@ ICX/
 |   |   |                       # restore_files(files, mode, source) - file-level discard, never a wildcard or '.'
 |   |   |                       # (same discipline as stage_files). mode='worktree' (default, `git restore <file>`)/
 |   |   |                       # 'staged' (`--staged`, unstage only)/'both' (`--staged --worktree`, full revert to
-|   |   |                       # source - default None lets git pick index-vs-HEAD itself).
+|   |   |                       # source - default None lets git pick index-vs-HEAD itself). stage_files() now
+|   |   |                       # tolerates a path already fully staged as deleted (gone from BOTH the working tree
+|   |   |                       # AND the index) - real bug fix: `git add` on such a path fatals with "pathspec did
+|   |   |                       # not match any files" (nothing left to change), which previously failed the ENTIRE
+|   |   |                       # batched add for every other file in the same call; one extra `ls-files --cached`
+|   |   |                       # check per missing-from-disk path (zero cost when nothing is missing) detects this
+|   |   |                       # and skips just that path. changed_files_since_common_ancestor(ref) - the reverse
+|   |   |                       # direction from changed_files_since() (which reports what the CURRENT branch
+|   |   |                       # touched; this reports what `ref` touched since ITS OWN merge-base with the
+|   |   |                       # current branch) - detects the stale-base silent-deletion bug class (a dirty local
+|   |   |                       # file the parent branch ALSO modified since the branch point). list_local_branches()
+|   |   |                       # - every local branch's tip sha/author/date via one `for-each-ref` call; fields are
+|   |   |                       # TAB-separated (`%09`), not `%x1f` - for-each-ref's format spec does not support
+|   |   |                       # arbitrary `%xHH` hex escapes the way `log --format` does (verified: `%x1f` prints
+|   |   |                       # literally there), only a handful of named ones like `%09`.
 |   |   +-- naming.py           # branch-name derivation from ticket key + summary
 |   |   +-- policy.py           # validate_branch_name(branch, require_ticket_suffix, pattern_description) -
 |   |   |                       # configurable branch-name policy validation, no org-specific values hardcoded.
@@ -321,6 +335,28 @@ ICX/
 |   |   |                       # policy.reason - the exact "Invalid branch name / Expected pattern / Received /
 |   |   |                       # Missing JIRA/ticket identifier" text - if invalid) - never creates a locally-valid
 |   |   |                       # branch a remote pre-receive hook would then reject.
+|   |   |                       #
+|   |   |                       # confirm_parent_branch() now strips an accidental `origin/` prefix (e.g. the human
+|   |   |                       # says "origin/development" instead of "development") before checking/storing it -
+|   |   |                       # real bug fix: remote_branch_exists() checks a BARE branch name against
+|   |   |                       # `ls-remote --heads`, so the prefixed form was always rejected as "does not exist",
+|   |   |                       # and had it ever been stored with the prefix, every downstream
+|   |   |                       # f"origin/{parent_branch}" call would have built a broken
+|   |   |                       # "origin/origin/development" ref.
+|   |   |                       #
+|   |   |                       # start_branch() now fetches FIRST, every call - real bug fix: it used to branch off
+|   |   |                       # whatever the local origin/<parent> tracking ref last happened to be, which could be
+|   |   |                       # arbitrarily stale if the caller already had parent_branch in hand (skipping
+|   |   |                       # resolve_parent_branch's own fetch) - confirm_parent_branch only verifies existence
+|   |   |                       # live via ls-remote, it never refreshes the LOCAL tracking ref start_branch actually
+|   |   |                       # branches from. Also now reports commits_behind_parent on the
+|   |   |                       # switched_to_existing=true path (an EXISTING local branch can still be stale
+|   |   |                       # relative to origin/<parent> even though the fetch above is fresh).
+|   |   |                       #
+|   |   |                       # list_merged_branches(target, older_than_days=0) - the discovery companion to
+|   |   |                       # delete_branch_safely: every local branch that IS an ancestor of target (same check
+|   |   |                       # delete_branch_safely uses to decide safety), excluding target and the current
+|   |   |                       # branch, optionally filtered by tip-commit age. Backs git_list_merged_branches.
 |   |   |                       #
 |   |   |                       # GitLab auth for git-network calls (fetch/ls-remote/push) - the fix for git push (and
 |   |   |                       # later, git_create_mr's own fetch/ls-remote) failing with "could not read Username" even
@@ -440,7 +476,20 @@ ICX/
 |   |                           # (confirmation-gated - the pending_confirmation preview reuses git_diff_worktree's
 |   |                           # own logic internally (mode mapped worktree->unstaged/staged->staged/both->combined),
 |   |                           # filtered to exactly the requested files, so the human sees a real diff of what
-|   |                           # would be discarded, not just a file list)
+|   |                           # would be discarded, not just a file list)/git_list_merged_branches (read-only,
+|   |                           # ungated - the discovery companion to git_delete_branch, backed by
+|   |                           # manager.list_merged_branches()). git_repo_status now also reports
+|   |                           # commits_behind_parent/files_modified_upstream when a parent_branch is confirmed
+|   |                           # (stale-base silent-deletion detection); git_start_branch reports
+|   |                           # commits_behind_parent on switched_to_existing. git_create_mr now returns
+|   |                           # has_conflicts/pipeline when not merged. git_reverse_merge/git_pull/git_sync now
+|   |                           # return dependency_pins_detected on a successful merge/pull (via
+|   |                           # _detect_local_dependency_pins() - LOCAL-only manifest scan, reuses
+|   |                           # deps.parse_manifest_git_deps, never triggers the network resolution itself).
+|   |                           # git_push/git_create_mr route a push failure through _humanize_git_error() -
+|   |                           # translates a `GL-HOOK-ERR:` GitLab pre-receive rejection into a plain-language
+|   |                           # server-policy message (with a specific tip when the rejection mentions
+|   |                           # .gitignore), falling through to the original text unchanged for anything else.
 |   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag/list_branches/
 |   |                           # list_pipelines/get_pipeline (pipeline detail + its jobs, one call)/get_job_trace/
 |   |                           # get_repository_file, plus the read-only list_merge_requests/
@@ -457,7 +506,13 @@ ICX/
 |   |                           # until terminal (max_attempts/delay_seconds, never indefinite); create_and_merge_mr()
 |   |                           # now treats a refusal right after creation as potentially transitional - GitLab
 |   |                           # computes mergeability async - polls via wait_for_mergeable and retries the merge
-|   |                           # EXACTLY ONCE if it settles on MERGEABLE, never retries a genuine CONFLICTED/BLOCKED),
+|   |                           # EXACTLY ONCE if it settles on MERGEABLE, never retries a genuine CONFLICTED/BLOCKED).
+|   |                           # When the final result is NOT merged, create_and_merge_mr() now also attaches
+|   |                           # has_conflicts (from the polled MR body's own field) and pipeline (via
+|   |                           # _pipeline_summary() - the source branch's latest pipeline id/status, plus
+|   |                           # failed_job_name/failed_job_id if it failed - reuses list_pipelines/get_pipeline,
+|   |                           # no new client method; returns None on any lookup failure, never raises, this is
+|   |                           # best-effort diagnostic context, not required for the merge result itself),
 |   |                           # mcp_tools.py (GITLAB_TOOLS + dispatch_gitlab_tool() -
 |   |                           # gitlab_list_merge_requests/gitlab_mr_changes/gitlab_list_commits/gitlab_compare/
 |   |                           # gitlab_list_tags/gitlab_list_branches/gitlab_list_pipelines/gitlab_pipeline_status
