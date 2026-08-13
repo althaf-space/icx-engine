@@ -807,3 +807,716 @@ def test_push_with_no_extra_env_still_works_against_real_remote(tmp_git_repo_wit
     checkout(tmp_git_repo_with_remote, "feature/push-no-env")
     push(tmp_git_repo_with_remote, "feature/push-no-env")
     assert remote_branch_exists(tmp_git_repo_with_remote, "feature/push-no-env") is True
+
+
+# Task: diff_worktree - local uncommitted diff (staged/unstaged/combined)
+from icx_engine.git.gitcmd import diff_worktree
+
+
+def test_diff_worktree_staged_reports_only_index_changes(tmp_git_repo):
+    (tmp_git_repo / "staged.txt").write_text("staged content\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "unstaged.txt").write_text("unstaged content\n", encoding="utf-8")
+    result = diff_worktree(tmp_git_repo, mode="staged")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == {"staged.txt"}
+
+
+def test_diff_worktree_unstaged_reports_only_worktree_changes(tmp_git_repo):
+    (tmp_git_repo / "staged.txt").write_text("staged content\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "README.md").write_text("changed but not staged\n", encoding="utf-8")
+    result = diff_worktree(tmp_git_repo, mode="unstaged")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == {"README.md"}
+
+
+def test_diff_worktree_combined_reports_staged_and_unstaged_together(tmp_git_repo):
+    (tmp_git_repo / "staged.txt").write_text("staged content\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "README.md").write_text("changed but not staged\n", encoding="utf-8")
+    result = diff_worktree(tmp_git_repo, mode="combined")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == {"staged.txt", "README.md"}
+
+
+def test_diff_worktree_scopes_to_one_relpath(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a\n", encoding="utf-8")
+    (tmp_git_repo / "b.txt").write_text("b\n", encoding="utf-8")
+    result = diff_worktree(tmp_git_repo, mode="combined", relpath="a.txt")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == set()  # untracked files never show up in `git diff` - only tracked changes do
+
+
+def test_diff_worktree_unstaged_scoped_to_relpath_excludes_other_files(tmp_git_repo):
+    (tmp_git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+    (tmp_git_repo / "extra.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["extra.txt"])
+    result = diff_worktree(tmp_git_repo, mode="unstaged", relpath="README.md")
+    paths = {f["path"] for f in result["files"]}
+    assert paths == {"README.md"}
+
+
+def test_diff_worktree_rejects_invalid_mode(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        diff_worktree(tmp_git_repo, mode="bogus")
+
+
+def test_diff_worktree_rejects_path_traversal_relpath(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        diff_worktree(tmp_git_repo, mode="combined", relpath="../outside.txt")
+
+
+# Task: structured_status - rich staged/unstaged/untracked/deleted/renamed/conflicted/ahead/behind
+from icx_engine.git.gitcmd import structured_status
+
+
+def test_structured_status_clean_repo_reports_empty_buckets(tmp_git_repo):
+    result = structured_status(tmp_git_repo)
+    assert result["staged"] == []
+    assert result["unstaged"] == []
+    assert result["untracked"] == []
+    assert result["deleted"] == []
+    assert result["renamed"] == []
+    assert result["conflicted"] == []
+    assert result["ahead"] == 0
+    assert result["behind"] == 0
+    assert result["current_branch"] == "main"
+
+
+def test_structured_status_reports_staged_and_unstaged_separately(tmp_git_repo):
+    (tmp_git_repo / "staged.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["staged.txt"])
+    (tmp_git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+    result = structured_status(tmp_git_repo)
+    staged_paths = {e["path"]: e["status"] for e in result["staged"]}
+    unstaged_paths = {e["path"]: e["status"] for e in result["unstaged"]}
+    assert staged_paths == {"staged.txt": "added"}
+    assert unstaged_paths == {"README.md": "modified"}
+
+
+def test_structured_status_reports_untracked_file(tmp_git_repo):
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    result = structured_status(tmp_git_repo)
+    assert result["untracked"] == ["new.txt"]
+
+
+def test_structured_status_reports_staged_deletion(tmp_git_repo):
+    import subprocess
+    subprocess.run(["git", "rm", "README.md"], cwd=str(tmp_git_repo), check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = structured_status(tmp_git_repo)
+    assert result["deleted"] == ["README.md"]
+    staged_paths = {e["path"]: e["status"] for e in result["staged"]}
+    assert staged_paths == {"README.md": "deleted"}
+
+
+def test_structured_status_reports_staged_rename(tmp_git_repo):
+    import subprocess
+    subprocess.run(["git", "mv", "README.md", "RENAMED.md"], cwd=str(tmp_git_repo), check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = structured_status(tmp_git_repo)
+    assert result["renamed"] == [{"from": "README.md", "to": "RENAMED.md"}]
+
+
+def test_structured_status_reports_conflicted_file_during_merge(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="status_conflict_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    result = structured_status(clone)
+    assert result["conflicted"] == ["README.md"]
+
+
+def test_structured_status_reports_upstream_and_ahead_behind(tmp_git_repo_with_remote):
+    (tmp_git_repo_with_remote / "local.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["local.txt"])
+    commit(tmp_git_repo_with_remote, "ABC-1 local only commit")
+    result = structured_status(tmp_git_repo_with_remote)
+    assert result["upstream"] == "origin/main"
+    assert result["ahead"] == 1
+    assert result["behind"] == 0
+
+
+def test_structured_status_no_upstream_defaults_ahead_behind_to_zero(tmp_git_repo):
+    result = structured_status(tmp_git_repo)
+    assert result["upstream"] is None
+    assert result["ahead"] == 0
+    assert result["behind"] == 0
+
+
+# Task: read_file_at_ref - read-only file content at any ref
+from icx_engine.git.gitcmd import read_file_at_ref
+
+
+def test_read_file_at_ref_returns_content_at_head(tmp_git_repo):
+    content = read_file_at_ref(tmp_git_repo, "HEAD", "README.md")
+    assert content == "hello\n"
+
+
+def test_read_file_at_ref_returns_content_at_branch(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/x-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/x-ABC-1")
+    (tmp_git_repo / "README.md").write_text("changed on feature\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "ABC-1 change readme")
+    assert read_file_at_ref(tmp_git_repo, "main", "README.md") == "hello\n"
+    assert read_file_at_ref(tmp_git_repo, "feature/x-ABC-1", "README.md") == "changed on feature\n"
+
+
+def test_read_file_at_ref_raises_for_missing_path(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        read_file_at_ref(tmp_git_repo, "HEAD", "does_not_exist.txt")
+
+
+def test_read_file_at_ref_raises_for_unresolvable_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        read_file_at_ref(tmp_git_repo, "not-a-real-ref", "README.md")
+
+
+def test_read_file_at_ref_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        read_file_at_ref(tmp_git_repo, _OPTION_LIKE, "README.md")
+
+
+def test_read_file_at_ref_rejects_path_traversal(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        read_file_at_ref(tmp_git_repo, "HEAD", "../outside.txt")
+
+
+# Task: stash_list/apply/drop, stash_pop(ref=...) - full stash API
+from icx_engine.git.gitcmd import stash_list, stash_apply, stash_drop
+
+
+def test_stash_list_empty_on_clean_repo(tmp_git_repo):
+    assert stash_list(tmp_git_repo) == []
+
+
+def test_stash_list_reports_message_and_ref_newest_first(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    stash_push(tmp_git_repo, "first stash")
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    stash_push(tmp_git_repo, "second stash")
+    stashes = stash_list(tmp_git_repo)
+    assert len(stashes) == 2
+    assert stashes[0]["ref"] == "stash@{0}"
+    assert stashes[0]["message"].endswith("second stash")
+    assert stashes[1]["ref"] == "stash@{1}"
+    assert stashes[1]["message"].endswith("first stash")
+
+
+def test_stash_apply_restores_changes_without_removing_stash(tmp_git_repo):
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    stash_push(tmp_git_repo, "keep me")
+    assert is_dirty(tmp_git_repo) is False
+    stash_apply(tmp_git_repo)
+    assert is_dirty(tmp_git_repo) is True
+    assert len(stash_list(tmp_git_repo)) == 1  # still there - apply never removes it
+
+
+def test_stash_apply_by_explicit_ref(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    stash_push(tmp_git_repo, "older")
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    stash_push(tmp_git_repo, "newer")
+    stash_apply(tmp_git_repo, "stash@{1}")
+    assert (tmp_git_repo / "a.txt").exists()
+    assert not (tmp_git_repo / "b.txt").exists()
+
+
+def test_stash_pop_with_explicit_ref_removes_only_that_stash(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    stash_push(tmp_git_repo, "older")
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    stash_push(tmp_git_repo, "newer")
+    stash_pop(tmp_git_repo, "stash@{1}")
+    assert (tmp_git_repo / "a.txt").exists()
+    remaining = stash_list(tmp_git_repo)
+    assert len(remaining) == 1
+    assert remaining[0]["message"].endswith("newer")
+
+
+def test_stash_pop_default_still_pops_top_stash(tmp_git_repo):
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    stash_push(tmp_git_repo, "top")
+    stash_pop(tmp_git_repo)
+    assert (tmp_git_repo / "new.txt").exists()
+    assert stash_list(tmp_git_repo) == []
+
+
+def test_stash_drop_removes_stash_permanently(tmp_git_repo):
+    (tmp_git_repo / "new.txt").write_text("x", encoding="utf-8")
+    stash_push(tmp_git_repo, "to drop")
+    stash_drop(tmp_git_repo)
+    assert stash_list(tmp_git_repo) == []
+    assert not (tmp_git_repo / "new.txt").exists()
+
+
+def test_stash_apply_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        stash_apply(tmp_git_repo, _OPTION_LIKE)
+
+
+def test_stash_drop_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        stash_drop(tmp_git_repo, _OPTION_LIKE)
+
+
+def test_stash_pop_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        stash_pop(tmp_git_repo, _OPTION_LIKE)
+
+
+# Task: fetch() ref/prune options
+def test_fetch_with_ref_updates_that_branchs_remote_tracking_ref(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    bare_origin = tmp_path / "origin.git"
+    clone = tmp_path / "clone_fetch_ref"
+    subprocess.run(["git", "clone", str(bare_origin), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    create_branch_from(tmp_git_repo_with_remote, "feature/only-remote", "main")
+    checkout(tmp_git_repo_with_remote, "feature/only-remote")
+    (tmp_git_repo_with_remote / "extra.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["extra.txt"])
+    commit(tmp_git_repo_with_remote, "ABC-1 extra")
+    subprocess.run(["git", "push", "origin", "feature/only-remote"], cwd=str(tmp_git_repo_with_remote), check=True)
+    fetch(clone, ref="feature/only-remote")
+    result = subprocess.run(["git", "rev-parse", "--verify", "origin/feature/only-remote"],
+                             cwd=str(clone), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 0
+
+
+def test_fetch_with_prune_removes_deleted_remote_tracking_refs(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    # Clone from the shared BARE origin (tmp_path / "origin.git", set up by the
+    # tmp_git_repo_with_remote fixture) - not from tmp_git_repo_with_remote's own
+    # working copy, which would make this clone's "origin" a different, unrelated
+    # non-bare remote that a push to the real bare origin never touches.
+    bare_origin = tmp_path / "origin.git"
+    clone = tmp_path / "clone_fetch_prune"
+    subprocess.run(["git", "clone", str(bare_origin), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    create_branch_from(tmp_git_repo_with_remote, "feature/to-be-deleted", "main")
+    subprocess.run(["git", "push", "origin", "feature/to-be-deleted"], cwd=str(tmp_git_repo_with_remote), check=True)
+    fetch(clone)
+    result_before = subprocess.run(["git", "branch", "-r"], cwd=str(clone), check=True, stdout=subprocess.PIPE)
+    assert "feature/to-be-deleted" in result_before.stdout.decode()
+    subprocess.run(["git", "push", "origin", "--delete", "feature/to-be-deleted"], cwd=str(tmp_git_repo_with_remote), check=True)
+    fetch(clone, prune=True)
+    result_after = subprocess.run(["git", "branch", "-r"], cwd=str(clone), check=True, stdout=subprocess.PIPE)
+    assert "feature/to-be-deleted" not in result_after.stdout.decode()
+
+
+def test_fetch_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        fetch(tmp_git_repo, ref=_OPTION_LIKE)
+
+
+# Task: is_ancestor/unique_commit_count/delete_remote_branch - branch-delete safety primitives
+from icx_engine.git.gitcmd import is_ancestor, unique_commit_count, delete_remote_branch
+
+
+def test_is_ancestor_true_when_fully_merged(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    assert is_ancestor(tmp_git_repo, "feature/merged-ABC-1", "main") is True
+
+
+def test_is_ancestor_false_when_branch_has_unique_commits(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    commit(tmp_git_repo, "ABC-1 unique commit")
+    checkout(tmp_git_repo, "main")
+    assert is_ancestor(tmp_git_repo, "feature/unmerged-ABC-1", "main") is False
+
+
+def test_is_ancestor_rejects_option_like_refs(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        is_ancestor(tmp_git_repo, _OPTION_LIKE, "main")
+    with pytest.raises(GitCommandError):
+        is_ancestor(tmp_git_repo, "main", _OPTION_LIKE)
+
+
+def test_unique_commit_count_zero_when_fully_merged(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    assert unique_commit_count(tmp_git_repo, "feature/merged-ABC-1", "main") == 0
+
+
+def test_unique_commit_count_counts_unreachable_commits(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    for i in range(3):
+        (tmp_git_repo / f"f{i}.txt").write_text("x", encoding="utf-8")
+        stage_files(tmp_git_repo, [f"f{i}.txt"])
+        commit(tmp_git_repo, f"ABC-1 commit {i}")
+    assert unique_commit_count(tmp_git_repo, "feature/unmerged-ABC-1", "main") == 3
+
+
+def test_unique_commit_count_rejects_option_like_refs(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        unique_commit_count(tmp_git_repo, _OPTION_LIKE, "main")
+    with pytest.raises(GitCommandError):
+        unique_commit_count(tmp_git_repo, "main", _OPTION_LIKE)
+
+
+def test_delete_remote_branch_removes_it_from_remote(tmp_git_repo_with_remote):
+    create_branch_from(tmp_git_repo_with_remote, "feature/remote-delete-me", "main")
+    checkout(tmp_git_repo_with_remote, "feature/remote-delete-me")
+    push(tmp_git_repo_with_remote, "feature/remote-delete-me")
+    assert remote_branch_exists(tmp_git_repo_with_remote, "feature/remote-delete-me") is True
+    delete_remote_branch(tmp_git_repo_with_remote, "feature/remote-delete-me")
+    assert remote_branch_exists(tmp_git_repo_with_remote, "feature/remote-delete-me") is False
+
+
+def test_delete_remote_branch_rejects_option_like_branch(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        delete_remote_branch(tmp_git_repo, _OPTION_LIKE)
+
+
+def test_delete_remote_branch_rejects_option_like_remote(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        delete_remote_branch(tmp_git_repo, "main", remote=_OPTION_LIKE)
+
+
+# Task: conflict_stage/parse_conflict_hunks/checkout_conflict_side/conflict_state/
+# abort_in_progress_operation - line-level conflict inspection + gated resolution primitives
+from icx_engine.git.gitcmd import (
+    conflict_stage, parse_conflict_hunks, checkout_conflict_side, conflict_state,
+    abort_in_progress_operation,
+)
+
+
+def test_conflict_stage_returns_base_ours_and_theirs(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="stage_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    assert conflict_stage(clone, "README.md", 1) == "hello\n"
+    assert conflict_stage(clone, "README.md", 2) == "local version\n"
+    assert conflict_stage(clone, "README.md", 3) == "remote version\n"
+
+
+def test_conflict_stage_returns_none_for_missing_base_on_add_add_conflict(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    clone = tmp_path / "add_add_clone"
+    subprocess.run(["git", "clone", str(tmp_git_repo_with_remote), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(clone), check=True)
+
+    (tmp_git_repo_with_remote / "new_both.txt").write_text("remote side\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["new_both.txt"])
+    commit(tmp_git_repo_with_remote, "PARENT-1 add new_both remote side")
+    subprocess.run(["git", "push"], cwd=str(tmp_git_repo_with_remote), check=True)
+
+    (clone / "new_both.txt").write_text("local side\n", encoding="utf-8")
+    stage_files(clone, ["new_both.txt"])
+    commit(clone, "ABC-1 add new_both local side")
+
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    assert conflict_stage(clone, "new_both.txt", 1) is None  # no common ancestor for this path
+    assert conflict_stage(clone, "new_both.txt", 2) == "local side\n"
+    assert conflict_stage(clone, "new_both.txt", 3) == "remote side\n"
+
+
+def test_conflict_stage_rejects_invalid_stage_number(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        conflict_stage(tmp_git_repo, "README.md", 4)
+
+
+def test_conflict_stage_rejects_path_traversal(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        conflict_stage(tmp_git_repo, "../outside.txt", 1)
+
+
+def test_parse_conflict_hunks_single_hunk(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="hunk_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    hunks = parse_conflict_hunks(clone, "README.md")
+    assert len(hunks) == 1
+    assert hunks[0]["ours"] == "local version"
+    assert hunks[0]["theirs"] == "remote version"
+    assert hunks[0]["start_line"] == 1
+    on_disk = (clone / "README.md").read_text(encoding="utf-8")
+    on_disk_lines = on_disk.splitlines()
+    assert on_disk_lines[hunks[0]["start_line"] - 1].startswith("<<<<<<<")
+    assert on_disk_lines[hunks[0]["end_line"] - 1].startswith(">>>>>>>")
+
+
+def test_parse_conflict_hunks_multiple_hunks_in_one_file(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    lines = [f"line{i}" for i in range(1, 13)]
+    (tmp_git_repo_with_remote / "multi.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["multi.txt"])
+    commit(tmp_git_repo_with_remote, "PARENT-1 add multi.txt")
+    subprocess.run(["git", "push"], cwd=str(tmp_git_repo_with_remote), check=True)
+
+    clone = tmp_path / "multi_hunk_clone"
+    subprocess.run(["git", "clone", str(tmp_git_repo_with_remote), str(clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(clone), check=True)
+
+    local_lines = list(lines)
+    local_lines[1] = "local-line2"
+    local_lines[9] = "local-line10"
+    (clone / "multi.txt").write_text("\n".join(local_lines) + "\n", encoding="utf-8")
+    stage_files(clone, ["multi.txt"])
+    commit(clone, "ABC-1 local edits")
+
+    remote_lines = list(lines)
+    remote_lines[1] = "remote-line2"
+    remote_lines[9] = "remote-line10"
+    (tmp_git_repo_with_remote / "multi.txt").write_text("\n".join(remote_lines) + "\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["multi.txt"])
+    commit(tmp_git_repo_with_remote, "PARENT-2 remote edits")
+    subprocess.run(["git", "push"], cwd=str(tmp_git_repo_with_remote), check=True)
+
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    hunks = parse_conflict_hunks(clone, "multi.txt")
+    assert len(hunks) == 2
+    assert hunks[0]["ours"] == "local-line2"
+    assert hunks[0]["theirs"] == "remote-line2"
+    assert hunks[1]["ours"] == "local-line10"
+    assert hunks[1]["theirs"] == "remote-line10"
+    assert hunks[0]["end_line"] < hunks[1]["start_line"]
+
+
+def test_parse_conflict_hunks_empty_for_clean_file(tmp_git_repo):
+    assert parse_conflict_hunks(tmp_git_repo, "README.md") == []
+
+
+def test_parse_conflict_hunks_rejects_path_traversal(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        parse_conflict_hunks(tmp_git_repo, "../outside.txt")
+
+
+def test_checkout_conflict_side_ours_resolves_to_local_version(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="take_ours_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    checkout_conflict_side(clone, "README.md", "ours")
+    assert (clone / "README.md").read_text(encoding="utf-8") == "local version\n"
+    # still unmerged in the index until staged
+    assert "README.md" in conflicted_files(clone)
+
+
+def test_checkout_conflict_side_theirs_resolves_to_remote_version(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="take_theirs_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    checkout_conflict_side(clone, "README.md", "theirs")
+    assert (clone / "README.md").read_text(encoding="utf-8") == "remote version\n"
+
+
+def test_checkout_conflict_side_rejects_invalid_side(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        checkout_conflict_side(tmp_git_repo, "README.md", "bogus")
+
+
+def test_checkout_conflict_side_rejects_path_traversal(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        checkout_conflict_side(tmp_git_repo, "../outside.txt", "ours")
+
+
+def test_conflict_state_clean_on_fresh_repo(tmp_git_repo):
+    assert conflict_state(tmp_git_repo) == "CLEAN"
+
+
+def test_conflict_state_conflict_detected_mid_merge(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="state_conflict_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    assert conflict_state(clone) == "CONFLICT_DETECTED"
+
+
+def test_conflict_state_staged_after_resolving_and_staging(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="state_staged_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    checkout_conflict_side(clone, "README.md", "ours")
+    stage_files(clone, ["README.md"])
+    assert conflict_state(clone) == "STAGED"
+
+
+def test_conflict_state_clean_after_abort(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="state_abort_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    merge_abort(clone)
+    assert conflict_state(clone) == "CLEAN"
+
+
+def test_abort_in_progress_operation_aborts_merge(tmp_git_repo_with_remote, tmp_path):
+    clone = _make_diverging_clone(tmp_git_repo_with_remote, tmp_path, name="abort_merge_clone")
+    fetch(clone)
+    with pytest.raises(GitCommandError):
+        merge_ref(clone, "origin/main")
+    result = abort_in_progress_operation(clone)
+    assert result == "merge"
+    assert conflicted_files(clone) == []
+    assert not (clone / ".git" / "MERGE_HEAD").exists()
+
+
+def test_abort_in_progress_operation_raises_when_nothing_in_progress(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        abort_in_progress_operation(tmp_git_repo)
+
+
+def test_abort_in_progress_operation_aborts_cherry_pick(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/cp-source", "main")
+    checkout(tmp_git_repo, "feature/cp-source")
+    (tmp_git_repo / "README.md").write_text("cherry-pick version\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    sha = commit(tmp_git_repo, "ABC-1 cherry-pick change")
+    checkout(tmp_git_repo, "main")
+    (tmp_git_repo / "README.md").write_text("main version\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "PARENT-1 main change")
+
+    import subprocess
+    result = subprocess.run(["git", "cherry-pick", sha], cwd=str(tmp_git_repo),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode != 0  # real conflict
+    assert (tmp_git_repo / ".git" / "CHERRY_PICK_HEAD").exists()
+
+    aborted = abort_in_progress_operation(tmp_git_repo)
+    assert aborted == "cherry-pick"
+    assert not (tmp_git_repo / ".git" / "CHERRY_PICK_HEAD").exists()
+    assert conflicted_files(tmp_git_repo) == []
+
+
+def test_abort_in_progress_operation_aborts_rebase(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/rebase-source", "main")
+    checkout(tmp_git_repo, "feature/rebase-source")
+    (tmp_git_repo / "README.md").write_text("rebase version\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "ABC-1 rebase change")
+    checkout(tmp_git_repo, "main")
+    (tmp_git_repo / "README.md").write_text("main version\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "PARENT-1 main change")
+    checkout(tmp_git_repo, "feature/rebase-source")
+
+    import subprocess
+    result = subprocess.run(["git", "rebase", "main"], cwd=str(tmp_git_repo),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode != 0  # real conflict
+    rebase_in_progress = (tmp_git_repo / ".git" / "rebase-merge").exists() or \
+                          (tmp_git_repo / ".git" / "rebase-apply").exists()
+    assert rebase_in_progress
+
+    aborted = abort_in_progress_operation(tmp_git_repo)
+    assert aborted == "rebase"
+    assert not (tmp_git_repo / ".git" / "rebase-merge").exists()
+    assert not (tmp_git_repo / ".git" / "rebase-apply").exists()
+    assert conflicted_files(tmp_git_repo) == []
+
+
+# Task: resolve_ref - tolerant ref-to-sha resolution for dependency-pin analysis
+from icx_engine.git.gitcmd import resolve_ref, head_sha
+
+
+def test_resolve_ref_resolves_branch_name(tmp_git_repo):
+    assert resolve_ref(tmp_git_repo, "main") == head_sha(tmp_git_repo)
+
+
+def test_resolve_ref_resolves_full_sha(tmp_git_repo):
+    sha = head_sha(tmp_git_repo)
+    assert resolve_ref(tmp_git_repo, sha) == sha
+
+
+def test_resolve_ref_resolves_short_sha(tmp_git_repo):
+    sha = head_sha(tmp_git_repo)
+    assert resolve_ref(tmp_git_repo, sha[:8]) == sha
+
+
+def test_resolve_ref_returns_none_for_unresolvable_ref(tmp_git_repo):
+    assert resolve_ref(tmp_git_repo, "not-a-real-ref") is None
+
+
+def test_resolve_ref_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        resolve_ref(tmp_git_repo, _OPTION_LIKE)
+
+
+# Task: restore_files - file-level discard, worktree/staged/both modes
+from icx_engine.git.gitcmd import restore_files, structured_status
+
+
+def _stage_then_dirty_readme(tmp_git_repo):
+    (tmp_git_repo / "README.md").write_text("staged\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    (tmp_git_repo / "README.md").write_text("unstaged\n", encoding="utf-8")
+
+
+def test_restore_files_worktree_mode_restores_from_index_leaves_staged(tmp_git_repo):
+    _stage_then_dirty_readme(tmp_git_repo)
+    restore_files(tmp_git_repo, ["README.md"], mode="worktree")
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "staged\n"
+    status = structured_status(tmp_git_repo)
+    assert status["unstaged"] == []
+    staged_paths = {e["path"]: e["status"] for e in status["staged"]}
+    assert staged_paths == {"README.md": "modified"}
+
+
+def test_restore_files_staged_mode_unstages_leaves_worktree(tmp_git_repo):
+    _stage_then_dirty_readme(tmp_git_repo)
+    restore_files(tmp_git_repo, ["README.md"], mode="staged")
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "unstaged\n"
+    status = structured_status(tmp_git_repo)
+    assert status["staged"] == []
+    unstaged_paths = {e["path"]: e["status"] for e in status["unstaged"]}
+    assert unstaged_paths == {"README.md": "modified"}
+
+
+def test_restore_files_both_mode_fully_reverts_to_head(tmp_git_repo):
+    _stage_then_dirty_readme(tmp_git_repo)
+    restore_files(tmp_git_repo, ["README.md"], mode="both")
+    assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "hello\n"
+    status = structured_status(tmp_git_repo)
+    assert status["staged"] == []
+    assert status["unstaged"] == []
+
+
+def test_restore_files_multiple_files(tmp_git_repo):
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_git_repo / "b.txt").write_text("b", encoding="utf-8")
+    stage_files(tmp_git_repo, ["a.txt", "b.txt"])
+    commit(tmp_git_repo, "add a and b")
+    (tmp_git_repo / "a.txt").write_text("a-changed", encoding="utf-8")
+    (tmp_git_repo / "b.txt").write_text("b-changed", encoding="utf-8")
+    restore_files(tmp_git_repo, ["a.txt", "b.txt"], mode="worktree")
+    assert (tmp_git_repo / "a.txt").read_text(encoding="utf-8") == "a"
+    assert (tmp_git_repo / "b.txt").read_text(encoding="utf-8") == "b"
+
+
+def test_restore_files_empty_list_is_noop(tmp_git_repo):
+    restore_files(tmp_git_repo, [])  # must not raise
+
+
+def test_restore_files_rejects_invalid_mode(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        restore_files(tmp_git_repo, ["README.md"], mode="bogus")
+
+
+def test_restore_files_rejects_option_like_file(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        restore_files(tmp_git_repo, [_OPTION_LIKE])
+
+
+def test_restore_files_rejects_option_like_source(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        restore_files(tmp_git_repo, ["README.md"], source=_OPTION_LIKE)

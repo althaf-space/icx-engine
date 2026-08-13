@@ -8,11 +8,19 @@ module by design - see the design spec's safety doctrine
 (docs/superpowers/specs/2026-07-26-icx-git-workflow-design.md, Section 2).
 A real, conflict-capable merge exists here (`merge_ref`), but this module
 never interprets or resolves a conflict itself - a caller that gets a
-conflict must either abort (`merge_abort`) or hand it to the
-conflict-quarantine flow in `manager.py`; `gitcmd.py` only ever reports raw
-git state, never makes a resolution decision. `fast_forward`/`fast_forward_ref`
-are `--ff-only` and cannot conflict or create a merge commit - they are not
-"real" merges in this sense.
+conflict must either abort (`merge_abort`, or the operation-agnostic
+`abort_in_progress_operation`) or hand it to the conflict-quarantine flow in
+`manager.py`; `gitcmd.py` only ever reports raw git state, never makes a
+resolution decision. `fast_forward`/`fast_forward_ref` are `--ff-only` and
+cannot conflict or create a merge commit - they are not "real" merges in
+this sense.
+
+ONE explicit, narrow exception to "no rebase": `abort_in_progress_operation`
+may run `git rebase --abort` - but ONLY to back out of a rebase a human
+started outside ICX, never to start, continue, or otherwise drive one. An
+abort restores the pre-rebase state; it does not rewrite history the way a
+real rebase does. This module still never initiates, continues, or skips a
+rebase step anywhere.
 """
 from __future__ import annotations
 
@@ -139,9 +147,18 @@ def current_branch(repo: Path) -> str:
     return _stdout(result)
 
 
-def fetch(repo: Path, remote: str = "origin", extra_env: dict[str, str] | None = None) -> None:
+def fetch(
+    repo: Path, remote: str = "origin", ref: str | None = None, prune: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> None:
     _reject_option_like(remote, "remote")
-    _run_git(repo, ["fetch", remote], timeout=60.0, extra_env=extra_env)
+    args = ["fetch", remote]
+    if ref is not None:
+        _reject_option_like(ref, "ref")
+        args.append(ref)
+    if prune:
+        args.append("--prune")
+    _run_git(repo, args, timeout=60.0, extra_env=extra_env)
 
 
 def remote_branch_exists(
@@ -210,8 +227,45 @@ def stash_push(repo: Path, message: str) -> None:
     _run_git(repo, ["stash", "push", "-u", "-m", message])
 
 
-def stash_pop(repo: Path) -> None:
-    _run_git(repo, ["stash", "pop"])
+def stash_pop(repo: Path, ref: str | None = None) -> None:
+    """Pops `ref` (a `stash@{N}` string) if given, else the most recent stash
+    (`stash@{0}`) - backward compatible with every existing no-ref call."""
+    args = ["stash", "pop"]
+    if ref is not None:
+        _reject_option_like(ref, "ref")
+        args.append(ref)
+    _run_git(repo, args)
+
+
+def stash_list(repo: Path) -> list[dict]:
+    """Every stash, newest first (stash@{0} is always the most recent).
+    `ref` is the exact `stash@{N}` string to pass to stash_apply/stash_pop/
+    stash_drop; `message` is the stash's own label (the part after
+    'On <branch>: ' or 'WIP on <branch>: ')."""
+    result = _run_git(repo, ["stash", "list", "--format=%gd%x1f%s"])
+    out = _stdout(result)
+    stashes = []
+    for i, line in enumerate(out.splitlines()):
+        if not line:
+            continue
+        ref, _, message = line.partition("\x1f")
+        stashes.append({"index": i, "ref": ref, "message": message})
+    return stashes
+
+
+def stash_apply(repo: Path, ref: str = "stash@{0}") -> None:
+    """Applies `ref`'s changes to the working tree WITHOUT removing it from
+    the stash list - use stash_pop to apply-and-remove in one step."""
+    _reject_option_like(ref, "ref")
+    _run_git(repo, ["stash", "apply", ref])
+
+
+def stash_drop(repo: Path, ref: str = "stash@{0}") -> None:
+    """Permanently discards `ref` from the stash list - never call this
+    without the human's explicit confirmation, this is not recoverable
+    through any ICX tool."""
+    _reject_option_like(ref, "ref")
+    _run_git(repo, ["stash", "drop", ref])
 
 
 def create_branch_from(repo: Path, new_branch: str, start_point: str) -> None:
@@ -247,6 +301,52 @@ def delete_branch(repo: Path, branch: str, force: bool = False) -> None:
     _run_git(repo, ["branch", "-D" if force else "-d", branch])
 
 
+def delete_remote_branch(
+    repo: Path, branch: str, remote: str = "origin", extra_env: dict[str, str] | None = None,
+) -> None:
+    """Deletes `branch` on `remote` via a real push (`--delete`) - routes
+    through the same extra_env auth plumbing as push()/fetch(), rather than a
+    second, separately-authenticated code path."""
+    _reject_option_like(branch, "branch")
+    _reject_option_like(remote, "remote")
+    _run_git(repo, ["push", remote, "--delete", branch], timeout=60.0, extra_env=extra_env)
+
+
+def is_ancestor(repo: Path, ancestor_ref: str, descendant_ref: str) -> bool:
+    """True if every commit on ancestor_ref already exists on descendant_ref
+    - i.e. ancestor_ref could be deleted without losing any commit reachable
+    only from it."""
+    _reject_option_like(ancestor_ref, "ancestor_ref")
+    _reject_option_like(descendant_ref, "descendant_ref")
+    result = _run_git(
+        repo, ["merge-base", "--is-ancestor", ancestor_ref, descendant_ref], allowed_returncodes={1},
+    )
+    return result.returncode == 0
+
+
+def unique_commit_count(repo: Path, branch: str, target: str) -> int:
+    """Count of commits reachable from branch but not from target - what
+    would become unreachable (lost) if branch were deleted right now. Zero
+    means branch is fully merged into target (equivalent to
+    is_ancestor(branch, target) being True)."""
+    _reject_option_like(branch, "branch")
+    _reject_option_like(target, "target")
+    result = _run_git(repo, ["rev-list", "--count", f"{target}..{branch}"])
+    return int(_stdout(result))
+
+
+def resolve_ref(repo: Path, ref: str) -> str | None:
+    """Resolves ref (branch/tag/full or short sha/anything git understands)
+    to its full commit sha - tolerant of an unresolvable ref (returns None
+    rather than raising), used by dependency-pin analysis to check a pinned
+    ref against a target branch without assuming either exists."""
+    _reject_option_like(ref, "ref")
+    result = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], allowed_returncodes={128})
+    if result.returncode != 0:
+        return None
+    return _stdout(result)
+
+
 def find_conflict_markers(repo: Path, relpaths: list[str]) -> dict[str, list[str]]:
     """Scan each given file's ON-DISK content (not git-tracked state) for
     literal conflict-marker lines. Universal, language-agnostic check (design
@@ -272,6 +372,34 @@ def stage_files(repo: Path, files: list[str]) -> None:
     if not files:
         return
     _run_git(repo, ["add", "--", *files])
+
+
+def restore_files(repo: Path, files: list[str], mode: str = "worktree", source: str | None = None) -> None:
+    """Discards changes to exactly these files - never a wildcard or '.',
+    same discipline as stage_files. mode='worktree' (default) restores the
+    working tree only (`git restore <file>` - unstaged changes discarded,
+    staged changes untouched). mode='staged' unstages only (`git restore
+    --staged <file>` - working tree untouched, only the index entry
+    reverts). mode='both' restores both (file fully reverts to source,
+    discarding staged AND unstaged changes). source (default None - git's
+    own default: index if staged, else HEAD) forces restoring from a
+    specific ref instead."""
+    if not files:
+        return
+    if mode not in ("worktree", "staged", "both"):
+        raise GitCommandError(f"mode must be 'worktree', 'staged', or 'both', got {mode!r}")
+    for f in files:
+        _reject_option_like(f, "files")
+    args = ["restore"]
+    if source is not None:
+        _reject_option_like(source, "source")
+        args.append(f"--source={source}")
+    if mode in ("staged", "both"):
+        args.append("--staged")
+    if mode in ("worktree", "both"):
+        args.append("--worktree")
+    args += ["--", *files]
+    _run_git(repo, args)
 
 
 def head_sha(repo: Path) -> str:
@@ -364,11 +492,117 @@ def merge_abort(repo: Path) -> None:
     _run_git(repo, ["merge", "--abort"])
 
 
+def abort_in_progress_operation(repo: Path) -> str:
+    """Aborts whichever conflict-capable operation is actually in progress -
+    merge, cherry-pick, or rebase - detected from real on-disk state markers
+    (MERGE_HEAD/CHERRY_PICK_HEAD/rebase-merge or rebase-apply), never assumed
+    to be one specific flow. Returns which one was aborted. Raises
+    GitCommandError if none is in progress - nothing to abort. See this
+    module's docstring for why a rebase abort here does not violate the
+    no-rebase doctrine."""
+    git_dir = repo / ".git"
+    if (git_dir / "MERGE_HEAD").exists():
+        merge_abort(repo)
+        return "merge"
+    if (git_dir / "CHERRY_PICK_HEAD").exists():
+        _run_git(repo, ["cherry-pick", "--abort"])
+        return "cherry-pick"
+    if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+        _run_git(repo, ["rebase", "--abort"])
+        return "rebase"
+    raise GitCommandError("No merge, cherry-pick, or rebase is currently in progress - nothing to abort.")
+
+
 def conflicted_files(repo: Path) -> list[str]:
-    """Paths with unresolved merge conflicts (unmerged index entries)."""
+    """Paths with unresolved merge conflicts (unmerged index entries) -
+    reflects the CURRENT repo's real index state, regardless of whether ICX,
+    a manual `git merge`/`git pull`, a rebase, or a cherry-pick produced it."""
     result = _run_git(repo, ["diff", "--name-only", "--diff-filter=U"])
     out = _stdout(result)
     return [_unquote_git_path(line) for line in out.splitlines() if line]
+
+
+def conflict_state(repo: Path) -> str:
+    """Live, derived conflict-workflow state label - CLEAN/CONFLICT_DETECTED/
+    STAGED - computed fresh from real git state every call, never stored or
+    tracked separately (a stored tracker could drift from the real repo
+    state; this can't, since it IS the real repo state). STAGED means every
+    conflicted path has been staged (no more unmerged index entries) but an
+    operation is still in progress - the merge/cherry-pick/rebase itself has
+    not been committed/continued yet."""
+    if conflicted_files(repo):
+        return "CONFLICT_DETECTED"
+    git_dir = repo / ".git"
+    if (git_dir / "MERGE_HEAD").exists() or (git_dir / "CHERRY_PICK_HEAD").exists() or \
+            (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+        return "STAGED"
+    return "CLEAN"
+
+
+def conflict_stage(repo: Path, relpath: str, stage: int) -> str | None:
+    """Reads one index stage of a conflicted path - 1=base (common ancestor),
+    2=ours, 3=theirs. Tolerant of a missing stage (an add/add conflict has no
+    base; a delete/modify conflict has no ours or theirs on the deleting
+    side) - returns None rather than raising, unlike conflict_versions()
+    which assumes both ours/theirs exist (the only shape ICX's own
+    scratch-branch merge flow ever produces)."""
+    if stage not in (1, 2, 3):
+        raise GitCommandError(f"stage must be 1, 2, or 3, got {stage!r}")
+    _reject_path_traversal(relpath, "relpath")
+    result = _run_git(repo, ["show", f":{stage}:{relpath}"], allowed_returncodes={128})
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def parse_conflict_hunks(repo: Path, relpath: str) -> list[dict]:
+    """Parses relpath's ON-DISK conflict markers into structured hunks -
+    1-indexed start_line/end_line spanning the full `<<<<<<<` to `>>>>>>>`
+    block, plus ours/theirs text for each - exactly what a human would see
+    open in an editor. Assumes the standard 2-way marker style (`<<<<<<<` /
+    `=======` / `>>>>>>>`) - ICX never enables diff3-style base markers
+    (`|||||||`) for its own merges, so a per-hunk base section never has to
+    be parsed here (use conflict_stage(repo, relpath, 1) for the whole
+    file's base content instead)."""
+    _reject_path_traversal(relpath, "relpath")
+    text = (repo / relpath).read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    hunks: list[dict] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if not lines[i].startswith("<<<<<<<"):
+            i += 1
+            continue
+        start = i
+        i += 1
+        ours_lines: list[str] = []
+        while i < n and not lines[i].startswith("======="):
+            ours_lines.append(lines[i])
+            i += 1
+        i += 1  # skip the ======= separator
+        theirs_lines: list[str] = []
+        while i < n and not lines[i].startswith(">>>>>>>"):
+            theirs_lines.append(lines[i])
+            i += 1
+        hunks.append({
+            "start_line": start + 1,
+            "end_line": i + 1,
+            "ours": "\n".join(ours_lines),
+            "theirs": "\n".join(theirs_lines),
+        })
+        i += 1  # skip the >>>>>>> marker
+    return hunks
+
+
+def checkout_conflict_side(repo: Path, relpath: str, side: str) -> None:
+    """Resolves relpath's ON-DISK content to one side of an in-progress
+    conflict via `git checkout --ours`/`--theirs` - does NOT stage the
+    result (still shows as unmerged in the index until stage_files is
+    called) and does not touch any other file."""
+    if side not in ("ours", "theirs"):
+        raise GitCommandError(f"side must be 'ours' or 'theirs', got {side!r}")
+    _reject_path_traversal(relpath, "relpath")
+    _run_git(repo, ["checkout", f"--{side}", "--", relpath])
 
 
 def commits_since(repo: Path, base_ref: str) -> list[str]:
@@ -392,6 +626,17 @@ def file_exists_at_ref(repo: Path, ref: str, relpath: str) -> bool:
     _reject_option_like(ref, "ref")
     result = _run_git(repo, ["cat-file", "-e", f"{ref}:{relpath}"], allowed_returncodes={1, 128})
     return result.returncode == 0
+
+
+def read_file_at_ref(repo: Path, ref: str, relpath: str) -> str:
+    """Read relpath's exact content at ref - HEAD, MERGE_HEAD (mid-conflict),
+    a branch, a remote-tracking ref, or a commit sha. Read-only, local, no
+    network. Raises GitCommandError if ref does not resolve or relpath does
+    not exist there."""
+    _reject_option_like(ref, "ref")
+    _reject_path_traversal(relpath, "relpath")
+    result = _run_git(repo, ["show", f"{ref}:{relpath}"])
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 def conflict_versions(repo: Path, relpath: str) -> tuple[str, str]:
@@ -527,16 +772,19 @@ def show_commit(repo: Path, sha: str) -> dict:
     }
 
 
-def diff_between(repo: Path, ref_a: str, ref_b: str) -> dict:
-    """Per-file status plus insertions/deletions between two refs. Combines
-    `--numstat` (counts) and `--name-status` (status codes) - numstat alone has
-    no status field. Rename detection is disabled on both calls so paths line up
-    1:1 between the two outputs. Binary files report `insertions`/`deletions` as
-    None (numstat prints '-' for them, not a number)."""
-    _reject_option_like(ref_a, "ref_a")
-    _reject_option_like(ref_b, "ref_b")
-    numstat_result = _run_git(repo, ["diff", "--no-renames", "--numstat", ref_a, ref_b])
-    namestatus_result = _run_git(repo, ["diff", "--no-renames", "--name-status", ref_a, ref_b])
+def _diff_stats(repo: Path, base_args: list[str], relpath: str | None) -> dict:
+    """Shared implementation for diff_between/diff_worktree - per-file status
+    plus insertions/deletions. Combines `--numstat` (counts) and
+    `--name-status` (status codes) - numstat alone has no status field. Rename
+    detection is disabled on both calls so paths line up 1:1 between the two
+    outputs. Binary files report `insertions`/`deletions` as None (numstat
+    prints '-' for them, not a number)."""
+    path_args: list[str] = []
+    if relpath is not None:
+        _reject_path_traversal(relpath, "relpath")
+        path_args = ["--", relpath]
+    numstat_result = _run_git(repo, [*base_args, "--numstat", *path_args])
+    namestatus_result = _run_git(repo, [*base_args, "--name-status", *path_args])
     numstat_out = _stdout(numstat_result)
     namestatus_out = _stdout(namestatus_result)
 
@@ -572,3 +820,110 @@ def diff_between(repo: Path, ref_a: str, ref_b: str) -> dict:
             "deletions": deletions,
         })
     return {"files": files}
+
+
+def diff_between(repo: Path, ref_a: str, ref_b: str) -> dict:
+    """Per-file status plus insertions/deletions between two refs (both
+    committed - use diff_worktree for anything involving the working tree or
+    the index)."""
+    _reject_option_like(ref_a, "ref_a")
+    _reject_option_like(ref_b, "ref_b")
+    return _diff_stats(repo, ["diff", "--no-renames", ref_a, ref_b], relpath=None)
+
+
+def diff_worktree(repo: Path, mode: str = "combined", relpath: str | None = None) -> dict:
+    """Local, uncommitted diff - diff_between only ever compares two existing
+    refs, never the working tree or index. mode='staged' is index vs HEAD
+    (what the next commit would contain), 'unstaged' is working tree vs index
+    (changes not yet staged), 'combined' is working tree vs HEAD (every
+    uncommitted change, staged or not). relpath scopes to one file; omitted
+    means every changed file. Same per-file shape as diff_between."""
+    if mode == "staged":
+        base_args = ["diff", "--no-renames", "--cached"]
+    elif mode == "unstaged":
+        base_args = ["diff", "--no-renames"]
+    elif mode == "combined":
+        base_args = ["diff", "--no-renames", "HEAD"]
+    else:
+        raise GitCommandError(f"mode must be 'staged', 'unstaged', or 'combined', got {mode!r}")
+    return _diff_stats(repo, base_args, relpath)
+
+
+_STATUS_CODE_NAMES = {
+    "M": "modified", "A": "added", "D": "deleted",
+    "R": "renamed", "C": "copied", "T": "type_changed", "U": "unmerged",
+}
+
+
+def structured_status(repo: Path) -> dict:
+    """Full working-tree status via `git status --porcelain=v2 --branch` -
+    v2's fixed-width XY codes and dedicated line-type prefixes (1/2/u/?) let
+    staged vs unstaged vs conflicted be told apart unambiguously, unlike v1's
+    single ambiguous leading-space format (dirty_files() above). branch.ab is
+    only present when an upstream is configured - ahead/behind default to 0
+    and upstream to None otherwise."""
+    result = _run_git(repo, ["status", "--porcelain=v2", "--branch"])
+    out = _stdout(result)
+
+    branch: str | None = None
+    upstream: str | None = None
+    ahead = 0
+    behind = 0
+    staged: list[dict] = []
+    unstaged: list[dict] = []
+    untracked: list[str] = []
+    renamed: list[dict] = []
+    conflicted: list[str] = []
+    deleted: set[str] = set()
+
+    for line in out.splitlines():
+        if line.startswith("# branch.head "):
+            branch = line[len("# branch.head "):]
+        elif line.startswith("# branch.upstream "):
+            upstream = line[len("# branch.upstream "):]
+        elif line.startswith("# branch.ab "):
+            for token in line[len("# branch.ab "):].split():
+                if token.startswith("+"):
+                    ahead = int(token[1:])
+                elif token.startswith("-"):
+                    behind = int(token[1:])
+        elif line.startswith("1 "):
+            fields = line.split(" ", 8)
+            xy, path = fields[1], _unquote_git_path(fields[8])
+            staged_code, unstaged_code = xy[0], xy[1]
+            if staged_code != ".":
+                staged.append({"path": path, "status": _STATUS_CODE_NAMES.get(staged_code, staged_code)})
+                if staged_code == "D":
+                    deleted.add(path)
+            if unstaged_code != ".":
+                unstaged.append({"path": path, "status": _STATUS_CODE_NAMES.get(unstaged_code, unstaged_code)})
+                if unstaged_code == "D":
+                    deleted.add(path)
+        elif line.startswith("2 "):
+            fields = line.split(" ", 9)
+            staged_code, unstaged_code = fields[1][0], fields[1][1]
+            new_path, _, old_path = fields[9].partition("\t")
+            new_path, old_path = _unquote_git_path(new_path), _unquote_git_path(old_path)
+            renamed.append({"from": old_path, "to": new_path})
+            if staged_code != ".":
+                staged.append({"path": new_path, "status": _STATUS_CODE_NAMES.get(staged_code, staged_code)})
+            if unstaged_code != ".":
+                unstaged.append({"path": new_path, "status": _STATUS_CODE_NAMES.get(unstaged_code, unstaged_code)})
+        elif line.startswith("u "):
+            fields = line.split(" ", 10)
+            conflicted.append(_unquote_git_path(fields[10]))
+        elif line.startswith("? "):
+            untracked.append(_unquote_git_path(line[2:]))
+
+    return {
+        "current_branch": branch,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+        "deleted": sorted(deleted),
+        "renamed": renamed,
+        "conflicted": conflicted,
+    }

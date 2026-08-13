@@ -33,6 +33,7 @@ from icx_engine.workstatus.service import (
     payroll_report,
     get_timesheet,
     edit_timesheet,
+    recent_project_tasks,
 )
 
 
@@ -277,3 +278,47 @@ async def test_edit_timesheet_returns_data_when_configured():
         cfg=_configured_cfg(),
     )
     assert result == {"code": "200", "message": "ok"}
+
+
+async def test_recent_project_tasks_raises_when_not_configured():
+    with pytest.raises(WorkstatusNotConfigured):
+        await recent_project_tasks(cfg=AppConfig())
+
+
+@respx.mock
+async def test_recent_project_tasks_dedupes_sorts_and_returns_empty_on_no_history():
+    respx.post(f"{BASE}/timesheets/viewTimesheet/list").mock(
+        return_value=httpx.Response(200, json={"code": "200", "message": "ok", "data": {"timeSheetList": [
+            {"date": "2026-08-04", "project": {"id": 1814, "name": "VIL Ads"}, "todo": {"id": 44967, "name": "VILAds_Development_Dev"}},
+            {"date": "2026-08-06", "project": {"id": 1814, "name": "VIL Ads"}, "todo": {"id": 44967, "name": "VILAds_Development_Dev"}},
+            {"date": "2026-08-05", "project": {"id": 2105, "name": "6D_IN_CVM_Int"}, "todo": {"id": 76822, "name": "R&D_Dashboards"}},
+        ]}})
+    )
+    rows = await recent_project_tasks(cfg=_configured_cfg())
+    assert len(rows) == 2
+    assert rows[0] == {
+        "project_id": 1814, "project_name": "VIL Ads", "todo_id": 44967,
+        "todo_name": "VILAds_Development_Dev", "last_used": "2026-08-06",
+    }
+    assert rows[1]["project_id"] == 2105
+
+
+@respx.mock
+async def test_recent_project_tasks_empty_history_returns_empty_list():
+    respx.post(f"{BASE}/timesheets/viewTimesheet/list").mock(
+        return_value=httpx.Response(200, json={"code": "200", "message": "ok", "data": {"timeSheetList": []}})
+    )
+    rows = await recent_project_tasks(cfg=_configured_cfg())
+    assert rows == []
+
+
+@respx.mock
+async def test_recent_project_tasks_passes_lookback_days_as_interval():
+    route = respx.post(f"{BASE}/timesheets/viewTimesheet/list").mock(
+        return_value=httpx.Response(200, json={"code": "200", "message": "ok", "data": {"timeSheetList": []}})
+    )
+    await recent_project_tasks(lookback_days=30, cfg=_configured_cfg())
+    body = json.loads(route.calls[0].request.content)
+    from datetime import date, timedelta
+    assert body["interval"]["to"] == date.today().isoformat()
+    assert body["interval"]["from"] == (date.today() - timedelta(days=30)).isoformat()

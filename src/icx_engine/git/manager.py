@@ -20,10 +20,12 @@ from icx_engine.git.gitcmd import (
     head_sha, merge_ref, merge_abort, conflicted_files, stash_pop,
     conflict_versions, find_conflict_markers, fast_forward_ref, delete_branch,
     commits_since, changed_files_since, remote_url, file_exists_at_ref, push,
+    delete_remote_branch, unique_commit_count,
 )
 from icx_engine.git.naming import (
     derive_branch_name, ticketless_branch_name, parse_ticket_key_from_branch, slugify,
 )
+from icx_engine.git.policy import validate_branch_name, BranchPolicyResult
 from icx_engine.git.settings import read_repo_settings, write_repo_settings
 from icx_engine.git.safety import (
     detect_leftover_state, LeftoverState, create_backup, create_scratch_branch, prune_old_backups,
@@ -125,6 +127,13 @@ class SyncResult:
 
 
 @dataclass
+class PullResult:
+    status: str  # "up_to_date" | "fast_forwarded" | "merged" | "conflict" | "diverged_needs_merge"
+    conflicted_files: list[str] = field(default_factory=list)
+    scratch_branch: str | None = None
+
+
+@dataclass
 class DebugLeftover:
     file: str
     line: str
@@ -170,6 +179,7 @@ class CreateMrResult:
     mr_iid: int
     created: bool
     merged: bool
+    merge_status: str = "UNKNOWN"  # MERGEABLE | CONFLICTED | CHECKING | BLOCKED | UNKNOWN
     refusal_reason: str | None = None
 
 
@@ -178,6 +188,14 @@ class CleanupResult:
     parent_branch: str
     feature_branch_deleted: bool
     backups_deleted: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BranchDeleteResult:
+    branch: str
+    local_deleted: bool
+    remote_deleted: bool
+    unique_commits: int
 
 
 _MIGRATION_PATH_RE = re.compile(r"(^|/)migrations?/", re.IGNORECASE)
@@ -255,6 +273,17 @@ class GitLifecycleManager:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         stash_push(self.repo_root, f"icx:{ticket_key}:{timestamp}")
 
+    def check_branch_name_policy(self, branch_name: str) -> BranchPolicyResult:
+        """Validates branch_name against this repo's configured naming policy -
+        require_ticket_in_branch_name (git/settings.py, default False - preserves
+        the existing ticketless-branch feature for repos that never opted into
+        stricter enforcement). See git/policy.py for what "valid" means."""
+        require_ticket = bool(read_repo_settings(self.repo_root).get("require_ticket_in_branch_name", False))
+        return validate_branch_name(branch_name, require_ticket_suffix=require_ticket)
+
+    def set_branch_name_policy(self, require_ticket_in_branch_name: bool) -> None:
+        write_repo_settings(self.repo_root, require_ticket_in_branch_name=require_ticket_in_branch_name)
+
     def start_branch(
         self, ticket_key: str | None, summary_or_preferred_name: str, parent_branch: str,
     ) -> BranchStartResult:
@@ -262,6 +291,9 @@ class GitLifecycleManager:
             derive_branch_name(ticket_key, summary_or_preferred_name)
             if ticket_key else ticketless_branch_name(summary_or_preferred_name)
         )
+        policy = self.check_branch_name_policy(branch_name)
+        if not policy.valid:
+            raise GitWorkflowError(policy.reason)
         if local_branch_exists(self.repo_root, branch_name):
             checkout(self.repo_root, branch_name)
             return BranchStartResult(branch_name=branch_name, created=False, switched_to_existing=True)
@@ -283,6 +315,36 @@ class GitLifecycleManager:
             return SyncResult(status="diverged_needs_merge")
         after = head_sha(self.repo_root)
         return SyncResult(status="fast_forwarded" if after != before else "up_to_date")
+
+    def pull(
+        self, remote: str = "origin", strategy: str = "ff-only", ticket_key: str | None = None,
+    ) -> PullResult:
+        """git pull's fetch+integrate step, scoped to the CURRENT branch's own
+        remote-tracking counterpart (origin/<current-branch>) - never a
+        different parent branch (see reverse_merge_standard/git_reverse_merge
+        for that). strategy='ff-only' (default) is sync_with_remote's existing
+        safe behavior - refuses (status='diverged_needs_merge') rather than
+        ever creating a merge commit. strategy='merge' reuses
+        reverse_merge_standard/start_conflict_resolution verbatim, passing the
+        current branch itself as "parent_branch" - a clean divergence
+        auto-fast-forwards (git's own merge default), a real divergence
+        creates a merge commit, and a genuine conflict quarantines onto a
+        disposable scratch branch exactly like git_reverse_merge (same
+        backup-first, stash-if-dirty, conflict-quarantine safety net - never
+        rebase, forbidden by this module's safety doctrine)."""
+        if strategy not in ("ff-only", "merge"):
+            raise GitWorkflowError(f"strategy must be 'ff-only' or 'merge', got {strategy!r}")
+        if strategy == "ff-only":
+            sync_result = self.sync_with_remote(remote)
+            return PullResult(status=sync_result.status)
+        branch = current_branch(self.repo_root)
+        result = self.reverse_merge_standard(branch, ticket_key, remote=remote)
+        if result.status == "clean":
+            return PullResult(status="merged")
+        session = self.start_conflict_resolution(branch, ticket_key, remote=remote)
+        return PullResult(
+            status="conflict", conflicted_files=session.conflicted_files, scratch_branch=session.scratch_branch,
+        )
 
     def scan_staged_debug_leftovers(self) -> list[DebugLeftover]:
         findings: list[DebugLeftover] = []
@@ -329,18 +391,28 @@ class GitLifecycleManager:
             ) from exc
 
     def reverse_merge_standard(
-        self, parent_branch: str, ticket_key: str, remote: str = "origin",
+        self, parent_branch: str, ticket_key: str | None, remote: str = "origin",
     ) -> ReverseMergeResult:
         """Standard path (design spec Section 7.1): stash if dirty, merge parent
         into the current branch, pop the stash back. On conflict, abort the
         merge completely and still pop the stash back before returning - the
-        feature branch is never left in a conflicted or half-stashed state."""
-        fetch(self.repo_root, remote=remote)
-        create_backup(self.repo_root, current_branch(self.repo_root), ticket_key)
+        feature branch is never left in a conflicted or half-stashed state.
+        ticket_key is nullable - when absent, backup/stash naming falls back
+        to a slug of the current branch (same fallback as stage_and_commit).
+        Passes self._auth_env() to fetch - the real fix for git_reverse_merge
+        failing with "could not read Username" on an HTTPS origin even with a
+        valid GitLab connection: this was the one fetch call in this class
+        that _auth_env's own docstring warned about missing (every OTHER
+        network call - sync_with_remote, create_mr_for_ticket,
+        post_merge_cleanup - already routed through it)."""
+        fetch(self.repo_root, remote=remote, extra_env=self._auth_env(remote))
+        branch = current_branch(self.repo_root)
+        backup_key = ticket_key or slugify(branch)
+        create_backup(self.repo_root, branch, backup_key)
 
         was_dirty = len(dirty_files(self.repo_root)) > 0
         if was_dirty:
-            self.stash_dirty_tree(ticket_key)
+            self.stash_dirty_tree(backup_key)
 
         try:
             try:
@@ -357,7 +429,7 @@ class GitLifecycleManager:
                 self._pop_stash_or_explain()
 
     def start_conflict_resolution(
-        self, parent_branch: str, ticket_key: str, remote: str = "origin",
+        self, parent_branch: str, ticket_key: str | None, remote: str = "origin",
     ) -> ScratchSession:
         """Escalation path (design spec Section 7.2 steps 2-4): back up the
         current branch, stash if dirty, create a disposable scratch branch off
@@ -366,16 +438,18 @@ class GitLifecycleManager:
         untouched. Any stashed work is popped back onto the SCRATCH branch
         (not feature) once the merge attempt completes, so it sits alongside
         whatever conflict-resolution work happens there rather than being lost
-        or left stranded on feature."""
+        or left stranded on feature. ticket_key is nullable - see
+        reverse_merge_standard's docstring for the fallback naming."""
         feature_branch = current_branch(self.repo_root)
-        create_backup(self.repo_root, feature_branch, ticket_key)
+        backup_key = ticket_key or slugify(feature_branch)
+        create_backup(self.repo_root, feature_branch, backup_key)
 
         was_dirty = len(dirty_files(self.repo_root)) > 0
         if was_dirty:
-            self.stash_dirty_tree(ticket_key)
+            self.stash_dirty_tree(backup_key)
 
         try:
-            scratch_branch = create_scratch_branch(self.repo_root, feature_branch, ticket_key)
+            scratch_branch = create_scratch_branch(self.repo_root, feature_branch, backup_key)
             try:
                 merge_ref(self.repo_root, f"{remote}/{parent_branch}")
             except GitCommandError:
@@ -394,7 +468,11 @@ class GitLifecycleManager:
 
     def get_conflict(self, relpath: str) -> ConflictPayload:
         """Read ours/theirs content for one conflicted file on the CURRENTLY
-        checked-out branch (must be a scratch branch mid-conflict)."""
+        checked-out branch - reads real index stages (2=ours, 3=theirs), so
+        this works regardless of what produced the conflict: ICX's own
+        scratch-branch quarantine flow, a manual `git merge`/`git pull`, a
+        rebase, or a cherry-pick. Not scratch-branch-specific despite living
+        alongside that flow in this class."""
         ours, theirs = conflict_versions(self.repo_root, relpath)
         return ConflictPayload(file=relpath, ours=ours, theirs=theirs)
 
@@ -464,7 +542,8 @@ class GitLifecycleManager:
         )
 
     async def create_mr_for_ticket(
-        self, parent_branch: str, ticket_key: str, ticket_summary: str, gitlab_conn,
+        self, parent_branch: str, ticket_key: str | None, ticket_summary: str, gitlab_conn,
+        max_poll_attempts: int = 5, poll_delay_seconds: float = 2.0,
     ) -> CreateMrResult:
         """MR creation + one immediate merge attempt (design spec Section 8.3-
         8.4). Order matters and is deliberate: resolve the GitLab project from
@@ -472,7 +551,9 @@ class GitLifecycleManager:
         never guesses) -> validate the GitLab connection (one cheap request,
         fails fast on a bad token before any git work) -> push the feature
         branch to origin (the branch must exist on the remote before GitLab
-        can create an MR from it) -> create/reuse + attempt merge."""
+        can create an MR from it) -> create/reuse + attempt merge. ticket_key
+        is nullable - the MR title is just ticket_summary with no prefix when
+        absent, never a manufactured ticket id."""
         origin = remote_url(self.repo_root)
         project_path = project_path_from_remote_url(origin)
         if project_path is None:
@@ -508,17 +589,19 @@ class GitLifecycleManager:
             f"## Rollback notes\n{description_sections.rollback_notes}\n"
         )
 
+        title = f"{ticket_key} {ticket_summary}" if ticket_key else ticket_summary
         result = await create_and_merge_mr(
             gitlab_conn, project_path, feature_branch, parent_branch,
-            f"{ticket_key} {ticket_summary}", description, assignee_id,
+            title, description, assignee_id,
+            max_poll_attempts=max_poll_attempts, poll_delay_seconds=poll_delay_seconds,
         )
         return CreateMrResult(
-            mr_iid=result["mr_iid"], created=result["created"],
-            merged=result["merged"], refusal_reason=result.get("refusal_reason"),
+            mr_iid=result["mr_iid"], created=result["created"], merged=result["merged"],
+            merge_status=result.get("merge_status", "UNKNOWN"), refusal_reason=result.get("refusal_reason"),
         )
 
     def post_merge_cleanup(
-        self, parent_branch: str, feature_branch: str, ticket_key: str,
+        self, parent_branch: str, feature_branch: str, ticket_key: str | None,
         delete_backups: bool, gitlab_conn, mr_iid: int,
     ) -> CleanupResult:
         """Post-merge cleanup (design spec Section 8.6). Never trusts the
@@ -575,6 +658,48 @@ class GitLifecycleManager:
 
         backups_deleted: list[str] = []
         if delete_backups:
-            backups_deleted = prune_old_backups(self.repo_root, ticket_key, keep=0)
+            backup_key = ticket_key or slugify(feature_branch)
+            backups_deleted = prune_old_backups(self.repo_root, backup_key, keep=0)
 
         return CleanupResult(parent_branch=parent_branch, feature_branch_deleted=deleted, backups_deleted=backups_deleted)
+
+    def delete_branch_safely(
+        self, branch: str, target: str, remote: str = "origin",
+        delete_local: bool = True, delete_remote: bool = False, force: bool = False,
+    ) -> BranchDeleteResult:
+        """Safety-gated branch deletion - never loses a commit silently.
+        Refuses unconditionally (never overridable by force - a hard git
+        constraint, not a judgment call) if branch is the currently
+        checked-out branch. Refuses (raises, force=True required to proceed)
+        if branch has commits not reachable from target - equivalent to the
+        manually-run `git merge-base --is-ancestor`/`git rev-list --count`
+        this replaces. delete_local/delete_remote are independent - either or
+        both."""
+        if current_branch(self.repo_root) == branch:
+            raise GitWorkflowError(
+                f"'{branch}' is the currently checked-out branch - switch to a different branch "
+                "before deleting it. This is a hard git constraint, not overridable by force."
+            )
+        unique = 0
+        if local_branch_exists(self.repo_root, branch):
+            unique = unique_commit_count(self.repo_root, branch, target)
+            if unique > 0 and not force:
+                raise GitWorkflowError(
+                    f"Branch '{branch}' cannot be safely deleted - {unique} commit(s) are not "
+                    f"reachable from '{target}' and would be lost. Use force=true only if you "
+                    "explicitly want to delete the branch anyway."
+                )
+        elif delete_local:
+            raise GitWorkflowError(f"Local branch '{branch}' does not exist - nothing to delete locally.")
+
+        local_deleted = False
+        if delete_local:
+            delete_branch(self.repo_root, branch, force=force)
+            local_deleted = True
+        remote_deleted = False
+        if delete_remote:
+            delete_remote_branch(self.repo_root, branch, remote=remote, extra_env=self._auth_env(remote))
+            remote_deleted = True
+        return BranchDeleteResult(
+            branch=branch, local_deleted=local_deleted, remote_deleted=remote_deleted, unique_commits=unique,
+        )

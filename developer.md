@@ -42,9 +42,9 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.), exposing
-  135 tools total - see readme.md's "The MCP tools" section for the full enumerated list (kept there
+  136 tools total - see readme.md's "The MCP tools" section for the full enumerated list (kept there
   as the single source of truth to avoid two lists drifting apart). Broad families: analysis/memory/
-  skills/testing tools, 22 Sonar tools, 18 git-workflow tools, 9 GitLab read-only tools, 24 Workstatus
+  skills/testing tools, 22 Sonar tools, 18 git-workflow tools, 9 GitLab read-only tools, 25 Workstatus
   tools, 26 Jira write-back tools.
 
 The architecture is deliberately split along several axes:
@@ -178,7 +178,7 @@ ICX/
 |   |   +-- storage.py          # SkillStorage: atomic read/write at ~/.icx/skills/, path-traversal guard
 |   |   +-- writer.py           # draft_skill_entry (agent-authored text -> SkillEntry), write_or_update (hash-guarded create/merge)
 |   |   +-- router.py           # rank_skills (free-text overlap), rank_skills_for_tags (structured tag overlap)
-|   |   +-- defaults.py         # curated catalog of 14 pre-installed default skills
+|   |   +-- defaults.py         # curated catalog of 15 pre-installed default skills
 |   |   +-- seed.py             # seed_default_skills(): writes/updates defaults, never overwrites a user edit
 |   |   \-- hints.py            # attach_skill_hint(): attaches one named default skill to a tool's own response
 |   +-- git/                    # git-workflow lifecycle engine - branch/sync/backup/commit, own CLI group + MCP
@@ -187,12 +187,79 @@ ICX/
 |   |   |                       # Includes read-only history helpers blame() (--line-porcelain, optional line_range),
 |   |   |                       # log() (relpath/limit/author/since filters), show_commit() (message + --name-status files),
 |   |   |                       # diff_between() (--numstat + --name-status between two refs, binary files -> None counts),
-|   |   |                       # push() (plain, non-force push, -u sets tracking branch on first push). fetch()/push()
+|   |   |                       # diff_worktree() (mode='staged'/'unstaged'/'combined' - the working tree/index side
+|   |   |                       # diff_between() cannot express; shares the _diff_stats() helper with diff_between()),
+|   |   |                       # structured_status() (`git status --porcelain=v2 --branch` - staged/unstaged/untracked/
+|   |   |                       # deleted/renamed/conflicted buckets plus ahead/behind/upstream; v2's fixed-width XY codes
+|   |   |                       # and 1/2/u/? line-type prefixes disambiguate staged vs unstaged vs conflicted, unlike
+|   |   |                       # v1's dirty_files()), read_file_at_ref() (read-only content of ref:relpath - HEAD,
+|   |   |                       # MERGE_HEAD, a branch, or a sha), push() (plain, non-force push, -u sets tracking branch
+|   |   |                       # on first push). fetch()/push()
 |   |   |                       # accept an optional extra_env dict, merged into the hardened subprocess env
 |   |   |                       # (credential.helper disabled, GIT_TERMINAL_PROMPT=0 - so an automated call never hangs
 |   |   |                       # on a prompt) - this is the plumbing manager._gitlab_push_auth_env uses to inject a
 |   |   |                       # GitLab auth header for network calls that need one; omitted, behavior is unchanged.
+|   |   |                       # fetch() also takes ref (fetch one branch) and prune (drop stale remote-tracking refs).
+|   |   |                       # Full stash API: stash_list() (%gd/%s via --format, ref+message per entry, newest
+|   |   |                       # first), stash_apply()/stash_drop() (explicit ref, default stash@{0}), stash_pop()
+|   |   |                       # now also takes an optional ref (was top-of-stack only). Branch-delete safety
+|   |   |                       # primitives: is_ancestor() (`merge-base --is-ancestor`), unique_commit_count()
+|   |   |                       # (`rev-list --count` - commits that would be lost), delete_remote_branch() (a real
+|   |   |                       # `push --delete`, routed through the same extra_env auth plumbing as push()/fetch()).
+|   |   |                       # Line-level conflict inspection + gated resolution primitives: conflict_stage()
+|   |   |                       # (one index stage - 1=base/2=ours/3=theirs - tolerant of a missing stage, unlike
+|   |   |                       # conflict_versions() which assumes ours+theirs both exist), parse_conflict_hunks()
+|   |   |                       # (parses ON-DISK <<<<<<</=======/>>>>>>> markers into start_line/end_line/ours/
+|   |   |                       # theirs per hunk - never a per-hunk base, since ICX never enables diff3-style
+|   |   |                       # conflictstyle), checkout_conflict_side() (`git checkout --ours`/`--theirs`, does
+|   |   |                       # NOT stage), conflict_state() (live CLEAN/CONFLICT_DETECTED/STAGED label computed
+|   |   |                       # fresh from real repo state every call - never stored, so it can't drift),
+|   |   |                       # abort_in_progress_operation() (detects merge/cherry-pick/rebase from real on-disk
+|   |   |                       # markers and aborts whichever is actually running - see this module's own
+|   |   |                       # docstring for why its one `git rebase --abort` call is a deliberate, narrow
+|   |   |                       # exception to "no rebase": it only ever backs one out, never starts/continues/
+|   |   |                       # drives one). resolve_ref() (`rev-parse --verify <ref>^{commit}` - tolerant
+|   |   |                       # branch/tag/full-or-short-sha to full-sha resolution, returns None rather than
+|   |   |                       # raising for an unresolvable ref) backs deps.py's dependency-pin analysis below.
+|   |   |                       # restore_files(files, mode, source) - file-level discard, never a wildcard or '.'
+|   |   |                       # (same discipline as stage_files). mode='worktree' (default, `git restore <file>`)/
+|   |   |                       # 'staged' (`--staged`, unstage only)/'both' (`--staged --worktree`, full revert to
+|   |   |                       # source - default None lets git pick index-vs-HEAD itself).
 |   |   +-- naming.py           # branch-name derivation from ticket key + summary
+|   |   +-- policy.py           # validate_branch_name(branch, require_ticket_suffix, pattern_description) -
+|   |   |                       # configurable branch-name policy validation, no org-specific values hardcoded.
+|   |   |                       # Reuses naming.py's own parse_ticket_key_from_branch as the sole "has a ticket
+|   |   |                       # suffix" check - one source of truth, never a second regex that could drift.
+|   |   |                       # require_ticket_suffix is always passed in explicit (this module never reads
+|   |   |                       # config) - manager.check_branch_name_policy() is the config-aware wrapper, reading
+|   |   |                       # git/settings.py's require_ticket_in_branch_name (default False - preserves the
+|   |   |                       # existing ticketless-branch feature; a repo opts in explicitly via
+|   |   |                       # git_set_branch_policy after e.g. a real remote pre-receive hook rejection, ICX
+|   |   |                       # never infers an org's real policy automatically).
+|   |   +-- deps.py             # Dependency-pin analysis - DependencyPin/DependencyPinReport dataclasses;
+|   |   |                       # parse_package_json_git_deps/parse_requirements_txt_git_deps/
+|   |   |                       # parse_pyproject_toml_git_deps (regex-based, deliberately narrow - npm's
+|   |   |                       # git+https/git+ssh/git:// spec form, pip/poetry's git+scheme://...@ref form incl.
+|   |   |                       # #egg=name, poetry's {git=..., rev=|branch=|tag=...} inline-table form; no
+|   |   |                       # gitlab:/github: npm shorthand, no real TOML parser); parse_manifest_git_deps()
+|   |   |                       # dispatches by basename, raises ValueError for anything else (callers skip, never
+|   |   |                       # treat as an error). Resolving the DEPENDENCY's own repo (never the consumer's -
+|   |   |                       # that's just where the manifest lives) - resolve_via_local_clone() (reuses
+|   |   |                       # gitcmd.resolve_ref/is_ancestor/unique_commit_count/file_exists_at_ref directly,
+|   |   |                       # real ancestor/distance checks) or resolve_via_gitlab() (reuses
+|   |   |                       # gitlab/client.py's list_commits/compare/get_repository_file - no new external
+|   |   |                       # client added) - _find_matching_gitlab_connection() checks every configured
+|   |   |                       # connection's host, not just the active one, since a dependency can live on a
+|   |   |                       # different GitLab host than the consuming project. Neither available (e.g. a
+|   |   |                       # GitHub-hosted dependency, no client for that host) -> resolved=False with a clear
+|   |   |                       # reason, never guessed. check_dependency_pins() is the orchestrator: parses every
+|   |   |                       # manifest, optional dependency_name filter (required to make dep_repo_path/
+|   |   |                       # check_paths unambiguous when more than one pin exists), picks local-clone vs
+|   |   |                       # GitLab per pin, never both. status: UP_TO_DATE (equal, and every check_paths entry
+|   |   |                       # exists at target) / BEHIND (ancestor, commits_behind counted) / INCOMPATIBLE
+|   |   |                       # (history diverged from target, OR any check_paths entry missing at target -
+|   |   |                       # e.g. "pinned commit is missing the ./graphs path") / left resolved=False when
+|   |   |                       # neither ref resolves.
 |   |   +-- settings.py         # per-repo ICX settings file (parent branch, etc.)
 |   |   +-- safety.py           # create_backup (timestamped snapshot, taken before a risky reverse-merge/
 |   |   |                       # conflict-resolution attempt only, kept as history via prune_old_backups) +
@@ -213,6 +280,47 @@ ICX/
 |   |   |                       # build_mr_description, create_mr_for_ticket (validates the GitLab connection FIRST -
 |   |   |                       # fail fast on a bad token before any git work - then pushes the feature branch to
 |   |   |                       # origin before creating the MR: a branch must exist on the remote first), post_merge_cleanup.
+|   |   |                       #
+|   |   |                       # ticket_key is nullable throughout - reverse_merge_standard/start_conflict_resolution/
+|   |   |                       # create_mr_for_ticket/post_merge_cleanup all accept `str | None`. When absent, backup/
+|   |   |                       # stash/scratch-branch naming falls back to slugify(branch) instead (same fallback
+|   |   |                       # stage_and_commit already used) - never a manufactured ticket id. create_mr_for_ticket's
+|   |   |                       # MR title is ticket_summary alone (no prefix) when ticket_key is None. Also now takes
+|   |   |                       # max_poll_attempts/poll_delay_seconds, passed through to create_and_merge_mr's bounded
+|   |   |                       # mergeability poll (gitlab/service.py).
+|   |   |                       #
+|   |   |                       # reverse_merge_standard's own fetch() now passes self._auth_env() too - it was the one
+|   |   |                       # network call in this class _auth_env's docstring had flagged as still missing (every
+|   |   |                       # other one - sync_with_remote/create_mr_for_ticket/post_merge_cleanup - already routed
+|   |   |                       # through it). Real fix for git_reverse_merge failing with "could not read Username" on
+|   |   |                       # an HTTPS origin despite a valid GitLab connection.
+|   |   |                       #
+|   |   |                       # pull(remote, strategy, ticket_key) - git pull's fetch+integrate step, scoped to the
+|   |   |                       # CURRENT branch's own remote counterpart (never a different parent branch).
+|   |   |                       # strategy='ff-only' (default) is sync_with_remote's existing behavior. strategy='merge'
+|   |   |                       # reuses reverse_merge_standard/start_conflict_resolution VERBATIM, passing the current
+|   |   |                       # branch itself as "parent_branch" - zero duplicated conflict-quarantine logic. Backs
+|   |   |                       # git_pull and git_sync (mcp_tools.py) - git_sync is a thin wrapper always calling
+|   |   |                       # strategy='merge', git_pull exposes strategy as a real choice, defaulting 'ff-only'.
+|   |   |                       #
+|   |   |                       # delete_branch_safely(branch, target, remote, delete_local, delete_remote, force) -
+|   |   |                       # refuses unconditionally (never force-overridable - a hard git constraint) if branch
+|   |   |                       # is the current branch; refuses (force=True required) if unique_commit_count(branch,
+|   |   |                       # target) > 0 - replaces the manually-run `git merge-base --is-ancestor`/
+|   |   |                       # `git rev-list --count`. delete_local/delete_remote are independent.
+|   |   |                       #
+|   |   |                       # get_conflict()'s docstring was corrected - it never actually required a scratch
+|   |   |                       # branch (reads real index stages 2/3 regardless), but said it did; the confusion
+|   |   |                       # this fixed was in the docstring only, the function itself always worked for any
+|   |   |                       # in-progress conflict.
+|   |   |                       #
+|   |   |                       # check_branch_name_policy(branch_name)/set_branch_name_policy(require_ticket_in_
+|   |   |                       # branch_name) - the config-aware wrapper around git/policy.py's pure
+|   |   |                       # validate_branch_name(). start_branch() now calls check_branch_name_policy() on
+|   |   |                       # the branch name it derives BEFORE ever creating it (raises GitWorkflowError with
+|   |   |                       # policy.reason - the exact "Invalid branch name / Expected pattern / Received /
+|   |   |                       # Missing JIRA/ticket identifier" text - if invalid) - never creates a locally-valid
+|   |   |                       # branch a remote pre-receive hook would then reject.
 |   |   |                       #
 |   |   |                       # GitLab auth for git-network calls (fetch/ls-remote/push) - the fix for git push (and
 |   |   |                       # later, git_create_mr's own fetch/ls-remote) failing with "could not read Username" even
@@ -267,21 +375,72 @@ ICX/
 |   |   |                       # typer.confirm before pushing), `icx git mr`, `icx git finish`, `icx git tag`,
 |   |   |                       # `icx git blame <FILE>` (--from-line/--to-line), `icx git log`
 |   |   |                       # (--file/--author/--since/--limit), `icx git show <SHA>`, `icx git diff <REF_A> <REF_B>`
-|   |   \-- mcp_tools.py        # GIT_TOOLS + dispatch_git_tool() - repo_status/git_start_branch (wraps start_branch,
-|   |                           # NOT confirmation-gated)/git_blame/git_log/git_show_commit/git_diff
-|   |                           # (all four read-only, ungated)/stage_and_commit (confirmation-gated; response also
+|   |   \-- mcp_tools.py        # GIT_TOOLS + dispatch_git_tool() - repo_status (now also returns structured_status()'s
+|   |                           # staged/unstaged/untracked/deleted/renamed/conflicted/ahead/behind/upstream, alongside the
+|   |                           # original dirty/dirty_files/leftover-state fields)/git_start_branch (wraps start_branch,
+|   |                           # NOT confirmation-gated)/git_blame/git_log/git_show_commit/git_diff/git_diff_worktree
+|   |                           # (mode='staged'/'unstaged'/'combined', optional relpath - local uncommitted diff, distinct
+|   |                           # from git_diff's ref-to-ref-only comparison)
+|   |                           # (all read-only, ungated)/stage_and_commit (confirmation-gated; response also
 |   |                           # carries on_parent_branch - true when the branch about to be committed to is this
 |   |                           # repo's confirmed parent/shared branch, strengthening the warning shown to the human
-|   |                           # without ever blocking the commit)/reverse_merge/get_conflict/
+|   |                           # without ever blocking the commit)/reverse_merge (ticket_key nullable - required key,
+|   |                           # null value allowed, same "required(arguments) but nullable(value)" pattern as
+|   |                           # stage_and_commit, forcing an explicit null rather than a silently omitted key)/
+|   |                           # get_conflict/git_read_file_at_ref (read-only content of any ref:path - HEAD,
+|   |                           # MERGE_HEAD, a branch, or a sha; no network call)/
 |   |                           # complete_resolution/adopt_resolution/discard_scratch (force-deletes the scratch
 |   |                           # branch - confirmation-gated)/git_push (confirmation-gated, same token pattern as
 |   |                           # stage_and_commit)/
-|   |                           # create_mr (validates the GitLab connection first, then pushes automatically before
-|   |                           # creating the MR; pending_confirmation shows BOTH source_branch and parent_branch)/
-|   |                           # finish_ticket/create_tag (now validates BOTH the environment token and the proposed
+|   |                           # create_mr (ticket_key nullable, same pattern as reverse_merge - validates the GitLab
+|   |                           # connection first, then pushes automatically before creating the MR; pending_confirmation
+|   |                           # shows BOTH source_branch and parent_branch)/
+|   |                           # finish_ticket (ticket_key nullable, same pattern)/create_tag (now validates BOTH the
+|   |                           # environment token and the proposed
 |   |                           # tag name against the project's real, live-fetched .gitlab-ci.yml before ever
 |   |                           # proposing anything - see gitlab/ci_tags.py below; degrades to a surfaced
-|   |                           # ci_check_error warning, never a hard block, if the CI file itself can't be fetched)
+|   |                           # ci_check_error warning, never a hard block, if the CI file itself can't be fetched)/
+|   |                           # git_stash_create/git_stash_list/git_stash_apply/git_stash_pop (all four ungated -
+|   |                           # nothing is lost by stashing, and a conflicting apply/pop leaves the stash intact)/
+|   |                           # git_stash_drop (confirmation-gated - permanent, shows ref+message before the first
+|   |                           # token)/git_fetch (ungated - never touches the working tree)/git_pull (strategy=
+|   |                           # 'ff-only'|'merge', ungated - safe by construction, same reasoning as reverse_merge)/
+|   |                           # git_sync (thin wrapper: mgr.pull(strategy='merge') always, one-shot "just sync me")/
+|   |                           # git_delete_branch (confirmation-gated once safety checks pass - computes
+|   |                           # unique_commits and refuses BEFORE issuing a token if >0 and force is not set;
+|   |                           # deleting the current branch is refused unconditionally, not force-overridable)/
+|   |                           # git_get_conflict_details (read-only, ungated - base/ours/theirs + per-hunk
+|   |                           # start_line/end_line + live conflict_state; works for any in-progress conflict,
+|   |                           # never assumes ICX started it)/git_conflict_take_ours/git_conflict_take_theirs
+|   |                           # (confirmation-gated, share one private helper _dispatch_take_side - resolves
+|   |                           # on-disk content to one index stage via checkout_conflict_side, does NOT stage)/
+|   |                           # git_conflict_apply_resolution (confirmation-gated - pending_confirmation carries
+|   |                           # a difflib.unified_diff between current conflicted content and resolved_content,
+|   |                           # so the human reviews an actual diff, not just raw text; does NOT stage)/
+|   |                           # git_conflict_mark_resolved (confirmation-gated - the deliberate STAGE-only step,
+|   |                           # hard-blocks before any token if any file still has marker text OR is not
+|   |                           # currently in conflicted_files(); use git_stage_and_commit afterward, as its own
+|   |                           # separate gate, to commit)/git_conflict_abort (confirmation-gated - detects
+|   |                           # merge/cherry-pick/rebase from real on-disk state via
+|   |                           # gitcmd.abort_in_progress_operation(), never assumes merge specifically)/
+|   |                           # git_check_branch_name_policy (read-only, ungated)/git_set_branch_policy (local
+|   |                           # settings write only, not confirmation-gated - trivially reversible). git_push and
+|   |                           # git_create_mr both now call mgr.check_branch_name_policy() on the branch about to
+|   |                           # be pushed BEFORE issuing a confirm_token - a policy violation refuses outright
+|   |                           # (same hard-gate shape as git_delete_branch's unique_commits pre-check), never lets
+|   |                           # a locally-valid-but-policy-violating branch reach a token, let alone a real push./
+|   |                           # git_check_dependency_pins (read-only, ungated - makes no local or remote mutation;
+|   |                           # auto-discovers package.json/requirements.txt/pyproject.toml at repo_path's root if
+|   |                           # manifests is omitted; dep_repo_path/check_paths both require dependency_name to
+|   |                           # disambiguate when more than one pin is found - enforced before deps.py is even
+|   |                           # called; resolves via deps.check_dependency_pins(), which itself picks local-clone
+|   |                           # vs the first GitLab connection - across every configured connection via
+|   |                           # ConfigManager.load().gitlab_connections.values(), not just the active one -
+|   |                           # whose host matches each dependency's own parsed URL host)/git_restore_files
+|   |                           # (confirmation-gated - the pending_confirmation preview reuses git_diff_worktree's
+|   |                           # own logic internally (mode mapped worktree->unstaged/staged->staged/both->combined),
+|   |                           # filtered to exactly the requested files, so the human sees a real diff of what
+|   |                           # would be discarded, not just a file list)
 |   +-- gitlab/                 # GitLab repo-host connector - client.py (REST v4: list_tags/create_tag/list_branches/
 |   |                           # list_pipelines/get_pipeline (pipeline detail + its jobs, one call)/get_job_trace/
 |   |                           # get_repository_file, plus the read-only list_merge_requests/
@@ -291,7 +450,15 @@ ICX/
 |   |                           # real .gitlab-ci.yml's `only:` regex-literal tag patterns, verified live against a real
 |   |                           # project's CI config; requires the new `pyyaml` dependency), service.py
 |   |                           # (connection + MR business logic + group_tags_by_environment/propose_next_tag/
-|   |                           # parse_tag_name), mcp_tools.py (GITLAB_TOOLS + dispatch_gitlab_tool() -
+|   |                           # parse_tag_name; classify_merge_status() buckets a raw MR body's merge_status/
+|   |                           # detailed_merge_status into MERGEABLE/CONFLICTED/CHECKING/BLOCKED/UNKNOWN - any named
+|   |                           # non-conflict refusal reason (not_approved/need_rebase/ci_still_running/...) is
+|   |                           # BLOCKED, never misreported as CONFLICTED; wait_for_mergeable() bounded-polls one MR
+|   |                           # until terminal (max_attempts/delay_seconds, never indefinite); create_and_merge_mr()
+|   |                           # now treats a refusal right after creation as potentially transitional - GitLab
+|   |                           # computes mergeability async - polls via wait_for_mergeable and retries the merge
+|   |                           # EXACTLY ONCE if it settles on MERGEABLE, never retries a genuine CONFLICTED/BLOCKED),
+|   |                           # mcp_tools.py (GITLAB_TOOLS + dispatch_gitlab_tool() -
 |   |                           # gitlab_list_merge_requests/gitlab_mr_changes/gitlab_list_commits/gitlab_compare/
 |   |                           # gitlab_list_tags/gitlab_list_branches/gitlab_list_pipelines/gitlab_pipeline_status
 |   |                           # (pipeline + jobs in one call)/gitlab_job_log, ALL read-only/ungated - project
@@ -2116,6 +2283,20 @@ rule, not a verified one. Re-attempt via a live browser capture (Chrome
 extension connected, real My Tasks / calendar-lock UI navigated) before
 building either tool.
 
+**`recent_project_tasks` - added to avoid blind full-list browsing:**
+`list_tasks`'s `search` param is UNVERIFIED to filter server-side (see its
+own docstring) - a project can have hundreds of tasks across dozens of
+pages, so finding one task by name with no working filter means paging
+through the entire list. `list_timesheets` already returns each entry's
+`project:{id,name}` and `todo:{id,name}` for free, so
+`recent_project_tasks(lookback_days=90)` does ONE `list_timesheets` call
+over a lookback window, dedupes to distinct `(project_id, todo_id)` pairs
+keeping the most recent `date` per pair, and returns them sorted
+most-recent-first. Not a cache, not new storage - purely a derived view of
+data already fetched for another endpoint. `workstatus_add_timesheet`'s and
+`workstatus_list_tasks`'s tool descriptions both point callers at this first,
+before a full `list_projects`/`list_tasks` browse.
+
 **`add_timesheet`'s HTTP-200-empty-body write failure - ROOT CAUSE FOUND
 (2026-08-03), payload shape corrected:** even after WS-1 made the empty
 response an honest raised error (rather than a false success), the entry
@@ -2208,8 +2389,10 @@ no current code path constructs it.
 org_id, authorization, sd_token, device_type, make_active, cfg)`,
 `list_connections()`, `remove_connection(name)`, `set_active(name)` - direct
 mirrors of `gitlab/service.py`'s functions of the same name. `_make_client`
-(the single choke point all other ~25 service functions funnel through) and
+(the single choke point all other ~26 service functions funnel through) and
 `status()` both resolve via `cfg.active_workstatus_connection()`.
+`recent_project_tasks(lookback_days=90)` is the one function here that isn't
+a thin `client.py` passthrough - see the finding above.
 
 **CLI:** `icx workstatus --add` (interactive: connection name, the four
 header values, active-or-not - same shape as `icx gitlab --add`),
@@ -3009,7 +3192,7 @@ Returns `{"status": "created"|"updated"|"skipped_user_edited", "name": ...}` fro
 
 ### Default (pre-installed) skills - agent-agnostic best practices
 
-`skills/defaults.py` ships a curated, static catalog of 14 default skills, written entirely in ICX's own words. They are seeded into every user's `~/.icx/skills/` store so any connected AI coding agent (Claude Code, Cursor, Windsurf, Copilot, etc.) gets consistent best-practice guidance with no manual setup - this is the mechanism, not a manually-maintained doc, that makes the guidance agent-agnostic.
+`skills/defaults.py` ships a curated, static catalog of 15 default skills, written entirely in ICX's own words. They are seeded into every user's `~/.icx/skills/` store so any connected AI coding agent (Claude Code, Cursor, Windsurf, Copilot, etc.) gets consistent best-practice guidance with no manual setup - this is the mechanism, not a manually-maintained doc, that makes the guidance agent-agnostic.
 
 **Catalog:**
 

@@ -12,6 +12,8 @@ from icx_engine.gitlab.service import (
     remove_connection,
     set_active,
     create_and_merge_mr,
+    classify_merge_status,
+    wait_for_mergeable,
 )
 
 
@@ -204,6 +206,7 @@ async def test_create_and_merge_mr_creates_new_and_merges_clean():
     assert out["mr_iid"] == 5
     assert out["created"] is True
     assert out["merged"] is True
+    assert out["merge_status"] == "MERGEABLE"
 
 
 @respx.mock
@@ -220,6 +223,7 @@ async def test_create_and_merge_mr_reuses_existing_open_mr():
     assert out["mr_iid"] == 9
     assert out["created"] is False
     assert out["merged"] is True
+    assert out["merge_status"] == "MERGEABLE"
 
 
 @respx.mock
@@ -231,12 +235,134 @@ async def test_create_and_merge_mr_reports_refusal_reason():
     respx.put("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5/merge").mock(
         return_value=httpx.Response(405, json={"message": "This merge request needs approval"})
     )
+    # A refusal triggers a mergeability check (create_and_merge_mr no longer treats a refusal as
+    # automatically final) - the MR's own detailed_merge_status decides the terminal bucket.
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5").mock(
+        return_value=httpx.Response(200, json={"iid": 5, "detailed_merge_status": "not_approved"})
+    )
     out = await create_and_merge_mr(
         _conn(), "group/project", "feature/x-ABC-1", "development", "ABC-1 fix login", "desc", assignee_id=42,
     )
     assert out["mr_iid"] == 5
     assert out["merged"] is False
+    assert out["merge_status"] == "BLOCKED"
     assert "approval" in out["refusal_reason"].lower()
+
+
+def test_classify_merge_status_mergeable():
+    assert classify_merge_status({"merge_status": "can_be_merged"}) == "MERGEABLE"
+    assert classify_merge_status({"detailed_merge_status": "mergeable"}) == "MERGEABLE"
+
+
+def test_classify_merge_status_conflicted():
+    assert classify_merge_status({"merge_status": "cannot_be_merged"}) == "CONFLICTED"
+    assert classify_merge_status({"detailed_merge_status": "conflict"}) == "CONFLICTED"
+
+
+def test_classify_merge_status_checking():
+    assert classify_merge_status({"merge_status": "checking"}) == "CHECKING"
+    assert classify_merge_status({"merge_status": "unchecked"}) == "CHECKING"
+
+
+def test_classify_merge_status_blocked_for_named_non_conflict_reasons():
+    for reason in ("not_approved", "need_rebase", "discussions_not_resolved", "ci_still_running",
+                   "draft_status", "policies_denied", "external_status_checks", "broken_status"):
+        assert classify_merge_status({"detailed_merge_status": reason}) == "BLOCKED"
+
+
+def test_classify_merge_status_unknown_when_absent_or_explicit():
+    assert classify_merge_status({}) == "UNKNOWN"
+    assert classify_merge_status({"merge_status": "unknown"}) == "UNKNOWN"
+
+
+def test_classify_merge_status_prefers_detailed_over_legacy_field():
+    assert classify_merge_status({"merge_status": "can_be_merged", "detailed_merge_status": "not_approved"}) == "BLOCKED"
+
+
+class _FakeClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    async def get_merge_request(self, project, mr_iid):
+        return self._responses.pop(0)
+
+
+async def test_wait_for_mergeable_returns_immediately_on_terminal_state():
+    client = _FakeClient([{"merge_status": "can_be_merged"}])
+    result = await wait_for_mergeable(client, "group/project", 5, max_attempts=5, delay_seconds=0)
+    assert result == {"status": "MERGEABLE", "attempts": 1, "mr": {"merge_status": "can_be_merged"}}
+
+
+async def test_wait_for_mergeable_polls_through_checking_to_terminal():
+    client = _FakeClient([
+        {"merge_status": "checking"}, {"merge_status": "checking"}, {"merge_status": "can_be_merged"},
+    ])
+    result = await wait_for_mergeable(client, "group/project", 5, max_attempts=5, delay_seconds=0)
+    assert result["status"] == "MERGEABLE"
+    assert result["attempts"] == 3
+
+
+async def test_wait_for_mergeable_stops_at_max_attempts_still_checking():
+    client = _FakeClient([{"merge_status": "checking"}] * 3)
+    result = await wait_for_mergeable(client, "group/project", 5, max_attempts=3, delay_seconds=0)
+    assert result["status"] == "CHECKING"
+    assert result["attempts"] == 3
+
+
+@respx.mock
+async def test_create_and_merge_mr_retries_merge_once_after_checking_resolves_to_mergeable():
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(return_value=httpx.Response(200, json=[]))
+    respx.post("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(
+        return_value=httpx.Response(201, json={"iid": 5})
+    )
+    merge_attempts = {"count": 0}
+
+    def _merge_side_effect(request):
+        merge_attempts["count"] += 1
+        if merge_attempts["count"] == 1:
+            return httpx.Response(405, json={"message": "Branch cannot be merged"})
+        return httpx.Response(200, json={"iid": 5, "state": "merged"})
+
+    respx.put("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5/merge").mock(
+        side_effect=_merge_side_effect
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5").mock(
+        return_value=httpx.Response(200, json={"iid": 5, "merge_status": "can_be_merged"})
+    )
+    out = await create_and_merge_mr(
+        _conn(), "group/project", "feature/x-ABC-1", "development", "ABC-1 fix login", "desc",
+        assignee_id=42, max_poll_attempts=3, poll_delay_seconds=0,
+    )
+    assert out["merged"] is True
+    assert out["merge_status"] == "MERGEABLE"
+    assert merge_attempts["count"] == 2
+
+
+@respx.mock
+async def test_create_and_merge_mr_never_retries_merge_on_genuine_conflict():
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(return_value=httpx.Response(200, json=[]))
+    respx.post("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(
+        return_value=httpx.Response(201, json={"iid": 5})
+    )
+    merge_attempts = {"count": 0}
+
+    def _merge_side_effect(request):
+        merge_attempts["count"] += 1
+        return httpx.Response(405, json={"message": "Branch has conflicts"})
+
+    respx.put("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5/merge").mock(
+        side_effect=_merge_side_effect
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5").mock(
+        return_value=httpx.Response(200, json={"iid": 5, "merge_status": "cannot_be_merged"})
+    )
+    out = await create_and_merge_mr(
+        _conn(), "group/project", "feature/x-ABC-1", "development", "ABC-1 fix login", "desc",
+        assignee_id=42, max_poll_attempts=3, poll_delay_seconds=0,
+    )
+    assert out["merged"] is False
+    assert out["merge_status"] == "CONFLICTED"
+    assert merge_attempts["count"] == 1  # never retried - a real conflict, not a transitional state
 
 
 from icx_engine.gitlab.service import parse_tag_name, group_tags_by_environment, propose_next_tag

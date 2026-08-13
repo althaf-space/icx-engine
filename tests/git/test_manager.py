@@ -270,6 +270,51 @@ def test_start_branch_switches_to_existing_instead_of_recreating(tmp_git_repo_wi
     assert current_branch(tmp_git_repo_with_remote) == "feature/fix-login-timeout-ABC-123"
 
 
+def test_check_branch_name_policy_defaults_to_not_requiring_ticket(tmp_git_repo, tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    result = mgr.check_branch_name_policy("feature/no-ticket-here")
+    assert result.valid is True
+    assert result.require_ticket_suffix is False
+
+
+def test_set_branch_name_policy_then_check_enforces_ticket_requirement(tmp_git_repo, tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    mgr.set_branch_name_policy(True)
+    result = mgr.check_branch_name_policy("feature/no-ticket-here")
+    assert result.valid is False
+    assert result.missing_ticket is True
+    assert "Missing JIRA/ticket identifier" in result.reason
+
+    ok_result = mgr.check_branch_name_policy("feature/has-ticket-ABC-1")
+    assert ok_result.valid is True
+
+
+def test_start_branch_raises_when_policy_requires_ticket_and_none_given(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    mgr.set_branch_name_policy(True)
+    with pytest.raises(GitWorkflowError, match="Missing JIRA/ticket identifier"):
+        mgr.start_branch(None, "Refactor auth module", "main")
+    # never created the invalid branch locally
+    from icx_engine.git.gitcmd import local_branch_exists as _lbe
+    assert _lbe(tmp_git_repo_with_remote, "feature/refactor-auth-module") is False
+
+
+def test_start_branch_succeeds_with_ticket_even_when_policy_requires_it(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    mgr.set_branch_name_policy(True)
+    result = mgr.start_branch("ABC-123", "Fix login timeout", "main")
+    assert result.branch_name == "feature/fix-login-timeout-ABC-123"
+    assert result.created is True
+
+
 def test_current_ticket_key_parses_from_branch_name(tmp_git_repo_with_remote):
     create_branch_from(tmp_git_repo_with_remote, "feature/fix-login-timeout-ABC-123", "main")
     checkout(tmp_git_repo_with_remote, "feature/fix-login-timeout-ABC-123")
@@ -546,6 +591,16 @@ def test_reverse_merge_standard_stash_pop_conflict_raises_clear_error(tmp_git_re
     assert stash_list != ""
 
 
+def test_reverse_merge_standard_nullable_ticket_key_falls_back_to_branch_slug(tmp_git_repo_with_remote):
+    _feature_branch_diverged_from_parent(tmp_git_repo_with_remote, conflicting=False)
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.reverse_merge_standard("main", None)
+    assert result == ReverseMergeResult(status="clean", conflicted_files=[])
+    from icx_engine.git.safety import list_backups
+    assert list_backups(tmp_git_repo_with_remote, "feature-x-abc-1") != []
+
+
 from icx_engine.git.manager import ScratchSession, ConflictPayload
 
 
@@ -575,6 +630,15 @@ def test_start_conflict_resolution_leaves_feature_branch_untouched(tmp_git_repo_
     # tip never moved without fighting that (correct) git safety behavior.
     feature_sha_after = _stdout(_run_git(tmp_git_repo_with_remote, ["rev-parse", "feature/x-ABC-1"]))
     assert feature_sha_after == feature_sha_before
+
+
+def test_start_conflict_resolution_nullable_ticket_key_falls_back_to_branch_slug(tmp_git_repo_with_remote):
+    _feature_branch_diverged_from_parent(tmp_git_repo_with_remote, conflicting=True)
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    session = mgr.start_conflict_resolution("main", None)
+    assert session.scratch_branch.startswith("scratch/feature-x-abc-1-")
+    assert session.conflicted_files == ["README.md"]
 
 
 def test_start_conflict_resolution_handles_dirty_tree_overlapping_the_conflict(tmp_git_repo_with_remote):
@@ -836,6 +900,29 @@ async def test_create_mr_for_ticket_resolves_project_and_calls_gitlab(tmp_git_re
     assert "add a.txt" in call_kwargs.args[5]
 
 
+async def test_create_mr_for_ticket_nullable_ticket_key_omits_prefix_from_title(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-nope", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-nope")
+    (tmp_git_repo_with_remote / "a.txt").write_text("a", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["a.txt"])
+    gitcmd_commit(tmp_git_repo_with_remote, "fix: add a.txt")
+
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+    mock_result = {"mr_iid": 7, "created": True, "merged": False, "refusal_reason": None}
+    with patch("icx_engine.git.manager.create_and_merge_mr", new=AsyncMock(return_value=mock_result)) as mock_call:
+        with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.validate.return_value = {"valid": True, "user": {"id": 42}}
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+            mgr.validate()
+            await mgr.create_mr_for_ticket("main", None, "Fix login timeout", _gitlab_conn())
+
+    # No manufactured ticket id prefix - the title is exactly ticket_summary.
+    assert mock_call.call_args.args[4] == "Fix login timeout"
+
+
 async def test_create_mr_for_ticket_raises_when_remote_not_gitlab(tmp_git_repo_with_remote, monkeypatch):
     monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: None)
     mgr = GitLifecycleManager(tmp_git_repo_with_remote)
@@ -993,6 +1080,39 @@ def test_post_merge_cleanup_deletes_feature_branch_when_mr_confirmed_merged(tmp_
     assert local_branch_exists(tmp_git_repo_with_remote, "feature/x-ABC-1") is False
 
 
+def test_post_merge_cleanup_nullable_ticket_key_uses_branch_slug_for_backup_prune(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit
+    import subprocess
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-nope", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-nope")
+    (tmp_git_repo_with_remote / "a.txt").write_text("a", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["a.txt"])
+    gitcmd_commit(tmp_git_repo_with_remote, "fix: add a.txt")
+    subprocess.run(["git", "push", "origin", "feature/x-nope:main"], cwd=str(tmp_git_repo_with_remote), check=True)
+    checkout(tmp_git_repo_with_remote, "main")
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+
+    with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get_merge_request.return_value = {"state": "merged"}
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        with patch("icx_engine.git.manager.asyncio") as mock_asyncio:
+            import asyncio as real_asyncio
+            mock_asyncio.run = real_asyncio.run
+            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+            mgr.validate()
+            checkout(tmp_git_repo_with_remote, "feature/x-nope")
+            # No ticket_key - must not raise (e.g. globbing "backup/None-*") and must
+            # complete cleanup using a slug of feature_branch instead.
+            result = mgr.post_merge_cleanup(
+                "main", "feature/x-nope", None, delete_backups=True,
+                gitlab_conn=_gitlab_conn(), mr_iid=5,
+            )
+
+    assert result.feature_branch_deleted is True
+    assert result.backups_deleted == []
+
+
 def test_post_merge_cleanup_raises_when_file_genuinely_missing_after_fast_forward(tmp_git_repo_with_remote, monkeypatch):
     """GitLab's API can say state=merged while the local fast-forward genuinely does not
     bring in the feature branch's content (e.g. the MR was merged against a different
@@ -1071,3 +1191,185 @@ def test_post_merge_cleanup_deletes_feature_branch_after_squash_merge(tmp_git_re
 
     assert result.feature_branch_deleted is True
     assert local_branch_exists(tmp_git_repo_with_remote, "feature/x-ABC-1") is False
+
+
+# Task: pull() - ff-only/merge strategies, scoped to the current branch's own remote
+from icx_engine.git.manager import PullResult
+
+
+def test_pull_ff_only_up_to_date_when_nothing_changed(tmp_git_repo_with_remote):
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.pull(strategy="ff-only")
+    assert result == PullResult(status="up_to_date")
+
+
+def test_pull_ff_only_fast_forwards_when_remote_is_ahead(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    bare_origin = tmp_path / "origin.git"
+    other_clone = tmp_path / "other_clone_ff"
+    subprocess.run(["git", "clone", str(bare_origin), str(other_clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(other_clone), check=True)
+    (other_clone / "remote_change.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "remote_change.txt"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "commit", "-m", "remote change"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "push"], cwd=str(other_clone), check=True)
+
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.pull(strategy="ff-only")
+    assert result.status == "fast_forwarded"
+    assert (tmp_git_repo_with_remote / "remote_change.txt").exists()
+
+
+def _diverge_current_branch_from_own_remote(tmp_git_repo_with_remote, tmp_path, clone_name, conflicting):
+    import subprocess
+    bare_origin = tmp_path / "origin.git"
+    other_clone = tmp_path / clone_name
+    subprocess.run(["git", "clone", str(bare_origin), str(other_clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(other_clone), check=True)
+    remote_file = "README.md" if conflicting else "remote_change.txt"
+    remote_content = "remote version\n" if conflicting else "x"
+    (other_clone / remote_file).write_text(remote_content, encoding="utf-8")
+    subprocess.run(["git", "add", remote_file], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "commit", "-m", "remote change"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "push"], cwd=str(other_clone), check=True)
+
+    from icx_engine.git.gitcmd import stage_files as _stage, commit as _commit
+    local_file = "README.md" if conflicting else "local_change.txt"
+    local_content = "local version\n" if conflicting else "y"
+    (tmp_git_repo_with_remote / local_file).write_text(local_content, encoding="utf-8")
+    _stage(tmp_git_repo_with_remote, [local_file])
+    _commit(tmp_git_repo_with_remote, "ABC-1 local change")
+
+
+def test_pull_ff_only_diverged_reports_status_without_merging(tmp_git_repo_with_remote, tmp_path):
+    _diverge_current_branch_from_own_remote(tmp_git_repo_with_remote, tmp_path, "other_clone_diverge", conflicting=False)
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.pull(strategy="ff-only")
+    assert result.status == "diverged_needs_merge"
+    assert not (tmp_git_repo_with_remote / "remote_change.txt").exists()
+
+
+def test_pull_merge_strategy_merges_diverged_branches_cleanly(tmp_git_repo_with_remote, tmp_path):
+    _diverge_current_branch_from_own_remote(tmp_git_repo_with_remote, tmp_path, "other_clone_merge", conflicting=False)
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.pull(strategy="merge", ticket_key="ABC-1")
+    assert result.status == "merged"
+    assert (tmp_git_repo_with_remote / "remote_change.txt").exists()
+    assert (tmp_git_repo_with_remote / "local_change.txt").exists()
+
+
+def test_pull_merge_strategy_conflict_quarantines_onto_scratch_branch(tmp_git_repo_with_remote, tmp_path):
+    _diverge_current_branch_from_own_remote(tmp_git_repo_with_remote, tmp_path, "other_clone_conflict", conflicting=True)
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.pull(strategy="merge", ticket_key="ABC-1")
+    assert result.status == "conflict"
+    assert result.conflicted_files == ["README.md"]
+    assert result.scratch_branch is not None
+    assert result.scratch_branch.startswith("scratch/ABC-1-")
+
+
+def test_pull_invalid_strategy_raises(tmp_git_repo):
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    with pytest.raises(GitWorkflowError):
+        mgr.pull(strategy="rebase")
+
+
+# Task: delete_branch_safely - merged-only safety mode, force override, current-branch protection
+from icx_engine.git.manager import BranchDeleteResult
+from icx_engine.git.gitcmd import local_branch_exists as _local_branch_exists, delete_branch as _delete_branch, push as _push
+
+
+def test_delete_branch_safely_merged_branch_deletes_locally(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    result = mgr.delete_branch_safely("feature/merged-ABC-1", "main")
+    assert result == BranchDeleteResult(
+        branch="feature/merged-ABC-1", local_deleted=True, remote_deleted=False, unique_commits=0,
+    )
+    assert _local_branch_exists(tmp_git_repo, "feature/merged-ABC-1") is False
+
+
+def test_delete_branch_safely_refuses_unmerged_branch_without_force(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    gitcmd_commit(tmp_git_repo, "ABC-1 unique commit")
+    checkout(tmp_git_repo, "main")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    with pytest.raises(GitWorkflowError, match="cannot be safely deleted"):
+        mgr.delete_branch_safely("feature/unmerged-ABC-1", "main")
+    assert _local_branch_exists(tmp_git_repo, "feature/unmerged-ABC-1") is True
+
+
+def test_delete_branch_safely_force_deletes_unmerged_branch(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    gitcmd_commit(tmp_git_repo, "ABC-1 unique commit")
+    checkout(tmp_git_repo, "main")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    result = mgr.delete_branch_safely("feature/unmerged-ABC-1", "main", force=True)
+    assert result.local_deleted is True
+    assert result.unique_commits == 1
+    assert _local_branch_exists(tmp_git_repo, "feature/unmerged-ABC-1") is False
+
+
+def test_delete_branch_safely_refuses_current_branch_even_with_force(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/current-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/current-ABC-1")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    with pytest.raises(GitWorkflowError, match="currently checked-out"):
+        mgr.delete_branch_safely("feature/current-ABC-1", "main", force=True)
+    assert _local_branch_exists(tmp_git_repo, "feature/current-ABC-1") is True
+
+
+def test_delete_branch_safely_raises_when_local_branch_missing(tmp_git_repo):
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    with pytest.raises(GitWorkflowError, match="does not exist"):
+        mgr.delete_branch_safely("feature/does-not-exist", "main")
+
+
+def test_delete_branch_safely_deletes_remote_branch_too(tmp_git_repo_with_remote):
+    create_branch_from(tmp_git_repo_with_remote, "feature/remote-cleanup-ABC-1", "main")
+    checkout(tmp_git_repo_with_remote, "feature/remote-cleanup-ABC-1")
+    _push(tmp_git_repo_with_remote, "feature/remote-cleanup-ABC-1")
+    checkout(tmp_git_repo_with_remote, "main")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.delete_branch_safely("feature/remote-cleanup-ABC-1", "main", delete_remote=True)
+    assert result.remote_deleted is True
+    from icx_engine.git.gitcmd import remote_branch_exists
+    assert remote_branch_exists(tmp_git_repo_with_remote, "feature/remote-cleanup-ABC-1") is False
+
+
+def test_delete_branch_safely_remote_only_skips_unique_commit_check(tmp_git_repo_with_remote):
+    create_branch_from(tmp_git_repo_with_remote, "feature/remote-only-ABC-1", "main")
+    checkout(tmp_git_repo_with_remote, "feature/remote-only-ABC-1")
+    _push(tmp_git_repo_with_remote, "feature/remote-only-ABC-1")
+    checkout(tmp_git_repo_with_remote, "main")
+    _delete_branch(tmp_git_repo_with_remote, "feature/remote-only-ABC-1")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.delete_branch_safely(
+        "feature/remote-only-ABC-1", "main", delete_local=False, delete_remote=True,
+    )
+    assert result.local_deleted is False
+    assert result.remote_deleted is True
+    assert result.unique_commits == 0

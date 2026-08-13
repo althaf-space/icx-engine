@@ -41,6 +41,7 @@ _LIST_INVOICES_TOOL = "workstatus_list_invoices"
 _PAYROLL_REPORT_TOOL = "workstatus_payroll_report"
 _GET_TIMESHEET_TOOL = "workstatus_get_timesheet"
 _EDIT_TIMESHEET_TOOL = "workstatus_edit_timesheet"
+_RECENT_PROJECT_TASKS_TOOL = "workstatus_recent_project_tasks"
 
 _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "required": []}
 
@@ -72,7 +73,13 @@ WORKSTATUS_TOOLS: list[Tool] = [
     Tool(
         name=_ADD_TIMESHEET_TOOL,
         description=(
-            "USE WHEN the user wants to log time against a Workstatus project/task: MUST call "
+            "USE WHEN the user wants to log time against a Workstatus project/task: BEFORE "
+            "browsing projects/tasks, call workstatus_recent_project_tasks first (one cheap call) "
+            "and ask the user whether they mean one of their recently-logged project/task pairs "
+            "or want to browse the full list - only fall back to workstatus_list_projects / "
+            "workstatus_list_tasks (which can require paging through hundreds of tasks - see that "
+            "tool's own description) once the human says they want the full list or the recent "
+            "list doesn't contain what they mean. Once project_id/todo_id are known, MUST call "
             "workstatus_add_timesheet with project_id, todo_id (the task id), date (DD-MM-YYYY), "
             "reason, and from_time/to_time as a FULL datetime string 'YYYY-MM-DD HH:MM:SS' "
             "(NOT the 12-hour '10:00 am' display format - that was tried repeatedly against a real "
@@ -159,7 +166,10 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "`search` is UNVERIFIED to actually filter server-side (the exact trigger parameter "
             "Workstatus needs was never confirmed live) - if the returned count looks like the "
             "full unfiltered list rather than a filtered one, treat search as not applied and use "
-            "page to browse instead of trusting the filter. Requires an active Workstatus connection."
+            "page to browse instead of trusting the filter. A project can have hundreds of tasks "
+            "spread across dozens of pages, so paging through all of them to find one task by name "
+            "is expensive - try workstatus_recent_project_tasks first if the goal is finding a "
+            "task the human has logged time against before. Requires an active Workstatus connection."
         ),
         inputSchema={
             "type": "object",
@@ -358,6 +368,20 @@ WORKSTATUS_TOOLS: list[Tool] = [
                 "duration", "reason", "updated_fields",
             ],
         },
+    ),
+    Tool(
+        name=_RECENT_PROJECT_TASKS_TOOL,
+        description=(
+            "USE WHEN the user wants to log time and you need to identify a project/task: MUST "
+            "call workstatus_recent_project_tasks FIRST, before workstatus_list_projects or "
+            "workstatus_list_tasks. One cheap call (derived from recent timesheet history, default "
+            "90-day lookback) returns the user's distinct project/task pairs actually logged "
+            "against recently, most-recent-first - present these to the user as a quick-pick before "
+            "falling back to a full project/task browse, which can require paging through hundreds "
+            "of tasks. Optional lookback_days overrides the 90-day window. Requires an active "
+            "Workstatus connection."
+        ),
+        inputSchema={"type": "object", "properties": {"lookback_days": {"type": "integer"}}, "required": []},
     ),
 ]
 
@@ -565,6 +589,11 @@ async def dispatch_workstatus_tool(name: str, arguments: dict) -> list[TextConte
             to_time=arguments["to_time"], duration=arguments["duration"], reason=arguments["reason"],
             updated_fields=arguments["updated_fields"], note=arguments.get("note", ""),
             billable=bool(raw_billable) if raw_billable is not None else None, cfg=cfg,
+        ))
+
+    if name == _RECENT_PROJECT_TASKS_TOOL:
+        return await _guarded("recent_project_tasks", service.recent_project_tasks(
+            lookback_days=int(arguments.get("lookback_days", 90)), cfg=cfg,
         ))
 
     return None

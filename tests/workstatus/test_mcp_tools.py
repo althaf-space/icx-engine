@@ -307,3 +307,40 @@ async def test_edit_timesheet_happy_path(monkeypatch):
     body = json.loads(result[0].text)
     assert body["ok"] is True
     assert body["timesheet"] == {"code": "200", "message": "ok"}
+
+
+async def test_recent_project_tasks_no_connection_returns_fallback(monkeypatch):
+    _load_cfg(monkeypatch, AppConfig())
+    result = await dispatch_workstatus_tool("workstatus_recent_project_tasks", {})
+    body = json.loads(result[0].text)
+    assert body["ok"] is False
+    assert "fallback" in body
+
+
+@respx.mock
+async def test_recent_project_tasks_happy_path(monkeypatch):
+    _load_cfg(monkeypatch, _configured_cfg())
+    respx.post(f"{BASE}/timesheets/viewTimesheet/list").mock(
+        return_value=httpx.Response(200, json={"code": "200", "message": "ok", "data": {"timeSheetList": [
+            {"date": "2026-08-04", "project": {"id": 1814, "name": "VIL Ads"}, "todo": {"id": 44967, "name": "VILAds_Development_Dev"}},
+        ]}})
+    )
+    result = await dispatch_workstatus_tool("workstatus_recent_project_tasks", {})
+    body = json.loads(result[0].text)
+    assert body["ok"] is True
+    assert body["recent_project_tasks"] == [{
+        "project_id": 1814, "project_name": "VIL Ads", "todo_id": 44967,
+        "todo_name": "VILAds_Development_Dev", "last_used": "2026-08-04",
+    }]
+
+
+@respx.mock
+async def test_recent_project_tasks_default_lookback_is_90_days(monkeypatch):
+    _load_cfg(monkeypatch, _configured_cfg())
+    route = respx.post(f"{BASE}/timesheets/viewTimesheet/list").mock(
+        return_value=httpx.Response(200, json={"code": "200", "message": "ok", "data": {"timeSheetList": []}})
+    )
+    await dispatch_workstatus_tool("workstatus_recent_project_tasks", {})
+    body = json.loads(route.calls[0].request.content)
+    from datetime import date, timedelta
+    assert body["interval"]["from"] == (date.today() - timedelta(days=90)).isoformat()

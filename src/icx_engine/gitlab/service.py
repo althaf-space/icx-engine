@@ -173,13 +173,71 @@ def set_active(name: str, cfg: Any | None = None) -> dict:
     return {"active": cfg.active_gitlab}
 
 
+_TRANSITIONAL_MERGE_STATUSES = {"checking", "unchecked", "preparing"}
+_MERGEABLE_MERGE_STATUSES = {"can_be_merged", "mergeable"}
+_CONFLICTED_MERGE_STATUSES = {"cannot_be_merged", "cannot_be_merged_recheck", "conflict"}
+
+
+def classify_merge_status(mr: dict) -> str:
+    """Buckets a GitLab MR's mergeability into MERGEABLE/CONFLICTED/CHECKING/
+    BLOCKED/UNKNOWN. Prefers `detailed_merge_status` (newer GitLab - names the
+    real reason: ci_still_running/not_approved/need_rebase/
+    discussions_not_resolved/draft_status/policies_denied/
+    external_status_checks/broken_status/...) over the legacy `merge_status`
+    field when both are present. Any named reason that is not itself a
+    conflict is BLOCKED - never silently reported as CONFLICTED (a different,
+    misleading diagnosis) or dropped."""
+    status = mr.get("detailed_merge_status") or mr.get("merge_status")
+    if status is None:
+        return "UNKNOWN"
+    status = str(status).lower()
+    if status in _TRANSITIONAL_MERGE_STATUSES:
+        return "CHECKING"
+    if status in _MERGEABLE_MERGE_STATUSES:
+        return "MERGEABLE"
+    if status in _CONFLICTED_MERGE_STATUSES:
+        return "CONFLICTED"
+    if status == "unknown":
+        return "UNKNOWN"
+    return "BLOCKED"
+
+
+async def wait_for_mergeable(
+    client: GitLabClient, project_path: str, mr_iid: int,
+    max_attempts: int = 5, delay_seconds: float = 2.0,
+) -> dict:
+    """Bounded poll of one MR's mergeability - GitLab computes merge_status
+    asynchronously after creation/push, so a refusal immediately after create
+    can be a stale CHECKING snapshot, not a real failure. Stops as soon as a
+    terminal state (MERGEABLE/CONFLICTED/BLOCKED/UNKNOWN) is reached, or after
+    max_attempts if it never leaves CHECKING - never polls indefinitely.
+    Returns {"status": <bucket>, "attempts": <n>, "mr": <raw MR body>}."""
+    import asyncio
+    mr: dict = {}
+    for attempt in range(1, max_attempts + 1):
+        mr = await client.get_merge_request(project_path, mr_iid)
+        bucket = classify_merge_status(mr)
+        if bucket != "CHECKING":
+            return {"status": bucket, "attempts": attempt, "mr": mr}
+        if attempt < max_attempts:
+            await asyncio.sleep(delay_seconds)
+    return {"status": "CHECKING", "attempts": max_attempts, "mr": mr}
+
+
 async def create_and_merge_mr(
     conn: "GitLabConnection", project_path: str, source_branch: str, target_branch: str,
     title: str, description: str, assignee_id: int,
+    max_poll_attempts: int = 5, poll_delay_seconds: float = 2.0,
 ) -> dict:
     """Create an MR (or reuse an existing open one for this branch), then
-    attempt one immediate merge (design spec Section 8.3-8.4). Never retries
-    after a refusal - the caller reports the reason and stops."""
+    attempt one immediate merge (design spec Section 8.3-8.4). A refusal
+    right after creation is not treated as permanent: GitLab computes
+    mergeability asynchronously, so this checks whether the MR was still
+    CHECKING at refusal time and, if so, polls (bounded by max_poll_attempts/
+    poll_delay_seconds) until a terminal state is reached, retrying the merge
+    exactly once if it settles on MERGEABLE. A genuine CONFLICTED/BLOCKED/
+    UNKNOWN terminal state is never retried - the caller reports it and
+    stops."""
     async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
         existing = await client.find_merge_request_for_branch(project_path, source_branch)
         if existing:
@@ -193,9 +251,26 @@ async def create_and_merge_mr(
             mr_iid = mr["iid"]
             created = True
         merge_result = await client.attempt_merge(project_path, mr_iid)
+        if merge_result["merged"]:
+            return {
+                "mr_iid": mr_iid, "created": created, "merged": True,
+                "merge_status": "MERGEABLE", "refusal_reason": None,
+            }
+
+        poll = await wait_for_mergeable(
+            client, project_path, mr_iid, max_attempts=max_poll_attempts, delay_seconds=poll_delay_seconds,
+        )
+        if poll["status"] != "MERGEABLE":
+            return {
+                "mr_iid": mr_iid, "created": created, "merged": False,
+                "merge_status": poll["status"], "refusal_reason": merge_result.get("reason"),
+            }
+        # Mergeability finished computing since the first attempt - retry exactly once now that it's terminal.
+        merge_result = await client.attempt_merge(project_path, mr_iid)
         return {
-            "mr_iid": mr_iid,
-            "created": created,
-            "merged": merge_result["merged"],
+            "mr_iid": mr_iid, "created": created, "merged": merge_result["merged"],
+            "merge_status": "MERGEABLE" if merge_result["merged"] else classify_merge_status(
+                await client.get_merge_request(project_path, mr_iid)
+            ),
             "refusal_reason": merge_result.get("reason"),
         }
