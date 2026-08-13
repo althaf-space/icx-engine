@@ -800,7 +800,7 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 136
+    assert len(tools) == 157
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
@@ -820,10 +820,17 @@ async def test_list_tools_returns_all_tools():
         "sonar_issue_authors", "sonar_issue_tags", "sonar_issue_changelog", "sonar_system_health", "sonar_languages",
         "icx_skill_get", "icx_skills_index", "draft_skill", "create_skill",
         "git_repo_status", "git_start_branch", "git_blame", "git_log", "git_show_commit", "git_diff",
+        "git_diff_worktree", "git_read_file_at_ref",
         "git_stage_and_commit", "git_push",
         "git_reverse_merge", "git_get_conflict", "git_complete_resolution",
         "git_adopt_resolution", "git_discard_scratch",
         "git_create_mr", "git_finish_ticket", "git_create_tag", "git_delete_tag", "git_retag",
+        "git_stash_create", "git_stash_list", "git_stash_apply", "git_stash_pop", "git_stash_drop",
+        "git_fetch", "git_pull", "git_sync", "git_delete_branch",
+        "git_get_conflict_details", "git_conflict_take_ours", "git_conflict_take_theirs",
+        "git_conflict_apply_resolution", "git_conflict_mark_resolved", "git_conflict_abort",
+        "git_check_branch_name_policy", "git_set_branch_policy",
+        "git_check_dependency_pins", "git_restore_files",
         "gitlab_list_merge_requests", "gitlab_mr_changes", "gitlab_list_commits", "gitlab_compare",
         "gitlab_list_tags", "gitlab_list_branches", "gitlab_list_pipelines",
         "gitlab_pipeline_status", "gitlab_job_log",
@@ -860,7 +867,7 @@ async def test_git_tool_descriptions_follow_sonar_use_when_must_convention():
         tools = await _list_tools()
 
     git_tools = [t for t in tools if t.name.startswith("git_")]
-    assert len(git_tools) == 18
+    assert len(git_tools) == 39
     for tool in git_tools:
         assert "USE WHEN" in tool.description, f"{tool.name} missing 'USE WHEN'"
         assert "MUST" in tool.description, f"{tool.name} missing 'MUST'"

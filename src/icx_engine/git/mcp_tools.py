@@ -272,7 +272,8 @@ GIT_TOOLS: list[Tool] = [
         description=(
             "USE WHEN a conflict needs inspecting and only whole-file ours/theirs content is "
             "needed - use git_get_conflict_details instead for base content and per-hunk line "
-            "numbers. Works for ANY in-progress conflict, not just one git_reverse_merge produced - "
+            "numbers. MUST call this to fetch the ours/theirs content for that file here - works "
+            "for ANY in-progress conflict, not just one git_reverse_merge produced - "
             "reads real index stages, so a manual `git merge`/`git pull`, a rebase, or a "
             "cherry-pick conflict inspects identically; never assumes ICX started it. Call once per "
             "file in conflicted_files. On ICX's own scratch-branch flow, suggest a resolution to the "
@@ -585,10 +586,10 @@ GIT_TOOLS: list[Tool] = [
     Tool(
         name=_STASH_LIST_TOOL,
         description=(
-            "USE WHEN the human wants to see what's currently stashed in this repo. Returns every "
-            "stash newest-first, each with index, ref (the exact stash@{N} string to pass to "
-            "git_stash_apply/git_stash_pop/git_stash_drop), and message. Read-only, UNGATED. "
-            "Requires a valid git repository at repo_path."
+            "USE WHEN the human wants to see what's currently stashed in this repo. MUST call this "
+            "to list every stash newest-first, each with index, ref (the exact stash@{N} string to "
+            "pass to git_stash_apply/git_stash_pop/git_stash_drop), and message. Read-only, "
+            "UNGATED. Requires a valid git repository at repo_path."
         ),
         inputSchema={"type": "object", "properties": {"repo_path": {"type": "string"}},
                      "required": ["repo_path"]},
@@ -731,7 +732,8 @@ GIT_TOOLS: list[Tool] = [
         name=_DELETE_BRANCH_TOOL,
         description=(
             "USE WHEN the human wants a branch deleted - local, remote, or both - e.g. after "
-            "merging without going through git_finish_ticket. NEVER run `git push origin --delete` "
+            "merging without going through git_finish_ticket. MUST call this via ICX - NEVER run "
+            "`git push origin --delete` "
             "or `git branch -D` directly yourself. target is required - the branch that must still "
             "contain every commit being deleted (e.g. the parent/development branch); the tool "
             "computes unique_commits (commits on branch unreachable from target - would be LOST) "
@@ -763,9 +765,10 @@ GIT_TOOLS: list[Tool] = [
     Tool(
         name=_GET_CONFLICT_DETAILS_TOOL,
         description=(
-            "USE WHEN a conflicted file needs full inspection beyond ours/theirs alone - base "
-            "(common-ancestor) content, and every conflict hunk with exact start_line/end_line plus "
-            "its own ours/theirs text, matching what a human sees open in an editor. Works for ANY "
+            "USE WHEN a conflicted file needs full inspection beyond ours/theirs alone. MUST call "
+            "this to get base (common-ancestor) content, and every conflict hunk with exact "
+            "start_line/end_line plus its own ours/theirs text, matching what a human sees open in "
+            "an editor. Works for ANY "
             "in-progress conflict regardless of what caused it - ICX's own git_reverse_merge/"
             "git_pull/git_sync scratch-branch quarantine, a manual `git merge`/`git pull`, a rebase, "
             "or a cherry-pick - NEVER assumes ICX started it. base is null when no common ancestor "
@@ -905,7 +908,8 @@ GIT_TOOLS: list[Tool] = [
         description=(
             "USE WHEN a candidate branch name needs validating BEFORE calling git_start_branch (or "
             "before pushing an already-existing branch) - e.g. deciding whether to ask the human "
-            "for a ticket key first. Validates branch_name against this repo's configured policy - "
+            "for a ticket key first. MUST call this to validate branch_name against this repo's "
+            "configured policy - "
             "require_ticket_suffix in the response reflects the actual per-repo setting (see "
             "git_set_branch_policy), never guessed. Reuses the exact same trailing-ticket-key "
             "pattern naming.py already parses branch names with - one source of truth, no separate "
@@ -925,7 +929,8 @@ GIT_TOOLS: list[Tool] = [
         description=(
             "USE WHEN the human wants this repo to require (or stop requiring) a trailing ticket "
             "key on every feature branch ICX creates or pushes - e.g. after a remote pre-receive "
-            "hook rejected a ticketless branch ICX created successfully locally. Defaults OFF for "
+            "hook rejected a ticketless branch ICX created successfully locally. MUST call this to "
+            "change the setting. Defaults OFF for "
             "every repo (preserves the existing, documented ticketless-branch feature) - this is "
             "the only way to turn it on; ICX never infers an org's real policy automatically. "
             "Purely local - writes this repo's ICX settings file, never touches git or GitLab. Not "
@@ -947,7 +952,8 @@ GIT_TOOLS: list[Tool] = [
             "USE WHEN diagnosing whether a git-VCS dependency (package.json/requirements*.txt/"
             "pyproject.toml pinning a package to a git commit/branch/tag) is stale relative to that "
             "dependency's OWN target branch - e.g. 'is graphs pinned to an old commit of "
-            "development?'. Parses git dependency references from the given manifests - "
+            "development?'. MUST call this to parse git dependency references from the given "
+            "manifests - "
             "auto-discovers package.json/requirements.txt/pyproject.toml at repo_path's root if "
             "manifests is omitted. Supports npm's git+https/git+ssh/git:// spec form, pip/poetry's "
             "git+scheme://...@ref form (with or without #egg=name), and poetry's "
