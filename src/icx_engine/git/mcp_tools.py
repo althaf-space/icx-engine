@@ -4,6 +4,7 @@ get a few additive lines only, no restructuring (design spec Section 11)."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from mcp.types import TextContent, Tool
@@ -56,6 +57,7 @@ _CHECK_BRANCH_POLICY_TOOL = "git_check_branch_name_policy"
 _SET_BRANCH_POLICY_TOOL = "git_set_branch_policy"
 _CHECK_DEPENDENCY_PINS_TOOL = "git_check_dependency_pins"
 _RESTORE_FILES_TOOL = "git_restore_files"
+_LIST_MERGED_BRANCHES_TOOL = "git_list_merged_branches"
 
 GIT_TOOLS: list[Tool] = [
     Tool(
@@ -79,7 +81,16 @@ GIT_TOOLS: list[Tool] = [
             "from an interrupted prior run. git resolves the actual repository root upward "
             "through parent directories automatically - call this even if no .git is visible "
             "directly inside repo_path's own directory listing (e.g. repo_path pointing at a "
-            "subdirectory like ui/ or svc/ inside a larger repo is fine). Requires a valid git "
+            "subdirectory like ui/ or svc/ inside a larger repo is fine). If this repo has a "
+            "confirmed parent_branch (see git_start_branch/git_reverse_merge), also reports "
+            "commits_behind_parent (how far origin/<parent> has moved since this branch's own "
+            "merge-base with it - null if parent_branch isn't confirmed yet or origin/<parent> "
+            "hasn't been fetched locally) and files_modified_upstream - which of the CURRENTLY "
+            "dirty/staged/untracked files the parent branch ALSO touched since the branch point. "
+            "A non-empty files_modified_upstream is a real silent-deletion risk: committing/merging "
+            "those files as-is could drop the upstream change entirely - show this to the human "
+            "BEFORE staging/committing them, and suggest git_pull/git_reverse_merge to bring the "
+            "parent's changes in first. Requires a valid git "
             "repository at repo_path."
         ),
         inputSchema={"type": "object", "properties": {"repo_path": {"type": "string"}},
@@ -90,10 +101,16 @@ GIT_TOOLS: list[Tool] = [
         description=(
             "USE WHEN starting work on a ticket and no feature branch exists yet, or the human "
             "asks to create/start a branch: MUST call this to create it via ICX - NEVER run `git "
-            "checkout -b` or `git branch` directly yourself. Derives the branch name from "
+            "checkout -b` or `git branch` directly yourself. Always fetches origin FIRST, even if "
+            "parent_branch was already confirmed on a previous call - a new branch is created off "
+            "the current real tip of origin/<parent_branch>, never a possibly-stale local tracking "
+            "ref. Derives the branch name from "
             "ticket_key (pass null for a ticketless branch) plus summary_or_preferred_name. If a "
             "matching local branch already exists, switches to it instead of recreating "
-            "(switched_to_existing=true, created=false). NOT confirmation-gated - creating or "
+            "(switched_to_existing=true, created=false) and reports commits_behind_parent - a "
+            "nonzero value here means that EXISTING branch has fallen behind origin/<parent_branch> "
+            "since it was created; consider git_pull/git_reverse_merge before continuing work on "
+            "it. NOT confirmation-gated - creating or "
             "switching to a branch is not destructive. If parent_branch is omitted, it is ALWAYS "
             "confirmed with the human, every call - never silently reused, even if one was "
             "confirmed for this repo before. Returns status='confirm_remembered' (with the "
@@ -226,7 +243,11 @@ GIT_TOOLS: list[Tool] = [
             "conflict quarantines onto a disposable scratch branch (status='conflict', "
             "scratch_branch + conflicted_files returned) - the real feature branch is left "
             "untouched. Use git_get_conflict per file, then git_complete_resolution and "
-            "git_adopt_resolution to finish. If parent_branch is omitted, it is ALWAYS confirmed "
+            "git_adopt_resolution to finish. On a clean merge, also returns "
+            "dependency_pins_detected - a cheap LOCAL scan (no network) of this repo's own "
+            "manifests for git-VCS dependency pins; a non-empty list is a nudge to run "
+            "git_check_dependency_pins next, never an automatic staleness check itself. If "
+            "parent_branch is omitted, it is ALWAYS confirmed "
             "with the human, every call - never silently reused, even if one was confirmed for "
             "this repo before. Returns status='confirm_remembered' (with the previously-confirmed "
             "value as proposed_default, a one-tap default to confirm back), 'needs_confirmation' "
@@ -423,7 +444,12 @@ GIT_TOOLS: list[Tool] = [
             "CHECKING means it never left that state within the poll budget (raise "
             "max_poll_attempts/poll_delay_seconds and retry rather than assuming failure); BLOCKED "
             "covers every named non-conflict refusal (ci_still_running/not_approved/need_rebase/"
-            "discussions_not_resolved/draft_status/policies_denied/etc, from refusal_reason). "
+            "discussions_not_resolved/draft_status/policies_denied/etc, from refusal_reason). When "
+            "not merged, also returns has_conflicts (GitLab's own boolean, null if unknown) and "
+            "pipeline (the source branch's latest pipeline - id/status, plus failed_job_name/"
+            "failed_job_id if it failed - null if no pipeline exists yet or the lookup itself "
+            "failed) - use these to tell a real conflict apart from a blocked/failed pipeline "
+            "instead of treating every non-merge as the same opaque refusal. "
             "Requires an active GitLab connection."
         ),
         inputSchema={
@@ -688,7 +714,10 @@ GIT_TOOLS: list[Tool] = [
             "conflicted_files; use git_get_conflict/git_complete_resolution/git_adopt_resolution to "
             "finish, identically. NOT confirmation-gated - matches git_reverse_merge's own "
             "ungated-because-safe-by-construction convention. ticket_key is nullable (backup/stash "
-            "naming only). Requires a valid git repository at repo_path."
+            "naming only). On status='merged'/'fast_forwarded', also returns "
+            "dependency_pins_detected - a cheap LOCAL scan (no network) for git-VCS dependency "
+            "pins in this repo's own manifests; non-empty means run git_check_dependency_pins next. "
+            "Requires a valid git repository at repo_path."
         ),
         inputSchema={
             "type": "object",
@@ -716,7 +745,10 @@ GIT_TOOLS: list[Tool] = [
             "git_adopt_resolution to finish. For anything more specific - a DIFFERENT target branch, "
             "or explicit control over merge vs ff-only - use git_reverse_merge or git_pull directly "
             "instead. NOT confirmation-gated, same reasoning as git_pull. ticket_key is nullable "
-            "(backup/stash naming only). Requires a valid git repository at repo_path."
+            "(backup/stash naming only). On status='merged'/'fast_forwarded', also returns "
+            "dependency_pins_detected - a cheap LOCAL scan (no network) for git-VCS dependency "
+            "pins in this repo's own manifests; non-empty means run git_check_dependency_pins next. "
+            "Requires a valid git repository at repo_path."
         ),
         inputSchema={
             "type": "object",
@@ -732,7 +764,9 @@ GIT_TOOLS: list[Tool] = [
         name=_DELETE_BRANCH_TOOL,
         description=(
             "USE WHEN the human wants a branch deleted - local, remote, or both - e.g. after "
-            "merging without going through git_finish_ticket. MUST call this via ICX - NEVER run "
+            "merging without going through git_finish_ticket. Use git_list_merged_branches first "
+            "if the human wants to clean up several stale branches rather than one named one. "
+            "MUST call this via ICX - NEVER run "
             "`git push origin --delete` "
             "or `git branch -D` directly yourself. target is required - the branch that must still "
             "contain every commit being deleted (e.g. the parent/development branch); the tool "
@@ -760,6 +794,32 @@ GIT_TOOLS: list[Tool] = [
                 "confirm_token": {"type": "string"},
             },
             "required": ["repo_path", "branch", "target"],
+        },
+    ),
+    Tool(
+        name=_LIST_MERGED_BRANCHES_TOOL,
+        description=(
+            "USE WHEN the human wants to clean up stale LOCAL branches - 'which branches can I "
+            "delete', 'list merged branches' - the discovery companion to git_delete_branch. MUST "
+            "call this to list every local branch that is fully merged into target (same "
+            "is_ancestor check git_delete_branch itself uses to decide safety - every branch "
+            "returned here would delete with unique_commits=0, no force needed), each with its tip "
+            "commit's author and date. Excludes target itself and the CURRENT branch always - "
+            "deleting either is refused by git_delete_branch anyway. older_than_days (default 0 - "
+            "no age filter) additionally restricts to branches whose tip commit is older than that "
+            "many days, using each branch's own author date. Local branches only - does not "
+            "enumerate GitLab-wide branches (use gitlab_list_branches for that, a different, "
+            "read-only, remote-only view with no merged/age computation). Read-only, UNGATED. "
+            "Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "target": {"type": "string"},
+                "older_than_days": {"type": "integer"},
+            },
+            "required": ["repo_path", "target"],
         },
     ),
     Tool(
@@ -1028,6 +1088,54 @@ def _err(message: str) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps({"ok": False, "error": message}))]
 
 
+_GL_HOOK_ERR_RE = re.compile(r"GL-HOOK-ERR:\s*(?P<message>.+)")
+
+
+def _humanize_git_error(raw: str) -> str:
+    """Translates a raw push-failure string into an actionable message when
+    it matches a known pattern - GitLab's pre-receive hook rejections
+    (`GL-HOOK-ERR:`) are a real SERVER-SIDE policy refusal, not a git or ICX
+    error, but the raw hook text alone reads like an opaque git failure and
+    gives no next step. Falls through to the original message completely
+    unchanged for anything not recognized - never invents a diagnosis it
+    can't back up."""
+    match = _GL_HOOK_ERR_RE.search(raw)
+    if not match:
+        return raw
+    hook_message = match["message"].strip()
+    tip = ""
+    if ".gitignore" in hook_message.lower():
+        tip = (
+            " Server policy forbids modifying .gitignore in a push - remove it from this "
+            "commit (git_restore_files can revert just that file) and push again."
+        )
+    return (
+        f"GitLab server policy rejected this push: {hook_message}{tip} This is a pre-receive "
+        "hook refusal, not a git or ICX error - the underlying commit still exists locally; "
+        "only the push itself was blocked."
+    )
+
+
+def _detect_local_dependency_pins(repo_root: Path) -> list[dict]:
+    """Cheap, LOCAL-only (no network) scan for git-VCS dependency pins in this
+    repo's own manifests - used to nudge toward git_check_dependency_pins right
+    after a successful sync/pull/reverse-merge, without ever running its full
+    network resolution automatically (that stays a deliberate, separate, opt-in
+    call - this only detects that a pin exists, never whether it's stale)."""
+    from icx_engine.git import deps
+    found: list[dict] = []
+    for name in ("package.json", "requirements.txt", "pyproject.toml"):
+        path = repo_root / name
+        if not path.exists():
+            continue
+        try:
+            pins = deps.parse_manifest_git_deps(name, path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        found.extend({"manifest": p.manifest, "name": p.name, "ref": p.ref} for p in pins)
+    return found
+
+
 def _no_gitlab_connection_err() -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps({
         "ok": False,
@@ -1136,6 +1244,28 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             dirty_status = mgr.check_dirty_tree()
             leftover = mgr.check_leftover_state()
             rich = gitcmd.structured_status(mgr.repo_root)
+
+            # Stale-base detection: is this branch's confirmed parent ahead, and if so,
+            # did the parent ALSO touch any file this branch currently has dirty? That's
+            # the exact silent-deletion class of bug (e.g. a stale index.js re-exporting
+            # an upstream addition away) - `ahead`/`behind` above are this branch's OWN
+            # remote-tracking drift, a different axis from parent drift.
+            parent_branch = read_repo_settings(mgr.repo_root).get("parent_branch")
+            commits_behind_parent = None
+            files_modified_upstream: list[str] = []
+            if parent_branch:
+                parent_ref = f"origin/{parent_branch}"
+                if gitcmd.resolve_ref(mgr.repo_root, parent_ref) is not None:
+                    commits_behind_parent = gitcmd.unique_commit_count(mgr.repo_root, parent_ref, "HEAD")
+                    if commits_behind_parent > 0:
+                        upstream_touched = set(gitcmd.changed_files_since_common_ancestor(mgr.repo_root, parent_ref))
+                        dirty_paths = (
+                            set(rich["untracked"])
+                            | {e["path"] for e in rich["staged"]}
+                            | {e["path"] for e in rich["unstaged"]}
+                        )
+                        files_modified_upstream = sorted(dirty_paths & upstream_touched)
+
             return _ok(attach_skill_hint({
                 "current_branch": current_branch(mgr.repo_root),
                 "dirty": dirty_status.dirty,
@@ -1153,6 +1283,9 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 "ahead": rich["ahead"],
                 "behind": rich["behind"],
                 "upstream": rich["upstream"],
+                "parent_branch": parent_branch,
+                "commits_behind_parent": commits_behind_parent,
+                "files_modified_upstream": files_modified_upstream,
             }, "safe-git-workflow", rank_prompt="git workflow branch commit merge", archetype="git"))
         except Exception as exc:
             return _err(str(exc))
@@ -1180,6 +1313,7 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 "branch_name": result.branch_name,
                 "created": result.created,
                 "switched_to_existing": result.switched_to_existing,
+                "commits_behind_parent": result.commits_behind_parent,
             })
         except Exception as exc:
             return _err(str(exc))
@@ -1355,7 +1489,10 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             parent_branch = given_parent
             result = mgr.reverse_merge_standard(parent_branch, ticket_key)
             if result.status == "clean":
-                return _ok({"status": "clean"})
+                return _ok({
+                    "status": "clean",
+                    "dependency_pins_detected": _detect_local_dependency_pins(mgr.repo_root),
+                })
             session = mgr.start_conflict_resolution(parent_branch, ticket_key)
             return _ok({
                 "status": "conflict",
@@ -1539,7 +1676,7 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             gitcmd.push(mgr.repo_root, branch, remote=remote, extra_env=mgr._auth_env(remote))
             return _ok({"branch": branch, "remote": remote, "pushed": True})
         except Exception as exc:
-            return _err(str(exc))
+            return _err(_humanize_git_error(str(exc)))
 
     if name == _CREATE_MR_TOOL:
         try:
@@ -1598,9 +1735,10 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 "mr_iid": result.mr_iid, "created": result.created,
                 "merged": result.merged, "merge_status": result.merge_status,
                 "refusal_reason": result.refusal_reason,
+                "has_conflicts": result.has_conflicts, "pipeline": result.pipeline,
             })
         except Exception as exc:
-            return _err(str(exc))
+            return _err(_humanize_git_error(str(exc)))
 
     if name == _FINISH_TICKET_TOOL:
         try:
@@ -2056,9 +2194,10 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             mgr = GitLifecycleManager(Path(repo_path))
             mgr.validate()
             result = mgr.pull(remote=remote, strategy=strategy, ticket_key=ticket_key)
+            pins = _detect_local_dependency_pins(mgr.repo_root) if result.status in ("merged", "fast_forwarded") else []
             return _ok({
                 "status": result.status, "conflicted_files": result.conflicted_files,
-                "scratch_branch": result.scratch_branch,
+                "scratch_branch": result.scratch_branch, "dependency_pins_detected": pins,
             })
         except Exception as exc:
             return _err(str(exc))
@@ -2075,9 +2214,10 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             mgr = GitLifecycleManager(Path(repo_path))
             mgr.validate()
             result = mgr.pull(remote=remote, strategy="merge", ticket_key=ticket_key)
+            pins = _detect_local_dependency_pins(mgr.repo_root) if result.status in ("merged", "fast_forwarded") else []
             return _ok({
                 "status": result.status, "conflicted_files": result.conflicted_files,
-                "scratch_branch": result.scratch_branch,
+                "scratch_branch": result.scratch_branch, "dependency_pins_detected": pins,
             })
         except Exception as exc:
             return _err(str(exc))
@@ -2460,6 +2600,22 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             mgr.validate()
             gitcmd.restore_files(mgr.repo_root, payload["files"], mode=payload["mode"])
             return _ok({"restored": payload["files"], "mode": payload["mode"]})
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _LIST_MERGED_BRANCHES_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        target = arguments.get("target")
+        if not target or not isinstance(target, str):
+            return _err("target is required and must be a non-empty string.")
+        older_than_days = arguments.get("older_than_days") or 0
+        try:
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            branches = mgr.list_merged_branches(target, older_than_days=older_than_days)
+            return _ok({"branches": branches})
         except Exception as exc:
             return _err(str(exc))
 

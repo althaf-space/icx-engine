@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from icx_engine.config_manager import ConfigManager
-from icx_engine.gitlab.client import GitLabClient
+from icx_engine.gitlab.client import GitLabClient, GitLabError
 from icx_engine.models.config import GitLabConnection
 
 _TAG_RE = re.compile(
@@ -224,6 +224,33 @@ async def wait_for_mergeable(
     return {"status": "CHECKING", "attempts": max_attempts, "mr": mr}
 
 
+async def _pipeline_summary(client: GitLabClient, project_path: str, source_branch: str) -> dict | None:
+    """Latest pipeline for source_branch, plus the failed job's name/id if the
+    pipeline itself failed - lets a BLOCKED/failed merge refusal name the
+    real reason (a specific failed job) instead of leaving the human to dig
+    through gitlab_pipeline_status/gitlab_job_log by hand. Returns None if no
+    pipeline exists yet or the lookup itself fails - never raises, this is
+    diagnostic best-effort, not required for the merge result itself."""
+    try:
+        pipelines = await client.list_pipelines(project_path, ref=source_branch)
+    except GitLabError:
+        return None
+    if not pipelines:
+        return None
+    latest = pipelines[0]
+    summary: dict = {"id": latest.get("id"), "status": latest.get("status")}
+    if latest.get("status") == "failed" and latest.get("id") is not None:
+        try:
+            detail = await client.get_pipeline(project_path, latest["id"])
+        except GitLabError:
+            return summary
+        failed_jobs = [j for j in detail.get("jobs", []) if j.get("status") == "failed"]
+        if failed_jobs:
+            summary["failed_job_name"] = failed_jobs[0].get("name")
+            summary["failed_job_id"] = failed_jobs[0].get("id")
+    return summary
+
+
 async def create_and_merge_mr(
     conn: "GitLabConnection", project_path: str, source_branch: str, target_branch: str,
     title: str, description: str, assignee_id: int,
@@ -264,13 +291,21 @@ async def create_and_merge_mr(
             return {
                 "mr_iid": mr_iid, "created": created, "merged": False,
                 "merge_status": poll["status"], "refusal_reason": merge_result.get("reason"),
+                "has_conflicts": poll["mr"].get("has_conflicts"),
+                "pipeline": await _pipeline_summary(client, project_path, source_branch),
             }
         # Mergeability finished computing since the first attempt - retry exactly once now that it's terminal.
         merge_result = await client.attempt_merge(project_path, mr_iid)
+        if merge_result["merged"]:
+            return {
+                "mr_iid": mr_iid, "created": created, "merged": True,
+                "merge_status": "MERGEABLE", "refusal_reason": None,
+            }
+        final_mr = await client.get_merge_request(project_path, mr_iid)
         return {
-            "mr_iid": mr_iid, "created": created, "merged": merge_result["merged"],
-            "merge_status": "MERGEABLE" if merge_result["merged"] else classify_merge_status(
-                await client.get_merge_request(project_path, mr_iid)
-            ),
+            "mr_iid": mr_iid, "created": created, "merged": False,
+            "merge_status": classify_merge_status(final_mr),
             "refusal_reason": merge_result.get("reason"),
+            "has_conflicts": final_mr.get("has_conflicts"),
+            "pipeline": await _pipeline_summary(client, project_path, source_branch),
         }

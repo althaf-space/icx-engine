@@ -312,6 +312,27 @@ def delete_remote_branch(
     _run_git(repo, ["push", remote, "--delete", branch], timeout=60.0, extra_env=extra_env)
 
 
+def list_local_branches(repo: Path) -> list[dict]:
+    """Every local branch with its tip commit's sha/author/date - one
+    `for-each-ref` call, no per-branch subprocess needed. `date` is
+    ISO-8601 (author date, not commit date) for direct comparison/sorting.
+    Fields are tab-separated - unlike `log --format`, for-each-ref's format
+    spec does not support arbitrary `%xHH` hex escapes (`%x1f` prints
+    literally, verified), only a handful of named ones like `%09` (tab)."""
+    result = _run_git(repo, [
+        "for-each-ref", "refs/heads/",
+        "--format=%(refname:short)%09%(objectname)%09%(authorname)%09%(authordate:iso-strict)",
+    ])
+    out = _stdout(result)
+    branches = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        name, sha, author, date = line.split("\t")
+        branches.append({"branch": name, "sha": sha, "author": author, "date": date})
+    return branches
+
+
 def is_ancestor(repo: Path, ancestor_ref: str, descendant_ref: str) -> bool:
     """True if every commit on ancestor_ref already exists on descendant_ref
     - i.e. ancestor_ref could be deleted without losing any commit reachable
@@ -368,10 +389,29 @@ def find_conflict_markers(repo: Path, relpaths: list[str]) -> dict[str, list[str
 
 def stage_files(repo: Path, files: list[str]) -> None:
     """Stage exactly these files. Never called with a wildcard or '.' - callers
-    always pass an explicit list (design spec Section 6.3)."""
+    always pass an explicit list (design spec Section 6.3).
+
+    A path missing from the working tree but STILL in the index (an
+    unstaged deletion) stages fine via plain `git add`. A path missing from
+    BOTH the working tree AND the index (already fully staged as deleted in
+    a prior stage/commit cycle - e.g. the caller re-lists a file it already
+    handled) has nothing left to change - `git add` refuses it with a fatal
+    'pathspec did not match any files', which previously failed the ENTIRE
+    batched add for every other file in the same call. Such paths are
+    detected (one extra `ls-files` check, only for paths absent from disk -
+    zero extra cost for the common case) and silently skipped instead."""
     if not files:
         return
-    _run_git(repo, ["add", "--", *files])
+    missing = [f for f in files if not (repo / f).exists()]
+    already_gone: set[str] = set()
+    for f in missing:
+        _reject_option_like(f, "files")
+        result = _run_git(repo, ["ls-files", "--cached", "--", f])
+        if not _stdout(result):
+            already_gone.add(f)
+    to_add = [f for f in files if f not in already_gone]
+    if to_add:
+        _run_git(repo, ["add", "--", *to_add])
 
 
 def restore_files(repo: Path, files: list[str], mode: str = "worktree", source: str | None = None) -> None:
@@ -618,6 +658,21 @@ def changed_files_since(repo: Path, base_ref: str) -> list[str]:
     """Paths touched by any commit on the current branch not on base_ref."""
     _reject_option_like(base_ref, "base_ref")
     result = _run_git(repo, ["diff", "--name-only", f"{base_ref}...HEAD"])
+    out = _stdout(result)
+    return [_unquote_git_path(line) for line in out.splitlines() if line]
+
+
+def changed_files_since_common_ancestor(repo: Path, ref: str) -> list[str]:
+    """Paths touched on `ref` since ITS merge-base with the current branch -
+    the reverse direction from changed_files_since() (which reports paths
+    the CURRENT branch touched instead). Used to detect the "stale base"
+    silent-deletion class of bug: a file this branch is about to commit that
+    the parent branch also modified since the branch point - the pending
+    commit could silently drop that upstream change on merge. Uses git's own
+    triple-dot (symmetric-difference-from-merge-base) diff form, just with
+    the two sides swapped relative to changed_files_since()."""
+    _reject_option_like(ref, "ref")
+    result = _run_git(repo, ["diff", "--name-only", f"HEAD...{ref}"])
     out = _stdout(result)
     return [_unquote_git_path(line) for line in out.splitlines() if line]
 

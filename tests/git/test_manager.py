@@ -73,6 +73,16 @@ def test_confirm_parent_branch_persists_valid_choice(tmp_git_repo_with_remote, m
     assert written == {"parent_branch": "main"}
 
 
+def test_confirm_parent_branch_strips_origin_prefix(tmp_git_repo_with_remote, monkeypatch):
+    written = {}
+    monkeypatch.setattr("icx_engine.git.manager.write_repo_settings",
+                         lambda root, **kw: written.update(kw))
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    mgr.confirm_parent_branch("origin/main")
+    assert written == {"parent_branch": "main"}
+
+
 def test_confirm_parent_branch_rejects_nonexistent_branch(tmp_git_repo_with_remote):
     mgr = GitLifecycleManager(tmp_git_repo_with_remote)
     mgr.validate()
@@ -313,6 +323,53 @@ def test_start_branch_succeeds_with_ticket_even_when_policy_requires_it(tmp_git_
     result = mgr.start_branch("ABC-123", "Fix login timeout", "main")
     assert result.branch_name == "feature/fix-login-timeout-ABC-123"
     assert result.created is True
+
+
+def test_start_branch_fetches_before_branching_off_a_stale_local_tracking_ref(tmp_git_repo_with_remote, tmp_path):
+    """Real bug repro: parent_branch given directly (skipping resolve_parent_branch's
+    own fetch) used to branch off whatever origin/main the local tracking ref last
+    fetched - arbitrarily stale. start_branch must fetch itself, every call."""
+    import subprocess
+    other_clone = tmp_path / "other_clone_start_branch"
+    subprocess.run(["git", "clone", str(tmp_path / "origin.git"), str(other_clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(other_clone), check=True)
+    (other_clone / "new_upstream_file.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "new_upstream_file.txt"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "commit", "-m", "new upstream commit"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "push"], cwd=str(other_clone), check=True)
+    # tmp_git_repo_with_remote never fetched since that push - its local origin/main
+    # tracking ref is now stale relative to the real remote.
+
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.start_branch("ABC-1", "Fix login", "main")
+    assert result.created is True
+    checkout(tmp_git_repo_with_remote, result.branch_name)
+    assert (tmp_git_repo_with_remote / "new_upstream_file.txt").exists()
+
+
+def test_start_branch_switched_to_existing_reports_commits_behind_parent(tmp_git_repo_with_remote, tmp_path):
+    import subprocess
+    create_branch_from(tmp_git_repo_with_remote, "feature/fix-login-timeout-ABC-123", "main")
+
+    other_clone = tmp_path / "other_clone_switch"
+    subprocess.run(["git", "clone", str(tmp_path / "origin.git"), str(other_clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(other_clone), check=True)
+    (other_clone / "new_upstream_file.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "new_upstream_file.txt"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "commit", "-m", "new upstream commit"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "push"], cwd=str(other_clone), check=True)
+
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.start_branch("ABC-123", "Fix login timeout", "main")
+    assert result.switched_to_existing is True
+    assert result.created is False
+    assert result.commits_behind_parent == 1
 
 
 def test_current_ticket_key_parses_from_branch_name(tmp_git_repo_with_remote):
@@ -1373,3 +1430,46 @@ def test_delete_branch_safely_remote_only_skips_unique_commit_check(tmp_git_repo
     assert result.local_deleted is False
     assert result.remote_deleted is True
     assert result.unique_commits == 0
+
+
+# Task: list_merged_branches - the discovery companion to delete_branch_safely
+
+def test_list_merged_branches_includes_fully_merged_branch(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    result = mgr.list_merged_branches("main")
+    assert {b["branch"] for b in result} == {"feature/merged-ABC-1"}
+
+
+def test_list_merged_branches_excludes_unmerged_branch(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    gitcmd_commit(tmp_git_repo, "ABC-1 unique commit")
+    checkout(tmp_git_repo, "main")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    assert mgr.list_merged_branches("main") == []
+
+
+def test_list_merged_branches_excludes_target_and_current_branch(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/merged-ABC-1")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    # target=feature/merged-ABC-1 is ALSO the current branch - it must never suggest
+    # deleting either itself as target or itself as the currently checked-out branch
+    # (same exclusion delete_branch_safely enforces). main IS merged into it (same
+    # commit) and is neither target nor current, so it correctly still appears.
+    result = mgr.list_merged_branches("feature/merged-ABC-1")
+    assert {b["branch"] for b in result} == {"main"}
+
+
+def test_list_merged_branches_older_than_days_filters_recent_branches(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    mgr = GitLifecycleManager(tmp_git_repo)
+    mgr.validate()
+    assert mgr.list_merged_branches("main", older_than_days=0) != []
+    assert mgr.list_merged_branches("main", older_than_days=9999) == []

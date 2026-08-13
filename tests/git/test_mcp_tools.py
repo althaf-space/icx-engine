@@ -53,6 +53,114 @@ async def test_git_repo_status_reports_rich_structured_fields(tmp_git_repo):
     assert payload["ahead"] == 0
     assert payload["behind"] == 0
     assert payload["upstream"] is None
+    assert payload["parent_branch"] is None
+    assert payload["commits_behind_parent"] is None
+    assert payload["files_modified_upstream"] == []
+
+
+# Task: git_repo_status parent-drift + stale-base silent-deletion detection
+
+async def test_git_repo_status_reports_commits_behind_parent(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.manager import GitLifecycleManager
+    from icx_engine.git.gitcmd import stage_files, commit, fetch
+    import subprocess
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    mgr.confirm_parent_branch("main")
+
+    other_clone = tmp_path / "other_clone"
+    subprocess.run(["git", "clone", str(tmp_path / "origin.git"), str(other_clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(other_clone), check=True)
+    (other_clone / "upstream.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "upstream.txt"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "commit", "-m", "upstream change"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "push"], cwd=str(other_clone), check=True)
+    fetch(tmp_git_repo_with_remote)
+
+    result = await dispatch_git_tool("git_repo_status", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["parent_branch"] == "main"
+    assert payload["commits_behind_parent"] == 1
+
+
+async def test_git_repo_status_flags_dirty_file_also_touched_upstream(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    """The exact silent-deletion near-miss from real usage: a dirty local file that
+    the confirmed parent branch ALSO modified since the branch point - committing
+    the stale local version as-is would drop the upstream change on merge."""
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.manager import GitLifecycleManager
+    from icx_engine.git.gitcmd import fetch
+    import subprocess
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    mgr.confirm_parent_branch("main")
+
+    other_clone = tmp_path / "other_clone2"
+    subprocess.run(["git", "clone", str(tmp_path / "origin.git"), str(other_clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(other_clone), check=True)
+    (other_clone / "README.md").write_text("upstream added MoreFilter\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "commit", "-m", "upstream touches README.md"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "push"], cwd=str(other_clone), check=True)
+    fetch(tmp_git_repo_with_remote)
+
+    # Local, stale, uncommitted edit to the SAME file - predates the upstream change.
+    (tmp_git_repo_with_remote / "README.md").write_text("my local stale version\n", encoding="utf-8")
+
+    result = await dispatch_git_tool("git_repo_status", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["commits_behind_parent"] == 1
+    assert payload["files_modified_upstream"] == ["README.md"]
+
+
+async def test_git_repo_status_no_flag_when_dirty_file_untouched_upstream(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.manager import GitLifecycleManager
+    from icx_engine.git.gitcmd import fetch
+    import subprocess
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    mgr.confirm_parent_branch("main")
+
+    other_clone = tmp_path / "other_clone3"
+    subprocess.run(["git", "clone", str(tmp_path / "origin.git"), str(other_clone)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=str(other_clone), check=True)
+    (other_clone / "unrelated.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "unrelated.txt"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "commit", "-m", "upstream touches unrelated.txt"], cwd=str(other_clone), check=True)
+    subprocess.run(["git", "push"], cwd=str(other_clone), check=True)
+    fetch(tmp_git_repo_with_remote)
+
+    (tmp_git_repo_with_remote / "my_own_file.txt").write_text("dirty", encoding="utf-8")
+
+    result = await dispatch_git_tool("git_repo_status", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["commits_behind_parent"] == 1
+    assert payload["files_modified_upstream"] == []
+
+
+async def test_git_repo_status_parent_confirmed_but_never_fetched_reports_none(tmp_git_repo, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.settings import write_repo_settings
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    write_repo_settings(tmp_git_repo, parent_branch="development")
+
+    result = await dispatch_git_tool("git_repo_status", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["parent_branch"] == "development"
+    assert payload["commits_behind_parent"] is None
+    assert payload["files_modified_upstream"] == []
 
 
 async def test_git_repo_status_attaches_safe_git_workflow_skill_hint(tmp_git_repo):
@@ -227,6 +335,7 @@ async def test_git_start_branch_switches_to_existing(tmp_git_repo_with_remote, t
     assert payload["created"] is False
     assert payload["switched_to_existing"] is True
     assert payload["branch_name"] == "feature/fix-login-timeout-ABC-1"
+    assert payload["commits_behind_parent"] == 0
 
 
 async def test_git_start_branch_ticketless(tmp_git_repo_with_remote, tmp_path, monkeypatch):
@@ -346,6 +455,56 @@ async def test_git_push_requires_confirm_token_then_puts_branch_on_remote(tmp_gi
     assert remote_branch_exists(tmp_git_repo_with_remote, "feature/push-me") is True
 
 
+def test_humanize_git_error_passes_through_unrecognized_message():
+    from icx_engine.git.mcp_tools import _humanize_git_error
+    raw = "git push failed (exit 1): remote rejected (some other reason)"
+    assert _humanize_git_error(raw) == raw
+
+
+def test_humanize_git_error_frames_gl_hook_err_as_server_policy():
+    from icx_engine.git.mcp_tools import _humanize_git_error
+    raw = "git push failed (exit 1): remote: GL-HOOK-ERR: Branch names must include a ticket key"
+    result = _humanize_git_error(raw)
+    assert "GitLab server policy rejected this push" in result
+    assert "Branch names must include a ticket key" in result
+    assert "pre-receive hook refusal" in result
+
+
+def test_humanize_git_error_adds_gitignore_tip():
+    from icx_engine.git.mcp_tools import _humanize_git_error
+    raw = (
+        "git push failed (exit 1): remote: GL-HOOK-ERR: Update of .gitignore files is not "
+        "allowed. Please contact IT-Ops / Dev-Ops"
+    )
+    result = _humanize_git_error(raw)
+    assert "git_restore_files" in result
+    assert "remove it from this commit" in result
+
+
+async def test_git_push_humanizes_gl_hook_err_gitignore_rejection(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout, GitCommandError
+    create_branch_from(tmp_git_repo_with_remote, "feature/push-me", "main")
+    checkout(tmp_git_repo_with_remote, "feature/push-me")
+
+    def _boom(*args, **kwargs):
+        raise GitCommandError(
+            "git push failed (exit 1): remote: GL-HOOK-ERR: Update of .gitignore files is not "
+            "allowed. Please contact IT-Ops / Dev-Ops"
+        )
+    monkeypatch.setattr("icx_engine.git.gitcmd.push", _boom)
+
+    first = await dispatch_git_tool("git_push", {"repo_path": str(tmp_git_repo_with_remote)})
+    token = json.loads(first[0].text)["token"]
+    second = await dispatch_git_tool("git_push", {
+        "repo_path": str(tmp_git_repo_with_remote), "confirm_token": token,
+    })
+    payload = json.loads(second[0].text)
+    assert payload["ok"] is False
+    assert "GitLab server policy rejected this push" in payload["error"]
+    assert "git_restore_files" in payload["error"]
+
+
 async def test_git_push_invalid_token_does_not_push(tmp_git_repo_with_remote):
     from icx_engine.git.mcp_tools import dispatch_git_tool
     from icx_engine.git.gitcmd import create_branch_from, checkout, remote_branch_exists
@@ -439,6 +598,31 @@ async def test_git_reverse_merge_reports_clean(tmp_git_repo_with_remote, tmp_pat
     payload = json.loads(result[0].text)
     assert payload["ok"] is True
     assert payload["status"] == "clean"
+    assert payload["dependency_pins_detected"] == []
+
+
+async def test_git_reverse_merge_clean_detects_local_dependency_pin(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    import json as _json
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    (tmp_git_repo_with_remote / "package.json").write_text(_json.dumps({
+        "dependencies": {"graphs": "git+https://gitlab.example.com/group/graphs.git#abc123"},
+    }), encoding="utf-8")
+    import subprocess
+    subprocess.run(["git", "add", "package.json"], cwd=str(tmp_git_repo_with_remote), check=True)
+    subprocess.run(["git", "commit", "-m", "add package.json"], cwd=str(tmp_git_repo_with_remote), check=True)
+    subprocess.run(["git", "push"], cwd=str(tmp_git_repo_with_remote), check=True)
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-1", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
+
+    result = await dispatch_git_tool("git_reverse_merge", {
+        "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main", "ticket_key": "ABC-1",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "clean"
+    assert payload["dependency_pins_detected"] == [{"manifest": "package.json", "name": "graphs", "ref": "abc123"}]
 
 
 async def test_git_reverse_merge_nullable_ticket_key_succeeds(tmp_git_repo_with_remote, tmp_path, monkeypatch):
@@ -533,7 +717,7 @@ async def test_git_reverse_merge_reports_conflict_with_scratch_branch(tmp_git_re
 
 async def test_git_create_mr_confirmation_gated_and_executes(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
-    mock_result = type("R", (), {"mr_iid": 5, "created": True, "merged": True, "merge_status": "MERGEABLE", "refusal_reason": None})()
+    mock_result = type("R", (), {"mr_iid": 5, "created": True, "merged": True, "merge_status": "MERGEABLE", "refusal_reason": None, "has_conflicts": None, "pipeline": None})()
     from icx_engine.models.config import GitLabConnection
     conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
     monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
@@ -557,7 +741,7 @@ async def test_git_create_mr_confirmation_gated_and_executes(tmp_git_repo_with_r
 
 async def test_git_create_mr_nullable_ticket_key_executes(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
-    mock_result = type("R", (), {"mr_iid": 6, "created": True, "merged": False, "merge_status": "BLOCKED", "refusal_reason": None})()
+    mock_result = type("R", (), {"mr_iid": 6, "created": True, "merged": False, "merge_status": "BLOCKED", "refusal_reason": None, "has_conflicts": None, "pipeline": None})()
     from icx_engine.models.config import GitLabConnection
     conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
     monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
@@ -2026,6 +2210,63 @@ async def test_git_delete_branch_invalid_token_returns_error(tmp_git_repo):
     assert payload["ok"] is False
 
 
+# Task: git_list_merged_branches tool - discovery companion to git_delete_branch
+
+async def test_git_list_merged_branches_returns_safe_to_delete_branches(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    result = await dispatch_git_tool("git_list_merged_branches", {
+        "repo_path": str(tmp_git_repo), "target": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert {b["branch"] for b in payload["branches"]} == {"feature/merged-ABC-1"}
+
+
+async def test_git_list_merged_branches_excludes_unmerged(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit
+    create_branch_from(tmp_git_repo, "feature/unmerged-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/unmerged-ABC-1")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    commit(tmp_git_repo, "ABC-1 unique commit")
+    checkout(tmp_git_repo, "main")
+    result = await dispatch_git_tool("git_list_merged_branches", {
+        "repo_path": str(tmp_git_repo), "target": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["branches"] == []
+
+
+async def test_git_list_merged_branches_older_than_days_filter(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from
+    create_branch_from(tmp_git_repo, "feature/merged-ABC-1", "main")
+    result = await dispatch_git_tool("git_list_merged_branches", {
+        "repo_path": str(tmp_git_repo), "target": "main", "older_than_days": 9999,
+    })
+    payload = json.loads(result[0].text)
+    assert payload["branches"] == []
+
+
+async def test_git_list_merged_branches_missing_target_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_list_merged_branches", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "target" in payload["error"]
+
+
+async def test_git_list_merged_branches_missing_repo_path_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_list_merged_branches", {"target": "main"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "repo_path" in payload["error"]
+
+
 # Task: git_get_conflict_details/git_conflict_take_ours/take_theirs/apply_resolution/
 # mark_resolved/abort - line-level conflict inspection + gated resolution tools
 
@@ -2580,3 +2821,39 @@ async def test_git_restore_files_without_confirmation_does_not_restore(tmp_git_r
         "repo_path": str(tmp_git_repo), "files": ["README.md"],
     })
     assert (tmp_git_repo / "README.md").read_text(encoding="utf-8") == "changed\n"
+
+
+# Task: _detect_local_dependency_pins - the proactive nudge helper
+
+def test_detect_local_dependency_pins_no_manifests(tmp_git_repo):
+    from icx_engine.git.mcp_tools import _detect_local_dependency_pins
+    assert _detect_local_dependency_pins(tmp_git_repo) == []
+
+
+def test_detect_local_dependency_pins_finds_package_json_pin(tmp_git_repo):
+    import json as _json
+    from icx_engine.git.mcp_tools import _detect_local_dependency_pins
+    (tmp_git_repo / "package.json").write_text(_json.dumps({
+        "dependencies": {"graphs": "git+https://gitlab.example.com/group/graphs.git#abc123"},
+    }), encoding="utf-8")
+    result = _detect_local_dependency_pins(tmp_git_repo)
+    assert result == [{"manifest": "package.json", "name": "graphs", "ref": "abc123"}]
+
+
+def test_detect_local_dependency_pins_scans_multiple_manifests(tmp_git_repo):
+    import json as _json
+    from icx_engine.git.mcp_tools import _detect_local_dependency_pins
+    (tmp_git_repo / "package.json").write_text(_json.dumps({
+        "dependencies": {"a": "git+https://gitlab.example.com/g/a.git#sha1"},
+    }), encoding="utf-8")
+    (tmp_git_repo / "requirements.txt").write_text(
+        "b @ git+https://gitlab.example.com/g/b.git@sha2\n", encoding="utf-8",
+    )
+    result = _detect_local_dependency_pins(tmp_git_repo)
+    assert {r["name"] for r in result} == {"a", "b"}
+
+
+def test_detect_local_dependency_pins_tolerates_malformed_manifest(tmp_git_repo):
+    from icx_engine.git.mcp_tools import _detect_local_dependency_pins
+    (tmp_git_repo / "package.json").write_text("not valid json {{{", encoding="utf-8")
+    assert _detect_local_dependency_pins(tmp_git_repo) == []  # must not raise

@@ -9,7 +9,7 @@ import asyncio
 import base64
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -20,7 +20,7 @@ from icx_engine.git.gitcmd import (
     head_sha, merge_ref, merge_abort, conflicted_files, stash_pop,
     conflict_versions, find_conflict_markers, fast_forward_ref, delete_branch,
     commits_since, changed_files_since, remote_url, file_exists_at_ref, push,
-    delete_remote_branch, unique_commit_count,
+    delete_remote_branch, unique_commit_count, is_ancestor, list_local_branches,
 )
 from icx_engine.git.naming import (
     derive_branch_name, ticketless_branch_name, parse_ticket_key_from_branch, slugify,
@@ -119,6 +119,7 @@ class BranchStartResult:
     branch_name: str
     created: bool
     switched_to_existing: bool
+    commits_behind_parent: int = 0
 
 
 @dataclass
@@ -181,6 +182,8 @@ class CreateMrResult:
     merged: bool
     merge_status: str = "UNKNOWN"  # MERGEABLE | CONFLICTED | CHECKING | BLOCKED | UNKNOWN
     refusal_reason: str | None = None
+    has_conflicts: bool | None = None
+    pipeline: dict | None = None
 
 
 @dataclass
@@ -259,11 +262,21 @@ class GitLifecycleManager:
         return ParentResolution(status="needs_manual_pick", available_branches=available)
 
     def confirm_parent_branch(self, chosen: str) -> None:
-        if not remote_branch_exists(self.repo_root, chosen, extra_env=self._auth_env()):
+        """Normalizes an accidental `origin/<branch>` prefix to the bare branch
+        name before checking/storing it - real bug this fixes: passing
+        'origin/development' got rejected as 'does not exist' (remote_branch_exists
+        checks a bare branch name against `ls-remote --heads`, which never has an
+        'origin/' prefix in its own ref names), and if it HAD been stored with the
+        prefix, every downstream `f"origin/{parent_branch}"` call (start_branch,
+        reverse_merge_standard, ...) would have built a broken
+        'origin/origin/development' ref."""
+        normalized = chosen[len("origin/"):] if chosen.startswith("origin/") else chosen
+        if not remote_branch_exists(self.repo_root, normalized, extra_env=self._auth_env()):
             raise GitWorkflowError(
-                f"Branch '{chosen}' does not exist on origin. Check the name and try again."
+                f"Branch '{normalized}' does not exist on origin. Check the name and try again "
+                "(pass just the branch name, e.g. 'development' - not 'origin/development')."
             )
-        write_repo_settings(self.repo_root, parent_branch=chosen)
+        write_repo_settings(self.repo_root, parent_branch=normalized)
 
     def check_dirty_tree(self) -> DirtyTreeStatus:
         files = dirty_files(self.repo_root)
@@ -285,8 +298,15 @@ class GitLifecycleManager:
         write_repo_settings(self.repo_root, require_ticket_in_branch_name=require_ticket_in_branch_name)
 
     def start_branch(
-        self, ticket_key: str | None, summary_or_preferred_name: str, parent_branch: str,
+        self, ticket_key: str | None, summary_or_preferred_name: str, parent_branch: str, remote: str = "origin",
     ) -> BranchStartResult:
+        """Fetches `remote` FIRST, always - real bug this fixes: confirm_parent_branch
+        only verifies a branch exists on the remote (a live `ls-remote`, always fresh)
+        but never updates the LOCAL `origin/<parent_branch>` tracking ref this method
+        branches from - a caller that already has parent_branch in hand (skipping
+        resolve_parent_branch's own fetch) could otherwise branch off a tracking ref
+        that's arbitrarily stale, however recently it was last fetched."""
+        fetch(self.repo_root, remote=remote, extra_env=self._auth_env(remote))
         branch_name = (
             derive_branch_name(ticket_key, summary_or_preferred_name)
             if ticket_key else ticketless_branch_name(summary_or_preferred_name)
@@ -294,11 +314,16 @@ class GitLifecycleManager:
         policy = self.check_branch_name_policy(branch_name)
         if not policy.valid:
             raise GitWorkflowError(policy.reason)
+        parent_ref = f"{remote}/{parent_branch}"
         if local_branch_exists(self.repo_root, branch_name):
             checkout(self.repo_root, branch_name)
-            return BranchStartResult(branch_name=branch_name, created=False, switched_to_existing=True)
+            behind = unique_commit_count(self.repo_root, parent_ref, branch_name)
+            return BranchStartResult(
+                branch_name=branch_name, created=False, switched_to_existing=True,
+                commits_behind_parent=behind,
+            )
 
-        create_branch_from(self.repo_root, branch_name, f"origin/{parent_branch}")
+        create_branch_from(self.repo_root, branch_name, parent_ref)
         checkout(self.repo_root, branch_name)
         return BranchStartResult(branch_name=branch_name, created=True, switched_to_existing=False)
 
@@ -598,6 +623,7 @@ class GitLifecycleManager:
         return CreateMrResult(
             mr_iid=result["mr_iid"], created=result["created"], merged=result["merged"],
             merge_status=result.get("merge_status", "UNKNOWN"), refusal_reason=result.get("refusal_reason"),
+            has_conflicts=result.get("has_conflicts"), pipeline=result.get("pipeline"),
         )
 
     def post_merge_cleanup(
@@ -703,3 +729,26 @@ class GitLifecycleManager:
         return BranchDeleteResult(
             branch=branch, local_deleted=local_deleted, remote_deleted=remote_deleted, unique_commits=unique,
         )
+
+    def list_merged_branches(self, target: str, older_than_days: int = 0) -> list[dict]:
+        """Local branches SAFE to delete via delete_branch_safely without force -
+        fully merged into target (is_ancestor, same check delete_branch_safely
+        itself uses), excluding target and the currently checked-out branch
+        (deleting either is refused there anyway, so listing them here would just
+        be noise). older_than_days (0 = no age filter) further restricts to
+        branches whose tip commit is older than that, using each branch's own
+        author date - a real, buildable answer to "which branches can I clean up"
+        without requiring a raw `git branch --merged` + manual date-squinting."""
+        current = current_branch(self.repo_root)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days) if older_than_days > 0 else None
+        results = []
+        for entry in list_local_branches(self.repo_root):
+            name = entry["branch"]
+            if name in (target, current):
+                continue
+            if not is_ancestor(self.repo_root, name, target):
+                continue
+            if cutoff is not None and datetime.fromisoformat(entry["date"]) > cutoff:
+                continue
+            results.append(entry)
+        return results

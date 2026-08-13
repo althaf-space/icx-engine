@@ -176,6 +176,55 @@ def test_stage_files_only_stages_named_files(tmp_git_repo):
     assert "b.txt" in dirty_files(tmp_git_repo)
 
 
+def test_stage_files_stages_an_unstaged_deletion(tmp_git_repo):
+    import subprocess
+    (tmp_git_repo / "gone.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "gone.txt"], cwd=str(tmp_git_repo), check=True)
+    subprocess.run(["git", "commit", "-m", "add gone.txt"], cwd=str(tmp_git_repo), check=True)
+    (tmp_git_repo / "gone.txt").unlink()
+    stage_files(tmp_git_repo, ["gone.txt"])
+    result = subprocess.run(["git", "diff", "--cached", "--name-status"], cwd=str(tmp_git_repo),
+                             check=True, stdout=subprocess.PIPE)
+    assert result.stdout.decode().strip() == "D\tgone.txt"
+
+
+def test_stage_files_tolerates_an_already_fully_staged_deletion(tmp_git_repo):
+    """Real bug repro: a path already removed from BOTH the working tree AND the
+    index (e.g. re-listed by a caller that already staged its deletion in a prior
+    cycle) previously made `git add` fail with 'pathspec did not match any files' -
+    failing the ENTIRE batch, including unrelated files also being staged."""
+    import subprocess
+    (tmp_git_repo / "already_gone.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "already_gone.txt"], cwd=str(tmp_git_repo), check=True)
+    subprocess.run(["git", "commit", "-m", "add already_gone.txt"], cwd=str(tmp_git_repo), check=True)
+    subprocess.run(["git", "rm", "--cached", "already_gone.txt"], cwd=str(tmp_git_repo), check=True)
+    (tmp_git_repo / "already_gone.txt").unlink()
+    # Fully staged deletion now - nothing left in the index or on disk for this path.
+    (tmp_git_repo / "new.txt").write_text("new", encoding="utf-8")
+
+    stage_files(tmp_git_repo, ["already_gone.txt", "new.txt"])  # must not raise
+
+    result = subprocess.run(["git", "diff", "--cached", "--name-status"], cwd=str(tmp_git_repo),
+                             check=True, stdout=subprocess.PIPE)
+    staged = dict(line.split("\t", 1) for line in result.stdout.decode().strip().splitlines())
+    assert staged == {"D": "already_gone.txt", "A": "new.txt"}
+
+
+def test_stage_files_all_already_gone_is_a_noop(tmp_git_repo):
+    import subprocess
+    (tmp_git_repo / "already_gone.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "already_gone.txt"], cwd=str(tmp_git_repo), check=True)
+    subprocess.run(["git", "commit", "-m", "add already_gone.txt"], cwd=str(tmp_git_repo), check=True)
+    subprocess.run(["git", "rm", "--cached", "already_gone.txt"], cwd=str(tmp_git_repo), check=True)
+    (tmp_git_repo / "already_gone.txt").unlink()
+
+    stage_files(tmp_git_repo, ["already_gone.txt"])  # must not raise, must not call `git add` at all
+
+    result = subprocess.run(["git", "diff", "--cached", "--name-status"], cwd=str(tmp_git_repo),
+                             check=True, stdout=subprocess.PIPE)
+    assert result.stdout.decode().strip() == "D\talready_gone.txt"
+
+
 def test_commit_creates_commit_and_returns_sha(tmp_git_repo):
     (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
     stage_files(tmp_git_repo, ["a.txt"])
@@ -421,6 +470,50 @@ def test_changed_files_since_lists_touched_paths(tmp_git_repo):
     stage_files(tmp_git_repo, ["src/app.py"])
     commit(tmp_git_repo, "ABC-1 add app.py")
     assert changed_files_since(tmp_git_repo, "main") == ["src/app.py"]
+
+
+# Task: changed_files_since_common_ancestor - reverse-direction "what did the OTHER
+# side touch since we diverged" (stale-base silent-deletion detection)
+from icx_engine.git.gitcmd import changed_files_since_common_ancestor
+
+
+def test_changed_files_since_common_ancestor_reports_only_other_sides_files(tmp_git_repo):
+    (tmp_git_repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["shared.txt"])
+    commit(tmp_git_repo, "add shared.txt")
+
+    create_branch_from(tmp_git_repo, "feature/x-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/x-ABC-1")
+    (tmp_git_repo / "feature_only.txt").write_text("f", encoding="utf-8")
+    stage_files(tmp_git_repo, ["feature_only.txt"])
+    commit(tmp_git_repo, "feature-only commit")
+
+    checkout(tmp_git_repo, "main")
+    (tmp_git_repo / "shared.txt").write_text("changed upstream\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["shared.txt"])
+    commit(tmp_git_repo, "upstream touches shared.txt")
+    (tmp_git_repo / "main_only.txt").write_text("m", encoding="utf-8")
+    stage_files(tmp_git_repo, ["main_only.txt"])
+    commit(tmp_git_repo, "upstream-only commit")
+
+    checkout(tmp_git_repo, "feature/x-ABC-1")
+    result = changed_files_since_common_ancestor(tmp_git_repo, "main")
+    assert set(result) == {"shared.txt", "main_only.txt"}
+    assert "feature_only.txt" not in result
+
+
+def test_changed_files_since_common_ancestor_empty_when_other_side_unchanged(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/x-ABC-1", "main")
+    checkout(tmp_git_repo, "feature/x-ABC-1")
+    (tmp_git_repo / "feature_only.txt").write_text("f", encoding="utf-8")
+    stage_files(tmp_git_repo, ["feature_only.txt"])
+    commit(tmp_git_repo, "feature-only commit")
+    assert changed_files_since_common_ancestor(tmp_git_repo, "main") == []
+
+
+def test_changed_files_since_common_ancestor_rejects_option_like_ref(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        changed_files_since_common_ancestor(tmp_git_repo, _OPTION_LIKE)
 
 
 from icx_engine.git.gitcmd import file_exists_at_ref
@@ -1177,6 +1270,19 @@ def test_delete_remote_branch_rejects_option_like_branch(tmp_git_repo):
 def test_delete_remote_branch_rejects_option_like_remote(tmp_git_repo):
     with pytest.raises(GitCommandError):
         delete_remote_branch(tmp_git_repo, "main", remote=_OPTION_LIKE)
+
+
+# Task: list_local_branches - branch discovery for stale-branch cleanup
+from icx_engine.git.gitcmd import list_local_branches
+
+
+def test_list_local_branches_reports_every_local_branch_with_tip_info(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "feature/x-ABC-1", "main")
+    branches = {b["branch"]: b for b in list_local_branches(tmp_git_repo)}
+    assert set(branches) == {"main", "feature/x-ABC-1"}
+    assert branches["main"]["author"] == "Test User"
+    assert branches["main"]["sha"] == head_sha(tmp_git_repo)
+    assert branches["feature/x-ABC-1"]["sha"] == head_sha(tmp_git_repo)
 
 
 # Task: conflict_stage/parse_conflict_hunks/checkout_conflict_side/conflict_state/
