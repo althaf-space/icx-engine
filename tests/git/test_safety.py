@@ -32,6 +32,18 @@ def test_create_backup_same_second_second_call_does_not_raise(tmp_git_repo):
     assert local_branch_exists(tmp_git_repo, first) is True
 
 
+def test_create_backup_prunes_down_to_the_cap_on_every_call(tmp_git_repo):
+    """Real fix for backup-branch sprawl: a ticket whose merge keeps getting refused never
+    reaches a successful git_finish_ticket (where prune_old_backups used to be the only place
+    this ran) - create_backup must cap the count itself, on every call, not just at finish."""
+    from icx_engine.git.safety import _MAX_BACKUPS_PER_TICKET
+    with patch("icx_engine.git.safety.datetime") as mock_datetime:
+        for second in range(_MAX_BACKUPS_PER_TICKET + 6):
+            mock_datetime.now.return_value = datetime(2026, 1, 1, 12, 0, second, tzinfo=timezone.utc)
+            create_backup(tmp_git_repo, "main", "ABC-1")
+    assert len(list_backups(tmp_git_repo, "ABC-1")) == _MAX_BACKUPS_PER_TICKET
+
+
 def test_sync_backup_creates_latest_branch_without_switching(tmp_git_repo):
     name = sync_backup(tmp_git_repo, "main", "ABC-1")
     assert name == "backup-latest/ABC-1"

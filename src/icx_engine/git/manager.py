@@ -21,6 +21,7 @@ from icx_engine.git.gitcmd import (
     conflict_versions, find_conflict_markers, fast_forward_ref, delete_branch,
     commits_since, changed_files_since, remote_url, file_exists_at_ref, push,
     delete_remote_branch, unique_commit_count, is_ancestor, list_local_branches,
+    check_merge_tree,
 )
 from icx_engine.git.naming import (
     derive_branch_name, ticketless_branch_name, parse_ticket_key_from_branch, slugify,
@@ -184,6 +185,7 @@ class CreateMrResult:
     refusal_reason: str | None = None
     has_conflicts: bool | None = None
     pipeline: dict | None = None
+    local_check: str | None = None
 
 
 @dataclass
@@ -620,11 +622,42 @@ class GitLifecycleManager:
             title, description, assignee_id,
             max_poll_attempts=max_poll_attempts, poll_delay_seconds=poll_delay_seconds,
         )
+        local_check = None
+        if not result["merged"] and result.get("merge_status") in ("CONFLICTED", "BLOCKED"):
+            local_check = self._local_conflict_cross_check(parent_branch, feature_branch, result["merge_status"])
         return CreateMrResult(
             mr_iid=result["mr_iid"], created=result["created"], merged=result["merged"],
             merge_status=result.get("merge_status", "UNKNOWN"), refusal_reason=result.get("refusal_reason"),
             has_conflicts=result.get("has_conflicts"), pipeline=result.get("pipeline"),
+            local_check=local_check,
         )
+
+    def _local_conflict_cross_check(self, parent_branch: str, feature_branch: str, reported_status: str) -> str | None:
+        """Best-effort local sanity check against GitLab's own mergeability
+        claim, run only when a merge was refused - never raises, this is a
+        diagnostic add-on, not required for the merge result itself. Uses the
+        just-fetched origin/parent_branch (fetch already ran earlier in
+        create_mr_for_ticket) so the comparison is against a fresh remote
+        target, not a possibly-stale local branch. Returns a human-readable
+        note only when the local read-only merge simulation disagrees with
+        GitLab's claim - silence when the two sides agree, since that is the
+        expected case and not worth flagging."""
+        try:
+            local = check_merge_tree(self.repo_root, f"origin/{parent_branch}", feature_branch)
+        except GitCommandError:
+            return None
+        if reported_status == "CONFLICTED" and not local["has_conflicts"]:
+            return (
+                "GitLab reports a conflict but local git shows a clean merge - "
+                "likely a stale mergeability cache. Try gitlab_refresh_merge_status "
+                "or reopen/close the MR to force GitLab to recompute it."
+            )
+        if reported_status == "BLOCKED" and local["has_conflicts"]:
+            return (
+                f"Local git also shows a real conflict in: {', '.join(local['conflicting_files'])} - "
+                "resolve it before retrying, this is not just a CI/approval block."
+            )
+        return None
 
     def post_merge_cleanup(
         self, parent_branch: str, feature_branch: str, ticket_key: str | None,

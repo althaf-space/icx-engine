@@ -8,6 +8,7 @@ from icx_engine.git.deps import (
     parse_package_json_git_deps, parse_requirements_txt_git_deps, parse_pyproject_toml_git_deps,
     parse_manifest_git_deps, _split_hostpath, DependencyPin, DependencyPinReport,
     resolve_via_local_clone, resolve_via_gitlab, check_dependency_pins, report_to_dict,
+    repin_manifest_text,
 )
 from icx_engine.models.config import GitLabConnection
 
@@ -149,6 +150,98 @@ def test_parse_pyproject_toml_pep508_style_in_dependencies_array():
 def test_parse_pyproject_toml_no_git_deps_returns_empty():
     text = '[tool.poetry.dependencies]\npython = "^3.11"\nrequests = "^2.31"\n'
     assert parse_pyproject_toml_git_deps(text) == []
+
+
+# -- repin_manifest_text ------------------------------------------------------
+
+def test_repin_package_json_replaces_only_the_ref():
+    text = json.dumps({
+        "name": "app",
+        "dependencies": {
+            "graphs": "git+https://gitlab.example.com/group/graphs.git#58cc063c",
+            "requests": "^2.31.0",
+        },
+    }, indent=2)
+    new_text, old_ref = repin_manifest_text("package.json", text, "graphs", "a1b2c3d4")
+    assert old_ref == "58cc063c"
+    assert "git+https://gitlab.example.com/group/graphs.git#a1b2c3d4" in new_text
+    # everything else in the file is untouched, including formatting
+    assert json.loads(new_text)["dependencies"]["requests"] == "^2.31.0"
+    assert new_text.count("\n") == text.count("\n")
+
+
+def test_repin_package_json_unknown_dependency_raises():
+    text = json.dumps({"dependencies": {"graphs": "git+https://gitlab.example.com/g/graphs.git#sha1"}})
+    with pytest.raises(ValueError):
+        repin_manifest_text("package.json", text, "nope", "newsha")
+
+
+def test_repin_requirements_txt_replaces_only_the_target_line():
+    text = (
+        "a @ git+https://gitlab.example.com/g/a.git@sha1\n"
+        "requests==2.31.0\n"
+        "b @ git+https://gitlab.example.com/g/b.git@sha2\n"
+    )
+    new_text, old_ref = repin_manifest_text("requirements.txt", text, "b", "sha2-new")
+    assert old_ref == "sha2"
+    lines = new_text.splitlines()
+    assert lines[0] == "a @ git+https://gitlab.example.com/g/a.git@sha1"  # untouched
+    assert lines[1] == "requests==2.31.0"  # untouched
+    assert lines[2] == "b @ git+https://gitlab.example.com/g/b.git@sha2-new"
+
+
+def test_repin_requirements_txt_editable_egg_form():
+    text = "-e git+https://gitlab.example.com/group/graphs.git@abc123#egg=graphs\n"
+    new_text, old_ref = repin_manifest_text("requirements-dev.txt", text, "graphs", "def456")
+    assert old_ref == "abc123"
+    assert new_text == "-e git+https://gitlab.example.com/group/graphs.git@def456#egg=graphs\n"
+
+
+def test_repin_requirements_txt_unknown_dependency_raises():
+    with pytest.raises(ValueError):
+        repin_manifest_text("requirements.txt", "a @ git+https://gitlab.example.com/g/a.git@sha1\n", "nope", "x")
+
+
+def test_repin_pyproject_toml_pep508_style():
+    text = 'dependencies = [\n  "graphs @ git+https://gitlab.example.com/group/graphs.git@58cc063c",\n]\n'
+    new_text, old_ref = repin_manifest_text("pyproject.toml", text, "graphs", "a1b2c3d4")
+    assert old_ref == "58cc063c"
+    assert new_text == 'dependencies = [\n  "graphs @ git+https://gitlab.example.com/group/graphs.git@a1b2c3d4",\n]\n'
+
+
+def test_repin_pyproject_toml_poetry_inline_table_rev():
+    text = 'graphs = { git = "https://gitlab.example.com/group/graphs.git", rev = "58cc063c" }\n'
+    new_text, old_ref = repin_manifest_text("pyproject.toml", text, "graphs", "a1b2c3d4")
+    assert old_ref == "58cc063c"
+    assert new_text == 'graphs = { git = "https://gitlab.example.com/group/graphs.git", rev = "a1b2c3d4" }\n'
+
+
+def test_repin_pyproject_toml_poetry_inline_table_branch():
+    text = 'tools = { git = "https://gitlab.example.com/group/tools.git", branch = "development" }\n'
+    new_text, old_ref = repin_manifest_text("pyproject.toml", text, "tools", "main")
+    assert old_ref == "development"
+    assert new_text == 'tools = { git = "https://gitlab.example.com/group/tools.git", branch = "main" }\n'
+
+
+def test_repin_pyproject_toml_only_touches_matching_dependency_among_several():
+    text = (
+        'graphs = { git = "https://gitlab.example.com/group/graphs.git", rev = "sha1" }\n'
+        'tools = { git = "https://gitlab.example.com/group/tools.git", rev = "sha2" }\n'
+    )
+    new_text, old_ref = repin_manifest_text("pyproject.toml", text, "tools", "sha2-new")
+    assert old_ref == "sha2"
+    assert 'graphs = { git = "https://gitlab.example.com/group/graphs.git", rev = "sha1" }' in new_text
+    assert 'tools = { git = "https://gitlab.example.com/group/tools.git", rev = "sha2-new" }' in new_text
+
+
+def test_repin_pyproject_toml_unknown_dependency_raises():
+    with pytest.raises(ValueError):
+        repin_manifest_text("pyproject.toml", 'python = "^3.11"\n', "nope", "x")
+
+
+def test_repin_manifest_text_raises_for_unsupported_filename():
+    with pytest.raises(ValueError):
+        repin_manifest_text("Cargo.toml", "", "graphs", "x")
 
 
 # -- parse_manifest_git_deps dispatch ----------------------------------------

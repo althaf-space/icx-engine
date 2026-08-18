@@ -1090,6 +1090,118 @@ async def test_create_mr_for_ticket_passes_gitlab_auth_env_to_fetch_and_push_for
     assert push_env == fetch_env
 
 
+async def test_create_mr_for_ticket_flags_stale_cache_when_gitlab_conflict_contradicts_local_clean_merge(
+    tmp_git_repo_with_remote, monkeypatch,
+):
+    """The exact real-world misdiagnosis: GitLab reports CONFLICTED but the feature branch
+    only adds a new file - a local read-only merge simulation shows no real conflict, so the
+    result should say so instead of leaving the human to prove GitLab wrong by hand."""
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-1", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
+    (tmp_git_repo_with_remote / "new.txt").write_text("new", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["new.txt"])
+    gitcmd_commit(tmp_git_repo_with_remote, "ABC-1 add new.txt")
+
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+    mock_result = {
+        "mr_iid": 5, "created": True, "merged": False, "merge_status": "CONFLICTED",
+        "refusal_reason": "Branch has conflicts", "has_conflicts": True, "pipeline": None,
+    }
+    with patch("icx_engine.git.manager.create_and_merge_mr", new=AsyncMock(return_value=mock_result)):
+        with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.validate.return_value = {"valid": True, "user": {"id": 42}}
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+            mgr.validate()
+            result = await mgr.create_mr_for_ticket("main", "ABC-1", "Add new file", _gitlab_conn())
+
+    assert result.merge_status == "CONFLICTED"
+    assert result.local_check is not None
+    assert "stale mergeability cache" in result.local_check
+
+
+async def test_create_mr_for_ticket_no_local_check_note_when_gitlab_and_local_agree_on_conflict(
+    tmp_git_repo_with_remote, monkeypatch,
+):
+    """When GitLab and local git agree there is a real conflict, no note is attached - only a
+    disagreement between the two is worth surfacing."""
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-2", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-2")
+    (tmp_git_repo_with_remote / "README.md").write_text("feature version\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["README.md"])
+    gitcmd_commit(tmp_git_repo_with_remote, "ABC-2 edit readme on feature")
+
+    checkout(tmp_git_repo_with_remote, "main")
+    (tmp_git_repo_with_remote / "README.md").write_text("main version\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["README.md"])
+    gitcmd_commit(tmp_git_repo_with_remote, "edit readme on main")
+    from icx_engine.git.gitcmd import push as gitcmd_push
+    gitcmd_push(tmp_git_repo_with_remote, "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-2")
+
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+    mock_result = {
+        "mr_iid": 6, "created": True, "merged": False, "merge_status": "CONFLICTED",
+        "refusal_reason": "Branch has conflicts", "has_conflicts": True, "pipeline": None,
+    }
+    with patch("icx_engine.git.manager.create_and_merge_mr", new=AsyncMock(return_value=mock_result)):
+        with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.validate.return_value = {"valid": True, "user": {"id": 42}}
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+            mgr.validate()
+            result = await mgr.create_mr_for_ticket("main", "ABC-2", "Edit readme", _gitlab_conn())
+
+    assert result.merge_status == "CONFLICTED"
+    assert result.local_check is None
+
+
+async def test_create_mr_for_ticket_flags_real_conflict_when_gitlab_reports_only_blocked(
+    tmp_git_repo_with_remote, monkeypatch,
+):
+    """BLOCKED (e.g. a failed pipeline) does not preclude there also being a real conflict -
+    if local git shows one too, the note should say so rather than implying it is purely a
+    CI/approval block."""
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit, push as gitcmd_push
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-3", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-3")
+    (tmp_git_repo_with_remote / "README.md").write_text("feature version\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["README.md"])
+    gitcmd_commit(tmp_git_repo_with_remote, "ABC-3 edit readme on feature")
+
+    checkout(tmp_git_repo_with_remote, "main")
+    (tmp_git_repo_with_remote / "README.md").write_text("main version\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["README.md"])
+    gitcmd_commit(tmp_git_repo_with_remote, "edit readme on main")
+    gitcmd_push(tmp_git_repo_with_remote, "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-3")
+
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+    mock_result = {
+        "mr_iid": 7, "created": True, "merged": False, "merge_status": "BLOCKED",
+        "refusal_reason": "not_approved", "has_conflicts": False, "pipeline": None,
+    }
+    with patch("icx_engine.git.manager.create_and_merge_mr", new=AsyncMock(return_value=mock_result)):
+        with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.validate.return_value = {"valid": True, "user": {"id": 42}}
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+            mgr.validate()
+            result = await mgr.create_mr_for_ticket("main", "ABC-3", "Edit readme", _gitlab_conn())
+
+    assert result.merge_status == "BLOCKED"
+    assert result.local_check is not None
+    assert "README.md" in result.local_check
+
+
 def test_post_merge_cleanup_raises_when_mr_not_actually_merged(tmp_git_repo_with_remote, monkeypatch):
     with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
         mock_client = AsyncMock()
