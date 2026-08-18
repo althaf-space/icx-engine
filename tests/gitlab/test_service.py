@@ -440,6 +440,49 @@ async def test_create_and_merge_mr_never_retries_merge_on_genuine_conflict():
     respx.put("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5/merge").mock(
         side_effect=_merge_side_effect
     )
+    # detailed_merge_status names the reason directly as a real conflict - trusted as-is, no
+    # pipeline cross-check needed or performed for this bucket.
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5").mock(
+        return_value=httpx.Response(
+            200, json={"iid": 5, "detailed_merge_status": "conflict", "merge_status": "cannot_be_merged", "has_conflicts": True}
+        )
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    out = await create_and_merge_mr(
+        _conn(), "group/project", "feature/x-ABC-1", "development", "ABC-1 fix login", "desc",
+        assignee_id=42, max_poll_attempts=3, poll_delay_seconds=0,
+    )
+    assert out["merged"] is False
+    assert out["merge_status"] == "CONFLICTED"
+    assert merge_attempts["count"] == 1  # never retried - a real conflict, not a transitional state
+    assert out["has_conflicts"] is True
+    assert out["pipeline"] is None
+
+
+@respx.mock
+async def test_create_and_merge_mr_reclassifies_legacy_conflicted_as_blocked_when_pipeline_failed():
+    """GitLab's legacy `merge_status` field uses the single string
+    'cannot_be_merged' for both a real conflict and merely-blocked-by-CI.
+    Without `detailed_merge_status` to name the real reason, a bare refusal
+    must not be reported as CONFLICTED when the ref's own pipeline actually
+    failed - that was the exact misdiagnosis reported from real GitLab usage
+    (merge_status: CONFLICTED, has_conflicts: true, on an MR blocked by a
+    failed pipeline with no real conflict at all)."""
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(return_value=httpx.Response(200, json=[]))
+    respx.post("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(
+        return_value=httpx.Response(201, json={"iid": 5})
+    )
+    merge_attempts = {"count": 0}
+
+    def _merge_side_effect(request):
+        merge_attempts["count"] += 1
+        return httpx.Response(405, json={"message": "405 Method Not Allowed"})
+
+    respx.put("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5/merge").mock(
+        side_effect=_merge_side_effect
+    )
     respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5").mock(
         return_value=httpx.Response(200, json={"iid": 5, "merge_status": "cannot_be_merged", "has_conflicts": True})
     )
@@ -457,10 +500,59 @@ async def test_create_and_merge_mr_never_retries_merge_on_genuine_conflict():
         assignee_id=42, max_poll_attempts=3, poll_delay_seconds=0,
     )
     assert out["merged"] is False
-    assert out["merge_status"] == "CONFLICTED"
-    assert merge_attempts["count"] == 1  # never retried - a real conflict, not a transitional state
-    assert out["has_conflicts"] is True
+    assert out["merge_status"] == "BLOCKED"
+    assert merge_attempts["count"] == 1
+    assert out["has_conflicts"] is True  # GitLab's own (possibly stale) field, passed through as-is
     assert out["pipeline"] == {"id": 99, "status": "failed", "failed_job_name": "test", "failed_job_id": 7}
+
+
+@respx.mock
+async def test_create_and_merge_mr_keeps_legacy_conflicted_when_pipeline_is_clean():
+    """The reclassification only fires when the pipeline itself explains the
+    refusal. A legacy-only cannot_be_merged with no failing pipeline (or no
+    pipeline at all) stays CONFLICTED - there is nothing else to blame it on."""
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(return_value=httpx.Response(200, json=[]))
+    respx.post("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests").mock(
+        return_value=httpx.Response(201, json={"iid": 5})
+    )
+    respx.put("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5/merge").mock(
+        return_value=httpx.Response(405, json={"message": "Branch has conflicts"})
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/merge_requests/5").mock(
+        return_value=httpx.Response(200, json={"iid": 5, "merge_status": "cannot_be_merged", "has_conflicts": True})
+    )
+    respx.get("https://gitlab.example.com/api/v4/projects/group%2Fproject/pipelines").mock(
+        return_value=httpx.Response(200, json=[{"id": 99, "status": "success"}])
+    )
+    out = await create_and_merge_mr(
+        _conn(), "group/project", "feature/x-ABC-1", "development", "ABC-1 fix login", "desc",
+        assignee_id=42, max_poll_attempts=3, poll_delay_seconds=0,
+    )
+    assert out["merge_status"] == "CONFLICTED"
+    assert out["pipeline"] == {"id": 99, "status": "success"}
+
+
+async def test_diagnose_merge_refusal_reclassifies_only_legacy_conflicted_with_failing_pipeline():
+    from icx_engine.gitlab.service import diagnose_merge_refusal
+
+    class _PipelineClient:
+        async def list_pipelines(self, project, ref="", status=""):
+            return [{"id": 1, "status": "failed"}]
+
+        async def get_pipeline(self, project, pipeline_id):
+            return {"id": 1, "status": "failed", "jobs": [{"id": 2, "name": "test", "status": "failed"}]}
+
+    client = _PipelineClient()
+    reclassified = await diagnose_merge_refusal(
+        client, "group/project", {"merge_status": "cannot_be_merged"}, "feature/x",
+    )
+    assert reclassified["status"] == "BLOCKED"
+    assert reclassified["pipeline"]["failed_job_name"] == "test"
+
+    not_reclassified = await diagnose_merge_refusal(
+        client, "group/project", {"detailed_merge_status": "conflict"}, "feature/x",
+    )
+    assert not_reclassified["status"] == "CONFLICTED"
 
 
 from icx_engine.gitlab.service import parse_tag_name, group_tags_by_environment, propose_next_tag

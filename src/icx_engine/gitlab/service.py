@@ -251,6 +251,29 @@ async def _pipeline_summary(client: GitLabClient, project_path: str, source_bran
     return summary
 
 
+async def diagnose_merge_refusal(
+    client: GitLabClient, project_path: str, mr: dict, source_branch: str,
+) -> dict:
+    """Reclassifies a CONFLICTED bucket that came only from the legacy
+    `merge_status` field (no `detailed_merge_status` on the MR body) -
+    GitLab's legacy field uses the single string 'cannot_be_merged' for both
+    a real conflict and merely-blocked-by-CI/a stale merge ref, so a bare
+    classify_merge_status() call can report CONFLICTED for a refusal that
+    has nothing to do with a conflict. Cross-checks the ref's latest
+    pipeline before trusting a legacy-only CONFLICTED bucket; every other
+    bucket (MERGEABLE/CHECKING/BLOCKED/UNKNOWN), and any CONFLICTED bucket
+    backed by the newer `detailed_merge_status` field, passes through
+    unchanged - that field already names the real reason and is trusted
+    as-is. Returns {"status": <bucket>, "pipeline": <_pipeline_summary result
+    or None>}."""
+    status = classify_merge_status(mr)
+    pipeline = await _pipeline_summary(client, project_path, source_branch)
+    if status == "CONFLICTED" and mr.get("detailed_merge_status") is None:
+        if pipeline and pipeline.get("status") not in (None, "success"):
+            status = "BLOCKED"
+    return {"status": status, "pipeline": pipeline}
+
+
 async def create_and_merge_mr(
     conn: "GitLabConnection", project_path: str, source_branch: str, target_branch: str,
     title: str, description: str, assignee_id: int,
@@ -288,11 +311,12 @@ async def create_and_merge_mr(
             client, project_path, mr_iid, max_attempts=max_poll_attempts, delay_seconds=poll_delay_seconds,
         )
         if poll["status"] != "MERGEABLE":
+            diagnosis = await diagnose_merge_refusal(client, project_path, poll["mr"], source_branch)
             return {
                 "mr_iid": mr_iid, "created": created, "merged": False,
-                "merge_status": poll["status"], "refusal_reason": merge_result.get("reason"),
+                "merge_status": diagnosis["status"], "refusal_reason": merge_result.get("reason"),
                 "has_conflicts": poll["mr"].get("has_conflicts"),
-                "pipeline": await _pipeline_summary(client, project_path, source_branch),
+                "pipeline": diagnosis["pipeline"],
             }
         # Mergeability finished computing since the first attempt - retry exactly once now that it's terminal.
         merge_result = await client.attempt_merge(project_path, mr_iid)
@@ -302,10 +326,11 @@ async def create_and_merge_mr(
                 "merge_status": "MERGEABLE", "refusal_reason": None,
             }
         final_mr = await client.get_merge_request(project_path, mr_iid)
+        diagnosis = await diagnose_merge_refusal(client, project_path, final_mr, source_branch)
         return {
             "mr_iid": mr_iid, "created": created, "merged": False,
-            "merge_status": classify_merge_status(final_mr),
+            "merge_status": diagnosis["status"],
             "refusal_reason": merge_result.get("reason"),
             "has_conflicts": final_mr.get("has_conflicts"),
-            "pipeline": await _pipeline_summary(client, project_path, source_branch),
+            "pipeline": diagnosis["pipeline"],
         }

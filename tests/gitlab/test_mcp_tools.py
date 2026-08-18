@@ -201,6 +201,191 @@ async def test_gitlab_job_log_missing_job_id_returns_named_error():
     assert "job_id" in payload["error"]
 
 
+async def test_gitlab_job_log_defaults_strip_ansi_and_only_errors_and_tails():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    lines = [f"npm info line {i}" for i in range(50)]
+    lines.append("\x1b[31mnpm ERR! HTTP Basic: Access denied\x1b[0m")
+    raw = "\n".join(lines)
+    mock_client = AsyncMock()
+    mock_client.get_job_trace.return_value = raw
+
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool(
+                "gitlab_job_log", {"project": "group/project", "job_id": 2226643},
+            )
+
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["log"] == "npm ERR! HTTP Basic: Access denied"
+    assert "\x1b[" not in payload["log"]
+    assert payload["total_lines"] == 51
+    assert payload["lines_shown"] == 1
+    assert payload["lines_omitted"] == 50
+
+
+async def test_gitlab_job_log_only_errors_false_returns_full_tail():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    lines = [f"line {i}" for i in range(300)]
+    raw = "\n".join(lines)
+    mock_client = AsyncMock()
+    mock_client.get_job_trace.return_value = raw
+
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool(
+                "gitlab_job_log",
+                {"project": "group/project", "job_id": 1, "only_errors": False, "tail_lines": 10},
+            )
+
+    payload = json.loads(result[0].text)
+    assert payload["lines_shown"] == 10
+    assert payload["log"].splitlines() == [f"line {i}" for i in range(290, 300)]
+    assert payload["total_lines"] == 300
+    assert payload["lines_omitted"] == 290
+
+
+async def test_gitlab_close_merge_request_issues_token_then_confirms():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        pending = await dispatch_gitlab_tool(
+            "gitlab_close_merge_request", {"project": "group/project", "mr_iid": 66},
+        )
+        pending_payload = json.loads(pending[0].text)
+        assert pending_payload["status"] == "pending_confirmation"
+        token = pending_payload["token"]
+
+        mock_client = AsyncMock()
+        mock_client.close_merge_request.return_value = {"iid": 66, "state": "closed"}
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool(
+                "gitlab_close_merge_request", {"mr_iid": 66, "confirm_token": token},
+            )
+
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["state"] == "closed"
+    mock_client.close_merge_request.assert_awaited_once_with("group/project", 66)
+
+
+async def test_gitlab_close_merge_request_rejects_reused_token():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    result = await dispatch_gitlab_tool(
+        "gitlab_close_merge_request", {"mr_iid": 66, "confirm_token": "not-a-real-token"},
+    )
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "Invalid or already-used" in payload["error"]
+
+
+async def test_gitlab_reopen_merge_request_issues_token_then_confirms():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        pending = await dispatch_gitlab_tool(
+            "gitlab_reopen_merge_request", {"project": "group/project", "mr_iid": 22},
+        )
+        token = json.loads(pending[0].text)["token"]
+
+        mock_client = AsyncMock()
+        mock_client.reopen_merge_request.return_value = {"iid": 22, "state": "opened"}
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool(
+                "gitlab_reopen_merge_request", {"mr_iid": 22, "confirm_token": token},
+            )
+
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["state"] == "opened"
+    mock_client.reopen_merge_request.assert_awaited_once_with("group/project", 22)
+
+
+async def test_gitlab_merge_merge_request_not_confirm_gated_merges_immediately():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    mock_client = AsyncMock()
+    mock_client.attempt_merge.return_value = {"merged": True, "state": "merged"}
+
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool(
+                "gitlab_merge_merge_request", {"project": "group/project", "mr_iid": 66},
+            )
+
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["merged"] is True
+    assert payload["merge_status"] == "MERGEABLE"
+    mock_client.get_merge_request.assert_not_awaited()
+
+
+async def test_gitlab_merge_merge_request_refusal_runs_diagnosis():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    mock_client = AsyncMock()
+    mock_client.attempt_merge.return_value = {"merged": False, "reason": "405 Method Not Allowed"}
+    mock_client.get_merge_request.return_value = {
+        "iid": 22, "merge_status": "cannot_be_merged", "has_conflicts": True, "source_branch": "feature/x",
+    }
+    mock_client.list_pipelines.return_value = [{"id": 1287294, "status": "failed"}]
+    mock_client.get_pipeline.return_value = {
+        "id": 1287294, "status": "failed", "jobs": [{"id": 2226643, "name": "npm-install", "status": "failed"}],
+    }
+
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool(
+                "gitlab_merge_merge_request", {"project": "group/project", "mr_iid": 22},
+            )
+
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["merged"] is False
+    assert payload["merge_status"] == "BLOCKED"  # legacy cannot_be_merged reclassified by the failed pipeline
+    assert payload["pipeline"]["failed_job_name"] == "npm-install"
+
+
+async def test_gitlab_merge_merge_request_requires_int_mr_iid():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    result = await dispatch_gitlab_tool("gitlab_merge_merge_request", {"project": "group/project"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "mr_iid" in payload["error"]
+
+
+async def test_gitlab_refresh_merge_status_happy_path():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    mock_client = AsyncMock()
+    mock_client.get_merge_request.return_value = {
+        "iid": 22, "detailed_merge_status": "mergeable", "has_conflicts": False, "source_branch": "feature/x",
+    }
+    mock_client.list_pipelines.return_value = []
+
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool(
+                "gitlab_refresh_merge_status", {"project": "group/project", "mr_iid": 22},
+            )
+
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["merge_status"] == "MERGEABLE"
+    assert payload["has_conflicts"] is False
+
+
 def test_resolve_project_uses_project_directly():
     from icx_engine.gitlab.mcp_tools import _resolve_project
     assert _resolve_project({"project": "group/project"}) == "group/project"
@@ -233,6 +418,10 @@ def test_resolve_project_returns_none_when_remote_unparseable():
     ("gitlab_list_pipelines", {}),
     ("gitlab_pipeline_status", {"pipeline_id": 1}),
     ("gitlab_job_log", {"job_id": 1}),
+    ("gitlab_merge_merge_request", {"mr_iid": 1}),
+    ("gitlab_refresh_merge_status", {"mr_iid": 1}),
+    ("gitlab_close_merge_request", {"mr_iid": 1}),
+    ("gitlab_reopen_merge_request", {"mr_iid": 1}),
 ])
 async def test_no_active_gitlab_connection_returns_err_for_every_tool(tool_name, extra_args):
     from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool

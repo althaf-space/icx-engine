@@ -42,9 +42,9 @@ ICX runs as:
 
 - A **CLI** (`icx analyze PROJ-123`) for human-driven use
 - An **MCP server** (`icx mcp run`) spawned by AI tools (Claude Code, Cursor, Codex, etc.), exposing
-  136 tools total - see readme.md's "The MCP tools" section for the full enumerated list (kept there
+  164 tools total - see readme.md's "The MCP tools" section for the full enumerated list (kept there
   as the single source of truth to avoid two lists drifting apart). Broad families: analysis/memory/
-  skills/testing tools, 22 Sonar tools, 18 git-workflow tools, 9 GitLab read-only tools, 25 Workstatus
+  skills/testing tools, 22 Sonar tools, 42 git-workflow tools, 13 GitLab tools, 25 Workstatus
   tools, 26 Jira write-back tools.
 
 The architecture is deliberately split along several axes:
@@ -206,6 +206,13 @@ ICX/
 |   |   |                       # primitives: is_ancestor() (`merge-base --is-ancestor`), unique_commit_count()
 |   |   |                       # (`rev-list --count` - commits that would be lost), delete_remote_branch() (a real
 |   |   |                       # `push --delete`, routed through the same extra_env auth plumbing as push()/fetch()).
+|   |   |                       # check_merge_tree(target_ref, source_ref) - read-only merge simulation via
+|   |   |                       # `git merge-tree` (git >=2.38); exit 0 = clean (nothing to parse), exit 1 = the
+|   |   |                       # leading stdout block is `<mode> <oid> <stage 1|2|3>\t<path>` lines, distinct paths
+|   |   |                       # across those lines are the conflicting files - never touches the working tree,
+|   |   |                       # index, or either ref. list_ignored(files) - which of the given files
+|   |   |                       # `git check-ignore` would silently exclude from `git add`; backs
+|   |   |                       # git_stage_and_commit's pre-token gitignore refusal.
 |   |   |                       # Line-level conflict inspection + gated resolution primitives: conflict_stage()
 |   |   |                       # (one index stage - 1=base/2=ours/3=theirs - tolerant of a missing stage, unlike
 |   |   |                       # conflict_versions() which assumes ours+theirs both exist), parse_conflict_hunks()
@@ -262,7 +269,7 @@ ICX/
 |   |   |                       # gitcmd.resolve_ref/is_ancestor/unique_commit_count/file_exists_at_ref directly,
 |   |   |                       # real ancestor/distance checks) or resolve_via_gitlab() (reuses
 |   |   |                       # gitlab/client.py's list_commits/compare/get_repository_file - no new external
-|   |   |                       # client added) - _find_matching_gitlab_connection() checks every configured
+|   |   |                       # client added) - find_matching_gitlab_connection() checks every configured
 |   |   |                       # connection's host, not just the active one, since a dependency can live on a
 |   |   |                       # different GitLab host than the consuming project. Neither available (e.g. a
 |   |   |                       # GitHub-hosted dependency, no client for that host) -> resolved=False with a clear
@@ -273,7 +280,11 @@ ICX/
 |   |   |                       # exists at target) / BEHIND (ancestor, commits_behind counted) / INCOMPATIBLE
 |   |   |                       # (history diverged from target, OR any check_paths entry missing at target -
 |   |   |                       # e.g. "pinned commit is missing the ./graphs path") / left resolved=False when
-|   |   |                       # neither ref resolves.
+|   |   |                       # neither ref resolves. repin_manifest_text() rewrites exactly the pinned ref/SHA
+|   |   |                       # for one dependency_name via a targeted character-span splice (re-runs the same
+|   |   |                       # matching regexes to find the ref's exact position, never a JSON/TOML
+|   |   |                       # re-serialization) - every other byte in the manifest, including formatting, is
+|   |   |                       # left unchanged; backs the git_repin_dependency MCP tool.
 |   |   +-- settings.py         # per-repo ICX settings file (parent branch, etc.)
 |   |   +-- safety.py           # create_backup (timestamped snapshot, taken before a risky reverse-merge/
 |   |   |                       # conflict-resolution attempt only, kept as history via prune_old_backups) +
@@ -478,11 +489,30 @@ ICX/
 |   |                           # filtered to exactly the requested files, so the human sees a real diff of what
 |   |                           # would be discarded, not just a file list)/git_list_merged_branches (read-only,
 |   |                           # ungated - the discovery companion to git_delete_branch, backed by
-|   |                           # manager.list_merged_branches()). git_repo_status now also reports
+|   |                           # manager.list_merged_branches())/git_check_merge (read-only, ungated - a read-only
+|   |                           # merge simulation via gitcmd.check_merge_tree() (`git merge-tree`, git >=2.38);
+|   |                           # answers whether merging source into target would conflict, and which files,
+|   |                           # without touching the working tree/index/either ref; fetches origin first and
+|   |                           # resolves a bare target branch name to origin/<target> when that ref exists)/
+|   |                           # git_repin_dependency (CONFIRMATION-GATED - the pending step does all resolution
+|   |                           # work (finds the pin, resolves target_ref to a real commit SHA the same way
+|   |                           # git_check_dependency_pins does) so the human reviews an already-correct
+|   |                           # old_ref/new_ref before approving; the confirm step only re-reads + splices +
+|   |                           # writes, via deps.repin_manifest_text() - a targeted character-span replacement
+|   |                           # of just the ref, never a JSON/TOML re-serialization, so the rest of the manifest
+|   |                           # is untouched byte-for-byte; does not stage/commit, follow with
+|   |                           # git_stage_and_commit). git_stage_and_commit now refuses BEFORE issuing a
+|   |                           # confirm_token if any listed file is one .gitignore would silently exclude
+|   |                           # (gitcmd.list_ignored(), via `git check-ignore`) - names every such file; the real
+|   |                           # bug this closes: a commit reporting success while an explicitly-listed file was
+|   |                           # never actually staged. safety.py's create_backup() now also prunes down to
+|   |                           # _MAX_BACKUPS_PER_TICKET (5) on every call, not only at a successful
+|   |                           # git_finish_ticket - bounds backup-branch sprawl even for a ticket whose merge
+|   |                           # keeps getting refused and never reaches a clean finish. git_repo_status now also reports
 |   |                           # commits_behind_parent/files_modified_upstream when a parent_branch is confirmed
 |   |                           # (stale-base silent-deletion detection); git_start_branch reports
 |   |                           # commits_behind_parent on switched_to_existing. git_create_mr now returns
-|   |                           # has_conflicts/pipeline when not merged. git_reverse_merge/git_pull/git_sync now
+|   |                           # has_conflicts/pipeline/local_check when not merged. git_reverse_merge/git_pull/git_sync now
 |   |                           # return dependency_pins_detected on a successful merge/pull (via
 |   |                           # _detect_local_dependency_pins() - LOCAL-only manifest scan, reuses
 |   |                           # deps.parse_manifest_git_deps, never triggers the network resolution itself).
@@ -512,14 +542,36 @@ ICX/
 |   |                           # _pipeline_summary() - the source branch's latest pipeline id/status, plus
 |   |                           # failed_job_name/failed_job_id if it failed - reuses list_pipelines/get_pipeline,
 |   |                           # no new client method; returns None on any lookup failure, never raises, this is
-|   |                           # best-effort diagnostic context, not required for the merge result itself),
+|   |                           # best-effort diagnostic context, not required for the merge result itself).
+|   |                           # diagnose_merge_refusal() reclassifies a CONFLICTED bucket that came ONLY from the
+|   |                           # legacy merge_status field (no detailed_merge_status) by cross-checking the ref's
+|   |                           # latest pipeline - GitLab's legacy field uses one string ('cannot_be_merged') for
+|   |                           # both a real conflict and merely-blocked-by-CI, so a bare classify_merge_status()
+|   |                           # call can misreport a CI-blocked MR as CONFLICTED; a CONFLICTED bucket backed by
+|   |                           # detailed_merge_status, or any other bucket, passes through unchanged. Used by
+|   |                           # create_and_merge_mr()'s two non-merged returns and by gitlab_merge_merge_request/
+|   |                           # gitlab_refresh_merge_status. client.py also gained close_merge_request/
+|   |                           # reopen_merge_request (state_event PUT) - the documented fix for a GitLab-side
+|   |                           # mergeability cache a fresh recompute alone won't clear.
+|   |                           # manager.py's create_mr_for_ticket() now also runs a LOCAL cross-check
+|   |                           # (_local_conflict_cross_check(), via gitcmd.check_merge_tree()) whenever the merge
+|   |                           # was refused - if GitLab's CONFLICTED/BLOCKED claim disagrees with what a local
+|   |                           # read-only merge simulation shows, CreateMrResult.local_check carries a
+|   |                           # human-readable note; silent when the two sides agree.
 |   |                           # mcp_tools.py (GITLAB_TOOLS + dispatch_gitlab_tool() -
 |   |                           # gitlab_list_merge_requests/gitlab_mr_changes/gitlab_list_commits/gitlab_compare/
 |   |                           # gitlab_list_tags/gitlab_list_branches/gitlab_list_pipelines/gitlab_pipeline_status
-|   |                           # (pipeline + jobs in one call)/gitlab_job_log, ALL read-only/ungated - project
-|   |                           # resolved from either an explicit `project` argument or a `repo_path` local checkout's
-|   |                           # origin remote via project_path_from_remote_url()). Separate from work-tracker
-|   |                           # connectors (Section 8.1 of the design spec).
+|   |                           # (pipeline + jobs in one call)/gitlab_job_log (now takes tail_lines/strip_ansi/
+|   |                           # only_errors, defaulting to a token-safe trimmed view instead of the full raw log),
+|   |                           # ALL read-only/ungated; plus gitlab_close_merge_request/gitlab_reopen_merge_request
+|   |                           # (CONFIRMATION-GATED - both mutate MR state) and gitlab_merge_merge_request/
+|   |                           # gitlab_refresh_merge_status (NOT confirm-gated - GitLab's own server-side
+|   |                           # protected-branch/approval rules are the real backstop for a merge; these exist so
+|   |                           # a merge retry after a push/CI fix is one cheap call instead of a full
+|   |                           # git_create_mr re-run). project resolved from either an explicit `project`
+|   |                           # argument or a `repo_path` local checkout's origin remote via
+|   |                           # project_path_from_remote_url()). Separate from work-tracker connectors
+|   |                           # (Section 8.1 of the design spec).
 |   +-- workstatus/             # Workstatus time-tracking/attendance integration - reverse-engineered API, no public
 |   |                           # docs exist (see Section 6b). config.py (WorkstatusConfig, registered via
 |   |                           # icx_engine.integrations - not the connectors/ registry, since Workstatus is not an

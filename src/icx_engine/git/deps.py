@@ -187,6 +187,102 @@ def parse_manifest_git_deps(filename: str, text: str) -> list[DependencyPin]:
     return pins
 
 
+def _repin_package_json(text: str, dependency_name: str, new_ref: str) -> tuple[str, str | None]:
+    data = json.loads(text)
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        spec = (data.get(section) or {}).get(dependency_name)
+        if not isinstance(spec, str):
+            continue
+        match = _NPM_GIT_URL_RE.match(spec.strip())
+        if not match or not match.group("ref"):
+            continue
+        quoted = f'"{spec.strip()}"'
+        pos = text.find(quoted)
+        if pos == -1:
+            continue
+        old_ref = match["ref"]
+        ref_start = pos + 1 + match.start("ref")  # +1 skips the opening quote
+        ref_end = pos + 1 + match.end("ref")
+        return text[:ref_start] + new_ref + text[ref_end:], old_ref
+    raise ValueError(f"No git-pinned dependency named '{dependency_name}' with a #ref found in package.json.")
+
+
+def _repin_requirements_txt(text: str, dependency_name: str, new_ref: str) -> tuple[str, str | None]:
+    lines = text.splitlines(keepends=True)
+    offset = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            body = stripped[3:].strip() if stripped.startswith("-e ") else stripped
+            name = None
+            url_part = body
+            name_match = _PIP_NAME_AT_URL_RE.match(body)
+            if name_match:
+                name = name_match["name"]
+                url_part = name_match["url"]
+            match = _PIP_GIT_URL_RE.search(url_part)
+            if match:
+                if name is None:
+                    egg_match = _EGG_NAME_RE.search(url_part)
+                    if egg_match:
+                        name = egg_match["name"]
+                    else:
+                        _, project_path = _split_hostpath(match["hostpath"])
+                        name = (project_path or match["hostpath"]).rsplit("/", 1)[-1]
+                if name == dependency_name:
+                    line_pos_in_body = line.index(url_part)
+                    old_ref = match["ref"]
+                    ref_start = offset + line_pos_in_body + match.start("ref")
+                    ref_end = offset + line_pos_in_body + match.end("ref")
+                    return text[:ref_start] + new_ref + text[ref_end:], old_ref
+        offset += len(line)
+    raise ValueError(f"No git-pinned dependency named '{dependency_name}' found in requirements.txt.")
+
+
+def _repin_pyproject_toml(text: str, dependency_name: str, new_ref: str) -> tuple[str, str | None]:
+    for match in _PIP_GIT_URL_RE.finditer(text):
+        _, project_path = _split_hostpath(match["hostpath"])
+        name = (project_path or match["hostpath"]).rsplit("/", 1)[-1]
+        if name == dependency_name:
+            old_ref = match["ref"]
+            return text[:match.start("ref")] + new_ref + text[match.end("ref"):], old_ref
+    for dep_match in _POETRY_DEP_RE.finditer(text):
+        if dep_match["name"] != dependency_name:
+            continue
+        body = dep_match["body"]
+        if not _POETRY_GIT_RE.search(body):
+            continue
+        ref_match = _POETRY_REF_RE.search(body)
+        if not ref_match:
+            continue
+        body_start = dep_match.start("body")
+        old_ref = ref_match["ref"]
+        ref_start = body_start + ref_match.start("ref")
+        ref_end = body_start + ref_match.end("ref")
+        return text[:ref_start] + new_ref + text[ref_end:], old_ref
+    raise ValueError(f"No git-pinned dependency named '{dependency_name}' with a rev/branch/tag found in pyproject.toml.")
+
+
+def repin_manifest_text(filename: str, text: str, dependency_name: str, new_ref: str) -> tuple[str, str | None]:
+    """Rewrites exactly the pinned ref/SHA for `dependency_name` in `text`, leaving
+    everything else in the manifest byte-for-byte unchanged (no JSON/TOML
+    re-serialization - a targeted splice at the ref's exact character span,
+    found by re-running the same matching logic parse_manifest_git_deps uses).
+    Returns (new_text, old_ref). Raises ValueError if dependency_name isn't
+    found as a git-pinned dependency with a resolvable ref in this manifest."""
+    basename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    if basename == "package.json":
+        return _repin_package_json(text, dependency_name, new_ref)
+    if basename == "pyproject.toml":
+        return _repin_pyproject_toml(text, dependency_name, new_ref)
+    if basename.startswith("requirements") and basename.endswith(".txt"):
+        return _repin_requirements_txt(text, dependency_name, new_ref)
+    raise ValueError(
+        f"Unsupported manifest filename: {filename!r} - supported: package.json, "
+        "requirements*.txt, pyproject.toml"
+    )
+
+
 def resolve_via_local_clone(
     pin: DependencyPin, target_ref: str, dep_repo_path: Path, check_paths: list[str] | None = None,
 ) -> DependencyPinReport:
@@ -291,7 +387,7 @@ async def resolve_via_gitlab(
         )
 
 
-def _find_matching_gitlab_connection(host: str | None, connections: list):
+def find_matching_gitlab_connection(host: str | None, connections: list):
     if not host:
         return None
     from urllib.parse import urlparse
@@ -325,7 +421,7 @@ async def check_dependency_pins(
         if dep_repo_path is not None:
             reports.append(resolve_via_local_clone(pin, target_ref, dep_repo_path, check_paths=check_paths))
             continue
-        conn = _find_matching_gitlab_connection(pin.host, gitlab_connections or [])
+        conn = find_matching_gitlab_connection(pin.host, gitlab_connections or [])
         if conn is None:
             reports.append(DependencyPinReport(
                 pin=pin, resolved=False,

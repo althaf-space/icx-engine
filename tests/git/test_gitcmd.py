@@ -160,7 +160,7 @@ def test_fast_forward_raises_when_diverged(tmp_git_repo_with_remote, tmp_path):
 
 # Task 3: staging, commit, remote info, added-lines diff
 from icx_engine.git.gitcmd import (
-    stage_files, commit, remote_url, default_remote_head_branch, added_lines_diff,
+    stage_files, commit, remote_url, default_remote_head_branch, added_lines_diff, list_ignored,
 )
 
 
@@ -223,6 +223,27 @@ def test_stage_files_all_already_gone_is_a_noop(tmp_git_repo):
     result = subprocess.run(["git", "diff", "--cached", "--name-status"], cwd=str(tmp_git_repo),
                              check=True, stdout=subprocess.PIPE)
     assert result.stdout.decode().strip() == "D\talready_gone.txt"
+
+
+def test_list_ignored_returns_only_the_gitignored_subset(tmp_git_repo):
+    (tmp_git_repo / ".gitignore").write_text("*.gitkeep_ignored\n", encoding="utf-8")
+    (tmp_git_repo / "a.gitkeep_ignored").write_text("x", encoding="utf-8")
+    (tmp_git_repo / "normal.txt").write_text("x", encoding="utf-8")
+    assert list_ignored(tmp_git_repo, ["a.gitkeep_ignored", "normal.txt"]) == ["a.gitkeep_ignored"]
+
+
+def test_list_ignored_empty_when_nothing_matches(tmp_git_repo):
+    (tmp_git_repo / "normal.txt").write_text("x", encoding="utf-8")
+    assert list_ignored(tmp_git_repo, ["normal.txt"]) == []
+
+
+def test_list_ignored_empty_list_input_is_a_noop(tmp_git_repo):
+    assert list_ignored(tmp_git_repo, []) == []
+
+
+def test_list_ignored_rejects_option_like_files(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        list_ignored(tmp_git_repo, [_OPTION_LIKE])
 
 
 def test_commit_creates_commit_and_returns_sha(tmp_git_repo):
@@ -1229,6 +1250,61 @@ def test_is_ancestor_rejects_option_like_refs(tmp_git_repo):
         is_ancestor(tmp_git_repo, _OPTION_LIKE, "main")
     with pytest.raises(GitCommandError):
         is_ancestor(tmp_git_repo, "main", _OPTION_LIKE)
+
+
+from icx_engine.git.gitcmd import check_merge_tree
+
+
+def test_check_merge_tree_clean_when_no_overlapping_changes(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "target-clean", "main")
+    create_branch_from(tmp_git_repo, "source-clean", "main")
+    checkout(tmp_git_repo, "source-clean")
+    (tmp_git_repo / "only_here.txt").write_text("x", encoding="utf-8")
+    stage_files(tmp_git_repo, ["only_here.txt"])
+    commit(tmp_git_repo, "unrelated addition")
+    checkout(tmp_git_repo, "main")
+    result = check_merge_tree(tmp_git_repo, "target-clean", "source-clean")
+    assert result == {"has_conflicts": False, "conflicting_files": []}
+
+
+def test_check_merge_tree_reports_conflicting_files(tmp_git_repo):
+    readme = tmp_git_repo / "README.md"
+    readme.write_text("base\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "base content")
+
+    create_branch_from(tmp_git_repo, "target-conflict", "main")
+    checkout(tmp_git_repo, "target-conflict")
+    readme.write_text("target change\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "target edits readme")
+
+    create_branch_from(tmp_git_repo, "source-conflict", "main")
+    checkout(tmp_git_repo, "source-conflict")
+    readme.write_text("source change\n", encoding="utf-8")
+    stage_files(tmp_git_repo, ["README.md"])
+    commit(tmp_git_repo, "source edits readme")
+    checkout(tmp_git_repo, "main")
+
+    result = check_merge_tree(tmp_git_repo, "target-conflict", "source-conflict")
+    assert result == {"has_conflicts": True, "conflicting_files": ["README.md"]}
+
+
+def test_check_merge_tree_never_touches_working_tree_or_index(tmp_git_repo):
+    create_branch_from(tmp_git_repo, "target-noop", "main")
+    create_branch_from(tmp_git_repo, "source-noop", "main")
+    checkout(tmp_git_repo, "main")
+    status_before = structured_status(tmp_git_repo)
+    check_merge_tree(tmp_git_repo, "target-noop", "source-noop")
+    assert current_branch(tmp_git_repo) == "main"
+    assert structured_status(tmp_git_repo) == status_before
+
+
+def test_check_merge_tree_rejects_option_like_refs(tmp_git_repo):
+    with pytest.raises(GitCommandError):
+        check_merge_tree(tmp_git_repo, _OPTION_LIKE, "main")
+    with pytest.raises(GitCommandError):
+        check_merge_tree(tmp_git_repo, "main", _OPTION_LIKE)
 
 
 def test_unique_commit_count_zero_when_fully_merged(tmp_git_repo):

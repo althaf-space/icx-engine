@@ -58,6 +58,8 @@ _SET_BRANCH_POLICY_TOOL = "git_set_branch_policy"
 _CHECK_DEPENDENCY_PINS_TOOL = "git_check_dependency_pins"
 _RESTORE_FILES_TOOL = "git_restore_files"
 _LIST_MERGED_BRANCHES_TOOL = "git_list_merged_branches"
+_CHECK_MERGE_TOOL = "git_check_merge"
+_REPIN_DEPENDENCY_TOOL = "git_repin_dependency"
 
 GIT_TOOLS: list[Tool] = [
     Tool(
@@ -71,10 +73,11 @@ GIT_TOOLS: list[Tool] = [
             "is also available in the same session; use git_start_branch/git_stage_and_commit/"
             "git_push/git_create_mr/git_stash_create/git_fetch/git_pull/git_sync/git_delete_branch/"
             "git_conflict_take_ours/git_conflict_take_theirs/git_conflict_apply_resolution/"
-            "git_conflict_mark_resolved/git_conflict_abort/git_restore_files instead - NEVER run "
+            "git_conflict_mark_resolved/git_conflict_abort/git_restore_files/git_check_merge instead - "
+            "NEVER run "
             "`git stash`/`git fetch`/`git pull`/`git checkout --ours`/`--theirs`/`git add` on a "
             "conflicted file/`git merge --abort`/`git rebase --abort`/`git cherry-pick --abort`/"
-            "`git restore`/`git checkout -- <file>` directly "
+            "`git restore`/`git checkout -- <file>`/`git merge-tree` directly "
             "either, same rule as commit/checkout/push. This is what enforces the no-rebase/no-force-push "
             "safety doctrine - bypassing these tools defeats it. Checks the repo's git-workflow "
             "state - current branch, whether the working tree is dirty, and any leftover state "
@@ -207,7 +210,11 @@ GIT_TOOLS: list[Tool] = [
         name=_STAGE_AND_COMMIT_TOOL,
         description=(
             "USE WHEN the human wants to stage and commit specific files: MUST stage exactly the "
-            "given files and commit them. NEVER pass a wildcard - list every file explicitly. The "
+            "given files and commit them. NEVER pass a wildcard - list every file explicitly. Any "
+            "listed file .gitignore would silently exclude is refused BEFORE a token is even "
+            "issued (error names every such file) - a commit reporting success while one of the "
+            "explicitly-listed files was never actually staged is exactly the failure this "
+            "prevents; remove the file from the list or fix .gitignore first. The "
             "message must start with the ticket key when ticket_key is set. This is a "
             "CONFIRMATION-GATED tool: the first call (no confirm_token) returns "
             "pending_confirmation plus a one-time token after showing the human the exact files "
@@ -844,6 +851,31 @@ GIT_TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name=_CHECK_MERGE_TOOL,
+        description=(
+            "USE WHEN the human wants to know whether merging target into the current branch (or "
+            "vice versa) would conflict, and where, WITHOUT actually starting a merge: MUST call "
+            "this instead of git_reverse_merge/git_pull when only a read-only answer is wanted - "
+            "unlike those, this never touches the working tree, the index, or either ref, and "
+            "cannot be blocked by a permission classifier the way a real merge attempt can. Fetches "
+            "origin first so target (if given as a bare branch name) is checked against its real "
+            "current remote tip, not a possibly-stale local tracking ref. Returns has_conflicts "
+            "plus conflicting_files (empty list when clean). Read-only, UNGATED. Requires a valid "
+            "git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "target": {"type": "string", "description": "Branch/ref to check merging against. "
+                                                              "Defaults to this repo's confirmed parent_branch."},
+                "source": {"type": "string", "description": "Branch/ref being merged in. Defaults to "
+                                                              "the current branch."},
+            },
+            "required": ["repo_path"],
+        },
+    ),
+    Tool(
         name=_CONFLICT_TAKE_OURS_TOOL,
         description=(
             "USE WHEN the human has decided, for ONE specific conflicted file, that the OURS side "
@@ -1049,6 +1081,37 @@ GIT_TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name=_REPIN_DEPENDENCY_TOOL,
+        description=(
+            "USE WHEN git_check_dependency_pins reports a dependency as BEHIND and the human wants "
+            "it repinned to the current tip of its own target_ref: MUST call this instead of "
+            "hand-editing the manifest and running npm update/poetry update yourself. Resolves "
+            "target_ref to that dependency's real current commit SHA the same way "
+            "git_check_dependency_pins does (dep_repo_path for a local clone, else a GitLab "
+            "connection matching the dependency's own host), then rewrites ONLY that dependency's "
+            "pinned ref/SHA in manifest - every other line, including formatting, is left "
+            "byte-for-byte unchanged. Supports package.json, requirements*.txt, and pyproject.toml "
+            "(both PEP508 and poetry inline-table forms) - same manifest shapes "
+            "git_check_dependency_pins parses. CONFIRMATION-GATED: first call (no confirm_token) "
+            "resolves the new SHA and returns pending_confirmation with old_ref and new_ref - show "
+            "both to the human, then call again with confirm_token once they agree. Does not "
+            "stage or commit the manifest change - follow with git_stage_and_commit. Requires a "
+            "valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "manifest": {"type": "string", "description": "Manifest filename, e.g. 'package.json'."},
+                "dependency_name": {"type": "string"},
+                "target_ref": {"type": "string", "description": "Branch/tag on the DEPENDENCY's own repo to repin to."},
+                "dep_repo_path": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
+            "required": ["repo_path", "manifest", "dependency_name", "target_ref"],
+        },
+    ),
+    Tool(
         name=_RESTORE_FILES_TOOL,
         description=(
             "USE WHEN the human wants specific local changes discarded - one or more files "
@@ -1169,6 +1232,94 @@ def _needs_parent_branch(mgr: GitLifecycleManager) -> list[TextContent]:
                        "(proposed_default/available_branches are suggestions, not decisions). "
                        "Call this tool again with parent_branch set to their answer.",
     }))]
+
+
+async def _dispatch_repin_dependency(arguments: dict) -> list[TextContent]:
+    """Confirmation-gated git_repin_dependency flow. The pending step does the (read-only)
+    resolution work up front - reading the manifest, finding the pin, resolving target_ref to a
+    real SHA - so the human reviews an old_ref/new_ref pair that is already known-correct before
+    approving; the confirm step only re-does the read + splice + write, never re-resolves."""
+    confirm_token = arguments.get("confirm_token")
+    if not confirm_token:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        manifest = arguments.get("manifest")
+        if not manifest or not isinstance(manifest, str):
+            return _err("manifest is required and must be a non-empty string.")
+        dependency_name = arguments.get("dependency_name")
+        if not dependency_name or not isinstance(dependency_name, str):
+            return _err("dependency_name is required and must be a non-empty string.")
+        target_ref = arguments.get("target_ref")
+        if not target_ref or not isinstance(target_ref, str):
+            return _err("target_ref is required and must be a non-empty string.")
+        dep_repo_path_arg = arguments.get("dep_repo_path")
+        try:
+            from icx_engine.git import deps
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            manifest_path = mgr.repo_root / manifest
+            if not manifest_path.exists():
+                return _err(f"Manifest '{manifest}' does not exist at repo_path.")
+            text = manifest_path.read_text(encoding="utf-8", errors="replace")
+            pins = deps.parse_manifest_git_deps(manifest, text)
+            pin = next((p for p in pins if p.name == dependency_name), None)
+            if pin is None:
+                return _err(f"No git-pinned dependency named '{dependency_name}' found in '{manifest}'.")
+
+            if dep_repo_path_arg:
+                report = deps.resolve_via_local_clone(pin, target_ref, Path(dep_repo_path_arg))
+            else:
+                connections = list(ConfigManager.load().gitlab_connections.values())
+                conn = deps.find_matching_gitlab_connection(pin.host, connections)
+                if conn is None:
+                    return _err(
+                        f"No local clone path given and host '{pin.host}' does not match any active "
+                        "GitLab connection - configure one (icx gitlab --add) or pass dep_repo_path."
+                    )
+                report = await deps.resolve_via_gitlab(pin, target_ref, conn)
+            if not report.resolved or report.target_commit is None:
+                return _err(f"Could not resolve target_ref '{target_ref}' on '{dependency_name}': {report.reason}")
+
+            new_ref = report.target_commit
+            token = issue_token("repin_dependency", {
+                "repo_path": repo_path, "manifest": manifest, "dependency_name": dependency_name, "new_ref": new_ref,
+            })
+            return [TextContent(type="text", text=json.dumps({
+                "status": "pending_confirmation",
+                "token": token,
+                "manifest": manifest,
+                "dependency_name": dependency_name,
+                "old_ref": pin.ref,
+                "new_ref": new_ref,
+                "instruction": (
+                    f"Show the human: '{dependency_name}' in {manifest} would move from {pin.ref} to "
+                    f"{new_ref} (resolved from target_ref '{target_ref}'). Only call this tool again "
+                    "with confirm_token set once they explicitly agree."
+                ),
+            }))]
+        except Exception as exc:
+            return _err(str(exc))
+
+    payload = verify_token(confirm_token, "repin_dependency")
+    if payload is None:
+        return _err("Invalid or already-used confirm_token. Call again without a token to get a fresh one.")
+    try:
+        from icx_engine.git import deps
+        mgr = GitLifecycleManager(Path(payload["repo_path"]))
+        mgr.validate()
+        manifest_path = mgr.repo_root / payload["manifest"]
+        text = manifest_path.read_text(encoding="utf-8", errors="replace")
+        new_text, old_ref = deps.repin_manifest_text(
+            payload["manifest"], text, payload["dependency_name"], payload["new_ref"],
+        )
+        manifest_path.write_text(new_text, encoding="utf-8")
+        return _ok({
+            "manifest": payload["manifest"], "dependency_name": payload["dependency_name"],
+            "old_ref": old_ref, "new_ref": payload["new_ref"],
+        })
+    except Exception as exc:
+        return _err(str(exc))
 
 
 def _dispatch_take_side(arguments: dict, side: str) -> list[TextContent]:
@@ -1427,9 +1578,16 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                     return _err("message is required and must be a non-empty string.")
                 if "ticket_key" not in arguments:
                     return _err("ticket_key is required (pass null if there is no ticket).")
-                from icx_engine.git.gitcmd import current_branch
+                from icx_engine.git.gitcmd import current_branch, list_ignored
                 mgr = GitLifecycleManager(Path(repo_path))
                 mgr.validate()
+                ignored = list_ignored(mgr.repo_root, files)
+                if ignored:
+                    return _err(
+                        f"{len(ignored)} of the listed files are gitignored and would not be staged: "
+                        f"{', '.join(ignored)}. Remove them from files, or add a .gitignore exception, "
+                        "before committing - otherwise the commit would silently succeed without them."
+                    )
                 branch = current_branch(mgr.repo_root)
                 stored_parent = read_repo_settings(mgr.repo_root).get("parent_branch")
                 on_parent_branch = bool(stored_parent) and branch == stored_parent
@@ -2318,6 +2476,26 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
         except Exception as exc:
             return _err(str(exc))
 
+    if name == _CHECK_MERGE_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        try:
+            from icx_engine.git import gitcmd
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            source = arguments.get("source") or gitcmd.current_branch(mgr.repo_root)
+            target = arguments.get("target") or read_repo_settings(mgr.repo_root).get("parent_branch")
+            if not target:
+                return _err("target is required (no confirmed parent_branch on this repo - pass target explicitly).")
+            auth_env = mgr._auth_env()
+            gitcmd.fetch(mgr.repo_root, extra_env=auth_env)
+            target_ref = f"origin/{target}" if gitcmd.remote_branch_exists(mgr.repo_root, target, extra_env=auth_env) else target
+            result = gitcmd.check_merge_tree(mgr.repo_root, target_ref, source)
+            return _ok({"source": source, "target": target_ref, **result})
+        except Exception as exc:
+            return _err(str(exc))
+
     if name == _CONFLICT_TAKE_OURS_TOOL:
         return _dispatch_take_side(arguments, "ours")
 
@@ -2557,6 +2735,9 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             return _ok({"dependencies": [deps.report_to_dict(r) for r in reports]})
         except Exception as exc:
             return _err(str(exc))
+
+    if name == _REPIN_DEPENDENCY_TOOL:
+        return await _dispatch_repin_dependency(arguments)
 
     if name == _RESTORE_FILES_TOOL:
         confirm_token = arguments.get("confirm_token")

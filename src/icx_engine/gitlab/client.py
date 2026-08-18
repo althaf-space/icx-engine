@@ -148,6 +148,30 @@ class GitLabClient:
             reason = resp.text
         return {"merged": False, "reason": str(reason)}
 
+    async def close_merge_request(self, project: str, mr_iid: int) -> dict:
+        """Close an open MR without merging it - state_event=close. Idempotent
+        against GitLab's own state: closing an already-closed MR just returns
+        its current (closed) state, never an error."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        resp = await self._put(
+            f"/api/v4/projects/{encoded}/merge_requests/{mr_iid}", json={"state_event": "close"},
+        )
+        if resp.status_code != 200:
+            raise GitLabError(f"Closing merge request !{mr_iid} failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+        return resp.json()
+
+    async def reopen_merge_request(self, project: str, mr_iid: int) -> dict:
+        """Reopen a closed MR - state_event=reopen. The documented fix for a
+        GitLab-side cached cannot_be_merged that a fresh mergeability
+        recompute won't clear on its own."""
+        encoded = project if project.isdigit() else quote(project, safe="")
+        resp = await self._put(
+            f"/api/v4/projects/{encoded}/merge_requests/{mr_iid}", json={"state_event": "reopen"},
+        )
+        if resp.status_code != 200:
+            raise GitLabError(f"Reopening merge request !{mr_iid} failed (HTTP {resp.status_code}): {resp.text}", resp.status_code)
+        return resp.json()
+
     async def find_merge_request_for_branch(self, project: str, source_branch: str) -> dict | None:
         """Look up an already-open MR for this source branch, if one exists -
         used to avoid creating a duplicate MR on a retry."""

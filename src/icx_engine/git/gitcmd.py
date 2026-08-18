@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -345,6 +346,32 @@ def is_ancestor(repo: Path, ancestor_ref: str, descendant_ref: str) -> bool:
     return result.returncode == 0
 
 
+_MERGE_TREE_CONFLICT_LINE = re.compile(r"^\d+ [0-9a-f]+ [123]\t(.+)$")
+
+
+def check_merge_tree(repo: Path, target_ref: str, source_ref: str) -> dict:
+    """Read-only merge simulation via `git merge-tree` (git >=2.38) - answers
+    whether merging source_ref into target_ref would conflict, and which
+    files, without touching the working tree, the index, or either ref.
+    Exit code 0 means a clean merge (stdout is just the resulting tree OID,
+    nothing to parse); exit code 1 means conflicts, and stdout's leading
+    block is `<mode> <oid> <stage 1|2|3>\\t<path>` lines - distinct paths
+    across those lines are the conflicting files. Any other exit code is a
+    real failure (e.g. an unresolvable ref), not a conflict result, and
+    raises GitCommandError via `_run_git`."""
+    _reject_option_like(target_ref, "target_ref")
+    _reject_option_like(source_ref, "source_ref")
+    result = _run_git(repo, ["merge-tree", target_ref, source_ref], allowed_returncodes={1})
+    if result.returncode == 0:
+        return {"has_conflicts": False, "conflicting_files": []}
+    conflicting: list[str] = []
+    for line in _stdout(result).splitlines():
+        match = _MERGE_TREE_CONFLICT_LINE.match(line)
+        if match and match.group(1) not in conflicting:
+            conflicting.append(match.group(1))
+    return {"has_conflicts": True, "conflicting_files": conflicting}
+
+
 def unique_commit_count(repo: Path, branch: str, target: str) -> int:
     """Count of commits reachable from branch but not from target - what
     would become unreachable (lost) if branch were deleted right now. Zero
@@ -385,6 +412,23 @@ def find_conflict_markers(repo: Path, relpaths: list[str]) -> dict[str, list[str
         if hits:
             found[relpath] = hits
     return found
+
+
+def list_ignored(repo: Path, files: list[str]) -> list[str]:
+    """Which of `files` .gitignore would silently exclude from `git add` - checked
+    BEFORE staging so a caller can warn/refuse instead of reporting a commit as
+    successful while some listed files were never actually staged at all (the
+    real failure mode: `git_stage_and_commit` listing .gitkeep files that
+    .gitignore silently swallowed, with no error and no sign anything was
+    skipped). `git check-ignore` prints only the matching subset of the given
+    paths to stdout, one per line - exit 1 means none matched, a normal
+    result here, not a failure."""
+    if not files:
+        return []
+    for f in files:
+        _reject_option_like(f, "files")
+    result = _run_git(repo, ["check-ignore", "--", *files], allowed_returncodes={1})
+    return [line for line in _stdout(result).splitlines() if line]
 
 
 def stage_files(repo: Path, files: list[str]) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import httpx
+import json
 import pytest
 import respx
 
@@ -190,6 +191,48 @@ async def test_attempt_merge_malformed_200_body_raises_gitlab_error(gitlab_base_
     async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
         with pytest.raises(GitLabError):
             await client.attempt_merge("group/project", 5)
+
+
+@respx.mock
+async def test_close_merge_request_sends_state_event_close(gitlab_base_url):
+    route = respx.put(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/merge_requests/22").mock(
+        return_value=httpx.Response(200, json={"iid": 22, "state": "closed"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        result = await client.close_merge_request("group/project", 22)
+    assert result["state"] == "closed"
+    assert json.loads(route.calls.last.request.content) == {"state_event": "close"}
+
+
+@respx.mock
+async def test_close_merge_request_raises_on_error(gitlab_base_url):
+    respx.put(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/merge_requests/22").mock(
+        return_value=httpx.Response(404, text="Not Found")
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.close_merge_request("group/project", 22)
+
+
+@respx.mock
+async def test_reopen_merge_request_sends_state_event_reopen(gitlab_base_url):
+    route = respx.put(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/merge_requests/22").mock(
+        return_value=httpx.Response(200, json={"iid": 22, "state": "opened"})
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        result = await client.reopen_merge_request("group/project", 22)
+    assert result["state"] == "opened"
+    assert json.loads(route.calls.last.request.content) == {"state_event": "reopen"}
+
+
+@respx.mock
+async def test_reopen_merge_request_raises_on_error(gitlab_base_url):
+    respx.put(f"{gitlab_base_url}/api/v4/projects/group%2Fproject/merge_requests/22").mock(
+        return_value=httpx.Response(500, text="Internal Server Error")
+    )
+    async with GitLabClient(gitlab_base_url, token="glpat-x") as client:
+        with pytest.raises(GitLabError):
+            await client.reopen_merge_request("group/project", 22)
 
 
 @respx.mock

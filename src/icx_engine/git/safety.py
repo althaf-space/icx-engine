@@ -14,6 +14,9 @@ from icx_engine.git.naming import slugify
 _STASH_TAG_PREFIX = "icx:"
 
 
+_MAX_BACKUPS_PER_TICKET = 5
+
+
 def create_backup(repo: Path, source_branch: str, ticket_key: str) -> str:
     """Create backup/<TICKET>-<slug>-<timestamp> pointing at source_branch's
     current commit, without switching to it. Returns the backup branch name.
@@ -24,11 +27,18 @@ def create_backup(repo: Path, source_branch: str, ticket_key: str) -> str:
     on `git branch <name> <start>`, which refuses to recreate an existing name.
     Since nothing can change source_branch's HEAD between two such calls, an
     existing same-name backup already captures the identical commit a new one
-    would - skip creation and return the existing name instead of erroring."""
+    would - skip creation and return the existing name instead of erroring.
+
+    Also prunes down to _MAX_BACKUPS_PER_TICKET right here, not only at a
+    successful git_finish_ticket - a ticket whose merge keeps getting
+    refused (retried reverse-merges/conflict-resolutions never reaching a
+    clean finish) would otherwise accumulate an unbounded number of these
+    with nothing ever cleaning them up."""
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     name = f"backup/{ticket_key}-{slugify(source_branch)}-{timestamp}"
     if not local_branch_exists(repo, name):
         create_branch_from(repo, name, source_branch)
+    prune_old_backups(repo, ticket_key, keep=_MAX_BACKUPS_PER_TICKET)
     return name
 
 

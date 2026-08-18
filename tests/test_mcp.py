@@ -800,7 +800,7 @@ async def test_list_tools_returns_all_tools():
         mock_cm.load.return_value = AppConfig()
         tools = await _list_tools()
 
-    assert len(tools) == 158
+    assert len(tools) == 164
     names = {t.name for t in tools}
     assert names == {
         "analyze_issue_fast", "analyze_issue", "save_memory", "record_verification",
@@ -831,9 +831,12 @@ async def test_list_tools_returns_all_tools():
         "git_conflict_apply_resolution", "git_conflict_mark_resolved", "git_conflict_abort",
         "git_check_branch_name_policy", "git_set_branch_policy",
         "git_check_dependency_pins", "git_restore_files", "git_list_merged_branches",
+        "git_check_merge", "git_repin_dependency",
         "gitlab_list_merge_requests", "gitlab_mr_changes", "gitlab_list_commits", "gitlab_compare",
         "gitlab_list_tags", "gitlab_list_branches", "gitlab_list_pipelines",
         "gitlab_pipeline_status", "gitlab_job_log",
+        "gitlab_close_merge_request", "gitlab_reopen_merge_request",
+        "gitlab_merge_merge_request", "gitlab_refresh_merge_status",
         "workstatus_unread_notifications", "workstatus_my_profile", "workstatus_add_timesheet",
         "workstatus_list_projects", "workstatus_get_project", "workstatus_project_budget_analytics",
         "workstatus_list_tasks", "workstatus_list_task_statuses", "workstatus_list_milestones",
@@ -867,7 +870,7 @@ async def test_git_tool_descriptions_follow_sonar_use_when_must_convention():
         tools = await _list_tools()
 
     git_tools = [t for t in tools if t.name.startswith("git_")]
-    assert len(git_tools) == 40
+    assert len(git_tools) == 42
     for tool in git_tools:
         assert "USE WHEN" in tool.description, f"{tool.name} missing 'USE WHEN'"
         assert "MUST" in tool.description, f"{tool.name} missing 'MUST'"

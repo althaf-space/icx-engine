@@ -244,6 +244,35 @@ async def test_git_stage_and_commit_executes_with_valid_token(tmp_git_repo):
     assert len(payload["sha"]) == 40
 
 
+async def test_git_stage_and_commit_refuses_before_token_when_files_are_gitignored(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / ".gitignore").write_text("*.gitkeep_ignored\n", encoding="utf-8")
+    (tmp_git_repo / "a.gitkeep_ignored").write_text("x", encoding="utf-8")
+    result = await dispatch_git_tool("git_stage_and_commit", {
+        "repo_path": str(tmp_git_repo), "files": ["a.gitkeep_ignored"],
+        "message": "Add placeholder", "ticket_key": None,
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "gitignored" in payload["error"]
+    assert "a.gitkeep_ignored" in payload["error"]
+    assert "status" not in payload  # never reached pending_confirmation - no token issued
+
+
+async def test_git_stage_and_commit_gitignore_check_only_flags_the_ignored_subset(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / ".gitignore").write_text("*.gitkeep_ignored\n", encoding="utf-8")
+    (tmp_git_repo / "a.gitkeep_ignored").write_text("x", encoding="utf-8")
+    (tmp_git_repo / "real.txt").write_text("x", encoding="utf-8")
+    result = await dispatch_git_tool("git_stage_and_commit", {
+        "repo_path": str(tmp_git_repo), "files": ["a.gitkeep_ignored", "real.txt"],
+        "message": "Add file", "ticket_key": None,
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "1 of the listed files" in payload["error"]
+
+
 async def test_git_stage_and_commit_warns_when_current_branch_is_stored_parent(tmp_git_repo, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
     from icx_engine.git.settings import write_repo_settings
@@ -2320,6 +2349,93 @@ async def test_git_get_conflict_details_missing_file_returns_named_error():
     assert "file" in payload["error"]
 
 
+async def test_git_check_merge_reports_clean_when_no_overlapping_changes(tmp_git_repo_with_remote):
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-1", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
+    (tmp_git_repo_with_remote / "new.txt").write_text("new", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["new.txt"])
+    gitcmd_commit(tmp_git_repo_with_remote, "ABC-1 add new.txt")
+
+    result = await dispatch_git_tool("git_check_merge", {
+        "repo_path": str(tmp_git_repo_with_remote), "target": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["has_conflicts"] is False
+    assert payload["conflicting_files"] == []
+    assert payload["target"] == "origin/main"
+    assert payload["source"] == "feature/x-ABC-1"
+
+
+async def test_git_check_merge_reports_real_conflict(tmp_git_repo_with_remote):
+    from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit, push as gitcmd_push
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-2", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-2")
+    (tmp_git_repo_with_remote / "README.md").write_text("feature version\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["README.md"])
+    gitcmd_commit(tmp_git_repo_with_remote, "ABC-2 edit readme on feature")
+
+    checkout(tmp_git_repo_with_remote, "main")
+    (tmp_git_repo_with_remote / "README.md").write_text("main version\n", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["README.md"])
+    gitcmd_commit(tmp_git_repo_with_remote, "edit readme on main")
+    gitcmd_push(tmp_git_repo_with_remote, "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-2")
+
+    result = await dispatch_git_tool("git_check_merge", {
+        "repo_path": str(tmp_git_repo_with_remote), "target": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["has_conflicts"] is True
+    assert payload["conflicting_files"] == ["README.md"]
+
+
+async def test_git_check_merge_never_mutates_the_repo(tmp_git_repo_with_remote):
+    from icx_engine.git.gitcmd import current_branch, structured_status
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+
+    before_branch = current_branch(tmp_git_repo_with_remote)
+    before_status = structured_status(tmp_git_repo_with_remote)
+    await dispatch_git_tool("git_check_merge", {
+        "repo_path": str(tmp_git_repo_with_remote), "target": "main", "source": "main",
+    })
+    assert current_branch(tmp_git_repo_with_remote) == before_branch
+    assert structured_status(tmp_git_repo_with_remote) == before_status
+
+
+async def test_git_check_merge_defaults_target_to_confirmed_parent_branch(tmp_git_repo_with_remote):
+    from icx_engine.git.settings import write_repo_settings
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+
+    write_repo_settings(tmp_git_repo_with_remote, parent_branch="main")
+    result = await dispatch_git_tool("git_check_merge", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["target"] == "origin/main"
+
+
+async def test_git_check_merge_requires_target_when_no_parent_branch_confirmed(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_merge", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "target" in payload["error"]
+
+
+async def test_git_check_merge_missing_repo_path_returns_named_error():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_check_merge", {})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "repo_path" in payload["error"]
+
+
 async def test_git_conflict_take_ours_confirmation_gated_and_executes(tmp_git_repo_with_remote, tmp_path):
     from icx_engine.git.mcp_tools import dispatch_git_tool
     clone = _setup_readme_merge_conflict(tmp_git_repo_with_remote, tmp_path, "take_ours_clone")
@@ -2670,6 +2786,80 @@ async def test_git_check_dependency_pins_missing_target_ref_returns_named_error(
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
     assert "target_ref" in payload["error"]
+
+
+async def test_git_repin_dependency_pending_then_confirms_writes_new_sha(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import head_sha, stage_files, commit as gitcmd_commit
+    old_sha = head_sha(tmp_git_repo)
+    (tmp_git_repo / "package.json").write_text(json.dumps({
+        "dependencies": {"graphs": f"git+https://gitlab.example.com/group/graphs.git#{old_sha}"},
+    }, indent=2), encoding="utf-8")
+    stage_files(tmp_git_repo, ["package.json"])
+    gitcmd_commit(tmp_git_repo, "add package.json")
+    (tmp_git_repo / "other.txt").write_text("more history", encoding="utf-8")
+    stage_files(tmp_git_repo, ["other.txt"])
+    gitcmd_commit(tmp_git_repo, "advance main")
+    new_sha = head_sha(tmp_git_repo)
+    assert new_sha != old_sha
+
+    pending = await dispatch_git_tool("git_repin_dependency", {
+        "repo_path": str(tmp_git_repo), "manifest": "package.json", "dependency_name": "graphs",
+        "target_ref": "main", "dep_repo_path": str(tmp_git_repo),
+    })
+    pending_payload = json.loads(pending[0].text)
+    assert pending_payload["status"] == "pending_confirmation"
+    assert pending_payload["old_ref"] == old_sha
+    assert pending_payload["new_ref"] == new_sha
+    token = pending_payload["token"]
+
+    confirmed = await dispatch_git_tool("git_repin_dependency", {"confirm_token": token})
+    payload = json.loads(confirmed[0].text)
+    assert payload["ok"] is True
+    assert payload["old_ref"] == old_sha
+    assert payload["new_ref"] == new_sha
+
+    on_disk = json.loads((tmp_git_repo / "package.json").read_text(encoding="utf-8"))
+    assert on_disk["dependencies"]["graphs"] == f"git+https://gitlab.example.com/group/graphs.git#{new_sha}"
+
+
+async def test_git_repin_dependency_unknown_dependency_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    (tmp_git_repo / "package.json").write_text(json.dumps({"dependencies": {}}), encoding="utf-8")
+    result = await dispatch_git_tool("git_repin_dependency", {
+        "repo_path": str(tmp_git_repo), "manifest": "package.json", "dependency_name": "nope",
+        "target_ref": "main", "dep_repo_path": str(tmp_git_repo),
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "nope" in payload["error"]
+
+
+async def test_git_repin_dependency_missing_manifest_file_returns_named_error(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_repin_dependency", {
+        "repo_path": str(tmp_git_repo), "manifest": "package.json", "dependency_name": "graphs",
+        "target_ref": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "package.json" in payload["error"]
+
+
+async def test_git_repin_dependency_missing_fields_returns_named_errors(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_repin_dependency", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "manifest" in payload["error"]
+
+
+async def test_git_repin_dependency_rejects_reused_token():
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_repin_dependency", {"confirm_token": "not-a-real-token"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "Invalid or already-used" in payload["error"]
 
 
 async def test_git_check_dependency_pins_dep_repo_path_requires_dependency_name(tmp_git_repo):
