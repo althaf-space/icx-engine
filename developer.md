@@ -75,7 +75,9 @@ ICX/
 |   +-- cli.py                  # Typer CLI - all user-facing commands
 |   +-- engine.py               # core pipeline - called by CLI and MCP
 |   +-- grounding.py            # visual grounding pass - re-verifies analysis against images
-|   +-- mcp_server.py           # MCP stdio server
+|   +-- mcp_server.py           # MCP stdio server - _list_tools() advertises only the 8-tool core set (see Section 3's
+|   |                           # "Tool discovery architecture" subsection); _all_tools_full() (167 tools) is the real
+|   |                           # catalog everything else reads from, including icx_find_tools
 |   +-- mcp_hosts.py            # MCP host config file management
 |   +-- runtime_manager.py      # language-runtime discover/ask/remember/reuse registry (never installs SDKs)
 |   +-- context_completeness.py # fuse graph+grep+semantic+memory signals, rank, miss-check (pure)
@@ -778,6 +780,25 @@ ICX/
 ---
 
 ## 3. Architecture - how the pieces fit
+
+### Tool discovery architecture
+
+`mcp_server.py` has two distinct tool inventories, not one:
+
+- **`_all_tools_full()`** - the real catalog, all 167 `Tool()` definitions (165 original + `icx_find_tools` + `icx_call_tool`), aggregated the same way it always was (`GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS + WORKSTATUS_TOOLS + ...`). This is the single source of truth every other piece reads from - `icx_find_tools`'s module/query lookups, and (indirectly) `icx_call_tool`'s dispatch.
+- **`_list_tools()`** - the `@server.list_tools()` handler actually advertised to clients over the wire. Returns only 8 tools: `git_repo_status`, `jira_analyze_issue_fast`, `jira_analyze_issue`, `sonar_status`, `icx_get_methodology`, `icx_boost`, `icx_find_tools`, `icx_call_tool`.
+
+**Why:** shipping all 167 tool definitions in `tools/list` costs ~54,800 tokens before any real work happens, unconditionally, every session - measured directly, not estimated. Advertising only 8 cuts that to ~5,950 tokens (~89% reduction), and matters even more for editors with a hard total-tools cap across every connected MCP server (Windsurf: 100) - ICX alone used to exceed that on its own.
+
+**Critical invariant - do not violate this when adding or changing tools:** shrinking `_list_tools()` must never restrict what `_call_tool`/`_call_tool_impl` can actually dispatch. Every one of the 167 tools remains fully callable by name through the normal `tools/call` path regardless of whether it's in the advertised 8 - a client that already has a tool name cached, or one that doesn't respect the advertised list strictly, still gets a correct result. Only the *advertised listing* shrank; the *dispatch capability* is unchanged. This is what makes the whole pattern safe and cheaply reversible - verify it explicitly (call a non-core tool directly through `_call_tool_impl` in a test) whenever this area is touched.
+
+**How an agent reaches a non-core tool:**
+1. `icx_find_tools(module=...)` or `icx_find_tools(query=...)` or `icx_find_tools()` with neither (returns a module directory) - reads `_all_tools_full()`, returns full `name`/`description`/`inputSchema` for matches. An unknown module name returns the valid module list in the error text, never a silent empty result.
+2. `icx_call_tool(tool_name, arguments)` - forwards straight into `_call_tool_impl(tool_name, arguments)`, the exact same dispatch chain a native call would use. Zero new dispatch logic - it's a thin pass-through. A confirm_token-gated tool (e.g. `git_push`) still requires its normal two-call pattern when reached this way; gating is a property of the underlying tool, unaffected by how it's invoked.
+
+**Telemetry through the discovery path:** `_dispatch_with_telemetry(name, args)` is the shared helper both the native `_call_tool` entry point and `icx_call_tool`'s forwarding call - a tool invoked via `icx_call_tool` logs a `tool_calls.jsonl` entry under its own real name (e.g. `git_push`), not just under `icx_call_tool`. Both the outer (`icx_call_tool`) and inner (`git_push`) calls get logged - two entries per forwarded call is correct and expected, not a bug; `icx logs report` reflects real per-tool usage either way.
+
+Real-world precedent this pattern is adapted from: [MCP Gateway Registry's dynamic tool discovery](https://github.com/agentic-community/mcp-gateway-registry/blob/main/docs/dynamic-tool-discovery.md) (`intelligent_tool_finder` + `invoke_mcp_tool`) and Anthropic's [Tool Search Tool](https://www.anthropic.com/engineering/advanced-tool-use) (`defer_loading` + search) - ICX's version had to be pure server-side since `defer_loading` is a client/Claude-API-specific parameter an MCP server has no access to; this pattern needs no client cooperation at all.
 
 ### The pipeline
 

@@ -430,7 +430,6 @@ async def dispatch_memory_tool(name: str, arguments: dict) -> list[TextContent] 
                  "note": f"Memory not ready (status={mem_state!r}) - skipping search."}
             ))]
         from icx_engine.memory.schema import MemoryQueryInput
-        import functools
         qi = MemoryQueryInput(
             issue_key="search",
             project_key="",
