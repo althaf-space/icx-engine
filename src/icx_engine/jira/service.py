@@ -10,7 +10,7 @@ analogs; `create_issue`/`delete_issue` are the create/delete pair; `list_comment
 pair - all plain pass-throughs, GATED reasoning lives at the MCP/CLI layer.
 `search`/`get_issue` are a lightweight JQL search and raw single-issue fetch -
 distinct from the read pipeline's `JiraConnector.fetch()`/`RawIssueData`, and
-from `analyze_issue_fast`/`analyze_issue`'s full LLM analysis; both UNGATED.
+from `jira_analyze_issue_fast`/`jira_analyze_issue`'s full LLM analysis; both UNGATED.
 `link_types`/`create_link`/`delete_link` are issue-link CRUD (`link_types` is
 a global lookup resolved by domain, like `create_issue`/`search`;
 `create_link` resolves by its `inward_key`; `delete_link` takes an

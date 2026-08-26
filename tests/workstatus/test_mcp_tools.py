@@ -344,3 +344,30 @@ async def test_recent_project_tasks_default_lookback_is_90_days(monkeypatch):
     body = json.loads(route.calls[0].request.content)
     from datetime import date, timedelta
     assert body["interval"]["from"] == (date.today() - timedelta(days=90)).isoformat()
+
+
+# -- workstatus_list_members pagination -----------------------------------------------------
+
+async def test_list_members_default_call_unchanged(monkeypatch):
+    from unittest.mock import AsyncMock, patch
+    _load_cfg(monkeypatch, _configured_cfg())
+    members = [{"id": i} for i in range(4)]
+    with patch("icx_engine.workstatus.mcp_tools.service.list_members", new=AsyncMock(return_value=members)):
+        result = await dispatch_workstatus_tool("workstatus_list_members", {})
+    body = json.loads(result[0].text)
+    assert body["ok"] is True
+    assert len(body["members"]) == 4
+    assert "total" not in body
+
+
+async def test_list_members_with_limit_pages_correctly(monkeypatch):
+    from unittest.mock import AsyncMock, patch
+    _load_cfg(monkeypatch, _configured_cfg())
+    members = [{"id": i} for i in range(4)]
+    with patch("icx_engine.workstatus.mcp_tools.service.list_members", new=AsyncMock(return_value=members)):
+        result = await dispatch_workstatus_tool("workstatus_list_members", {"limit": 2})
+    body = json.loads(result[0].text)
+    assert len(body["members"]) == 2
+    assert body["total"] == 4
+    assert body["has_more"] is True
+    assert body["next_offset"] == 2

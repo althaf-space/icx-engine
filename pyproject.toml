@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "icx-engine"
-version = "0.6.6"
+version = "0.6.7"
 description = "ICX (Integrated Contextual X-ecution Engine): an AI-native intelligence layer for development teams. Extracts deep issue context from work trackers, processes attachments, runs multi-provider LLM analysis, maintains local-first RAG memory, builds a codebase knowledge graph, reads SonarQube findings, drives AI-assisted testing, automates the git/GitLab workflow (confirmation-gated), and integrates Workstatus time-tracking. Exposes everything to AI editors over MCP and the CLI."
 readme = "readme.md"
 license = { file = "license" }
@@ -93,6 +93,7 @@ Repository = "https://github.com/althaf-space/icx-engine"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-xdist>=3.5",
     "respx>=0.21",
 ]
 graph-extended = [

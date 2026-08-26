@@ -76,7 +76,7 @@ def test_rules_host_writes_routing_rule_to_its_global_file(fake_home):
         assert p.exists(), f"{name} rule file not written"
         text = p.read_text(encoding="utf-8")
         assert _RULE_START in text and _RULE_END in text
-        assert "analyze_issue_fast" in text
+        assert "jira_analyze_issue_fast" in text
         assert "icx_boost" in text and "/icx-boost" in text   # points to the on-demand command
 
 
@@ -103,7 +103,7 @@ def test_install_writes_hook_script(fake_home):
     install_enforcement(get_host("claude"))
     script = fake_home / ".icx" / "hooks" / _HOOK_FILENAME
     assert script.exists()
-    assert "analyze_issue_fast" in script.read_text(encoding="utf-8")
+    assert "jira_analyze_issue_fast" in script.read_text(encoding="utf-8")
 
 
 def test_install_merges_userpromptsubmit_preserving_existing(fake_home):
@@ -134,7 +134,7 @@ def test_install_inserts_claude_md_rule(fake_home):
     install_enforcement(get_host("claude"))
     md = (fake_home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
     assert _RULE_START in md and _RULE_END in md
-    assert "analyze_issue_fast" in md
+    assert "jira_analyze_issue_fast" in md
 
 
 def test_install_claude_md_idempotent_and_preserves_user_text(fake_home):
@@ -288,13 +288,13 @@ def test_detector_silent_on_plain_question(fake_home):
 
 def test_detector_adds_ticket_routing_on_bare_key(fake_home):
     out = _run_detector(fake_home, "VILMA-2048 login broken")
-    assert "analyze_issue_fast" in out
+    assert "jira_analyze_issue_fast" in out
     assert "icx_boost" not in out                    # boost is not injected by the hook anymore
 
 
 def test_detector_adds_ticket_routing_on_issue_url(fake_home):
     out = _run_detector(fake_home, "see https://github.com/org/repo/issues/12")
-    assert "analyze_issue_fast" in out
+    assert "jira_analyze_issue_fast" in out
     assert "icx_boost" not in out
 
 
@@ -325,22 +325,22 @@ def test_remove_cleans_legacy_hook_file(fake_home):
 
 def test_detector_routes_testing_requests(fake_home):
     out = _run_detector(fake_home, "please test the login screen and check coverage")
-    assert "start_testing_session" in out
-    assert "analyze_issue_fast" not in out and "sonar_" not in out
+    assert "testing_start_session" in out
+    assert "jira_analyze_issue_fast" not in out and "sonar_" not in out
     assert "icx_boost" not in out
 
 
 def test_detector_routes_sonar_requests(fake_home):
     out = _run_detector(fake_home, "show me the sonarqube quality gate and vulnerabilities")
     assert "sonar_" in out
-    assert "start_testing_session" not in out
+    assert "testing_start_session" not in out
     assert "icx_boost" not in out
 
 
 def test_detector_routes_workstatus_requests(fake_home):
     out = _run_detector(fake_home, "add a timesheet entry in workstatus for today")
     assert "workstatus_" in out
-    assert "sonar_" not in out and "start_testing_session" not in out
+    assert "sonar_" not in out and "testing_start_session" not in out
     assert "icx_boost" not in out
 
 
@@ -354,8 +354,8 @@ def test_detector_workstatus_directive_is_a_soft_preference_not_a_mandate(fake_h
 def test_rule_block_mandates_ticket_testing_sonar_routing():
     from icx_engine.mcp_hosts import _RULE_BLOCK
     b = _RULE_BLOCK
-    assert "analyze_issue_fast" in b
-    assert "start_testing_session" in b
+    assert "jira_analyze_issue_fast" in b
+    assert "testing_start_session" in b
     assert "sonar_" in b
 
 
@@ -376,7 +376,7 @@ def test_rule_block_covers_agent_connector_fallback_for_other_links():
 
 def test_rule_block_covers_full_tracker_crud_not_just_analysis():
     # regression: a create/search/lookup request has no ticket key yet, so it must not be
-    # scoped out of ICX routing just because analyze_issue_fast doesn't apply to it
+    # scoped out of ICX routing just because jira_analyze_issue_fast doesn't apply to it
     from icx_engine.mcp_hosts import _RULE_BLOCK
     b = _RULE_BLOCK.lower()
     assert "creating" in b and "searching" in b

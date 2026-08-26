@@ -4,7 +4,7 @@ Framework: intake -> context -> classify -> decompose -> plan -> execute -> self
 -> fail-well -> verify.
 
 `build_checklist(analysis)` returns the per-ticket MANDATORY checklist injected into every analyze
-response (unavoidable). `full_text()` returns the complete operative methodology for the get_methodology
+response (unavoidable). `full_text()` returns the complete operative methodology for the icx_get_methodology
 tool (pullable on demand).
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ ICX METHODOLOGY (mandatory - follow every step, every ticket):
 4 DECOMPOSE  - split into independently verifiable units; order by dependency; do the risky/uncertain
                part first.
 5 PLAN       - 2-4 REAL alternatives (different trade-offs), compare on the axes that matter, COMMIT
-               with a one-line reason + name the strongest rejected option. Then call lock_plan.
+               with a one-line reason + name the strongest rejected option. Then call icx_lock_plan.
 6 EXECUTE    - contract-first (signatures/schemas before bodies). Tools over guesses. Match the
                codebase's conventions. Localize uncertainty. Fix root cause, not the symptom.
 7 SELF-CHECK - adversarial: try to prove it wrong. Complete (every clause answered) + correct (run/
@@ -197,7 +197,7 @@ def _core(archetype: str) -> dict:
         "failure_modes_to_avoid": _FAILURE_MODES,
         "hallucination_high_risk_zones": _HIGH_RISK_ZONES,
         "gate_sequence": list(_GATE_SEQUENCE),
-        "note": "This is mandatory. Call get_methodology for the full framework (archetypes, "
+        "note": "This is mandatory. Call icx_get_methodology for the full framework (archetypes, "
                 "decision trees, failure modes, case studies).",
     }
 
@@ -205,9 +205,9 @@ def _core(archetype: str) -> dict:
 _GATE_SEQUENCE = (
     "answer INTAKE + CONTEXT before planning",
     "produce 2-4 alternatives, COMMIT one with reasons",
-    "call lock_plan with the files you will change (blocks on missed high-signal files)",
-    "implement only after lock_plan ok",
-    "run the VERIFICATION battery; record_verification before declaring done",
+    "call icx_lock_plan with the files you will change (blocks on missed high-signal files)",
+    "implement only after icx_lock_plan ok",
+    "run the VERIFICATION battery; icx_record_verification before declaring done",
 )
 
 
@@ -226,9 +226,9 @@ def build_checklist_for(prompt: str, archetype: str | None = None, env: dict | N
 
 def compact_checklist(prompt: str, archetype: str | None = None, env: dict | None = None) -> dict:
     """Token-lean methodology for the boost brief (returned on EVERY prompt): the operative spine
-    (one_pager) + this archetype's discipline/pitfalls + gate_sequence + a pointer to get_methodology
+    (one_pager) + this archetype's discipline/pitfalls + gate_sequence + a pointer to icx_get_methodology
     for the full framework. Drops the full intake/verification/failure-mode/hallucination lists (they
-    live in get_methodology) - saving ~600 tokens per call with no loss (they are one tool call away)."""
+    live in icx_get_methodology) - saving ~600 tokens per call with no loss (they are one tool call away)."""
     arch = archetype or classify_text(prompt or "")
     discipline, pitfalls = _ARCHETYPES.get(arch, _ARCHETYPES["coding"])
     return {
@@ -240,12 +240,12 @@ def compact_checklist(prompt: str, archetype: str | None = None, env: dict | Non
         "archetype_pitfalls": pitfalls,
         "gate_sequence": list(_GATE_SEQUENCE),
         "note": "Full framework (intake checklist, verification battery, failure modes, hallucination "
-                "zones, all archetypes) is one call away: get_methodology.",
+                "zones, all archetypes) is one call away: icx_get_methodology.",
     }
 
 
 def full_text() -> str:
-    """Complete operative methodology for the get_methodology tool. ASCII-only."""
+    """Complete operative methodology for the icx_get_methodology tool. ASCII-only."""
     parts = [
         "# ICX Agent Methodology (mandatory)\n",
         ONE_PAGER,

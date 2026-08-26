@@ -74,6 +74,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_APPLY_UPDATE_TOOL,
@@ -103,20 +104,26 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_ISSUE_TYPES_TOOL,
         description=(
             "USE WHEN the human wants to create a Jira issue and the exact issuetype name/id for "
             "the target project isn't already known: call this first. Issue types are configured "
-            "per-project - never guess a name. Read-only, UNGATED. Pass `domain` only when "
+            "per-project - never guess a name. Read-only, UNGATED. Optional limit/offset to page "
+            "results. Pass `domain` only when "
             "multiple Jira connections are configured and none is set as default."
         ),
         inputSchema={
             "type": "object",
-            "properties": {"project": {"type": "string"}, "domain": {"type": "string"}},
+            "properties": {
+                "project": {"type": "string"}, "domain": {"type": "string"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
+            },
             "required": ["project"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_GET_CREATEMETA_FIELDS_TOOL,
@@ -149,6 +156,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["project", "issuetype_id"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_CREATE_ISSUE_TOOL,
@@ -184,6 +192,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["project", "issuetype", "summary"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_DELETE_ISSUE_TOOL,
@@ -206,18 +215,24 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_COMMENT_LIST_TOOL,
         description=(
             "USE WHEN the human wants to see the comments on a Jira issue. Read-only, UNGATED. "
-            "Requires a resolvable Jira connection for the issue's key."
+            "Optional limit/offset to page results. Requires a resolvable Jira connection for "
+            "the issue's key."
         ),
         inputSchema={
             "type": "object",
-            "properties": {"issue_key": {"type": "string"}},
+            "properties": {
+                "issue_key": {"type": "string"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
+            },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_COMMENT_ADD_TOOL,
@@ -236,6 +251,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "comment"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_COMMENT_EDIT_TOOL,
@@ -254,6 +270,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "comment_id", "comment"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_COMMENT_DELETE_TOOL,
@@ -277,15 +294,16 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "comment_id"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_SEARCH_TOOL,
         description=(
             "USE WHEN the human wants to find Jira issues matching a JQL query. This is a "
             "LIGHTWEIGHT, RAW search - it returns bare Jira issue fields with NO LLM analysis, "
-            "distinct from analyze_issue_fast/analyze_issue (which run full LLM analysis on a "
+            "distinct from jira_analyze_issue_fast/jira_analyze_issue (which run full LLM analysis on a "
             "single already-known issue). Use jira_search to discover candidate issue keys "
-            "first, then call analyze_issue_fast/analyze_issue on a specific key afterwards if "
+            "first, then call jira_analyze_issue_fast/jira_analyze_issue on a specific key afterwards if "
             "deep analysis is needed - this tool does not replace those. UNGATED, read-only, "
             "executes immediately. Cost-capped server-side: max_results is clamped to 100 "
             "regardless of what is requested, and fields defaults to a small set "
@@ -305,6 +323,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["jql"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_GET_ISSUE_TOOL,
@@ -312,7 +331,7 @@ JIRA_TOOLS: list[Tool] = [
             "USE WHEN the human wants a cheap, raw look at a single Jira issue's current "
             "fields - e.g. a quick status check before deciding an action. This is a "
             "LIGHTWEIGHT, RAW fetch - it returns Jira's bare field JSON with NO LLM analysis. "
-            "It is NOT a replacement for analyze_issue_fast/analyze_issue, which run full LLM "
+            "It is NOT a replacement for jira_analyze_issue_fast/jira_analyze_issue, which run full LLM "
             "analysis and produce ICX's structured issue context - use those instead when real "
             "analysis is needed, use jira_get_issue only for a quick raw peek. UNGATED, "
             "read-only, executes immediately. Pass `fields` to limit which fields come back; "
@@ -326,6 +345,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LINK_TYPES_TOOL,
@@ -343,6 +363,7 @@ JIRA_TOOLS: list[Tool] = [
             "properties": {"domain": {"type": "string"}},
             "required": [],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LINK_CREATE_TOOL,
@@ -363,6 +384,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["link_type_name", "inward_key", "outward_key"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_LINK_DELETE_TOOL,
@@ -390,6 +412,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "link_id"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_SET_ASSIGNEE_TOOL,
@@ -411,6 +434,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_SEARCH_ASSIGNABLE_USERS_TOOL,
@@ -420,17 +444,19 @@ JIRA_TOOLS: list[Tool] = [
             "Returns users assignable to `issue_key`, each with a real `accountId`, optionally "
             "narrowed by `query` (name/email substring). get_current_user only resolves the "
             "caller's own accountId, never someone else's - this is the discovery path for "
-            "anyone else, so account_id is never guessed. Read-only, UNGATED. Requires a "
-            "resolvable Jira connection for the issue_key."
+            "anyone else, so account_id is never guessed. Read-only, UNGATED. Optional "
+            "limit/offset to page results. Requires a resolvable Jira connection for the issue_key."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "issue_key": {"type": "string"},
                 "query": {"type": "string"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
             },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_ATTACHMENT_UPLOAD_TOOL,
@@ -460,6 +486,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_ATTACHMENT_DELETE_TOOL,
@@ -484,6 +511,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "attachment_id"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_GET_CURRENT_USER_TOOL,
@@ -506,19 +534,24 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": [],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_WATCHERS_TOOL,
         description=(
             "USE WHEN the human wants to see who is watching a Jira issue. Read-only, "
-            "UNGATED, executes immediately. Requires a resolvable Jira connection for "
-            "the issue's key."
+            "UNGATED, executes immediately. Optional limit/offset to page results. Requires a "
+            "resolvable Jira connection for the issue's key."
         ),
         inputSchema={
             "type": "object",
-            "properties": {"issue_key": {"type": "string"}},
+            "properties": {
+                "issue_key": {"type": "string"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
+            },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_WORKLOGS_TOOL,
@@ -526,14 +559,18 @@ JIRA_TOOLS: list[Tool] = [
             "USE WHEN the human wants to see the work log entries on a Jira issue - "
             "who logged time, how much, and when. Read-only, UNGATED, executes "
             "immediately. Call this before jira_worklog_edit/jira_worklog_delete to "
-            "find a worklog_id and see its author. Requires a resolvable Jira "
-            "connection for the issue's key."
+            "find a worklog_id and see its author. Optional limit/offset to page results. "
+            "Requires a resolvable Jira connection for the issue's key."
         ),
         inputSchema={
             "type": "object",
-            "properties": {"issue_key": {"type": "string"}},
+            "properties": {
+                "issue_key": {"type": "string"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
+            },
             "required": ["issue_key"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_SET_WATCHER_TOOL,
@@ -565,6 +602,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "watching"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_WORKLOG_ADD_TOOL,
@@ -589,6 +627,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "time_spent_seconds", "started"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_WORKLOG_EDIT_TOOL,
@@ -620,6 +659,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "worklog_id"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_WORKLOG_DELETE_TOOL,
@@ -645,6 +685,7 @@ JIRA_TOOLS: list[Tool] = [
             },
             "required": ["issue_key", "worklog_id"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
 ]
 
@@ -655,6 +696,18 @@ def _ok(payload: dict) -> list[TextContent]:
 
 def _err(message: str) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps({"ok": False, "error": message}))]
+
+
+def _paginate(items: list, limit, offset) -> tuple[list, dict]:
+    """limit omitted (None): returns items unchanged, no extra fields - exact legacy behavior.
+    limit given: slices [offset:offset+limit] and returns total/has_more/next_offset alongside."""
+    if limit is None:
+        return items, {}
+    offset = offset or 0
+    total = len(items)
+    sliced = items[offset:offset + limit]
+    has_more = offset + len(sliced) < total
+    return sliced, {"total": total, "has_more": has_more, "next_offset": (offset + len(sliced)) if has_more else None}
 
 
 async def _resolve_worklog_author(issue_key: str, worklog_id: str) -> str | None:
@@ -730,7 +783,8 @@ async def dispatch_jira_tool(name: str, arguments: dict) -> list[TextContent] | 
             return _err("project is required and must be a non-empty string.")
         try:
             result = await service.list_issue_types(project, domain=arguments.get("domain"))
-            return _ok({"issue_types": result})
+            result, extra = _paginate(result, arguments.get("limit"), arguments.get("offset"))
+            return _ok({"issue_types": result, **extra})
         except Exception as exc:
             return _err(str(exc))
 
@@ -826,7 +880,8 @@ async def dispatch_jira_tool(name: str, arguments: dict) -> list[TextContent] | 
             return _err("issue_key is required and must be a non-empty string.")
         try:
             result = await service.list_comments(issue_key)
-            return _ok(result)
+            comments, extra = _paginate(result["comments"], arguments.get("limit"), arguments.get("offset"))
+            return _ok({**result, "comments": comments, **extra})
         except Exception as exc:
             return _err(str(exc))
 
@@ -985,7 +1040,8 @@ async def dispatch_jira_tool(name: str, arguments: dict) -> list[TextContent] | 
             return _err("issue_key is required and must be a non-empty string.")
         try:
             result = await service.search_assignable_users(issue_key, query=arguments.get("query") or "")
-            return _ok({"users": result})
+            result, extra = _paginate(result, arguments.get("limit"), arguments.get("offset"))
+            return _ok({"users": result, **extra})
         except Exception as exc:
             return _err(str(exc))
 
@@ -1078,7 +1134,8 @@ async def dispatch_jira_tool(name: str, arguments: dict) -> list[TextContent] | 
             return _err("issue_key is required and must be a non-empty string.")
         try:
             result = await service.list_watchers(issue_key)
-            return _ok(result)
+            watchers, extra = _paginate(result["watchers"], arguments.get("limit"), arguments.get("offset"))
+            return _ok({**result, "watchers": watchers, **extra})
         except Exception as exc:
             return _err(str(exc))
 
@@ -1088,7 +1145,8 @@ async def dispatch_jira_tool(name: str, arguments: dict) -> list[TextContent] | 
             return _err("issue_key is required and must be a non-empty string.")
         try:
             result = await service.list_worklogs(issue_key)
-            return _ok(result)
+            worklogs, extra = _paginate(result["worklogs"], arguments.get("limit"), arguments.get("offset"))
+            return _ok({**result, "worklogs": worklogs, **extra})
         except Exception as exc:
             return _err(str(exc))
 

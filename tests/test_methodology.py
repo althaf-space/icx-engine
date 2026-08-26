@@ -9,7 +9,7 @@ def test_build_checklist_shape_and_mandatory():
     assert c["mandatory"] is True
     assert c["archetype"] == "debugging"
     assert c["intake_checklist"] and c["verification_battery"] and c["gate_sequence"]
-    assert "lock_plan" in " ".join(c["gate_sequence"])
+    assert "icx_lock_plan" in " ".join(c["gate_sequence"])
     assert c["one_pager"] == ONE_PAGER
     assert isinstance(c["archetype_discipline"], str) and c["archetype_pitfalls"]
     assert c["failure_modes_to_avoid"] and c["hallucination_high_risk_zones"]
@@ -45,21 +45,21 @@ def test_one_pager_ascii():
 async def test_get_methodology_tool_returns_framework():
     from icx_engine.mcp_server import _call_tool
     import json
-    r = await _call_tool("get_methodology", {})
+    r = await _call_tool("icx_get_methodology", {})
     p = json.loads(r[0].text)
     assert p["version"] == METHODOLOGY_VERSION
     assert "INTAKE" in p["methodology"]
 
 
 async def test_get_methodology_registered_before_memory_and_testing():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        names = [t.name for t in await _list_tools()]
-    assert "get_methodology" in names
-    assert names.index("get_methodology") < names.index("start_testing_session")
+        names = [t.name for t in await _all_tools_full()]
+    assert "icx_get_methodology" in names
+    assert names.index("icx_get_methodology") < names.index("testing_start_session")
 
 
 def test_apply_methodology_injects_one_pager_and_checklist():

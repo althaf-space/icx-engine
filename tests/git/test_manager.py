@@ -262,11 +262,18 @@ def test_start_branch_creates_and_switches_for_ticket(tmp_git_repo_with_remote):
     assert current_branch(tmp_git_repo_with_remote) == "feature/fix-login-timeout-ABC-123"
 
 
-def test_start_branch_ticketless(tmp_git_repo_with_remote):
+def test_start_branch_ticketless_requires_project_code(tmp_git_repo_with_remote):
     mgr = GitLifecycleManager(tmp_git_repo_with_remote)
     mgr.validate()
-    result = mgr.start_branch(None, "Refactor auth module", "main")
-    assert result.branch_name == "feature/refactor-auth-module"
+    with pytest.raises(GitWorkflowError, match="project_code is required"):
+        mgr.start_branch(None, "Refactor auth module", "main")
+
+
+def test_start_branch_ticketless_with_project_code(tmp_git_repo_with_remote):
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.start_branch(None, "Refactor auth module", "main", project_code="ICX")
+    assert result.branch_name == "feature/refactor-auth-module-ICX-0000"
 
 
 def test_start_branch_switches_to_existing_instead_of_recreating(tmp_git_repo_with_remote):
@@ -309,10 +316,10 @@ def test_start_branch_raises_when_policy_requires_ticket_and_none_given(tmp_git_
     mgr.validate()
     mgr.set_branch_name_policy(True)
     with pytest.raises(GitWorkflowError, match="Missing JIRA/ticket identifier"):
-        mgr.start_branch(None, "Refactor auth module", "main")
+        mgr.start_branch(None, "Refactor auth module", "main", project_code="ICX")
     # never created the invalid branch locally
     from icx_engine.git.gitcmd import local_branch_exists as _lbe
-    assert _lbe(tmp_git_repo_with_remote, "feature/refactor-auth-module") is False
+    assert _lbe(tmp_git_repo_with_remote, "feature/refactor-auth-module-ICX-0000") is False
 
 
 def test_start_branch_succeeds_with_ticket_even_when_policy_requires_it(tmp_git_repo_with_remote, tmp_path, monkeypatch):
@@ -370,6 +377,52 @@ def test_start_branch_switched_to_existing_reports_commits_behind_parent(tmp_git
     assert result.switched_to_existing is True
     assert result.created is False
     assert result.commits_behind_parent == 1
+
+
+def test_checkout_branch_switches_to_existing_local_branch(tmp_git_repo_with_remote):
+    create_branch_from(tmp_git_repo_with_remote, "development", "main")
+    checkout(tmp_git_repo_with_remote, "main")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.checkout_branch("development")
+    assert result.branch_name == "development"
+    assert result.tracked_from_remote is False
+    assert result.stashed is False
+    assert current_branch(tmp_git_repo_with_remote) == "development"
+
+
+def test_checkout_branch_creates_tracking_branch_for_remote_only_branch(tmp_git_repo_with_remote):
+    import subprocess
+    create_branch_from(tmp_git_repo_with_remote, "development", "main")
+    subprocess.run(["git", "push", "origin", "development"], cwd=str(tmp_git_repo_with_remote), check=True)
+    subprocess.run(["git", "branch", "-D", "development"], cwd=str(tmp_git_repo_with_remote), check=True)
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.checkout_branch("development")
+    assert result.tracked_from_remote is True
+    assert current_branch(tmp_git_repo_with_remote) == "development"
+
+
+def test_checkout_branch_auto_stashes_dirty_tree_and_leaves_it_stashed(tmp_git_repo_with_remote):
+    from icx_engine.git.gitcmd import stash_list
+    create_branch_from(tmp_git_repo_with_remote, "development", "main")
+    (tmp_git_repo_with_remote / "dirty.txt").write_text("uncommitted", encoding="utf-8")
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    result = mgr.checkout_branch("development")
+    assert result.stashed is True
+    assert current_branch(tmp_git_repo_with_remote) == "development"
+    stashes = stash_list(tmp_git_repo_with_remote)
+    assert len(stashes) == 1
+    # never auto-popped onto the target branch
+    assert not (tmp_git_repo_with_remote / "dirty.txt").exists()
+
+
+def test_checkout_branch_raises_when_branch_missing_everywhere(tmp_git_repo_with_remote):
+    mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+    mgr.validate()
+    with pytest.raises(GitWorkflowError, match="does-not-exist"):
+        mgr.checkout_branch("does-not-exist")
 
 
 def test_current_ticket_key_parses_from_branch_name(tmp_git_repo_with_remote):
@@ -1202,7 +1255,7 @@ async def test_create_mr_for_ticket_flags_real_conflict_when_gitlab_reports_only
     assert "README.md" in result.local_check
 
 
-def test_post_merge_cleanup_raises_when_mr_not_actually_merged(tmp_git_repo_with_remote, monkeypatch):
+async def test_post_merge_cleanup_raises_when_mr_not_actually_merged(tmp_git_repo_with_remote, monkeypatch):
     with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
         mock_client = AsyncMock()
         mock_client.get_merge_request.return_value = {"state": "opened"}
@@ -1211,10 +1264,10 @@ def test_post_merge_cleanup_raises_when_mr_not_actually_merged(tmp_git_repo_with
         mgr = GitLifecycleManager(tmp_git_repo_with_remote)
         mgr.validate()
         with pytest.raises(GitWorkflowError, match="not.*merged"):
-            mgr.post_merge_cleanup("main", "feature/x-ABC-1", "ABC-1", delete_backups=False, gitlab_conn=_gitlab_conn(), mr_iid=5)
+            await mgr.post_merge_cleanup("main", "feature/x-ABC-1", "ABC-1", gitlab_conn=_gitlab_conn(), mr_iid=5)
 
 
-def test_post_merge_cleanup_deletes_feature_branch_when_mr_confirmed_merged(tmp_git_repo_with_remote, monkeypatch):
+async def test_post_merge_cleanup_deletes_feature_branch_when_mr_confirmed_merged(tmp_git_repo_with_remote, monkeypatch):
     from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit, local_branch_exists
     import subprocess
     create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-1", "main")
@@ -1234,22 +1287,91 @@ def test_post_merge_cleanup_deletes_feature_branch_when_mr_confirmed_merged(tmp_
         mock_client = AsyncMock()
         mock_client.get_merge_request.return_value = {"state": "merged"}
         mock_client_cls.return_value.__aenter__.return_value = mock_client
-        with patch("icx_engine.git.manager.asyncio") as mock_asyncio:
-            import asyncio as real_asyncio
-            mock_asyncio.run = real_asyncio.run
-            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
-            mgr.validate()
-            checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
-            result = mgr.post_merge_cleanup(
-                "main", "feature/x-ABC-1", "ABC-1", delete_backups=False,
-                gitlab_conn=_gitlab_conn(), mr_iid=5,
-            )
+        mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+        mgr.validate()
+        checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
+        # feature/x-ABC-1 was never pushed to origin under its own name, so remote
+        # deletion hits "remote ref does not exist" - the idempotent not-an-error path.
+        result = await mgr.post_merge_cleanup(
+            "main", "feature/x-ABC-1", "ABC-1", gitlab_conn=_gitlab_conn(), mr_iid=5,
+        )
 
     assert result.feature_branch_deleted is True
+    assert result.remote_branch_deleted is False
     assert local_branch_exists(tmp_git_repo_with_remote, "feature/x-ABC-1") is False
 
 
-def test_post_merge_cleanup_nullable_ticket_key_uses_branch_slug_for_backup_prune(tmp_git_repo_with_remote, monkeypatch):
+async def test_post_merge_cleanup_deletes_pushed_remote_branch(tmp_git_repo_with_remote, monkeypatch):
+    """Feature branch pushed to origin under its own name (the normal MR flow) - cleanup
+    must delete it there too, not just locally."""
+    from icx_engine.git.gitcmd import (
+        create_branch_from, checkout, stage_files, commit as gitcmd_commit,
+        local_branch_exists, remote_branch_exists,
+    )
+    import subprocess
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-2", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-2")
+    (tmp_git_repo_with_remote / "a.txt").write_text("a", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["a.txt"])
+    gitcmd_commit(tmp_git_repo_with_remote, "ABC-2 add a.txt")
+    subprocess.run(["git", "push", "origin", "feature/x-ABC-2"], cwd=str(tmp_git_repo_with_remote), check=True)
+    subprocess.run(["git", "push", "origin", "feature/x-ABC-2:main"], cwd=str(tmp_git_repo_with_remote), check=True)
+    checkout(tmp_git_repo_with_remote, "main")
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+
+    with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get_merge_request.return_value = {"state": "merged"}
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+        mgr.validate()
+        checkout(tmp_git_repo_with_remote, "feature/x-ABC-2")
+        result = await mgr.post_merge_cleanup(
+            "main", "feature/x-ABC-2", "ABC-2", gitlab_conn=_gitlab_conn(), mr_iid=5,
+        )
+
+    assert result.feature_branch_deleted is True
+    assert result.remote_branch_deleted is True
+    assert local_branch_exists(tmp_git_repo_with_remote, "feature/x-ABC-2") is False
+    assert remote_branch_exists(tmp_git_repo_with_remote, "feature/x-ABC-2") is False
+
+
+async def test_post_merge_cleanup_deletes_both_backup_tiers_unconditionally(tmp_git_repo_with_remote, monkeypatch):
+    from icx_engine.git.gitcmd import (
+        create_branch_from, checkout, stage_files, commit as gitcmd_commit, local_branch_exists,
+    )
+    from icx_engine.git.safety import create_backup, sync_backup
+    import subprocess
+    create_branch_from(tmp_git_repo_with_remote, "feature/x-ABC-4", "main")
+    checkout(tmp_git_repo_with_remote, "feature/x-ABC-4")
+    (tmp_git_repo_with_remote / "a.txt").write_text("a", encoding="utf-8")
+    stage_files(tmp_git_repo_with_remote, ["a.txt"])
+    gitcmd_commit(tmp_git_repo_with_remote, "ABC-4 add a.txt")
+    create_backup(tmp_git_repo_with_remote, "feature/x-ABC-4", "ABC-4")
+    sync_backup(tmp_git_repo_with_remote, "feature/x-ABC-4", "ABC-4")
+    subprocess.run(["git", "push", "origin", "feature/x-ABC-4:main"], cwd=str(tmp_git_repo_with_remote), check=True)
+    checkout(tmp_git_repo_with_remote, "main")
+    monkeypatch.setattr("icx_engine.git.manager.project_path_from_remote_url", lambda url: "group/project")
+
+    assert local_branch_exists(tmp_git_repo_with_remote, "backup-latest/ABC-4") is True
+
+    with patch("icx_engine.git.manager.GitLabClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get_merge_request.return_value = {"state": "merged"}
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+        mgr.validate()
+        checkout(tmp_git_repo_with_remote, "feature/x-ABC-4")
+        result = await mgr.post_merge_cleanup(
+            "main", "feature/x-ABC-4", "ABC-4", gitlab_conn=_gitlab_conn(), mr_iid=5,
+        )
+
+    assert result.backup_latest_deleted is True
+    assert len(result.backups_deleted) == 1
+    assert local_branch_exists(tmp_git_repo_with_remote, "backup-latest/ABC-4") is False
+
+
+async def test_post_merge_cleanup_nullable_ticket_key_uses_branch_slug_for_backup_prune(tmp_git_repo_with_remote, monkeypatch):
     from icx_engine.git.gitcmd import create_branch_from, checkout, stage_files, commit as gitcmd_commit
     import subprocess
     create_branch_from(tmp_git_repo_with_remote, "feature/x-nope", "main")
@@ -1265,24 +1387,20 @@ def test_post_merge_cleanup_nullable_ticket_key_uses_branch_slug_for_backup_prun
         mock_client = AsyncMock()
         mock_client.get_merge_request.return_value = {"state": "merged"}
         mock_client_cls.return_value.__aenter__.return_value = mock_client
-        with patch("icx_engine.git.manager.asyncio") as mock_asyncio:
-            import asyncio as real_asyncio
-            mock_asyncio.run = real_asyncio.run
-            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
-            mgr.validate()
-            checkout(tmp_git_repo_with_remote, "feature/x-nope")
-            # No ticket_key - must not raise (e.g. globbing "backup/None-*") and must
-            # complete cleanup using a slug of feature_branch instead.
-            result = mgr.post_merge_cleanup(
-                "main", "feature/x-nope", None, delete_backups=True,
-                gitlab_conn=_gitlab_conn(), mr_iid=5,
-            )
+        mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+        mgr.validate()
+        checkout(tmp_git_repo_with_remote, "feature/x-nope")
+        # No ticket_key - must not raise (e.g. globbing "backup/None-*") and must
+        # complete cleanup using a slug of feature_branch instead.
+        result = await mgr.post_merge_cleanup(
+            "main", "feature/x-nope", None, gitlab_conn=_gitlab_conn(), mr_iid=5,
+        )
 
     assert result.feature_branch_deleted is True
     assert result.backups_deleted == []
 
 
-def test_post_merge_cleanup_raises_when_file_genuinely_missing_after_fast_forward(tmp_git_repo_with_remote, monkeypatch):
+async def test_post_merge_cleanup_raises_when_file_genuinely_missing_after_fast_forward(tmp_git_repo_with_remote, monkeypatch):
     """GitLab's API can say state=merged while the local fast-forward genuinely does not
     bring in the feature branch's content (e.g. the MR was merged against a different
     remote state than what this clone has fetched). The content check must catch this -
@@ -1302,23 +1420,19 @@ def test_post_merge_cleanup_raises_when_file_genuinely_missing_after_fast_forwar
         mock_client = AsyncMock()
         mock_client.get_merge_request.return_value = {"state": "merged"}
         mock_client_cls.return_value.__aenter__.return_value = mock_client
-        with patch("icx_engine.git.manager.asyncio") as mock_asyncio:
-            import asyncio as real_asyncio
-            mock_asyncio.run = real_asyncio.run
-            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
-            mgr.validate()
-            checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
-            with pytest.raises(GitWorkflowError, match="b.txt"):
-                mgr.post_merge_cleanup(
-                    "main", "feature/x-ABC-1", "ABC-1", delete_backups=False,
-                    gitlab_conn=_gitlab_conn(), mr_iid=5,
-                )
+        mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+        mgr.validate()
+        checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
+        with pytest.raises(GitWorkflowError, match="b.txt"):
+            await mgr.post_merge_cleanup(
+                "main", "feature/x-ABC-1", "ABC-1", gitlab_conn=_gitlab_conn(), mr_iid=5,
+            )
 
     # Safety check must fire before the feature branch is deleted.
     assert local_branch_exists(tmp_git_repo_with_remote, "feature/x-ABC-1") is True
 
 
-def test_post_merge_cleanup_deletes_feature_branch_after_squash_merge(tmp_git_repo_with_remote, monkeypatch):
+async def test_post_merge_cleanup_deletes_feature_branch_after_squash_merge(tmp_git_repo_with_remote, monkeypatch):
     """GitLab's squash-merge gives parent a NEW commit that is not a descendant of the
     feature branch's tip - `git branch -d` (force=False) legitimately refuses this as
     'not fully merged' even though the content genuinely landed. Before the fix, this
@@ -1347,16 +1461,12 @@ def test_post_merge_cleanup_deletes_feature_branch_after_squash_merge(tmp_git_re
         mock_client = AsyncMock()
         mock_client.get_merge_request.return_value = {"state": "merged"}
         mock_client_cls.return_value.__aenter__.return_value = mock_client
-        with patch("icx_engine.git.manager.asyncio") as mock_asyncio:
-            import asyncio as real_asyncio
-            mock_asyncio.run = real_asyncio.run
-            mgr = GitLifecycleManager(tmp_git_repo_with_remote)
-            mgr.validate()
-            checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
-            result = mgr.post_merge_cleanup(
-                "main", "feature/x-ABC-1", "ABC-1", delete_backups=False,
-                gitlab_conn=_gitlab_conn(), mr_iid=5,
-            )
+        mgr = GitLifecycleManager(tmp_git_repo_with_remote)
+        mgr.validate()
+        checkout(tmp_git_repo_with_remote, "feature/x-ABC-1")
+        result = await mgr.post_merge_cleanup(
+            "main", "feature/x-ABC-1", "ABC-1", gitlab_conn=_gitlab_conn(), mr_iid=5,
+        )
 
     assert result.feature_branch_deleted is True
     assert local_branch_exists(tmp_git_repo_with_remote, "feature/x-ABC-1") is False

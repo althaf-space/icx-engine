@@ -432,3 +432,35 @@ async def test_no_active_gitlab_connection_returns_err_for_every_tool(tool_name,
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
     assert payload["error"] == "No active GitLab connection. Run `icx gitlab --add` first."
+
+
+# -- gitlab_list_tags pagination ---------------------------------------------------------
+
+async def test_gitlab_list_tags_default_call_unchanged():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    mock_client = AsyncMock()
+    mock_client.list_tags.return_value = [{"name": f"v{i}"} for i in range(4)]
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool("gitlab_list_tags", {"project": "group/project"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert len(payload["tags"]) == 4
+    assert "total" not in payload
+
+
+async def test_gitlab_list_tags_with_limit_pages_correctly():
+    from icx_engine.gitlab.mcp_tools import dispatch_gitlab_tool
+    mock_client = AsyncMock()
+    mock_client.list_tags.return_value = [{"name": f"v{i}"} for i in range(4)]
+    with patch("icx_engine.gitlab.mcp_tools.ConfigManager") as mock_cfg_cls:
+        mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = _CONN
+        with patch("icx_engine.gitlab.mcp_tools.GitLabClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            result = await dispatch_gitlab_tool("gitlab_list_tags", {"project": "group/project", "limit": 2})
+    payload = json.loads(result[0].text)
+    assert len(payload["tags"]) == 2
+    assert payload["total"] == 4
+    assert payload["has_more"] is True

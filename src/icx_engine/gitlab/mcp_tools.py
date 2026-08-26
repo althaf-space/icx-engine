@@ -52,6 +52,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": [],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_MR_CHANGES_TOOL,
@@ -69,6 +70,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": ["mr_iid"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_COMMITS_TOOL,
@@ -89,6 +91,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": [],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_COMPARE_TOOL,
@@ -107,6 +110,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": ["from_ref", "to_ref"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_TAGS_TOOL,
@@ -115,13 +119,18 @@ GITLAB_TOOLS: list[Tool] = [
             "new one: MUST call this FIRST, before git_create_tag, with either project or "
             "repo_path - never invent an environment name or version series from guesswork. "
             "Returns every tag with its target commit and creation date, newest first per GitLab's "
-            "own ordering. Read-only, UNGATED. Requires an active GitLab connection."
+            "own ordering. Read-only, UNGATED. Optional limit/offset to page results. Requires an "
+            "active GitLab connection."
         ),
         inputSchema={
             "type": "object",
-            "properties": {"project": {"type": "string"}, "repo_path": {"type": "string"}},
+            "properties": {
+                "project": {"type": "string"}, "repo_path": {"type": "string"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
+            },
             "required": [],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_BRANCHES_TOOL,
@@ -130,17 +139,19 @@ GITLAB_TOOLS: list[Tool] = [
             "proposing a parent/base branch, or to confirm an exact branch name rather than "
             "guessing between similarly-named ones: MUST call this instead of inventing a branch "
             "name. Returns name/protected/default/last-commit-date per branch. `search` (if given) "
-            "is GitLab's own server-side substring filter. Read-only, UNGATED. Requires an active "
-            "GitLab connection."
+            "is GitLab's own server-side substring filter. Read-only, UNGATED. Optional limit/offset "
+            "to page results. Requires an active GitLab connection."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "project": {"type": "string"}, "repo_path": {"type": "string"},
                 "search": {"type": "string"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
             },
             "required": [],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_PIPELINES_TOOL,
@@ -150,16 +161,19 @@ GITLAB_TOOLS: list[Tool] = [
             "guessing from timing alone whether a merge refusal means a real conflict or just an "
             "in-progress/not-yet-started pipeline. `ref` (branch or tag name) narrows to that ref; "
             "`status` (e.g. 'running', 'success', 'failed') narrows further. Returns the 20 most "
-            "recent matching pipelines. Read-only, UNGATED. Requires an active GitLab connection."
+            "recent matching pipelines. Read-only, UNGATED. Optional limit/offset to page within "
+            "those 20. Requires an active GitLab connection."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "project": {"type": "string"}, "repo_path": {"type": "string"},
                 "ref": {"type": "string"}, "status": {"type": "string"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
             },
             "required": [],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_PIPELINE_STATUS_TOOL,
@@ -178,6 +192,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": ["pipeline_id"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_JOB_LOG_TOOL,
@@ -205,6 +220,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": ["job_id"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_CLOSE_MR_TOOL,
@@ -225,6 +241,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": ["mr_iid"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_REOPEN_MR_TOOL,
@@ -244,6 +261,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": ["mr_iid"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_MERGE_MR_TOOL,
@@ -267,6 +285,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": ["mr_iid"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_REFRESH_MERGE_STATUS_TOOL,
@@ -287,6 +306,7 @@ GITLAB_TOOLS: list[Tool] = [
             },
             "required": ["mr_iid"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     ),
 ]
 
@@ -297,6 +317,18 @@ def _ok(payload: dict) -> list[TextContent]:
 
 def _err(message: str) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps({"ok": False, "error": message}))]
+
+
+def _paginate(items: list, limit, offset) -> tuple[list, dict]:
+    """limit omitted (None): returns items unchanged, no extra fields - exact legacy behavior.
+    limit given: slices [offset:offset+limit] and returns total/has_more/next_offset alongside."""
+    if limit is None:
+        return items, {}
+    offset = offset or 0
+    total = len(items)
+    sliced = items[offset:offset + limit]
+    has_more = offset + len(sliced) < total
+    return sliced, {"total": total, "has_more": has_more, "next_offset": (offset + len(sliced)) if has_more else None}
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -436,7 +468,8 @@ async def dispatch_gitlab_tool(name: str, arguments: dict) -> list[TextContent] 
                 return _err("Either project or repo_path is required (a repo_path remote must be a recognized GitLab URL).")
             async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
                 result = await client.list_tags(project)
-            return _ok({"tags": result})
+            result, extra = _paginate(result, arguments.get("limit"), arguments.get("offset"))
+            return _ok({"tags": result, **extra})
         except Exception as exc:
             return _err(str(exc))
 
@@ -450,7 +483,8 @@ async def dispatch_gitlab_tool(name: str, arguments: dict) -> list[TextContent] 
                 return _err("Either project or repo_path is required (a repo_path remote must be a recognized GitLab URL).")
             async with GitLabClient(conn.url, conn.token, conn.verify_tls) as client:
                 result = await client.list_branches(project, search=arguments.get("search") or "")
-            return _ok({"branches": result})
+            result, extra = _paginate(result, arguments.get("limit"), arguments.get("offset"))
+            return _ok({"branches": result, **extra})
         except Exception as exc:
             return _err(str(exc))
 
@@ -466,7 +500,8 @@ async def dispatch_gitlab_tool(name: str, arguments: dict) -> list[TextContent] 
                 result = await client.list_pipelines(
                     project, ref=arguments.get("ref") or "", status=arguments.get("status") or "",
                 )
-            return _ok({"pipelines": result})
+            result, extra = _paginate(result, arguments.get("limit"), arguments.get("offset"))
+            return _ok({"pipelines": result, **extra})
         except Exception as exc:
             return _err(str(exc))
 

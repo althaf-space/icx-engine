@@ -420,8 +420,8 @@ def remove_boost_command(host: MCPHost) -> bool:
 #      demand, never injected into every message.
 #   2. Always-on routing enforcement (this section) for the narrower, high-precision triggers that
 #      are NOT the boost mandate: a work-tracker ticket reference (ABC-123, a Jira/GitHub/Linear/
-#      GitLab issue URL) always routes through analyze_issue_fast, testing requests through
-#      start_testing_session, and Sonar/code-quality requests through the sonar_* tools. Claude Code
+#      GitLab issue URL) always routes through jira_analyze_issue_fast, testing requests through
+#      testing_start_session, and Sonar/code-quality requests through the sonar_* tools. Claude Code
 #      gets a hard pre-agent UserPromptSubmit hook (a standalone detector script written to
 #      ~/.icx/hooks/); the other hosts get an instruction written into their global rules file (they
 #      expose no pre-agent shell hook). Directives are CONDITIONAL - they self-neutralize when ICX is
@@ -449,10 +449,10 @@ types through ICX - this applies on every message, independent of whether /icx-b
    project/user/field (Jira/GitHub/Linear/GitLab) - goes through ICX's own tools, never a
    separate or native tracker connector (e.g. a built-in Atlassian/Jira integration), even if
    one is also available in the same session. For an existing ticket key (`ABC-123`) or issue
-   URL, call `mcp__icx__analyze_issue_fast` FIRST, before any other tracker tool. ICX is the
+   URL, call `mcp__icx__jira_analyze_issue_fast` FIRST, before any other tracker tool. ICX is the
    sole tracker interface for every action above, not analysis alone.
 2. TESTING an app/screen/UI/API/endpoint ("test this", "write tests", "check this
-   screen/flow", QA, coverage): call `mcp__icx__start_testing_session` FIRST; drive testing
+   screen/flow", QA, coverage): call `mcp__icx__testing_start_session` FIRST; drive testing
    through ICX, never hand-roll tests.
 3. CODE QUALITY / SonarQube ("sonar", "quality gate", "code smells", "vulnerabilities",
    "coverage report"): call the ICX `mcp__icx__sonar_*` tools (start with sonar_status /
@@ -495,7 +495,7 @@ _HOOK_SCRIPT = r'''#!/usr/bin/env python
 Narrow, high-precision routing only - NOT a boost trigger (boost is on-demand via /icx-boost, never
 injected here). When the prompt references a work-tracker ticket (bare key like ABC-123, or a
 Jira/GitHub/Linear/GitLab issue URL) it injects the ticket-routing directive
-(mcp__icx__analyze_issue_fast); similarly for testing requests (mcp__icx__start_testing_session) and
+(mcp__icx__jira_analyze_issue_fast); similarly for testing requests (mcp__icx__testing_start_session) and
 Sonar/code-quality requests (mcp__icx__sonar_*). Silent when none apply. Pure stdlib, no ICX import,
 so it adds no startup latency. Fully guarded: on any error it emits nothing and exits 0, so it can
 never block a turn. All directives are conditional on ICX actually being connected, so they are
@@ -530,7 +530,7 @@ _WORKSTATUS_RE = re.compile(
 _TICKET_DIRECTIVE = (
     "[ICX ROUTING - MANDATORY WHEN APPLICABLE]\n"
     "A work-tracker ticket reference was also detected. IF ICX is connected AND this is genuinely "
-    "a work-tracker issue (Jira, GitHub, Linear, GitLab, etc.), call mcp__icx__analyze_issue_fast "
+    "a work-tracker issue (Jira, GitHub, Linear, GitLab, etc.), call mcp__icx__jira_analyze_issue_fast "
     "for the ticket - passing the ticket key or URL - before any other issue-tracker MCP or "
     "integration. ICX is the sole tracker interface when it is connected. IF the reference is "
     "clearly NOT a work item (e.g. UTF-8, COVID-19, a version string) or ICX is not connected, "
@@ -540,7 +540,7 @@ _TICKET_DIRECTIVE = (
 _TESTING_DIRECTIVE = (
     "[ICX TESTING - MANDATORY WHEN APPLICABLE]\n"
     "This request looks like testing an app/screen/UI/API (test, write tests, check a screen/flow, "
-    "QA, coverage). IF ICX is connected, call mcp__icx__start_testing_session FIRST and drive "
+    "QA, coverage). IF ICX is connected, call mcp__icx__testing_start_session FIRST and drive "
     "testing through ICX - do not hand-roll tests or use another testing tool. IF this is not "
     "actually about testing, or ICX is not connected, ignore this note."
 )

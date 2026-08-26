@@ -60,6 +60,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "Workstatus connection."
         ),
         inputSchema=_NO_ARGS_SCHEMA,
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_MY_PROFILE_TOOL,
@@ -69,6 +70,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "Workstatus connection."
         ),
         inputSchema=_NO_ARGS_SCHEMA,
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_ADD_TIMESHEET_TOOL,
@@ -81,15 +83,12 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "tool's own description) once the human says they want the full list or the recent "
             "list doesn't contain what they mean. Once project_id/todo_id are known, MUST call "
             "workstatus_add_timesheet with project_id, todo_id (the task id), date as 'YYYY-MM-DD' "
-            "(NOT 'DD-MM-YYYY' - that format was tried repeatedly against a real assigned task and "
-            "consistently produced an HTTP-200-with-empty-body silent failure; 'YYYY-MM-DD' matches "
-            "the date component already used in from_time/to_time below and is what a real, "
-            "independently-confirmed submission used), "
-            "reason, and from_time/to_time as a FULL datetime string 'YYYY-MM-DD HH:MM:SS' "
-            "(NOT the 12-hour '10:00 am' display format - that was tried repeatedly against a real "
-            "assigned task and consistently produced an HTTP-200-with-empty-body silent failure; "
-            "the full-datetime form matches the read-side top-level from_time/to_time fields and "
-            "is what a second, independently-supplied real submission example used). duration is "
+            "(NOT 'DD-MM-YYYY'), reason, and from_time/to_time as a FULL datetime string "
+            "'YYYY-MM-DD HH:MM:SS' (NOT the 12-hour '10:00 am' display format) - wrong format on "
+            "EITHER field was tried repeatedly against a real assigned task and consistently "
+            "produced an HTTP-200-with-empty-body silent failure; these exact formats match what "
+            "independently-confirmed real submissions used and the read-side from_time/to_time "
+            "fields' own shape. duration is "
             "optional - leave it empty unless the human gives one; Workstatus appears to compute it "
             "from from_time/to_time itself. note and billable are optional - billable is NOT "
             "mandatory: if omitted, an empty value is sent rather than forcing a False default. "
@@ -115,6 +114,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             },
             "required": ["project_id", "todo_id", "date", "from_time", "to_time", "reason"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_PROJECTS_TOOL,
@@ -138,6 +138,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             },
             "required": [],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_GET_PROJECT_TOOL,
@@ -146,6 +147,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "workstatus_get_project with project_id. Requires an active Workstatus connection."
         ),
         inputSchema={"type": "object", "properties": {"project_id": {"type": "integer"}}, "required": ["project_id"]},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_PROJECT_BUDGET_TOOL,
@@ -159,6 +161,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "properties": {"project_id": {"type": "integer"}, "quarter": {"type": "string"}},
             "required": ["project_id"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_TASKS_TOOL,
@@ -184,56 +187,81 @@ WORKSTATUS_TOOLS: list[Tool] = [
             },
             "required": ["project_id"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_TASK_STATUSES_TOOL,
         description=(
             "USE WHEN the user asks what task statuses exist for a Workstatus project: MUST call "
-            "workstatus_list_task_statuses with project_id. Requires an active Workstatus connection."
+            "workstatus_list_task_statuses with project_id. Optional limit/offset to page results. "
+            "Requires an active Workstatus connection."
         ),
-        inputSchema={"type": "object", "properties": {"project_id": {"type": "integer"}}, "required": ["project_id"]},
+        inputSchema={"type": "object", "properties": {
+            "project_id": {"type": "integer"},
+            "limit": {"type": "integer"}, "offset": {"type": "integer"},
+        }, "required": ["project_id"]},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_MILESTONES_TOOL,
         description=(
             "USE WHEN the user wants milestones for a Workstatus project: MUST call "
-            "workstatus_list_milestones with project_id. Requires an active Workstatus connection."
+            "workstatus_list_milestones with project_id. Optional limit/offset to page results. "
+            "Requires an active Workstatus connection."
         ),
-        inputSchema={"type": "object", "properties": {"project_id": {"type": "integer"}}, "required": ["project_id"]},
+        inputSchema={"type": "object", "properties": {
+            "project_id": {"type": "integer"},
+            "limit": {"type": "integer"}, "offset": {"type": "integer"},
+        }, "required": ["project_id"]},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_TASK_CHECKLIST_TOOL,
         description=(
             "USE WHEN the user wants the checklist items for one Workstatus task: MUST call "
-            "workstatus_list_task_checklist with task_id. Requires an active Workstatus connection."
+            "workstatus_list_task_checklist with task_id. Optional limit/offset to page results. "
+            "Requires an active Workstatus connection."
         ),
-        inputSchema={"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]},
+        inputSchema={"type": "object", "properties": {
+            "task_id": {"type": "integer"},
+            "limit": {"type": "integer"}, "offset": {"type": "integer"},
+        }, "required": ["task_id"]},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_MEMBERS_TOOL,
         description=(
             "USE WHEN the user wants the Workstatus member/employee list: MUST call "
-            "workstatus_list_members with an optional search_key. Requires an active Workstatus "
-            "connection."
+            "workstatus_list_members with an optional search_key. Optional limit/offset to page "
+            "results. Requires an active Workstatus connection."
         ),
-        inputSchema={"type": "object", "properties": {"search_key": {"type": "string"}}, "required": []},
+        inputSchema={"type": "object", "properties": {
+            "search_key": {"type": "string"},
+            "limit": {"type": "integer"}, "offset": {"type": "integer"},
+        }, "required": []},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_TEAMS_TOOL,
         description=(
-            "USE WHEN the user wants the Workstatus team list: MUST call workstatus_list_teams with "
-            "no arguments. Requires an active Workstatus connection."
+            "USE WHEN the user wants the Workstatus team list: MUST call workstatus_list_teams. "
+            "Optional limit/offset to page results. Requires an active Workstatus connection."
         ),
-        inputSchema=_NO_ARGS_SCHEMA,
+        inputSchema={"type": "object", "properties": {
+            "limit": {"type": "integer"}, "offset": {"type": "integer"},
+        }, "required": []},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_ATTENDANCE_LIST_TOOL,
         description=(
             "USE WHEN the user asks for their own day-by-day Workstatus attendance/check-in-out "
             "history: MUST call workstatus_attendance_list with start_date and end_date "
-            "(YYYY-MM-DD). Requires an active Workstatus connection."
+            "(YYYY-MM-DD). Optional limit/offset to page results. Requires an active Workstatus "
+            "connection."
         ),
-        inputSchema=_date_range_schema(),
+        inputSchema=_date_range_schema(limit={"type": "integer"}, offset={"type": "integer"}),
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_ATTENDANCE_STATS_TOOL,
@@ -243,24 +271,29 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "start_date and end_date (YYYY-MM-DD). Requires an active Workstatus connection."
         ),
         inputSchema=_date_range_schema(),
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_TIMESHEETS_TOOL,
         description=(
             "USE WHEN the user wants their logged timesheet entries for a date range: MUST call "
-            "workstatus_list_timesheets with start_date and end_date (YYYY-MM-DD). Requires an "
-            "active Workstatus connection."
+            "workstatus_list_timesheets with start_date and end_date (YYYY-MM-DD). Optional "
+            "limit/offset to page results. Requires an active Workstatus connection."
         ),
-        inputSchema=_date_range_schema(),
+        inputSchema=_date_range_schema(limit={"type": "integer"}, offset={"type": "integer"}),
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_TIMESHEET_CLIENTS_TOOL,
         description=(
             "USE WHEN the user wants the list of clients billable via Workstatus timesheets: MUST "
-            "call workstatus_list_timesheet_clients with no arguments. Requires an active "
-            "Workstatus connection."
+            "call workstatus_list_timesheet_clients. Optional limit/offset to page results. "
+            "Requires an active Workstatus connection."
         ),
-        inputSchema=_NO_ARGS_SCHEMA,
+        inputSchema={"type": "object", "properties": {
+            "limit": {"type": "integer"}, "offset": {"type": "integer"},
+        }, "required": []},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_WEEKLY_REPORT_TOOL,
@@ -270,6 +303,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "active Workstatus connection."
         ),
         inputSchema=_date_range_schema(),
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_TIMESHEET_SUBMISSION_KPIS_TOOL,
@@ -279,6 +313,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "start_date and end_date (YYYY-MM-DD). Requires an active Workstatus connection."
         ),
         inputSchema=_date_range_schema(),
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_TIMESHEET_SUBMISSION_TABLE_TOOL,
@@ -289,23 +324,30 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "Workstatus connection."
         ),
         inputSchema=_date_range_schema(page={"type": "integer"}, per_page={"type": "integer"}),
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_EXPENSES_TOOL,
         description=(
             "USE WHEN the user wants recorded Workstatus expenses for a date range: MUST call "
-            "workstatus_list_expenses with start_date and end_date (YYYY-MM-DD). Requires an "
-            "active Workstatus connection."
+            "workstatus_list_expenses with start_date and end_date (YYYY-MM-DD). Optional "
+            "limit/offset to page results. Requires an active Workstatus connection."
         ),
-        inputSchema=_date_range_schema(),
+        inputSchema=_date_range_schema(limit={"type": "integer"}, offset={"type": "integer"}),
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_LIST_INVOICES_TOOL,
         description=(
             "USE WHEN the user wants Workstatus invoices: MUST call workstatus_list_invoices with "
-            "an optional search keyword. Requires an active Workstatus connection."
+            "an optional search keyword. Optional limit/offset to page results. Requires an active "
+            "Workstatus connection."
         ),
-        inputSchema={"type": "object", "properties": {"search": {"type": "string"}}, "required": []},
+        inputSchema={"type": "object", "properties": {
+            "search": {"type": "string"},
+            "limit": {"type": "integer"}, "offset": {"type": "integer"},
+        }, "required": []},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_PAYROLL_REPORT_TOOL,
@@ -314,6 +356,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "with start_date and end_date (YYYY-MM-DD). Requires an active Workstatus connection."
         ),
         inputSchema=_date_range_schema(),
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_GET_TIMESHEET_TOOL,
@@ -323,6 +366,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "Workstatus connection."
         ),
         inputSchema={"type": "object", "properties": {"timesheet_id": {"type": "integer"}}, "required": ["timesheet_id"]},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_EDIT_TIMESHEET_TOOL,
@@ -373,6 +417,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
                 "duration", "reason", "updated_fields",
             ],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_RECENT_PROJECT_TASKS_TOOL,
@@ -387,6 +432,7 @@ WORKSTATUS_TOOLS: list[Tool] = [
             "Workstatus connection."
         ),
         inputSchema={"type": "object", "properties": {"lookback_days": {"type": "integer"}}, "required": []},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
 ]
 
@@ -413,6 +459,31 @@ async def _guarded(payload_key: str, awaitable) -> list[TextContent]:
     try:
         result = await awaitable
         return _ok({payload_key: result})
+    except WorkstatusNotConfigured:
+        return _no_workstatus_connection_err()
+    except Exception as exc:
+        return _err(str(exc))
+
+
+def _paginate(items: list, limit, offset) -> tuple[list, dict]:
+    """limit omitted (None): returns items unchanged, no extra fields - exact legacy behavior.
+    limit given: slices [offset:offset+limit] and returns total/has_more/next_offset alongside."""
+    if limit is None:
+        return items, {}
+    offset = offset or 0
+    total = len(items)
+    sliced = items[offset:offset + limit]
+    has_more = offset + len(sliced) < total
+    return sliced, {"total": total, "has_more": has_more, "next_offset": (offset + len(sliced)) if has_more else None}
+
+
+async def _guarded_paginated(payload_key: str, awaitable, limit, offset) -> list[TextContent]:
+    """Same as _guarded, but for a call whose result is a plain list - paginates it (see
+    _paginate) before wrapping under payload_key. limit omitted -> identical to _guarded."""
+    try:
+        result = await awaitable
+        items, extra = _paginate(result, limit, offset)
+        return _ok({payload_key: items, **extra})
     except WorkstatusNotConfigured:
         return _no_workstatus_connection_err()
     except Exception as exc:
@@ -495,31 +566,36 @@ async def dispatch_workstatus_tool(name: str, arguments: dict) -> list[TextConte
         err = _require(arguments, "project_id")
         if err:
             return _err(err)
-        return await _guarded("task_statuses", service.list_task_statuses(int(arguments["project_id"]), cfg=cfg))
+        return await _guarded_paginated("task_statuses", service.list_task_statuses(int(arguments["project_id"]), cfg=cfg),
+                                         arguments.get("limit"), arguments.get("offset"))
 
     if name == _LIST_MILESTONES_TOOL:
         err = _require(arguments, "project_id")
         if err:
             return _err(err)
-        return await _guarded("milestones", service.list_milestones(int(arguments["project_id"]), cfg=cfg))
+        return await _guarded_paginated("milestones", service.list_milestones(int(arguments["project_id"]), cfg=cfg),
+                                         arguments.get("limit"), arguments.get("offset"))
 
     if name == _LIST_TASK_CHECKLIST_TOOL:
         err = _require(arguments, "task_id")
         if err:
             return _err(err)
-        return await _guarded("checklist", service.list_task_checklist(int(arguments["task_id"]), cfg=cfg))
+        return await _guarded_paginated("checklist", service.list_task_checklist(int(arguments["task_id"]), cfg=cfg),
+                                         arguments.get("limit"), arguments.get("offset"))
 
     if name == _LIST_MEMBERS_TOOL:
-        return await _guarded("members", service.list_members(search_key=arguments.get("search_key", ""), cfg=cfg))
+        return await _guarded_paginated("members", service.list_members(search_key=arguments.get("search_key", ""), cfg=cfg),
+                                         arguments.get("limit"), arguments.get("offset"))
 
     if name == _LIST_TEAMS_TOOL:
-        return await _guarded("teams", service.list_teams(cfg=cfg))
+        return await _guarded_paginated("teams", service.list_teams(cfg=cfg), arguments.get("limit"), arguments.get("offset"))
 
     if name == _ATTENDANCE_LIST_TOOL:
         err = _require(arguments, "start_date", "end_date")
         if err:
             return _err(err)
-        return await _guarded("attendance", service.attendance_list(arguments["start_date"], arguments["end_date"], cfg=cfg))
+        return await _guarded_paginated("attendance", service.attendance_list(arguments["start_date"], arguments["end_date"], cfg=cfg),
+                                         arguments.get("limit"), arguments.get("offset"))
 
     if name == _ATTENDANCE_STATS_TOOL:
         err = _require(arguments, "start_date", "end_date")
@@ -531,10 +607,11 @@ async def dispatch_workstatus_tool(name: str, arguments: dict) -> list[TextConte
         err = _require(arguments, "start_date", "end_date")
         if err:
             return _err(err)
-        return await _guarded("timesheets", service.list_timesheets(arguments["start_date"], arguments["end_date"], cfg=cfg))
+        return await _guarded_paginated("timesheets", service.list_timesheets(arguments["start_date"], arguments["end_date"], cfg=cfg),
+                                         arguments.get("limit"), arguments.get("offset"))
 
     if name == _LIST_TIMESHEET_CLIENTS_TOOL:
-        return await _guarded("clients", service.list_timesheet_clients(cfg=cfg))
+        return await _guarded_paginated("clients", service.list_timesheet_clients(cfg=cfg), arguments.get("limit"), arguments.get("offset"))
 
     if name == _WEEKLY_REPORT_TOOL:
         err = _require(arguments, "start_date", "end_date")
@@ -561,10 +638,12 @@ async def dispatch_workstatus_tool(name: str, arguments: dict) -> list[TextConte
         err = _require(arguments, "start_date", "end_date")
         if err:
             return _err(err)
-        return await _guarded("expenses", service.list_expenses(arguments["start_date"], arguments["end_date"], cfg=cfg))
+        return await _guarded_paginated("expenses", service.list_expenses(arguments["start_date"], arguments["end_date"], cfg=cfg),
+                                         arguments.get("limit"), arguments.get("offset"))
 
     if name == _LIST_INVOICES_TOOL:
-        return await _guarded("invoices", service.list_invoices(search=arguments.get("search", ""), cfg=cfg))
+        return await _guarded_paginated("invoices", service.list_invoices(search=arguments.get("search", ""), cfg=cfg),
+                                         arguments.get("limit"), arguments.get("offset"))
 
     if name == _PAYROLL_REPORT_TOOL:
         err = _require(arguments, "start_date", "end_date")

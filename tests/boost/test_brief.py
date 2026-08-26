@@ -46,8 +46,8 @@ def test_gates_present():
     meth = build_checklist_for("optimize the query", "performance")
     brief = build_brief("optimize the query", "performance", meth, _ctx(),
                         ActivationPlan(), [], [])
-    assert any("lock_plan" in g for g in brief["gates"])
-    assert any("record_verification" in g for g in brief["gates"])
+    assert any("icx_lock_plan" in g for g in brief["gates"])
+    assert any("icx_record_verification" in g for g in brief["gates"])
 
 
 def test_links_appear_in_boosted_prompt():

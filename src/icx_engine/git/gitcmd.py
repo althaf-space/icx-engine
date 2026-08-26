@@ -281,6 +281,15 @@ def checkout(repo: Path, branch: str) -> None:
     _run_git(repo, ["checkout", branch])
 
 
+def checkout_tracking(repo: Path, branch: str, remote: str = "origin") -> None:
+    """Creates a new local branch named `branch` tracking `<remote>/<branch>` and
+    switches to it, in one step - for a branch that exists on the remote but has no
+    local copy yet."""
+    _reject_option_like(branch, "branch")
+    _reject_option_like(remote, "remote")
+    _run_git(repo, ["checkout", "--track", f"{remote}/{branch}"])
+
+
 def fast_forward_ref(repo: Path, ref: str) -> None:
     """Fast-forward-only merge of an arbitrary ref into the currently checked-out
     branch. Raises GitCommandError (never falls back to a real merge) if a

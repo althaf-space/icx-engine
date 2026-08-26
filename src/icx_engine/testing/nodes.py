@@ -891,8 +891,8 @@ async def node_auth_gate(state: TestingState) -> dict:
         ),
         "options": ["public", "capture", "reuse", "inline"],
         "instruction": (
-            "For capture: call the ui_auth_capture tool (url + file_paths) - it opens a browser for "
-            "manual login and saves the session. For inline: call ui_auth_inline (url + file_paths + "
+            "For capture: call the icx_ui_auth_capture tool (url + file_paths) - it opens a browser for "
+            "manual login and saves the session. For inline: call icx_ui_auth_inline (url + file_paths + "
             "username + password) - only inline collects credentials, and they go to ICX's browser "
             "process, never into chat history. After either tool returns ok, resume with "
             "{\"auth_mode\": \"capture\"|\"inline\"}. For reuse, resume with {\"auth_mode\": \"reuse\"}, "
@@ -1332,7 +1332,7 @@ async def node_local_run(state: TestingState) -> dict:
                             "severity": "high", "detail": {}}]}
 
     # DoD integration: derive a confidence report from the suite result so the agent can feed
-    # record_verification / save_memory. One DoD item per runner (evidence = its command + summary).
+    # icx_record_verification / save_memory. One DoD item per runner (evidence = its command + summary).
     try:
         from icx_engine.verification import build_confidence_report
         tier = str(state.get("risk_tier") or "medium")
@@ -1494,7 +1494,7 @@ async def node_limit_gate(state: TestingState) -> dict:
 # -- node_mode_select -------------------------------------------------------
 
 async def node_mode_select(state: TestingState) -> dict:
-    # test_mode pre-set at session start via start_testing_session parameter - skip interrupt
+    # test_mode pre-set at session start via testing_start_session parameter - skip interrupt
     if state.get("test_mode") in ("automated", "manual"):
         return {}
 
@@ -1527,7 +1527,7 @@ async def node_manual_wait(state: TestingState) -> dict:
             "Run the test manually against the application now.\n"
             "Files in scope:\n"
             + "\n".join(f"  - {f}" for f in state["file_paths"])
-            + "\n\nCall resume_testing_session with {\"done\": true} when finished."
+            + "\n\nCall testing_resume_session with {\"done\": true} when finished."
         ),
         "file_paths": state["file_paths"],
         "context": state.get("context"),

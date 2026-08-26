@@ -87,6 +87,14 @@ def _resolve_parent_or_ask(mgr: GitLifecycleManager, cli_value: str | None) -> s
     return chosen
 
 
+def _resolve_project_code_or_ask(cli_value: str | None) -> str:
+    """No remembered/derived default for this, by design - always asks fresh (unlike
+    parent branch, which offers a last-confirmed value as a one-tap default)."""
+    if cli_value:
+        return cli_value
+    return typer.prompt("This is a ticketless branch - what project code should it use (e.g. a Jira project key)?")
+
+
 @git_app.callback()
 def _git_app_callback() -> None:
     """Git-workflow lifecycle helpers. Forces this Typer app to stay in
@@ -134,6 +142,7 @@ def git_branch(
     ticket: str = typer.Option(None, "--ticket", help="Ticket key (omit for a ticketless branch)"),
     name: str = typer.Option(..., "--name", help="Human-readable summary/preferred name used to derive the branch name"),
     parent: str = typer.Option(None, "--parent", help="Parent branch to branch from (asked every time if omitted; a saved parent branch is only offered as a default)"),
+    project_code: str = typer.Option(None, "--project-code", help="Required for a ticketless branch (--ticket omitted) - asked interactively if not given"),
     debug: _cli.DebugOpt = False,
     traceback: _cli.TracebackOpt = False,
 ) -> None:
@@ -141,11 +150,32 @@ def git_branch(
     mgr = GitLifecycleManager(_resolve_cwd())
     mgr.validate()
     resolved_parent = _resolve_parent_or_ask(mgr, parent)
-    result = mgr.start_branch(ticket, name, resolved_parent)
+    resolved_project_code = None if ticket else _resolve_project_code_or_ask(project_code)
+    result = mgr.start_branch(ticket, name, resolved_parent, project_code=resolved_project_code)
     if result.switched_to_existing:
         console.print(f"[yellow]Branch '{result.branch_name}' already exists - switched to it.[/yellow]")
     else:
         console.print(f"[green]Created and switched to branch '{result.branch_name}'.[/green]")
+
+
+@git_app.command("checkout")
+@_guarded
+def git_checkout(
+    branch_name: str = typer.Argument(..., help="Exact existing branch name - never derived, slugified, or prefixed"),
+    remote: str = typer.Option("origin", "--remote"),
+    debug: _cli.DebugOpt = False,
+    traceback: _cli.TracebackOpt = False,
+) -> None:
+    """Switch to a branch that already exists, by its exact name - use this instead of
+    `branch` to avoid feature/ derivation. A dirty working tree is auto-stashed first,
+    never discarded; retrieve it afterward with `git stash pop`."""
+    mgr = GitLifecycleManager(_resolve_cwd())
+    mgr.validate()
+    result = mgr.checkout_branch(branch_name, remote=remote)
+    if result.stashed:
+        console.print("[yellow]Working tree was dirty - stashed before switching (retrieve with 'git stash pop').[/yellow]")
+    source = "remote (new local tracking branch created)" if result.tracked_from_remote else "local"
+    console.print(f"[green]Switched to '{result.branch_name}' ({source}).[/green]")
 
 
 @git_app.command("sync")
@@ -233,24 +263,26 @@ def git_finish(
     feature: str = typer.Option(..., "--feature"),
     ticket: str = typer.Option(..., "--ticket"),
     mr_iid: int = typer.Option(..., "--mr-iid"),
-    delete_backups: bool = typer.Option(False, "--delete-backups"),
     debug: _cli.DebugOpt = False,
     traceback: _cli.TracebackOpt = False,
 ) -> None:
-    """Post-merge cleanup - verifies the MR actually merged, then updates
-    parent and removes the local feature branch."""
+    """Post-merge cleanup - verifies the MR actually merged, then updates parent and
+    removes the feature branch locally, on GitLab, and both backup tiers."""
     mgr = GitLifecycleManager(_resolve_cwd())
     mgr.validate()
     resolved_parent = _resolve_parent_or_ask(mgr, parent)
     conn = ConfigManager.load().active_gitlab_connection()
     if conn is None:
         raise GitWorkflowError("No active GitLab connection. Run `icx gitlab --add` first.")
-    console.print(f"About to clean up after merge: delete local branch '{feature}' and fast-forward '{resolved_parent}'.")
+    console.print(
+        f"About to clean up after merge: delete '{feature}' (local + remote), fast-forward "
+        f"'{resolved_parent}', and remove its backup branches."
+    )
     if not typer.confirm("Proceed?", default=True):
         console.print("Cancelled.")
         return
-    result = mgr.post_merge_cleanup(resolved_parent, feature, ticket, delete_backups, conn, mr_iid)
-    console.print(f"[green]Cleaned up. Feature branch deleted: {result.feature_branch_deleted}[/green]")
+    result = asyncio.run(mgr.post_merge_cleanup(resolved_parent, feature, ticket, conn, mr_iid))
+    console.print(f"[green]Cleaned up. Feature branch deleted: {result.feature_branch_deleted} (remote: {result.remote_branch_deleted}).[/green]")
 
 
 @git_app.command("tag")
