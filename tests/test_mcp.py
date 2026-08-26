@@ -535,10 +535,10 @@ async def test_list_tools_schema_has_optional_profile_property():
 
 
 async def test_list_tools_returns_core_tools():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
     names = {t.name for t in tools}
     assert {"jira_analyze_issue_fast", "jira_analyze_issue", "save_memory"}.issubset(names)
 
@@ -663,10 +663,10 @@ async def test_image_paths_written_to_disk_not_inline(mcp_config_with_llm, tmp_p
 
 
 async def test_save_memory_tool_has_required_inputs():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
 
     save_tool = next(t for t in tools if t.name == "save_memory")
     schema = save_tool.inputSchema
@@ -795,16 +795,17 @@ async def test_call_tool_save_memory_rejects_empty_work_item_type():
 # -- Tool count and schema -----------------------------------------------------
 
 async def test_list_tools_returns_all_tools():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
 
-    assert len(tools) == 165
+    assert len(tools) == 167
     names = {t.name for t in tools}
     assert names == {
         "jira_analyze_issue_fast", "jira_analyze_issue", "save_memory", "icx_record_verification",
         "icx_get_methodology", "icx_lock_plan", "icx_boost", "icx_boost_refine",
+        "icx_find_tools", "icx_call_tool",
         "icx_ui_auth_capture", "icx_ui_auth_inline",
         "graph_find_context", "graph_call_chain", "graph_impact", "graph_subsystem",
         "graph_cross_links", "graph_important_nodes", "graph_blast_radius",
@@ -864,10 +865,10 @@ async def test_list_tools_returns_all_tools():
 async def test_git_tool_descriptions_follow_sonar_use_when_must_convention():
     """Every git_* tool description must follow the same USE WHEN...MUST... convention
     already established by the sonar_* tool descriptions in mcp_server.py."""
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
 
     git_tools = [t for t in tools if t.name.startswith("git_")]
     assert len(git_tools) == 43
@@ -891,10 +892,10 @@ async def test_git_repo_status_description_mandates_icx_over_raw_git():
 
 
 async def test_graph_cross_links_schema_has_file_path():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
 
     tool = next(t for t in tools if t.name == "graph_cross_links")
     assert "file_path" in tool.inputSchema["properties"]
@@ -2071,19 +2072,19 @@ async def test_session_context_deduplicates_same_key(monkeypatch):
 # -- memory_search tool --------------------------------------------------------
 
 async def test_memory_search_tool_present_in_list_tools():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
     names = {t.name for t in tools}
     assert "memory_search" in names
 
 
 async def test_memory_search_tool_has_required_inputs():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
     tool = next(t for t in tools if t.name == "memory_search")
     assert "query" in tool.inputSchema["required"]
     assert "tags" in tool.inputSchema["required"]
@@ -3233,8 +3234,8 @@ async def test_memory_get_patterns_with_limit_pages_correctly():
 # -- memory_delete --------------------------------------------------------------
 
 async def test_memory_delete_tool_present_in_list_tools():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     assert any(t.name == "memory_delete" for t in tools)
 
 
@@ -3281,8 +3282,8 @@ async def test_memory_delete_missing_issue_key_returns_error():
 # -- memory_update ---------------------------------------------------------------
 
 async def test_memory_update_tool_present_in_list_tools():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     assert any(t.name == "memory_update" for t in tools)
 
 
@@ -3336,11 +3337,11 @@ async def test_reinforce_memory_usage_schema_untouched_by_internal_naming_cleanu
     already-consistent used_by_key/used_by_tickets) was fixed WITHOUT changing the
     external MCP schema - any agent already calling this tool with new_ticket_key
     must keep working identically. This must pass both before and after that fix."""
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
     tool = next(t for t in tools if t.name == "reinforce_memory_usage")
     assert "new_ticket_key" in tool.inputSchema["properties"]
     assert "new_ticket_key" in tool.inputSchema["required"]
@@ -3408,10 +3409,10 @@ async def test_get_memory_audit_invalid_key_format_returns_error():
 # -- Magik-AI testing tools ----------------------------------------------------
 
 async def test_magik_tools_registered():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
     names = {t.name for t in tools}
     expected = {
         "testing_start_session",
@@ -3421,10 +3422,10 @@ async def test_magik_tools_registered():
 
 
 async def test_magik_start_tool_requires_file_paths():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
     tool = next(t for t in tools if t.name == "testing_start_session")
     assert "file_paths" in tool.inputSchema["required"]
     assert "file_paths" in tool.inputSchema["properties"]
@@ -3432,10 +3433,10 @@ async def test_magik_start_tool_requires_file_paths():
 
 
 async def test_magik_resume_tool_requires_session_id_and_response():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = await _list_tools()
+        tools = await _all_tools_full()
     tool = next(t for t in tools if t.name == "testing_resume_session")
     assert "session_id" in tool.inputSchema["required"]
     assert "response" in tool.inputSchema["required"]
@@ -3451,24 +3452,24 @@ async def test_start_session_validates_bad_input():
 
 
 async def test_resume_description_lists_gate_shapes():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = {t.name: t for t in await _list_tools()}
+        tools = {t.name: t for t in await _all_tools_full()}
     desc = tools["testing_resume_session"].description
     for token in ("pick_type", "compat_check", "auth_gate", "author_flow", "approve_iteration", "RULE"):
         assert token in desc
 
 
 async def test_resume_description_lists_agent_gates():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = {t.name: t for t in await _list_tools()}
+        tools = {t.name: t for t in await _all_tools_full()}
     desc = tools["testing_resume_session"].description
     for token in ("compat_scan", "author_flow", "steps", "all_compatible"):
         assert token in desc
@@ -3478,12 +3479,12 @@ async def test_compat_scan_description_is_open_ended_mandate():
     """compat_scan must be an open-ended agent mandate - no hardcoded blocker classes,
     it bans deferring to the runner, and it makes the agent report every finding to the
     user rather than deciding. ICX must not claim to verify the answer."""
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = {t.name: t for t in await _list_tools()}
+        tools = {t.name: t for t in await _all_tools_full()}
     desc = tools["testing_resume_session"].description
     # forbidden-deferral rule (the exact rationalization that caused the miss)
     assert "work around it" in desc and "less robust but fine" in desc
@@ -3502,12 +3503,12 @@ async def test_compat_scan_description_is_open_ended_mandate():
 async def test_resume_description_has_rulebook_rule():
     """The agent must be told gate.rules is the binding rulebook loaded from
     ~/.icx/testing_rules, and gate 2b must document ICX section-presence enforcement."""
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = {t.name: t for t in await _list_tools()}
+        tools = {t.name: t for t in await _all_tools_full()}
     desc = tools["testing_resume_session"].description
     assert "RULEBOOK RULE" in desc
     assert "testing_rules" in desc
@@ -3517,23 +3518,23 @@ async def test_resume_description_has_rulebook_rule():
 
 
 async def test_resume_description_has_expand_scan():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = {t.name: t for t in await _list_tools()}
+        tools = {t.name: t for t in await _all_tools_full()}
     desc = tools["testing_resume_session"].description
     assert "expand_scan" in desc and "related_files" in desc
 
 
 async def test_resume_description_has_reread_rule():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = {t.name: t for t in await _list_tools()}
+        tools = {t.name: t for t in await _all_tools_full()}
     desc = tools["testing_resume_session"].description.lower()
     assert "re-read" in desc or "read again" in desc
     assert "read_receipts" in desc
@@ -3648,12 +3649,12 @@ async def test_sonar_status_omits_skill_hint_when_lookup_fails():
 # -- Sonar MCP tools -----------------------------------------------------------
 
 async def test_sonar_tools_registered():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        names = {t.name for t in await _list_tools()}
+        names = {t.name for t in await _all_tools_full()}
     for n in ("sonar_status", "sonar_projects", "sonar_branches",
               "sonar_measures", "sonar_quality_gate", "sonar_findings", "sonar_report",
               "sonar_top_files", "sonar_history", "sonar_analyses", "sonar_rule", "sonar_hotspot"):
@@ -3735,8 +3736,8 @@ def test_select_persona_ui_pick_kept_when_ui_vocab_present():
 
 
 async def test_icx_skill_get_registered():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     assert any(t.name == "icx_skill_get" for t in tools)
 
 
@@ -3778,8 +3779,8 @@ async def test_icx_skill_get_validates_name():
 
 
 async def test_icx_skills_index_registered():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     assert any(t.name == "icx_skills_index" for t in tools)
 
 
@@ -4239,12 +4240,12 @@ async def test_lock_plan_fan_out_runs_off_event_loop(monkeypatch):
 
 
 async def test_lock_plan_in_tool_order_before_testing():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        names = [t.name for t in await _list_tools()]
+        names = [t.name for t in await _all_tools_full()]
     assert "icx_lock_plan" in names
     assert names.index("icx_lock_plan") < names.index("testing_start_session")   # spec-lock before testing
 
@@ -4515,8 +4516,8 @@ async def test_get_prompt_rejects_empty_prompt():
 
 def test_save_memory_schema_has_no_skills_fields():
     import asyncio
-    from icx_engine.mcp_server import _list_tools
-    tools = asyncio.run(_list_tools())
+    from icx_engine.mcp_server import _all_tools_full
+    tools = asyncio.run(_all_tools_full())
     save_tool = next(t for t in tools if t.name == "save_memory")
     props = save_tool.inputSchema["properties"]
     for removed in ("worth_remembering", "skill_name", "skill_procedure", "skill_pitfalls", "skill_verification"):
@@ -4670,8 +4671,8 @@ def test_save_memory_related_skills_lookup_never_breaks_save(mcp_config):
 
 
 async def test_draft_skill_registered():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     assert any(t.name == "icx_draft_skill" for t in tools)
 
 
@@ -4807,8 +4808,8 @@ async def test_dynamic_step_sequences_mandate_draft_skill_after_save_memory():
 # -- icx_create_skill ----------------------------------------------------------------
 
 async def test_create_skill_registered():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     assert any(t.name == "icx_create_skill" for t in tools)
 
 
@@ -5033,15 +5034,15 @@ def test_sonar_scope_args_passes_through_rules_and_tags():
 # -- Sonar completeness tools (top_files/history/analyses/rule/hotspot) --------
 
 async def test_sonar_top_files_tool_registered():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     names = {t.name for t in tools}
     assert {"sonar_top_files", "sonar_history", "sonar_analyses", "sonar_rule", "sonar_rules", "sonar_hotspot"} <= names
 
 
 async def test_sonar_rules_tool_registered():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     tool = next(t for t in tools if t.name == "sonar_rules")
     assert tool.inputSchema["required"] == []
     assert "language" in tool.inputSchema["properties"]
@@ -5174,8 +5175,8 @@ async def test_sonar_hotspot_tool_disabled(monkeypatch):
 #    quality-profiles/issue-authors/issue-tags/issue-changelog/system-health/languages) ---
 
 async def test_sonar_medium_tier_tools_registered():
-    from icx_engine.mcp_server import _list_tools
-    tools = await _list_tools()
+    from icx_engine.mcp_server import _all_tools_full
+    tools = await _all_tools_full()
     names = {t.name for t in tools}
     assert {
         "sonar_source", "sonar_metrics", "sonar_quality_gate_definition", "sonar_quality_profiles",
@@ -5437,12 +5438,12 @@ async def test_description_length_exceptions_list_is_still_accurate():
     """If one of the known exceptions ever gets successfully shrunk under the ceiling, this
     catches it so the exception list (and developer.md's note) gets cleaned up rather than
     silently going stale."""
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        tools = {t.name: t for t in await _list_tools()}
+        tools = {t.name: t for t in await _all_tools_full()}
     for name in _DESCRIPTION_LENGTH_EXCEPTIONS:
         assert name in tools, f"{name} is listed as a length exception but no longer exists as a tool."
         assert len(tools[name].description) > _DESCRIPTION_LENGTH_CEILING, (
@@ -5498,3 +5499,184 @@ async def test_call_tool_logs_and_reraises_on_unhandled_exception(tmp_path, monk
     record = json.loads(files[0].read_text(encoding="utf-8").strip().splitlines()[0])
     assert record["ok"] is False
     assert record["error_type"] == "RuntimeError"
+
+
+# -- icx_find_tools / icx_call_tool - discovery + forwarding dispatch ----------------------
+# tools/list now advertises only _CORE_TOOL_ORDER (8 tools); every other tool stays fully
+# callable (via icx_call_tool, or directly by name) and discoverable via icx_find_tools, which
+# searches _all_tools_full()'s complete, unfiltered set. See mcp_server.py's _list_tools/
+# _all_tools_full/_module_index/_dispatch_find_tools/_dispatch_call_tool/_dispatch_with_telemetry.
+
+def _tmp_git_repo(tmp_path):
+    import subprocess
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ["init", "-b", "main"],
+        ["config", "user.email", "t@e.com"],
+        ["config", "user.name", "T"],
+    ):
+        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True)
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=str(repo), check=True, capture_output=True)
+    return repo
+
+
+async def test_list_tools_returns_only_the_core_set():
+    from icx_engine.mcp_server import _list_tools, _CORE_TOOL_ORDER
+    tools = await _list_tools()
+    assert [t.name for t in tools] == _CORE_TOOL_ORDER
+    assert len(tools) == 8
+
+
+async def test_all_tools_full_still_has_every_tool():
+    from icx_engine.mcp_server import _all_tools_full, _list_tools
+    full = await _all_tools_full()
+    core = await _list_tools()
+    # 165 original tools + the 2 new discovery/dispatch tools themselves
+    assert len(full) == 167
+    assert {t.name for t in core} <= {t.name for t in full}
+
+
+async def test_formerly_visible_tools_still_directly_callable_by_name():
+    """Critical regression: the LISTING shrank, the CALLING capability did not. 5 tools across
+    different modules, no longer in tools/list, must still work exactly as before when called
+    directly through _call_tool_impl/_call_tool - not just via icx_call_tool."""
+    from icx_engine.mcp_server import _call_tool_impl, _list_tools
+    core_names = {t.name for t in await _list_tools()}
+    probes = [
+        ("git_check_branch_name_policy", {"repo_path": "/nonexistent", "branch_name": "x"}),
+        ("memory_search", {"query": "x"}),
+        ("sonar_projects", {}),
+        ("gitlab_list_tags", {"project": "1"}),
+        ("graph_important_nodes", {"project_path": "/nonexistent"}),
+    ]
+    for name, args in probes:
+        assert name not in core_names, f"{name} unexpectedly still in the core tools/list set"
+        result = await _call_tool_impl(name, args)
+        payload = json.loads(result[0].text)
+        assert isinstance(payload, dict) and payload, f"{name} returned an unusable response: {payload}"
+
+
+async def test_find_tools_module_directory_with_no_args():
+    from icx_engine.mcp_server import _call_tool_impl
+    result = await _call_tool_impl("icx_find_tools", {})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    names = {m["name"] for m in payload["modules"]}
+    for expected in ("git", "gitlab", "jira", "workstatus", "sonar", "graph", "memory", "testing", "skills", "boost", "core"):
+        assert expected in names
+
+
+async def test_find_tools_by_module():
+    from icx_engine.mcp_server import _call_tool_impl
+    for module, min_count in (("git", 40), ("gitlab", 10), ("memory", 5)):
+        result = await _call_tool_impl("icx_find_tools", {"module": module})
+        payload = json.loads(result[0].text)
+        assert payload["ok"] is True
+        assert len(payload["tools"]) >= min_count
+        for t in payload["tools"]:
+            assert "name" in t and "description" in t and "inputSchema" in t
+
+
+async def test_find_tools_unknown_module_returns_guidance_not_empty():
+    from icx_engine.mcp_server import _call_tool_impl
+    result = await _call_tool_impl("icx_find_tools", {"module": "not_a_real_module"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "Valid modules" in payload["error"]
+
+
+async def test_find_tools_by_query_finds_known_tool():
+    from icx_engine.mcp_server import _call_tool_impl
+    result = await _call_tool_impl("icx_find_tools", {"query": "push"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert "git_push" in {t["name"] for t in payload["tools"]}
+
+
+async def test_find_tools_query_no_match_returns_guidance():
+    from icx_engine.mcp_server import _call_tool_impl
+    result = await _call_tool_impl("icx_find_tools", {"query": "zzz_totally_no_such_tool_zzz"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "No tools matched" in payload["error"]
+
+
+async def test_call_tool_forwards_identically_to_a_direct_call():
+    from icx_engine.mcp_server import _call_tool_impl
+    args = {"repo_path": "/nonexistent", "branch_name": "feature/x-ABC-1"}
+    direct = await _call_tool_impl("git_check_branch_name_policy", args)
+    forwarded = await _call_tool_impl("icx_call_tool", {"tool_name": "git_check_branch_name_policy", "arguments": args})
+    assert direct[0].text == forwarded[0].text
+
+
+async def test_call_tool_missing_tool_name_returns_named_error():
+    from icx_engine.mcp_server import _call_tool_impl
+    result = await _call_tool_impl("icx_call_tool", {})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "tool_name" in payload["error"]
+
+
+async def test_call_tool_unknown_tool_name_returns_clean_error_not_crash():
+    from icx_engine.mcp_server import _call_tool_impl
+    result = await _call_tool_impl("icx_call_tool", {"tool_name": "definitely_not_a_real_tool", "arguments": {}})
+    payload = json.loads(result[0].text)
+    assert "error" in payload
+
+
+async def test_call_tool_rejects_non_object_arguments():
+    from icx_engine.mcp_server import _call_tool_impl
+    result = await _call_tool_impl("icx_call_tool", {"tool_name": "git_repo_status", "arguments": "not-an-object"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "arguments" in payload["error"]
+
+
+async def test_call_tool_omitted_arguments_defaults_to_empty_dict(tmp_path):
+    from icx_engine.mcp_server import _call_tool_impl
+    repo = _tmp_git_repo(tmp_path)
+    result = await _call_tool_impl("icx_call_tool", {"tool_name": "git_repo_status", "arguments": {"repo_path": str(repo)}})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+
+
+async def test_call_tool_preserves_confirm_token_gating(tmp_path):
+    """A confirm_token-gated tool reached through icx_call_tool must still require the two-call
+    pattern - forwarding must not bypass gating."""
+    from icx_engine.mcp_server import _call_tool_impl
+    from icx_engine.git.gitcmd import stage_files
+    repo = _tmp_git_repo(tmp_path)
+    (repo / "new.txt").write_text("x", encoding="utf-8")
+    first = await _call_tool_impl("icx_call_tool", {
+        "tool_name": "git_stage_and_commit",
+        "arguments": {"repo_path": str(repo), "files": ["new.txt"], "message": "add new.txt", "ticket_key": None},
+    })
+    payload = json.loads(first[0].text)
+    assert payload.get("status") == "pending_confirmation"
+    assert "token" in payload
+    # not committed yet - a second call is required
+    log = __import__("subprocess").run(["git", "log", "--oneline"], cwd=str(repo), capture_output=True, text=True)
+    assert "add new.txt" not in log.stdout
+
+
+async def test_call_tool_via_native_entry_point_logs_the_real_inner_tool(tmp_path, monkeypatch):
+    """icx_call_tool reached through the native @server.call_tool() entry point (_call_tool, not
+    _call_tool_impl directly) must produce a telemetry record for the REAL inner tool it forwarded
+    to, not just for icx_call_tool itself."""
+    from icx_engine import mcp_server
+    from icx_engine.telemetry.logger import ToolCallLogger
+    monkeypatch.setattr("icx_engine.telemetry.logger.ToolCallLogger", lambda: ToolCallLogger(root=tmp_path))
+    await mcp_server._call_tool("icx_call_tool", {
+        "tool_name": "git_check_branch_name_policy",
+        "arguments": {"repo_path": "/nonexistent", "branch_name": "x"},
+    })
+    files = list(tmp_path.rglob("tool_calls.jsonl"))
+    assert len(files) == 1
+    records = [json.loads(l) for l in files[0].read_text(encoding="utf-8").strip().splitlines()]
+    tool_names_logged = {r["tool"] for r in records}
+    assert "git_check_branch_name_policy" in tool_names_logged
+    assert "icx_call_tool" in tool_names_logged
+    assert len(records) == 2

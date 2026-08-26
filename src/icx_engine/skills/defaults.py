@@ -363,6 +363,12 @@ DEFAULT_SKILLS: list[dict] = [
             "dependency-pin diagnosis."
         ),
         "procedure": (
+            "0. Every git_*/gitlab_* tool below except git_repo_status itself is reached via "
+            "icx_call_tool(tool_name, arguments) now, not called directly by name - tools/list "
+            "only advertises a small core set. Use icx_find_tools(module='git') or "
+            "icx_find_tools(module='gitlab') first to get each tool's real name/schema, then call "
+            "it through icx_call_tool - everything below still applies exactly as written, just "
+            "reached that way.\n"
             "1. Always call git_repo_status first, before any other git_* tool and before running "
             "any raw git command - never skip this even if you think you know the state. It reports "
             "current branch, staged/unstaged/untracked/deleted/renamed/conflicted files, "

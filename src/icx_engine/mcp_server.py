@@ -429,6 +429,19 @@ _SAVE_TOOL_NAME = "save_memory"
 _RECORD_VERIFICATION_TOOL = "icx_record_verification"
 _LOCK_PLAN_TOOL = "icx_lock_plan"
 _BOOST_PROMPT_NAME = "icx-boost"
+_FIND_TOOLS_TOOL = "icx_find_tools"
+_CALL_TOOL_TOOL = "icx_call_tool"
+
+# tools/list advertises only this "core" set (entry points + the 2 discovery/dispatch tools
+# below) instead of all 165 - the other ~157 stay fully callable via _call_tool_impl exactly as
+# before (nothing about dispatch/execution changed, only what's listed), and are reachable
+# through icx_find_tools (discovery) + icx_call_tool (forwarding dispatch). See _all_tools_full()
+# for the complete, unfiltered set icx_find_tools searches.
+_CORE_TOOL_ORDER = [
+    "git_repo_status", "jira_analyze_issue_fast", "jira_analyze_issue",
+    "sonar_status", "icx_get_methodology", "icx_boost",
+    _FIND_TOOLS_TOOL, _CALL_TOOL_TOOL,
+]
 
 # Testing session tools (LangGraph entry - local engine)
 
@@ -1022,8 +1035,7 @@ async def _get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptR
     )
 
 
-@server.list_tools()
-async def _list_tools() -> list[Tool]:
+async def _all_tools_full() -> list[Tool]:
     # Do NOT call ConfigManager.load() here - it triggers a keyring health check
     # that can take 3s+ in background MCP processes, causing the MCP initialization
     # handshake to time out before Windsurf receives the tool list.
@@ -1249,21 +1261,189 @@ async def _list_tools() -> list[Tool]:
             annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         ),
         # ------------------------------------------------------------------ #
+        # icx_find_tools / icx_call_tool - discovery + forwarding dispatch    #
+        # for the ~157 tools not in tools/list's core set (_CORE_TOOL_ORDER). #
+        # ------------------------------------------------------------------ #
+        Tool(
+            name=_FIND_TOOLS_TOOL,
+            description=(
+                "Discover a tool that isn't in your current tool list - tools/list only shows a "
+                "small core set; the rest (git, gitlab, jira write-back, workstatus, sonar, "
+                "graph, memory, testing, skills, boost - ~157 tools) are reachable through this "
+                "tool plus icx_call_tool. Call with module set to one of git/gitlab/jira/"
+                "workstatus/sonar/graph/memory/testing/skills/boost/core for that module's full "
+                "tool list (name+description+inputSchema for each - everything needed to "
+                "construct a correct icx_call_tool call). Call with query for a free-text search "
+                "by tool name/description instead. Call with NEITHER to get the module directory "
+                "(every module name + its tool count) as a starting point. Never invent a tool "
+                "name - always confirm it exists here first."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "module": {"type": "string", "description": "One of: git, gitlab, jira, workstatus, sonar, graph, memory, testing, skills, boost, core."},
+                    "query": {"type": "string", "description": "Free-text search over tool names/descriptions. Ignored if module is given."},
+                },
+                "required": [],
+            },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        ),
+        Tool(
+            name=_CALL_TOOL_TOOL,
+            description=(
+                "Call any tool discovered via icx_find_tools, by exact name - use this for every "
+                "tool not in your current tool list. Forwards to the real tool's own dispatch "
+                "logic and returns exactly what a native call to it would have returned - same "
+                "gating (confirm_token, needs_confirmation, etc. all behave identically), same "
+                "response shape. tool_name must be an exact name from icx_find_tools - never "
+                "guessed. arguments must match that tool's real inputSchema (from icx_find_tools' "
+                "response) exactly - this wrapper does not pre-validate the nested shape, the "
+                "inner tool's own validation still runs and returns a clean error on a bad call, "
+                "same as it always has."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string", "description": "Exact tool name from icx_find_tools, e.g. 'gitlab_list_tags'."},
+                    "arguments": {"type": "object", "description": "Arguments matching that tool's real inputSchema. Omit or {} for a no-arg tool."},
+                },
+                "required": ["tool_name"],
+            },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
+        ),
+        # ------------------------------------------------------------------ #
         # Sonar code-quality tools - direct SonarQube reader, read-only      #
         # ------------------------------------------------------------------ #
     ] + GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS + WORKSTATUS_TOOLS + SONAR_TOOLS + GRAPH_TOOLS + MEMORY_TOOLS + SKILLS_TOOLS + TESTING_TOOLS + BOOST_TOOLS
 
 
-@server.call_tool()
-async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
-    """Thin timing/logging wrapper around _call_tool_impl - every actual tool dispatch stays
-    in _call_tool_impl untouched. Logs to ~/.icx/logs/ (telemetry/logger.py) and never lets a
-    logging failure - or the logging itself - change the tool's own result or raise past this
-    boundary beyond what _call_tool_impl itself would have raised."""
+@server.list_tools()
+async def _list_tools() -> list[Tool]:
+    """The advertised tools/list surface - only _CORE_TOOL_ORDER, not all 165. Every tool NOT
+    in this list is still fully callable (via icx_call_tool, or directly by name - _call_tool_impl
+    itself was never restricted) and discoverable via icx_find_tools, which searches
+    _all_tools_full()'s complete, unfiltered set. This is the only thing that changed - the
+    listing shrank, the dispatch/call capability did not."""
+    full = await _all_tools_full()
+    by_name = {t.name: t for t in full}
+    return [by_name[name] for name in _CORE_TOOL_ORDER if name in by_name]
+
+
+async def _module_index() -> dict[str, list[Tool]]:
+    """Maps module name -> its tools, read from the exact same *_TOOLS constants
+    _all_tools_full() itself sums - no second, hand-maintained copy of tool membership. Anything
+    not claimed by one of those constants (jira_analyze_issue/_fast, icx_lock_plan, save_memory,
+    icx_record_verification - the tools still defined inline in this file) falls into "core"."""
+    from icx_engine.git.mcp_tools import GIT_TOOLS
+    from icx_engine.gitlab.mcp_tools import GITLAB_TOOLS
+    from icx_engine.jira.mcp_tools import JIRA_TOOLS
+    from icx_engine.workstatus.mcp_tools import WORKSTATUS_TOOLS
+    from icx_engine.sonar.mcp_tools import SONAR_TOOLS
+    from icx_engine.graph.mcp_tools import GRAPH_TOOLS
+    from icx_engine.memory.mcp_tools import MEMORY_TOOLS
+    from icx_engine.testing.mcp_tools import TESTING_TOOLS
+    from icx_engine.skills.mcp_tools import SKILLS_TOOLS
+    from icx_engine.boost.mcp_tools import BOOST_TOOLS
+
+    modules: dict[str, list[Tool]] = {
+        "git": GIT_TOOLS, "gitlab": GITLAB_TOOLS, "jira": JIRA_TOOLS,
+        "workstatus": WORKSTATUS_TOOLS, "sonar": SONAR_TOOLS, "graph": GRAPH_TOOLS,
+        "memory": MEMORY_TOOLS, "testing": TESTING_TOOLS, "skills": SKILLS_TOOLS,
+        "boost": BOOST_TOOLS,
+    }
+    grouped_names = {t.name for tools in modules.values() for t in tools}
+    full = await _all_tools_full()
+    modules["core"] = [t for t in full if t.name not in grouped_names]
+    return modules
+
+
+def _tool_summary(t: Tool) -> dict:
+    """Everything icx_call_tool's caller needs to construct a correct call - real name,
+    real (untruncated) description, real inputSchema - since this replaces what tools/list
+    used to provide for a tool no longer advertised there."""
+    annotations = t.annotations
+    if annotations is not None and hasattr(annotations, "model_dump"):
+        annotations = annotations.model_dump(exclude_none=True)
+    summary = {"name": t.name, "description": t.description, "inputSchema": t.inputSchema}
+    if annotations:
+        summary["annotations"] = annotations
+    return summary
+
+
+async def _dispatch_find_tools(args: dict) -> list[TextContent]:
+    from icx_engine.git.mcp_tools import _ok, _err
+
+    module = args.get("module")
+    query = args.get("query")
+    index = await _module_index()
+
+    if module is not None:
+        if not isinstance(module, str) or module not in index:
+            return _err(
+                f"Unknown module {module!r}. Valid modules: {sorted(index.keys())}. "
+                "Call icx_find_tools with no arguments to see each module's tool count first."
+            )
+        return _ok({"module": module, "tools": [_tool_summary(t) for t in index[module]]})
+
+    if query is not None:
+        if not isinstance(query, str) or not query.strip():
+            return _err("query must be a non-empty string.")
+        q = query.strip().lower()
+        scored: list[tuple[int, Tool]] = []
+        for t in await _all_tools_full():
+            name_l = t.name.lower()
+            if name_l == q:
+                score = 3
+            elif q in name_l:
+                score = 2
+            elif q in t.description.lower():
+                score = 1
+            else:
+                continue
+            scored.append((score, t))
+        scored.sort(key=lambda pair: -pair[0])
+        top = [t for _, t in scored[:10]]
+        if not top:
+            return _err(
+                f"No tools matched {query!r}. Try a different query, call icx_find_tools with "
+                f"module set to one of {sorted(index.keys())}, or call it with no arguments at "
+                "all to see the module directory."
+            )
+        return _ok({"query": query, "tools": [_tool_summary(t) for t in top]})
+
+    return _ok({
+        "modules": [{"name": name, "tool_count": len(tools)} for name, tools in sorted(index.items())],
+        "instruction": (
+            "Call icx_find_tools again with module set to one of these names for its full tool "
+            "list, or with a free-text query to search by name/description. Then call "
+            "icx_call_tool with the tool_name and arguments you need."
+        ),
+    })
+
+
+async def _dispatch_call_tool(args: dict) -> list[TextContent]:
+    from icx_engine.git.mcp_tools import _err
+
+    tool_name = args.get("tool_name")
+    if not tool_name or not isinstance(tool_name, str):
+        return _err("tool_name is required and must be a non-empty string.")
+    inner_args = args.get("arguments", {})
+    if inner_args is None:
+        inner_args = {}
+    if not isinstance(inner_args, dict):
+        return _err("arguments must be an object.")
+    return await _dispatch_with_telemetry(tool_name, inner_args)
+
+
+async def _dispatch_with_telemetry(name: str, args: dict) -> list[TextContent]:
+    """Runs one real tool's dispatch (_call_tool_impl) wrapped with timing + ToolCallLogger -
+    shared by the native @server.call_tool() entry point below AND icx_call_tool's forwarding,
+    so a tool invoked either way gets exactly one telemetry record under its own real name.
+    Never lets a logging failure - or the logging itself - change the tool's own result or raise
+    past this boundary beyond what _call_tool_impl itself would have raised."""
     import time
     from icx_engine.telemetry.logger import ToolCallLogger
 
-    args = arguments or {}
     input_text = json.dumps(args, default=str)
     start = time.monotonic()
     try:
@@ -1289,7 +1469,20 @@ async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
     return result
 
 
+@server.call_tool()
+async def _call_tool(name: str, arguments: dict | None) -> list[TextContent]:
+    """Native MCP entry point - delegates straight to _dispatch_with_telemetry, the same shared
+    timing/logging helper icx_call_tool's forwarding path uses, so a tool logs identically
+    whether it was called natively or reached through icx_call_tool."""
+    return await _dispatch_with_telemetry(name, arguments or {})
+
+
 async def _call_tool_impl(name: str, args: dict) -> list[TextContent]:
+    if name == _FIND_TOOLS_TOOL:
+        return await _dispatch_find_tools(args)
+    if name == _CALL_TOOL_TOOL:
+        return await _dispatch_call_tool(args)
+
     from icx_engine.git.mcp_tools import dispatch_git_tool
     git_result = await dispatch_git_tool(name, args)
     if git_result is not None:

@@ -52,12 +52,12 @@ async def test_get_methodology_tool_returns_framework():
 
 
 async def test_get_methodology_registered_before_memory_and_testing():
-    from icx_engine.mcp_server import _list_tools
+    from icx_engine.mcp_server import _all_tools_full
     from icx_engine.models.config import AppConfig
     from unittest.mock import patch
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
-        names = [t.name for t in await _list_tools()]
+        names = [t.name for t in await _all_tools_full()]
     assert "icx_get_methodology" in names
     assert names.index("icx_get_methodology") < names.index("testing_start_session")
 
