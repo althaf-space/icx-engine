@@ -37,7 +37,7 @@ _URL_RE = re.compile(r"https?://[^\s<>()\"'\]]+")
 
 # The ICX tool to call for a connected target.
 _ICX_TOOL = {
-    "jira": "analyze_issue_fast (pass this ticket) to pull its full context",
+    "jira": "jira_analyze_issue_fast (pass this ticket) to pull its full context",
     "sonarqube": "sonar_report / sonar_findings (for this project) to pull its findings",
 }
 

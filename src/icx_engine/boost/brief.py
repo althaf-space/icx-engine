@@ -6,7 +6,7 @@ from __future__ import annotations
 _DIRECTIVE = (
     "MANDATORY: this boosted brief is your working spec. Follow the methodology one_pager and the "
     "archetype discipline, treat boosted_prompt as the real task, resolve the clarifications, and pass "
-    "the gates (lock_plan before coding, record_verification before done). Do not fall back to the raw "
+    "the gates (icx_lock_plan before coding, icx_record_verification before done). Do not fall back to the raw "
     "prompt."
 )
 

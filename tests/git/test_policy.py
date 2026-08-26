@@ -51,3 +51,17 @@ def test_validate_branch_name_ticket_suffix_must_be_trailing():
     # parse_ticket_key_from_branch anchors on the end of the string ($).
     result = validate_branch_name("feature/ABC-1-then-more-words", require_ticket_suffix=True)
     assert result.valid is False
+
+
+def test_validate_branch_name_rejects_ticketless_0000_placeholder_when_ticket_required():
+    # feature/<slug>-<PROJECT_CODE>-0000 (naming.py's ticketless_branch_name) parses as a
+    # trailing ticket-shaped suffix but is never a real ticket - a repo that requires one
+    # must still refuse it.
+    result = validate_branch_name("feature/refactor-auth-module-ICX-0000", require_ticket_suffix=True)
+    assert result.valid is False
+    assert result.missing_ticket is True
+
+
+def test_validate_branch_name_accepts_0000_placeholder_when_ticket_not_required():
+    result = validate_branch_name("feature/refactor-auth-module-ICX-0000", require_ticket_suffix=False)
+    assert result.valid is True

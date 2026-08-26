@@ -367,7 +367,7 @@ async def test_git_start_branch_switches_to_existing(tmp_git_repo_with_remote, t
     assert payload["commits_behind_parent"] == 0
 
 
-async def test_git_start_branch_ticketless(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+async def test_git_start_branch_ticketless_without_project_code_asks_for_one(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
     monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
     result = await dispatch_git_tool("git_start_branch", {
@@ -375,8 +375,19 @@ async def test_git_start_branch_ticketless(tmp_git_repo_with_remote, tmp_path, m
         "summary_or_preferred_name": "Refactor auth module", "parent_branch": "main",
     })
     payload = json.loads(result[0].text)
+    assert payload["status"] == "needs_project_code"
+
+
+async def test_git_start_branch_ticketless_with_project_code(tmp_git_repo_with_remote, tmp_path, monkeypatch):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
+    result = await dispatch_git_tool("git_start_branch", {
+        "repo_path": str(tmp_git_repo_with_remote), "ticket_key": None, "project_code": "ICX",
+        "summary_or_preferred_name": "Refactor auth module", "parent_branch": "main",
+    })
+    payload = json.loads(result[0].text)
     assert payload["ok"] is True
-    assert payload["branch_name"] == "feature/refactor-auth-module"
+    assert payload["branch_name"] == "feature/refactor-auth-module-ICX-0000"
 
 
 async def test_git_start_branch_parent_omitted_with_saved_value_asks_confirm_remembered(tmp_git_repo_with_remote, monkeypatch):
@@ -455,6 +466,73 @@ async def test_git_start_branch_missing_summary_returns_named_error():
     assert payload["ok"] is False
     assert "summary_or_preferred_name" in payload["error"]
     assert payload["error"] != "'summary_or_preferred_name'"
+
+
+async def test_git_checkout_branch_switches_to_existing_local_branch(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, current_branch
+    create_branch_from(tmp_git_repo_with_remote, "development", "main")
+    result = await dispatch_git_tool("git_checkout_branch", {
+        "repo_path": str(tmp_git_repo_with_remote), "branch_name": "development",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["branch_name"] == "development"
+    assert payload["tracked_from_remote"] is False
+    assert payload["stashed"] is False
+    assert current_branch(tmp_git_repo_with_remote) == "development"
+
+
+async def test_git_checkout_branch_tracks_remote_only_branch(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, current_branch, local_branch_exists
+    import subprocess
+    create_branch_from(tmp_git_repo_with_remote, "development", "main")
+    subprocess.run(["git", "push", "origin", "development"], cwd=str(tmp_git_repo_with_remote), check=True)
+    subprocess.run(["git", "branch", "-D", "development"], cwd=str(tmp_git_repo_with_remote), check=True)
+    assert local_branch_exists(tmp_git_repo_with_remote, "development") is False
+
+    result = await dispatch_git_tool("git_checkout_branch", {
+        "repo_path": str(tmp_git_repo_with_remote), "branch_name": "development",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["tracked_from_remote"] is True
+    assert current_branch(tmp_git_repo_with_remote) == "development"
+
+
+async def test_git_checkout_branch_auto_stashes_dirty_tree_without_losing_it(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, current_branch, stash_list
+    create_branch_from(tmp_git_repo_with_remote, "development", "main")
+    (tmp_git_repo_with_remote / "dirty.txt").write_text("uncommitted", encoding="utf-8")
+
+    result = await dispatch_git_tool("git_checkout_branch", {
+        "repo_path": str(tmp_git_repo_with_remote), "branch_name": "development",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert payload["stashed"] is True
+    assert current_branch(tmp_git_repo_with_remote) == "development"
+    assert len(stash_list(tmp_git_repo_with_remote)) == 1
+
+
+async def test_git_checkout_branch_errors_when_branch_not_found_anywhere(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_checkout_branch", {
+        "repo_path": str(tmp_git_repo_with_remote), "branch_name": "does-not-exist-anywhere",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "does-not-exist-anywhere" in payload["error"]
+
+
+async def test_git_checkout_branch_missing_branch_name_returns_named_error(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    result = await dispatch_git_tool("git_checkout_branch", {"repo_path": str(tmp_git_repo_with_remote)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is False
+    assert "branch_name" in payload["error"]
 
 
 async def test_git_push_requires_confirm_token_then_puts_branch_on_remote(tmp_git_repo_with_remote):
@@ -845,50 +923,56 @@ async def test_git_create_mr_confirmed_once_still_asks_again_next_call(tmp_git_r
 
 async def test_git_finish_ticket_confirmation_gated_and_executes(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
-    mock_result = type("R", (), {"parent_branch": "main", "feature_branch_deleted": True, "backups_deleted": []})()
+    mock_result = type("R", (), {
+        "parent_branch": "main", "feature_branch_deleted": True, "remote_branch_deleted": True,
+        "backup_latest_deleted": True, "backups_deleted": [],
+    })()
     from icx_engine.models.config import GitLabConnection
     conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
     monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
 
     with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
         mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
-        with patch("icx_engine.git.manager.GitLifecycleManager.post_merge_cleanup", return_value=mock_result):
+        with patch("icx_engine.git.manager.GitLifecycleManager.post_merge_cleanup", new=AsyncMock(return_value=mock_result)):
             first = await dispatch_git_tool("git_finish_ticket", {
                 "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
-                "feature_branch": "feature/x-ABC-1", "ticket_key": "ABC-1",
-                "delete_backups": True, "mr_iid": 5,
+                "feature_branch": "feature/x-ABC-1", "ticket_key": "ABC-1", "mr_iid": 5,
             })
             token = json.loads(first[0].text)["token"]
             second = await dispatch_git_tool("git_finish_ticket", {
                 "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
                 "feature_branch": "feature/x-ABC-1", "ticket_key": "ABC-1",
-                "delete_backups": True, "mr_iid": 5, "confirm_token": token,
+                "mr_iid": 5, "confirm_token": token,
             })
     payload = json.loads(second[0].text)
     assert payload["ok"] is True
     assert payload["feature_branch_deleted"] is True
+    assert payload["remote_branch_deleted"] is True
+    assert payload["backup_latest_deleted"] is True
 
 
 async def test_git_finish_ticket_nullable_ticket_key_executes(tmp_git_repo_with_remote, tmp_path, monkeypatch):
     from icx_engine.git.mcp_tools import dispatch_git_tool
-    mock_result = type("R", (), {"parent_branch": "main", "feature_branch_deleted": True, "backups_deleted": []})()
+    mock_result = type("R", (), {
+        "parent_branch": "main", "feature_branch_deleted": True, "remote_branch_deleted": False,
+        "backup_latest_deleted": False, "backups_deleted": [],
+    })()
     from icx_engine.models.config import GitLabConnection
     conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
     monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
 
     with patch("icx_engine.git.mcp_tools.ConfigManager") as mock_cfg_cls:
         mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
-        with patch("icx_engine.git.manager.GitLifecycleManager.post_merge_cleanup", return_value=mock_result) as mock_cleanup:
+        with patch("icx_engine.git.manager.GitLifecycleManager.post_merge_cleanup", new=AsyncMock(return_value=mock_result)) as mock_cleanup:
             first = await dispatch_git_tool("git_finish_ticket", {
                 "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
-                "feature_branch": "feature/x-nope", "ticket_key": None,
-                "delete_backups": True, "mr_iid": 5,
+                "feature_branch": "feature/x-nope", "ticket_key": None, "mr_iid": 5,
             })
             token = json.loads(first[0].text)["token"]
             second = await dispatch_git_tool("git_finish_ticket", {
                 "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
                 "feature_branch": "feature/x-nope", "ticket_key": None,
-                "delete_backups": True, "mr_iid": 5, "confirm_token": token,
+                "mr_iid": 5, "confirm_token": token,
             })
     payload = json.loads(second[0].text)
     assert payload["ok"] is True
@@ -922,7 +1006,7 @@ async def test_git_finish_ticket_invalid_token_returns_error(tmp_git_repo_with_r
     result = await dispatch_git_tool("git_finish_ticket", {
         "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
         "feature_branch": "feature/x-ABC-1", "ticket_key": "ABC-1",
-        "delete_backups": True, "mr_iid": 5, "confirm_token": "bogus",
+        "mr_iid": 5, "confirm_token": "bogus",
     })
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
@@ -1466,14 +1550,13 @@ async def test_git_finish_ticket_no_gitlab_connection_returns_fallback_hint(tmp_
         mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = None
         first = await dispatch_git_tool("git_finish_ticket", {
             "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
-            "feature_branch": "feature/x-ABC-1", "ticket_key": "ABC-1",
-            "delete_backups": True, "mr_iid": 5,
+            "feature_branch": "feature/x-ABC-1", "ticket_key": "ABC-1", "mr_iid": 5,
         })
         token = json.loads(first[0].text)["token"]
         second = await dispatch_git_tool("git_finish_ticket", {
             "repo_path": str(tmp_git_repo_with_remote), "parent_branch": "main",
             "feature_branch": "feature/x-ABC-1", "ticket_key": "ABC-1",
-            "delete_backups": True, "mr_iid": 5, "confirm_token": token,
+            "mr_iid": 5, "confirm_token": token,
         })
     payload = json.loads(second[0].text)
     assert payload["ok"] is False
@@ -2669,14 +2752,14 @@ async def test_git_start_branch_refuses_ticketless_when_policy_requires_ticket(t
         "repo_path": str(tmp_git_repo_with_remote), "require_ticket_in_branch_name": True,
     })
     result = await dispatch_git_tool("git_start_branch", {
-        "repo_path": str(tmp_git_repo_with_remote), "ticket_key": None,
+        "repo_path": str(tmp_git_repo_with_remote), "ticket_key": None, "project_code": "ICX",
         "summary_or_preferred_name": "Refactor auth module", "parent_branch": "main",
     })
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
     assert "Missing JIRA/ticket identifier" in payload["error"]
     from icx_engine.git.gitcmd import local_branch_exists
-    assert local_branch_exists(tmp_git_repo_with_remote, "feature/refactor-auth-module") is False
+    assert local_branch_exists(tmp_git_repo_with_remote, "feature/refactor-auth-module-ICX-0000") is False
 
 
 async def test_git_start_branch_succeeds_with_ticket_when_policy_requires_it(tmp_git_repo_with_remote, tmp_path, monkeypatch):
@@ -3047,3 +3130,68 @@ def test_detect_local_dependency_pins_tolerates_malformed_manifest(tmp_git_repo)
     from icx_engine.git.mcp_tools import _detect_local_dependency_pins
     (tmp_git_repo / "package.json").write_text("not valid json {{{", encoding="utf-8")
     assert _detect_local_dependency_pins(tmp_git_repo) == []  # must not raise
+
+
+# -- Pagination (git_stash_list, git_list_merged_branches) -----------------------------------
+
+async def test_git_stash_list_default_call_unchanged(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import stash_push
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    stash_push(tmp_git_repo, "one")
+    (tmp_git_repo / "a.txt").write_text("b", encoding="utf-8")
+    stash_push(tmp_git_repo, "two")
+
+    result = await dispatch_git_tool("git_stash_list", {"repo_path": str(tmp_git_repo)})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert len(payload["stashes"]) == 2
+    assert "total" not in payload and "has_more" not in payload and "next_offset" not in payload
+
+
+async def test_git_stash_list_with_limit_pages_correctly(tmp_git_repo):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import stash_push
+    (tmp_git_repo / "a.txt").write_text("a", encoding="utf-8")
+    stash_push(tmp_git_repo, "one")
+    (tmp_git_repo / "a.txt").write_text("b", encoding="utf-8")
+    stash_push(tmp_git_repo, "two")
+
+    result = await dispatch_git_tool("git_stash_list", {"repo_path": str(tmp_git_repo), "limit": 1})
+    payload = json.loads(result[0].text)
+    assert len(payload["stashes"]) == 1
+    assert payload["total"] == 2
+    assert payload["has_more"] is True
+    assert payload["next_offset"] == 1
+
+
+async def test_git_list_merged_branches_default_call_unchanged(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    create_branch_from(tmp_git_repo_with_remote, "feature/a", "main")
+    create_branch_from(tmp_git_repo_with_remote, "feature/b", "main")
+    checkout(tmp_git_repo_with_remote, "main")
+
+    result = await dispatch_git_tool("git_list_merged_branches", {
+        "repo_path": str(tmp_git_repo_with_remote), "target": "main",
+    })
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert len(payload["branches"]) == 2
+    assert "total" not in payload
+
+
+async def test_git_list_merged_branches_with_limit_pages_correctly(tmp_git_repo_with_remote):
+    from icx_engine.git.mcp_tools import dispatch_git_tool
+    from icx_engine.git.gitcmd import create_branch_from, checkout
+    create_branch_from(tmp_git_repo_with_remote, "feature/a", "main")
+    create_branch_from(tmp_git_repo_with_remote, "feature/b", "main")
+    checkout(tmp_git_repo_with_remote, "main")
+
+    result = await dispatch_git_tool("git_list_merged_branches", {
+        "repo_path": str(tmp_git_repo_with_remote), "target": "main", "limit": 1,
+    })
+    payload = json.loads(result[0].text)
+    assert len(payload["branches"]) == 1
+    assert payload["total"] == 2
+    assert payload["has_more"] is True

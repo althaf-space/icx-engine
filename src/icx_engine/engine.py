@@ -281,7 +281,7 @@ async def run(
                 attachment_full_texts=attachment_full_texts,
                 attachment_raw=attachment_raw,
                 note=(
-                    "Fast mode: text analysis only. Call analyze_issue for full OCR/transcription/document extraction."
+                    "Fast mode: text analysis only. Call jira_analyze_issue for full OCR/transcription/document extraction."
                     if skip_vision else
                     "No LLM analysis performed - no API key configured. "
                     "Raw issue data, digested documents, and raw images are provided for your direct analysis."

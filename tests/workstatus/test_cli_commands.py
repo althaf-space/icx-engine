@@ -58,7 +58,11 @@ def test_workstatus_status_reports_not_configured(cli_runner, isolated_config):
 
 
 @respx.mock
+@pytest.mark.xdist_group(name="workstatus_default_keyring")
 def test_workstatus_connect_command_saves_connection(cli_runner, isolated_config, monkeypatch):
+    """xdist_group: see test_smoke.py's identically-named test for why - both write real
+    keyring secrets under connection name 'default' and must not run on different xdist
+    workers concurrently."""
     from icx_engine.cli import app
     respx.get("https://web-api.workstatus.io/api/v5/notifications/unread-count").mock(
         return_value=httpx.Response(200, json={"code": 200, "message": "ok", "data": {"count": 0}})
@@ -81,6 +85,7 @@ def test_workstatus_connect_command_saves_connection(cli_runner, isolated_config
 
 
 @respx.mock
+@pytest.mark.xdist_group(name="workstatus_default_keyring")
 def test_workstatus_status_reports_connected_after_add(cli_runner, isolated_config, monkeypatch):
     from icx_engine.cli import app
     respx.get("https://web-api.workstatus.io/api/v5/notifications/unread-count").mock(

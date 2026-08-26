@@ -20,9 +20,9 @@ The highest-value contributions right now:
     git clone https://github.com/althaf-space/icx-engine
     cd icx-engine
     pip install -e ".[dev]"
-    pytest
+    pytest -n auto
 
-The full test suite runs in about 60-90 seconds. Start there.
+The full test suite (165 MCP tools' worth of coverage plus real-subprocess git fixtures) takes several minutes even parallelized with `pytest-xdist` (`-n auto`) - scope your own verification runs to the directory you're changing (e.g. `pytest tests/git/ -n auto`) while iterating, and only run the full suite as a final check before opening a PR.
 
 ## Adding a new connector
 
@@ -48,6 +48,12 @@ See `developer.md` for a step-by-step guide to adding a connector.
 - No new dependencies without discussion - keep the install footprint small
 - Type annotations on all public functions
 - Follow the existing module structure
+
+## Adding a new MCP tool
+
+- Give it its own `annotations={readOnlyHint, destructiveHint, idempotentHint, openWorldHint}` dict - every existing tool has one, don't skip it on a new one.
+- Keep the `description` under 2048 chars (some MCP clients hard-clamp there) - `tests/test_mcp.py::test_no_new_tool_exceeds_description_length_ceiling` enforces this for every tool except a short, documented exception list (see `developer.md`'s "What NOT to touch" table for why those exist). If your tool's description needs to grow past the ceiling, that's a sign the detail belongs in an ICX skill (`skills/defaults.py`, surfaced via `attach_skill_hint` on the tool's response) rather than the static description - see `safe-git-workflow` for the pattern.
+- Follow the `{service}_{action}_{resource}` naming convention (e.g. `git_start_branch`, `sonar_quality_gate`) - a tool name without its service prefix risks colliding with another MCP server's tool of the same bare name in the same session.
 
 ## Submitting a pull request
 

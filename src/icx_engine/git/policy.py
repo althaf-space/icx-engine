@@ -41,7 +41,14 @@ def validate_branch_name(
     per-repo-setting-aware wrapper) - keeps this trivially testable and reusable
     by anything that has a candidate branch name and a policy decision already
     in hand, not just the git-workflow manager."""
-    if not require_ticket_suffix or parse_ticket_key_from_branch(branch) is not None:
+    ticket = parse_ticket_key_from_branch(branch)
+    # A trailing "-0000" is ICX's own ticketless placeholder (naming.py's
+    # ticketless_branch_name), never a real ticket - real Jira ticket numbers start at 1,
+    # so this can't collide with a genuine ticket key. Without this check, a repo that
+    # opted into require_ticket_in_branch_name specifically to reject ticketless branches
+    # would be silently satisfied by the placeholder, defeating the whole setting.
+    has_real_ticket = ticket is not None and not ticket.endswith("-0000")
+    if not require_ticket_suffix or has_real_ticket:
         return BranchPolicyResult(valid=True, branch=branch, require_ticket_suffix=require_ticket_suffix)
     return BranchPolicyResult(
         valid=False,

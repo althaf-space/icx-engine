@@ -40,7 +40,7 @@ def test_classify_target_still_matches_real_subdomains():
 def test_tier1_icx_tool_when_connected():
     plan = build_link_plan(["https://acme.atlassian.net/browse/AB-1"], {"jira": True})
     assert plan[0]["status"] == "icx_tool"
-    assert "analyze_issue_fast" in plan[0]["action"]
+    assert "jira_analyze_issue_fast" in plan[0]["action"]
 
 
 def test_tier2_connect_needed_when_icx_has_tool_but_not_connected():

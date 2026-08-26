@@ -20,6 +20,7 @@ from icx_engine.skills.hints import attach_skill_hint
 
 _REPO_STATUS_TOOL = "git_repo_status"
 _START_BRANCH_TOOL = "git_start_branch"
+_CHECKOUT_BRANCH_TOOL = "git_checkout_branch"
 _BLAME_TOOL = "git_blame"
 _LOG_TOOL = "git_log"
 _SHOW_COMMIT_TOOL = "git_show_commit"
@@ -68,17 +69,11 @@ GIT_TOOLS: list[Tool] = [
             "USE WHEN starting any git workflow on a repo, or when the human asks to commit, "
             "branch, sync, push, merge, or open an MR: MUST call this first, before any other "
             "git_* tool AND before running any raw git command yourself. ICX IS THE SOLE "
-            "GIT-WORKFLOW INTERFACE - NEVER run `git commit`/`git checkout -b`/`git push`/etc. "
-            "directly, and never route around ICX through another git integration, even if one "
-            "is also available in the same session; use git_start_branch/git_stage_and_commit/"
-            "git_push/git_create_mr/git_stash_create/git_fetch/git_pull/git_sync/git_delete_branch/"
-            "git_conflict_take_ours/git_conflict_take_theirs/git_conflict_apply_resolution/"
-            "git_conflict_mark_resolved/git_conflict_abort/git_restore_files/git_check_merge instead - "
-            "NEVER run "
-            "`git stash`/`git fetch`/`git pull`/`git checkout --ours`/`--theirs`/`git add` on a "
-            "conflicted file/`git merge --abort`/`git rebase --abort`/`git cherry-pick --abort`/"
-            "`git restore`/`git checkout -- <file>`/`git merge-tree` directly "
-            "either, same rule as commit/checkout/push. This is what enforces the no-rebase/no-force-push "
+            "GIT-WORKFLOW INTERFACE - NEVER run any raw git command that reads or mutates "
+            "workflow state (commit/checkout/branch/push/stash/fetch/pull/merge/rebase/"
+            "cherry-pick/restore/add/merge-tree) directly, and never route around ICX through "
+            "another git integration even if one is also available in the same session; always "
+            "use the matching ICX git_* tool instead. This is what enforces the no-rebase/no-force-push "
             "safety doctrine - bypassing these tools defeats it. Checks the repo's git-workflow "
             "state - current branch, whether the working tree is dirty, and any leftover state "
             "from an interrupted prior run. git resolves the actual repository root upward "
@@ -98,34 +93,38 @@ GIT_TOOLS: list[Tool] = [
         ),
         inputSchema={"type": "object", "properties": {"repo_path": {"type": "string"}},
                      "required": ["repo_path"]},
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_START_BRANCH_TOOL,
         description=(
             "USE WHEN starting work on a ticket and no feature branch exists yet, or the human "
             "asks to create/start a branch: MUST call this to create it via ICX - NEVER run `git "
-            "checkout -b` or `git branch` directly yourself. Always fetches origin FIRST, even if "
+            "checkout -b` or `git branch` directly yourself. The branch name is always agent-"
+            "proposed, human-approved - never silently invent one. To switch to an EXISTING branch "
+            "by exact name, use git_checkout_branch instead. "
+            "Always fetches origin FIRST, even if "
             "parent_branch was already confirmed on a previous call - a new branch is created off "
             "the current real tip of origin/<parent_branch>, never a possibly-stale local tracking "
-            "ref. Derives the branch name from "
-            "ticket_key (pass null for a ticketless branch) plus summary_or_preferred_name. If a "
-            "matching local branch already exists, switches to it instead of recreating "
+            "ref. Derives the branch name as feature/<slug>-<ticket_key> when ticket_key is given, "
+            "or feature/<slug>-<PROJECT_CODE>-0000 when null - project_code is then required; "
+            "omit it to get status='needs_project_code' and ask the human (e.g. a Jira project "
+            "key) - never invent one. "
+            "If a matching local branch already exists, switches to it instead of recreating "
             "(switched_to_existing=true, created=false) and reports commits_behind_parent - a "
-            "nonzero value here means that EXISTING branch has fallen behind origin/<parent_branch> "
-            "since it was created; consider git_pull/git_reverse_merge before continuing work on "
-            "it. NOT confirmation-gated - creating or "
+            "nonzero value means that EXISTING branch has fallen behind origin/<parent_branch> "
+            "since it was created; sync it first (git_pull/git_reverse_merge). "
+            "NOT confirmation-gated - creating or "
             "switching to a branch is not destructive. If parent_branch is omitted, it is ALWAYS "
             "confirmed with the human, every call - never silently reused, even if one was "
-            "confirmed for this repo before. Returns status='confirm_remembered' (with the "
-            "previously-confirmed value as proposed_default, a one-tap default to confirm back), "
-            "'needs_confirmation' (with a proposed_default), or 'needs_manual_pick' (with "
-            "available_branches) - ask the human, then call again with parent_branch set to their "
-            "answer. If this repo has require_ticket_in_branch_name enabled (see "
+            "confirmed for this repo before. Returns status='confirm_remembered' (previously-"
+            "confirmed value as proposed_default), 'needs_confirmation' (proposed_default only), "
+            "or 'needs_manual_pick' (available_branches) - ask the human, call again with "
+            "parent_branch set to their answer. If this repo has require_ticket_in_branch_name enabled (see "
             "git_set_branch_policy/git_check_branch_name_policy - default OFF, preserves ticketless "
             "branches unless a repo explicitly opts in) and ticket_key is null, this REFUSES before "
-            "creating anything, with an error naming the expected pattern - never creates a locally "
-            "valid branch a remote pre-receive hook will then reject. Requires a valid git "
-            "repository at repo_path."
+            "creating anything - never creates a locally valid branch a remote pre-receive hook "
+            "will then reject. Requires a valid git repository at repo_path."
         ),
         inputSchema={
             "type": "object",
@@ -134,9 +133,37 @@ GIT_TOOLS: list[Tool] = [
                 "ticket_key": {"type": ["string", "null"]},
                 "summary_or_preferred_name": {"type": "string"},
                 "parent_branch": {"type": "string"},
+                "project_code": {"type": "string"},
             },
             "required": ["repo_path", "summary_or_preferred_name"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True},
+    ),
+    Tool(
+        name=_CHECKOUT_BRANCH_TOOL,
+        description=(
+            "USE WHEN the human wants to switch to a branch that ALREADY EXISTS, by its exact "
+            "name - never derives, slugifies, or prefixes anything, unlike git_start_branch (which "
+            "would turn 'development' into 'feature/development', creating an unwanted new branch). "
+            "MUST call this via ICX - NEVER run `git checkout` directly yourself. Switches to a "
+            "matching local branch, or fetches and creates a local tracking branch if it only "
+            "exists on the remote; errors if branch_name exists in neither place. A dirty working "
+            "tree is auto-stashed first (never refused, never discarded) - the stash is left in "
+            "place, NOT auto-popped onto the target branch (could conflict against unrelated work); "
+            "retrieve it afterward with git_stash_apply/git_stash_pop. NOT confirmation-gated - "
+            "switching branches is not destructive, and the auto-stash step already protects the "
+            "dirty tree. Requires a valid git repository at repo_path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "branch_name": {"type": "string"},
+                "remote": {"type": "string"},
+            },
+            "required": ["repo_path", "branch_name"],
+        },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_BLAME_TOOL,
@@ -156,6 +183,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "relpath"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_LOG_TOOL,
@@ -175,6 +203,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_SHOW_COMMIT_TOOL,
@@ -188,6 +217,7 @@ GIT_TOOLS: list[Tool] = [
             "properties": {"repo_path": {"type": "string"}, "sha": {"type": "string"}},
             "required": ["repo_path", "sha"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_DIFF_TOOL,
@@ -205,6 +235,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "ref_a", "ref_b"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_STAGE_AND_COMMIT_TOOL,
@@ -240,6 +271,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "files", "message", "ticket_key"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_REVERSE_MERGE_TOOL,
@@ -271,6 +303,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "ticket_key"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_DIFF_WORKTREE_TOOL,
@@ -294,6 +327,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "mode"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
     Tool(
         name=_GET_CONFLICT_TOOL,
@@ -313,6 +347,7 @@ GIT_TOOLS: list[Tool] = [
         inputSchema={"type": "object",
                      "properties": {"repo_path": {"type": "string"}, "file": {"type": "string"}},
                      "required": ["repo_path", "file"]},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
     Tool(
         name=_READ_FILE_AT_REF_TOOL,
@@ -333,6 +368,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "ref", "path"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
     Tool(
         name=_COMPLETE_RESOLUTION_TOOL,
@@ -355,6 +391,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "files", "message"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_ADOPT_RESOLUTION_TOOL,
@@ -377,6 +414,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "feature_branch", "scratch_branch"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_DISCARD_SCRATCH_TOOL,
@@ -401,6 +439,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "feature_branch", "scratch_branch"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_PUSH_TOOL,
@@ -425,6 +464,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_CREATE_MR_TOOL,
@@ -432,32 +472,30 @@ GIT_TOOLS: list[Tool] = [
             "USE WHEN the human wants to open a merge request for the current feature branch: "
             "MUST create (or reuse an existing open) merge request for the current feature branch "
             "and attempt one immediate merge. CONFIRMATION-GATED: first call (no confirm_token) "
-            "returns pending_confirmation plus a token - show the human BOTH source_branch (the "
-            "current feature branch this MR merges FROM) and parent_branch (the target it merges "
-            "INTO), plus ticket/summary, get explicit agreement, then call again with confirm_token. "
+            "returns pending_confirmation plus a token - show the human BOTH source_branch (merges "
+            "FROM) and parent_branch (merges INTO), plus ticket/summary, get explicit agreement, "
+            "then call again with confirm_token. "
             "If parent_branch "
             "is omitted, it is ALWAYS confirmed with the human, every call - never silently "
             "reused, even if one was confirmed for this repo before. Returns "
-            "status='confirm_remembered' (with the previously-confirmed value as proposed_default, "
-            "a one-tap default to confirm back), 'needs_confirmation' (with a proposed_default), or "
-            "'needs_manual_pick' (with available_branches) - ask the human, then call again with "
-            "parent_branch set to their answer. ticket_key is nullable - pass null if there is no "
+            "status='confirm_remembered' (previously-confirmed value as proposed_default), "
+            "'needs_confirmation' (proposed_default only), or 'needs_manual_pick' "
+            "(available_branches) - ask the human, call again with parent_branch set to their "
+            "answer. ticket_key is nullable - pass null if there is no "
             "ticket; the MR title is then just ticket_summary with no prefix, never a manufactured "
             "ticket id. A merge refusal right after creation is not final: GitLab computes "
-            "mergeability asynchronously, so a refusal while it is still CHECKING is polled (bounded "
-            "by max_poll_attempts/poll_delay_seconds, default 5 attempts / 2s apart - never "
-            "indefinitely) and the merge is retried exactly once if it settles on MERGEABLE. The "
-            "response's merge_status is one of MERGEABLE/CONFLICTED/CHECKING/BLOCKED/UNKNOWN - "
-            "CHECKING means it never left that state within the poll budget (raise "
-            "max_poll_attempts/poll_delay_seconds and retry rather than assuming failure); BLOCKED "
+            "mergeability asynchronously, so a CHECKING refusal is polled (bounded by "
+            "max_poll_attempts/poll_delay_seconds, default 5 attempts / 2s apart - never "
+            "indefinitely) and retried once if it settles on MERGEABLE. merge_status is one of "
+            "MERGEABLE/CONFLICTED/CHECKING/BLOCKED/UNKNOWN - CHECKING past the poll budget means "
+            "raise max_poll_attempts/poll_delay_seconds and retry, never assume failure; BLOCKED "
             "covers every named non-conflict refusal (ci_still_running/not_approved/need_rebase/"
             "discussions_not_resolved/draft_status/policies_denied/etc, from refusal_reason). When "
             "not merged, also returns has_conflicts (GitLab's own boolean, null if unknown) and "
-            "pipeline (the source branch's latest pipeline - id/status, plus failed_job_name/"
-            "failed_job_id if it failed - null if no pipeline exists yet or the lookup itself "
-            "failed) - use these to tell a real conflict apart from a blocked/failed pipeline "
-            "instead of treating every non-merge as the same opaque refusal. "
-            "Requires an active GitLab connection."
+            "pipeline (latest pipeline id/status plus failed_job_name/failed_job_id if it failed; "
+            "null if none exists or the lookup failed) - use these to tell a real conflict apart "
+            "from a blocked/failed pipeline instead of treating every non-merge as the same opaque "
+            "refusal. Requires an active GitLab connection."
         ),
         inputSchema={
             "type": "object",
@@ -472,24 +510,30 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "ticket_key", "ticket_summary"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_FINISH_TICKET_TOOL,
         description=(
             "USE WHEN an MR has merged and the ticket's branch needs post-merge cleanup: MUST "
             "re-verify the MR is actually merged (never trust the caller's word alone), "
-            "fast-forward the parent branch, and delete the local feature branch. "
+            "fast-forward the parent branch, and fully clean up the feature branch - local copy, "
+            "its remote counterpart on GitLab, AND both backup tiers (the continuous "
+            "backup-latest/<key> pointer and any timestamped backup/<key>-* snapshots). Cleanup is "
+            "unconditional once the merge is verified, no opt-in flag needed - deleting an "
+            "already-gone remote branch (GitLab may have removed it itself on merge) is treated as "
+            "success, not an error. "
             "CONFIRMATION-GATED: first call (no confirm_token) returns pending_confirmation plus a "
-            "token - show the human what's about to be cleaned up, get explicit agreement, then "
+            "token - show the human everything about to be deleted (local branch, remote branch, "
+            "both backup tiers), get explicit agreement, then "
             "call again with confirm_token. If parent_branch is omitted, it is ALWAYS confirmed "
             "with the human, every call - never silently reused, even if one was confirmed for "
             "this repo before. Returns status='confirm_remembered' (with the previously-confirmed "
             "value as proposed_default, a one-tap default to confirm back), 'needs_confirmation' "
             "(with a proposed_default), or 'needs_manual_pick' (with available_branches) - ask "
             "the human, then call again with parent_branch set to their answer. ticket_key is "
-            "nullable - pass null if there is no ticket (used only for backup naming when "
-            "delete_backups is set; never invent a ticket id). Requires an "
-            "active GitLab connection."
+            "nullable - pass null if there is no ticket (used only for backup naming; never invent "
+            "a ticket id). Requires an active GitLab connection."
         ),
         inputSchema={
             "type": "object",
@@ -499,11 +543,11 @@ GIT_TOOLS: list[Tool] = [
                 "feature_branch": {"type": "string"},
                 "ticket_key": {"type": ["string", "null"]},
                 "mr_iid": {"type": "integer"},
-                "delete_backups": {"type": "boolean"},
                 "confirm_token": {"type": "string"},
             },
             "required": ["repo_path", "feature_branch", "ticket_key", "mr_iid"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_CREATE_TAG_TOOL,
@@ -542,6 +586,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "environment", "branch"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_DELETE_TAG_TOOL,
@@ -568,6 +613,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "tag_name"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_RETAG_TOOL,
@@ -599,6 +645,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "tag_name", "branch"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_STASH_CREATE_TOOL,
@@ -615,6 +662,7 @@ GIT_TOOLS: list[Tool] = [
             "properties": {"repo_path": {"type": "string"}, "message": {"type": "string"}},
             "required": ["repo_path", "message"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_STASH_LIST_TOOL,
@@ -622,10 +670,13 @@ GIT_TOOLS: list[Tool] = [
             "USE WHEN the human wants to see what's currently stashed in this repo. MUST call this "
             "to list every stash newest-first, each with index, ref (the exact stash@{N} string to "
             "pass to git_stash_apply/git_stash_pop/git_stash_drop), and message. Read-only, "
-            "UNGATED. Requires a valid git repository at repo_path."
+            "UNGATED. Optional limit/offset to page results. Requires a valid git repository at repo_path."
         ),
-        inputSchema={"type": "object", "properties": {"repo_path": {"type": "string"}},
-                     "required": ["repo_path"]},
+        inputSchema={"type": "object", "properties": {
+            "repo_path": {"type": "string"},
+            "limit": {"type": "integer"}, "offset": {"type": "integer"},
+        }, "required": ["repo_path"]},
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
     Tool(
         name=_STASH_APPLY_TOOL,
@@ -643,6 +694,7 @@ GIT_TOOLS: list[Tool] = [
             "properties": {"repo_path": {"type": "string"}, "ref": {"type": "string"}},
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_STASH_POP_TOOL,
@@ -661,6 +713,7 @@ GIT_TOOLS: list[Tool] = [
             "properties": {"repo_path": {"type": "string"}, "ref": {"type": "string"}},
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_STASH_DROP_TOOL,
@@ -683,6 +736,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_FETCH_TOOL,
@@ -706,6 +760,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
     Tool(
         name=_PULL_TOOL,
@@ -736,6 +791,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_SYNC_TOOL,
@@ -766,6 +822,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_DELETE_BRANCH_TOOL,
@@ -802,6 +859,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "branch", "target"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_LIST_MERGED_BRANCHES_TOOL,
@@ -817,7 +875,7 @@ GIT_TOOLS: list[Tool] = [
             "many days, using each branch's own author date. Local branches only - does not "
             "enumerate GitLab-wide branches (use gitlab_list_branches for that, a different, "
             "read-only, remote-only view with no merged/age computation). Read-only, UNGATED. "
-            "Requires a valid git repository at repo_path."
+            "Optional limit/offset to page results. Requires a valid git repository at repo_path."
         ),
         inputSchema={
             "type": "object",
@@ -825,9 +883,11 @@ GIT_TOOLS: list[Tool] = [
                 "repo_path": {"type": "string"},
                 "target": {"type": "string"},
                 "older_than_days": {"type": "integer"},
+                "limit": {"type": "integer"}, "offset": {"type": "integer"},
             },
             "required": ["repo_path", "target"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_GET_CONFLICT_DETAILS_TOOL,
@@ -849,6 +909,7 @@ GIT_TOOLS: list[Tool] = [
             "properties": {"repo_path": {"type": "string"}, "file": {"type": "string"}},
             "required": ["repo_path", "file"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
     Tool(
         name=_CHECK_MERGE_TOOL,
@@ -874,6 +935,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
     Tool(
         name=_CONFLICT_TAKE_OURS_TOOL,
@@ -898,6 +960,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "file"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_CONFLICT_TAKE_THEIRS_TOOL,
@@ -922,6 +985,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "file"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_CONFLICT_APPLY_RESOLUTION_TOOL,
@@ -947,6 +1011,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "file", "resolved_content"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_CONFLICT_MARK_RESOLVED_TOOL,
@@ -972,6 +1037,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "files"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_CONFLICT_ABORT_TOOL,
@@ -994,6 +1060,7 @@ GIT_TOOLS: list[Tool] = [
             "properties": {"repo_path": {"type": "string"}, "confirm_token": {"type": "string"}},
             "required": ["repo_path"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
     Tool(
         name=_CHECK_BRANCH_POLICY_TOOL,
@@ -1015,6 +1082,7 @@ GIT_TOOLS: list[Tool] = [
             "properties": {"repo_path": {"type": "string"}, "branch_name": {"type": "string"}},
             "required": ["repo_path", "branch_name"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_SET_BRANCH_POLICY_TOOL,
@@ -1037,6 +1105,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "require_ticket_in_branch_name"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
     ),
     Tool(
         name=_CHECK_DEPENDENCY_PINS_TOOL,
@@ -1079,6 +1148,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "target_ref"],
         },
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     ),
     Tool(
         name=_REPIN_DEPENDENCY_TOOL,
@@ -1110,6 +1180,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "manifest", "dependency_name", "target_ref"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
     ),
     Tool(
         name=_RESTORE_FILES_TOOL,
@@ -1139,6 +1210,7 @@ GIT_TOOLS: list[Tool] = [
             },
             "required": ["repo_path", "files"],
         },
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     ),
 ]
 
@@ -1149,6 +1221,19 @@ def _ok(payload: dict) -> list[TextContent]:
 
 def _err(message: str) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps({"ok": False, "error": message}))]
+
+
+def _paginate(items: list, limit, offset) -> tuple[list, dict]:
+    """limit omitted (None): returns items unchanged, no extra fields - exact legacy behavior for
+    every caller that doesn't opt into pagination. limit given: slices [offset:offset+limit] and
+    returns total/has_more/next_offset alongside."""
+    if limit is None:
+        return items, {}
+    offset = offset or 0
+    total = len(items)
+    sliced = items[offset:offset + limit]
+    has_more = offset + len(sliced) < total
+    return sliced, {"total": total, "has_more": has_more, "next_offset": (offset + len(sliced)) if has_more else None}
 
 
 _GL_HOOK_ERR_RE = re.compile(r"GL-HOOK-ERR:\s*(?P<message>.+)")
@@ -1231,6 +1316,19 @@ def _needs_parent_branch(mgr: GitLifecycleManager) -> list[TextContent]:
         "instruction": "Ask the human which branch is their parent/target branch for this repo "
                        "(proposed_default/available_branches are suggestions, not decisions). "
                        "Call this tool again with parent_branch set to their answer.",
+    }))]
+
+
+def _needs_project_code() -> list[TextContent]:
+    """Always returns an ask-payload when ticket_key is null and project_code was omitted - there
+    is no remembered or derived default for this, by design (unlike parent_branch): the human is
+    asked fresh every time, same as they are for parent_branch."""
+    return [TextContent(type="text", text=json.dumps({
+        "status": "needs_project_code",
+        "instruction": "This is a ticketless branch (ticket_key is null). Ask the human for a "
+                       "short project code to use in the branch name (e.g. a Jira project key, or "
+                       "any short alphanumeric code they choose) - never invent one. Call this "
+                       "tool again with project_code set to their answer.",
     }))]
 
 
@@ -1451,6 +1549,11 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
         ticket_key = arguments.get("ticket_key")
         if ticket_key is not None and not isinstance(ticket_key, str):
             return _err("ticket_key must be a string or null.")
+        project_code = arguments.get("project_code")
+        if project_code is not None and not isinstance(project_code, str):
+            return _err("project_code must be a string.")
+        if not ticket_key and not project_code:
+            return _needs_project_code()
         try:
             mgr = GitLifecycleManager(Path(repo_path))
             mgr.validate()
@@ -1459,12 +1562,32 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 return _needs_parent_branch(mgr)
             mgr.confirm_parent_branch(given_parent)
             parent_branch = given_parent
-            result = mgr.start_branch(ticket_key, summary_or_preferred_name, parent_branch)
+            result = mgr.start_branch(ticket_key, summary_or_preferred_name, parent_branch, project_code=project_code)
             return _ok({
                 "branch_name": result.branch_name,
                 "created": result.created,
                 "switched_to_existing": result.switched_to_existing,
                 "commits_behind_parent": result.commits_behind_parent,
+            })
+        except Exception as exc:
+            return _err(str(exc))
+
+    if name == _CHECKOUT_BRANCH_TOOL:
+        repo_path = arguments.get("repo_path")
+        if not repo_path or not isinstance(repo_path, str):
+            return _err("repo_path is required and must be a non-empty string.")
+        branch_name = arguments.get("branch_name")
+        if not branch_name or not isinstance(branch_name, str):
+            return _err("branch_name is required and must be a non-empty string.")
+        remote = arguments.get("remote") or "origin"
+        try:
+            mgr = GitLifecycleManager(Path(repo_path))
+            mgr.validate()
+            result = mgr.checkout_branch(branch_name, remote=remote)
+            return _ok({
+                "branch_name": result.branch_name,
+                "tracked_from_remote": result.tracked_from_remote,
+                "stashed": result.stashed,
             })
         except Exception as exc:
             return _err(str(exc))
@@ -1930,9 +2053,10 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                     "feature_branch": feature_branch,
                     "parent_branch": parent_branch,
                     "instruction": "Show the human the SOURCE (feature_branch, about to be deleted "
-                                   "locally) and TARGET (parent_branch, whose local pointer moves "
-                                   "forward) - confirm both. Only call again with confirm_token once "
-                                   "they agree.",
+                                   "locally AND on the GitLab remote) and TARGET (parent_branch, "
+                                   "whose local pointer moves forward) - both backup tiers for this "
+                                   "ticket are also removed. Confirm all of it. Only call again with "
+                                   "confirm_token once they agree.",
                 }))]
             payload = verify_token(confirm_token, "finish_ticket")
             if payload is None:
@@ -1942,13 +2066,15 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
                 return _no_gitlab_connection_err()
             mgr = GitLifecycleManager(Path(payload["repo_path"]))
             mgr.validate()
-            result = mgr.post_merge_cleanup(
+            result = await mgr.post_merge_cleanup(
                 payload["parent_branch"], payload["feature_branch"], payload["ticket_key"],
-                payload.get("delete_backups", False), conn, payload["mr_iid"],
+                conn, payload["mr_iid"],
             )
             return _ok({
                 "parent_branch": result.parent_branch,
                 "feature_branch_deleted": result.feature_branch_deleted,
+                "remote_branch_deleted": result.remote_branch_deleted,
+                "backup_latest_deleted": result.backup_latest_deleted,
                 "backups_deleted": result.backups_deleted,
             })
         except Exception as exc:
@@ -2251,7 +2377,8 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             from icx_engine.git import gitcmd
             mgr = GitLifecycleManager(Path(repo_path))
             mgr.validate()
-            return _ok({"stashes": gitcmd.stash_list(mgr.repo_root)})
+            stashes, extra = _paginate(gitcmd.stash_list(mgr.repo_root), arguments.get("limit"), arguments.get("offset"))
+            return _ok({"stashes": stashes, **extra})
         except Exception as exc:
             return _err(str(exc))
 
@@ -2796,7 +2923,8 @@ async def dispatch_git_tool(name: str, arguments: dict) -> list[TextContent] | N
             mgr = GitLifecycleManager(Path(repo_path))
             mgr.validate()
             branches = mgr.list_merged_branches(target, older_than_days=older_than_days)
-            return _ok({"branches": branches})
+            branches, extra = _paginate(branches, arguments.get("limit"), arguments.get("offset"))
+            return _ok({"branches": branches, **extra})
         except Exception as exc:
             return _err(str(exc))
 

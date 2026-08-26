@@ -5,7 +5,6 @@ and decisions (design spec: manager is UI-agnostic by design so the same
 logic serves both front doors)."""
 from __future__ import annotations
 
-import asyncio
 import base64
 import re
 from dataclasses import dataclass, field
@@ -15,7 +14,7 @@ from urllib.parse import urlparse
 
 from icx_engine.git.gitcmd import (
     is_git_repo, repo_root, fetch, remote_branch_exists, default_remote_head_branch,
-    dirty_files, stash_push, create_branch_from, checkout, local_branch_exists,
+    dirty_files, stash_push, create_branch_from, checkout, checkout_tracking, local_branch_exists,
     current_branch, fast_forward, stage_files, commit, added_lines_diff, GitCommandError,
     head_sha, merge_ref, merge_abort, conflicted_files, stash_pop,
     conflict_versions, find_conflict_markers, fast_forward_ref, delete_branch,
@@ -30,7 +29,7 @@ from icx_engine.git.policy import validate_branch_name, BranchPolicyResult
 from icx_engine.git.settings import read_repo_settings, write_repo_settings
 from icx_engine.git.safety import (
     detect_leftover_state, LeftoverState, create_backup, create_scratch_branch, prune_old_backups,
-    sync_backup,
+    sync_backup, delete_backup_latest,
 )
 from icx_engine.gitlab.client import GitLabClient, project_path_from_remote_url
 from icx_engine.gitlab.service import create_and_merge_mr
@@ -124,6 +123,13 @@ class BranchStartResult:
 
 
 @dataclass
+class CheckoutResult:
+    branch_name: str
+    tracked_from_remote: bool
+    stashed: bool
+
+
+@dataclass
 class SyncResult:
     status: str  # "up_to_date" | "fast_forwarded" | "diverged_needs_merge"
 
@@ -192,6 +198,8 @@ class CreateMrResult:
 class CleanupResult:
     parent_branch: str
     feature_branch_deleted: bool
+    remote_branch_deleted: bool
+    backup_latest_deleted: bool
     backups_deleted: list[str] = field(default_factory=list)
 
 
@@ -300,19 +308,25 @@ class GitLifecycleManager:
         write_repo_settings(self.repo_root, require_ticket_in_branch_name=require_ticket_in_branch_name)
 
     def start_branch(
-        self, ticket_key: str | None, summary_or_preferred_name: str, parent_branch: str, remote: str = "origin",
+        self, ticket_key: str | None, summary_or_preferred_name: str, parent_branch: str,
+        project_code: str | None = None, remote: str = "origin",
     ) -> BranchStartResult:
         """Fetches `remote` FIRST, always - real bug this fixes: confirm_parent_branch
         only verifies a branch exists on the remote (a live `ls-remote`, always fresh)
         but never updates the LOCAL `origin/<parent_branch>` tracking ref this method
         branches from - a caller that already has parent_branch in hand (skipping
         resolve_parent_branch's own fetch) could otherwise branch off a tracking ref
-        that's arbitrarily stale, however recently it was last fetched."""
+        that's arbitrarily stale, however recently it was last fetched.
+        project_code is required when ticket_key is None - the MCP/CLI layer must have
+        already asked the human for it before calling this (never defaulted or derived
+        here); it becomes the -<PROJECT_CODE>-0000 trailing segment."""
         fetch(self.repo_root, remote=remote, extra_env=self._auth_env(remote))
-        branch_name = (
-            derive_branch_name(ticket_key, summary_or_preferred_name)
-            if ticket_key else ticketless_branch_name(summary_or_preferred_name)
-        )
+        if ticket_key:
+            branch_name = derive_branch_name(ticket_key, summary_or_preferred_name)
+        else:
+            if not project_code:
+                raise GitWorkflowError("project_code is required for a ticketless branch.")
+            branch_name = ticketless_branch_name(project_code, summary_or_preferred_name)
         policy = self.check_branch_name_policy(branch_name)
         if not policy.valid:
             raise GitWorkflowError(policy.reason)
@@ -329,8 +343,47 @@ class GitLifecycleManager:
         checkout(self.repo_root, branch_name)
         return BranchStartResult(branch_name=branch_name, created=True, switched_to_existing=False)
 
+    def checkout_branch(self, branch_name: str, remote: str = "origin") -> CheckoutResult:
+        """Switches to branch_name EXACTLY as given - no derive/slugify/prefix, unlike
+        start_branch. A dirty working tree is stashed first (never refused, never
+        discarded) so the switch never loses anything; the stash is deliberately left
+        in place rather than auto-popped onto the target branch, which could produce a
+        conflict against unrelated work - the human retrieves it via
+        git_stash_apply/git_stash_pop once ready. Raises if branch_name exists neither
+        locally nor on `remote`."""
+        stashed = False
+        if dirty_files(self.repo_root):
+            self.stash_dirty_tree(f"checkout-{branch_name}")
+            stashed = True
+        if local_branch_exists(self.repo_root, branch_name):
+            checkout(self.repo_root, branch_name)
+            return CheckoutResult(branch_name=branch_name, tracked_from_remote=False, stashed=stashed)
+        fetch(self.repo_root, remote=remote, extra_env=self._auth_env(remote))
+        if remote_branch_exists(self.repo_root, branch_name, remote=remote, extra_env=self._auth_env(remote)):
+            checkout_tracking(self.repo_root, branch_name, remote=remote)
+            return CheckoutResult(branch_name=branch_name, tracked_from_remote=True, stashed=stashed)
+        raise GitWorkflowError(
+            f"Branch '{branch_name}' does not exist locally or on remote '{remote}'. "
+            "Check the name, or use git_start_branch to create a new one."
+        )
+
     def current_ticket_key(self) -> str | None:
         return parse_ticket_key_from_branch(current_branch(self.repo_root))
+
+    @staticmethod
+    def _backup_key(ticket_key: str | None, branch: str) -> str:
+        """A ticketless branch created via start_branch already carries its own
+        -<PROJECT_CODE>-0000 segment, so parsing it back out gives the same key
+        start_branch used. Only trusts a parsed suffix that IS that literal placeholder -
+        a branch that merely happens to be named like a real ticket (e.g. a manually
+        created 'feature/x-ABC-1' with no ticket_key passed) must still fall through to a
+        raw slug, exactly as it always has, since the caller explicitly said no ticket."""
+        if ticket_key:
+            return ticket_key
+        parsed = parse_ticket_key_from_branch(branch)
+        if parsed is not None and parsed.endswith("-0000"):
+            return parsed
+        return slugify(branch)
 
     def sync_with_remote(self, remote: str = "origin") -> SyncResult:
         branch = current_branch(self.repo_root)
@@ -401,7 +454,7 @@ class GitLifecycleManager:
         warnings = self.scan_staged_debug_leftovers()
         sha = commit(self.repo_root, cleaned)
         branch = current_branch(self.repo_root)
-        backup_key = ticket_key or slugify(branch)
+        backup_key = self._backup_key(ticket_key, branch)
         sync_backup(self.repo_root, branch, backup_key)
         return CommitResult(sha=sha, debug_warnings=warnings)
 
@@ -434,7 +487,7 @@ class GitLifecycleManager:
         post_merge_cleanup - already routed through it)."""
         fetch(self.repo_root, remote=remote, extra_env=self._auth_env(remote))
         branch = current_branch(self.repo_root)
-        backup_key = ticket_key or slugify(branch)
+        backup_key = self._backup_key(ticket_key, branch)
         create_backup(self.repo_root, branch, backup_key)
 
         was_dirty = len(dirty_files(self.repo_root)) > 0
@@ -468,7 +521,7 @@ class GitLifecycleManager:
         or left stranded on feature. ticket_key is nullable - see
         reverse_merge_standard's docstring for the fallback naming."""
         feature_branch = current_branch(self.repo_root)
-        backup_key = ticket_key or slugify(feature_branch)
+        backup_key = self._backup_key(ticket_key, feature_branch)
         create_backup(self.repo_root, feature_branch, backup_key)
 
         was_dirty = len(dirty_files(self.repo_root)) > 0
@@ -659,14 +712,23 @@ class GitLifecycleManager:
             )
         return None
 
-    def post_merge_cleanup(
+    async def post_merge_cleanup(
         self, parent_branch: str, feature_branch: str, ticket_key: str | None,
-        delete_backups: bool, gitlab_conn, mr_iid: int,
+        gitlab_conn, mr_iid: int, remote: str = "origin",
     ) -> CleanupResult:
         """Post-merge cleanup (design spec Section 8.6). Never trusts the
         caller's word that the MR merged - re-checks via the GitLab API first
         and refuses if it isn't actually merged. The only local write to
-        parent is the fast-forward pointer-move (never a merge)."""
+        parent is the fast-forward pointer-move (never a merge).
+
+        Cleanup is unconditional once the merge is verified - local feature branch,
+        its remote counterpart, and BOTH backup tiers (backup-latest/<key> and any
+        backup/<key>-* snapshots) are all removed, no opt-in flag required. This
+        method itself stays behind the caller's existing confirm_token gate (the
+        MCP dispatch shows the human everything about to be deleted before calling
+        this) - it is `async` so `_check_merged` can be awaited directly instead of
+        `asyncio.run()`, which raised inside the MCP server's already-running event
+        loop."""
         origin = remote_url(self.repo_root)
         project_path = project_path_from_remote_url(origin)
         if project_path is None:
@@ -674,12 +736,9 @@ class GitLifecycleManager:
         self._gitlab_conn = gitlab_conn
         self._gitlab_conn_resolved = True
 
-        async def _check_merged() -> bool:
-            async with GitLabClient(gitlab_conn.url, gitlab_conn.token, gitlab_conn.verify_tls) as client:
-                mr = await client.get_merge_request(project_path, mr_iid)
-            return mr.get("state") == "merged"
-
-        if not asyncio.run(_check_merged()):
+        async with GitLabClient(gitlab_conn.url, gitlab_conn.token, gitlab_conn.verify_tls) as client:
+            mr = await client.get_merge_request(project_path, mr_iid)
+        if mr.get("state") != "merged":
             raise GitWorkflowError(
                 f"MR !{mr_iid} is not actually merged yet - refusing to clean up. "
                 "Finish the review/merge in GitLab first."
@@ -715,12 +774,26 @@ class GitLifecycleManager:
             delete_branch(self.repo_root, feature_branch, force=True)
             deleted = True
 
-        backups_deleted: list[str] = []
-        if delete_backups:
-            backup_key = ticket_key or slugify(feature_branch)
-            backups_deleted = prune_old_backups(self.repo_root, backup_key, keep=0)
+        remote_deleted = False
+        try:
+            delete_remote_branch(self.repo_root, feature_branch, remote=remote, extra_env=self._auth_env(remote))
+            remote_deleted = True
+        except GitCommandError as exc:
+            # GitLab already deletes the source branch itself when an MR created with
+            # remove_source_branch=True merges (see gitlab/service.py:create_and_merge_mr) -
+            # a prior deletion racing this one is the expected case, not a failure, and
+            # must not block local cleanup below.
+            if "remote ref does not exist" not in exc.stderr.lower():
+                raise
 
-        return CleanupResult(parent_branch=parent_branch, feature_branch_deleted=deleted, backups_deleted=backups_deleted)
+        backup_key = self._backup_key(ticket_key, feature_branch)
+        backup_latest_deleted = delete_backup_latest(self.repo_root, backup_key)
+        backups_deleted = prune_old_backups(self.repo_root, backup_key, keep=0)
+
+        return CleanupResult(
+            parent_branch=parent_branch, feature_branch_deleted=deleted, remote_branch_deleted=remote_deleted,
+            backup_latest_deleted=backup_latest_deleted, backups_deleted=backups_deleted,
+        )
 
     def delete_branch_safely(
         self, branch: str, target: str, remote: str = "origin",

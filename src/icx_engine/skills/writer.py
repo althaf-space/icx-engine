@@ -1,6 +1,6 @@
 """Build SkillEntry objects from agent-authored text and write/update them, hash-guarded.
 
-One creation path: draft_skill_entry, called by the draft_skill MCP tool handler (mcp_server.py)
+One creation path: draft_skill_entry, called by the icx_draft_skill MCP tool handler (mcp_server.py)
 immediately after every verified save_memory call. The agent supplies the full authored content live,
 with full context - no mechanical text concatenation, no deferred/statistical trigger. See design spec
 2026-07-25-icx-skills-agent-authoring-redesign-design.md for why the prior emergent/statistical path
@@ -47,7 +47,7 @@ def draft_skill_entry(entry: "MemoryEntry", skill_name: str, description: str, w
                       procedure: str, verification: str, pitfalls: str = "",
                       tags: list | None = None) -> SkillEntry:
     """Build a SkillEntry from agent-authored text. No fallback to raw memory-entry fields - the
-    draft_skill MCP tool schema requires description/when_to_use/procedure/verification, so by the time
+    icx_draft_skill MCP tool schema requires description/when_to_use/procedure/verification, so by the time
     this is called the agent has always supplied real, live-authored content."""
     now = datetime.now(timezone.utc).isoformat()
     root_cause = entry.root_cause_pattern

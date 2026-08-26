@@ -61,17 +61,17 @@ def test_returns_full_brief_shape():
 
 def test_boost_methodology_is_compact_not_full_framework():
     """Token guard: the boost brief carries the operative spine + archetype guidance, NOT the full
-    framework (that is one get_methodology call away). Prevents silent re-bloat of every-prompt tokens."""
+    framework (that is one icx_get_methodology call away). Prevents silent re-bloat of every-prompt tokens."""
     brief = build_boost_brief("add a login feature", repo_path=None,
                               env_fn=_env(has_repo=False, has_graph=False),
                               signals_fn=_signals([]), connected_fn=_connected())
     m = brief["methodology"]
     # kept (the value): the mandatory spine + this task's discipline
     assert m.get("one_pager") and m.get("archetype_discipline")
-    # dropped from the every-prompt payload (lives in get_methodology): the long lists
+    # dropped from the every-prompt payload (lives in icx_get_methodology): the long lists
     for heavy in ("intake_checklist", "verification_battery", "failure_modes_to_avoid",
                   "hallucination_high_risk_zones"):
-        assert heavy not in m, f"{heavy} bloats every boost call - keep it in get_methodology only"
+        assert heavy not in m, f"{heavy} bloats every boost call - keep it in icx_get_methodology only"
     # gate_sequence is surfaced once, at top level, not duplicated inside methodology
     assert "gate_sequence" not in m
     assert brief["gates"]

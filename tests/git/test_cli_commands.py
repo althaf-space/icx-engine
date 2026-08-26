@@ -228,13 +228,16 @@ def test_git_finish_reports_cleanup(tmp_git_repo_with_remote, tmp_path, monkeypa
     monkeypatch.setattr("icx_engine.git.cli_commands._resolve_cwd", lambda: tmp_git_repo_with_remote)
     monkeypatch.setattr("icx_engine.git.settings._git_settings_root", lambda: tmp_path / ".icx-test-home")
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
-    mock_result = type("R", (), {"parent_branch": "main", "feature_branch_deleted": True, "backups_deleted": []})()
+    mock_result = type("R", (), {
+        "parent_branch": "main", "feature_branch_deleted": True, "remote_branch_deleted": True,
+        "backup_latest_deleted": True, "backups_deleted": [],
+    })()
     from icx_engine.models.config import GitLabConnection
     conn = GitLabConnection(name="gitlab.example.com", url="https://gitlab.example.com", token="glpat-x")
 
     with patch("icx_engine.git.cli_commands.ConfigManager") as mock_cfg_cls:
         mock_cfg_cls.load.return_value.active_gitlab_connection.return_value = conn
-        with patch("icx_engine.git.manager.GitLifecycleManager.post_merge_cleanup", return_value=mock_result):
+        with patch("icx_engine.git.manager.GitLifecycleManager.post_merge_cleanup", new=AsyncMock(return_value=mock_result)):
             runner = typer.testing.CliRunner()
             result = runner.invoke(git_app, [
                 "finish", "--parent", "main", "--feature", "feature/x-ABC-1",

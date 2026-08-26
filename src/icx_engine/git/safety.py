@@ -75,6 +75,18 @@ def sync_backup(repo: Path, source_branch: str, backup_key: str) -> str:
     return name
 
 
+def delete_backup_latest(repo: Path, backup_key: str) -> bool:
+    """Deletes the continuously-updated backup-latest/<backup_key> pointer, if it
+    exists. Returns whether anything was actually deleted - called from
+    post_merge_cleanup once a ticket's merge is verified, since the running backup
+    stops being needed the moment the real work has safely landed on parent."""
+    name = f"backup-latest/{backup_key}"
+    if not local_branch_exists(repo, name):
+        return False
+    _run_git(repo, ["branch", "-D", name])
+    return True
+
+
 def list_backups(repo: Path, ticket_key: str) -> list[str]:
     result = _run_git(repo, ["branch", "--list", f"backup/{ticket_key}-*", "--format=%(refname:short)"])
     out = _stdout(result)

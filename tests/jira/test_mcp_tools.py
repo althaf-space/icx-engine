@@ -631,7 +631,7 @@ def test_jira_search_tool_description_distinguishes_from_analyze_tools():
     description = tool.description.lower()
     assert "lightweight" in description
     assert "raw" in description
-    assert "analyze_issue" in description
+    assert "jira_analyze_issue" in description
 
 
 # -- jira_get_issue: required-field validation + UNGATED execution ----------
@@ -683,7 +683,7 @@ def test_jira_get_issue_tool_description_distinguishes_from_analyze_tools():
     description = tool.description.lower()
     assert "lightweight" in description
     assert "raw" in description
-    assert "analyze_issue" in description
+    assert "jira_analyze_issue" in description
 
 
 # -- jira_link_types: UNGATED, no required fields at all ---------------------
@@ -1841,3 +1841,30 @@ async def test_jira_worklog_delete_no_connection_error_surfaces_as_ok_false():
     payload = json.loads(result[0].text)
     assert payload["ok"] is False
     assert payload["error"] == "No Jira connection configured."
+
+
+# -- jira_comment_list pagination ---------------------------------------------
+
+async def test_jira_comment_list_default_call_unchanged():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    service_result = {"issue_key": "TEST-1", "comments": [{"id": str(i)} for i in range(4)]}
+    with patch("icx_engine.jira.mcp_tools.service.list_comments", new=AsyncMock(return_value=service_result)):
+        result = await dispatch_jira_tool("jira_comment_list", {"issue_key": "TEST-1"})
+    payload = json.loads(result[0].text)
+    assert payload["ok"] is True
+    assert len(payload["comments"]) == 4
+    assert payload["issue_key"] == "TEST-1"
+    assert "total" not in payload
+
+
+async def test_jira_comment_list_with_limit_pages_correctly():
+    from icx_engine.jira.mcp_tools import dispatch_jira_tool
+    service_result = {"issue_key": "TEST-1", "comments": [{"id": str(i)} for i in range(4)]}
+    with patch("icx_engine.jira.mcp_tools.service.list_comments", new=AsyncMock(return_value=service_result)):
+        result = await dispatch_jira_tool("jira_comment_list", {"issue_key": "TEST-1", "limit": 2})
+    payload = json.loads(result[0].text)
+    assert len(payload["comments"]) == 2
+    assert payload["total"] == 4
+    assert payload["has_more"] is True
+    assert payload["issue_key"] == "TEST-1"
+

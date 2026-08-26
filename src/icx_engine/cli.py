@@ -188,6 +188,7 @@ AI-native intelligence layer for development teams. Connect your work tracker to
 [bold]Git[/bold]
   [cyan]icx git status[/cyan]                                         Show current branch, dirty files, and leftover state
   [cyan]icx git branch --ticket <KEY> --name <TEXT>[/cyan]            Create a feature branch (or switch to it if it already exists)
+  [cyan]icx git checkout <BRANCH_NAME>[/cyan]                        Switch to an existing branch by its exact name - no derivation
   [cyan]icx git sync --parent <branch> --ticket <KEY>[/cyan]          Reverse-merge parent in; quarantines conflicts on a scratch branch
   [cyan]icx git push --remote <NAME>[/cyan]                          Push the current branch to the remote - plain push, no force
   [cyan]icx git mr --parent <branch> --ticket <KEY> --summary <TEXT>[/cyan]  Create/reuse an MR and attempt one immediate merge
@@ -269,6 +270,11 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx mcp remove --host <HOST>[/cyan]                           Remove from one specific editor
   [cyan]icx mcp config[/cyan]                                         Print config JSON snippets for all editors
   [cyan]icx mcp list[/cyan]                                           List supported editors and detection status
+
+[bold]Telemetry[/bold]
+  [cyan]icx logs report[/cyan]                                        Per-tool call count, error count, avg duration, token estimates for today
+  [cyan]icx logs report --date <YYYY-MM-DD>[/cyan]                    Same, for a specific day
+  [cyan]icx logs report --tool <NAME>[/cyan]                          Scope to one tool
 
 [bold]General[/bold]
   [cyan]icx status[/cyan]                                             Show all connections and LLM profiles
@@ -374,6 +380,9 @@ app.add_typer(skills_app, name="skills", rich_help_panel="Skills")
 
 from icx_engine.git.cli_commands import git_app
 app.add_typer(git_app, name="git", rich_help_panel="Git")
+
+from icx_engine.telemetry.cli_commands import logs_app
+app.add_typer(logs_app, name="logs", rich_help_panel="Telemetry")
 
 from icx_engine.jira.cli_commands import jira_app
 app.add_typer(jira_app, name="jira", rich_help_panel="Jira")
