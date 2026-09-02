@@ -275,6 +275,10 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx logs report[/cyan]                                        Per-tool call count, error count, avg duration, token estimates for today
   [cyan]icx logs report --date <YYYY-MM-DD>[/cyan]                    Same, for a specific day
   [cyan]icx logs report --tool <NAME>[/cyan]                          Scope to one tool
+  [cyan]icx langfuse[/cyan]                                           Show Langfuse OTel export status (local traces are always written regardless)
+  [cyan]icx langfuse --set[/cyan]                                     Set host/public key/secret key (interactive)
+  [cyan]icx langfuse --enable[/cyan]                                  Turn on export to Langfuse
+  [cyan]icx langfuse --disable[/cyan]                                 Turn off export to Langfuse
 
 [bold]General[/bold]
   [cyan]icx status[/cyan]                                             Show all connections and LLM profiles
@@ -383,6 +387,9 @@ app.add_typer(git_app, name="git", rich_help_panel="Git")
 
 from icx_engine.telemetry.cli_commands import logs_app
 app.add_typer(logs_app, name="logs", rich_help_panel="Telemetry")
+
+langfuse_app = typer.Typer(help="Langfuse OTel trace export destination (local OTel traces under ~/.icx/otel/ are always written regardless).", rich_markup_mode="rich")
+app.add_typer(langfuse_app, name="langfuse", rich_help_panel="Telemetry")
 
 from icx_engine.jira.cli_commands import jira_app
 app.add_typer(jira_app, name="jira", rich_help_panel="Jira")
@@ -3780,6 +3787,63 @@ def gitlab_compare(
             marker = "M"
         path = d.get("new_path") or d.get("old_path")
         console.print(f"  {marker}  {path}")
+
+
+@langfuse_app.callback(invoke_without_command=True)
+def langfuse_main(
+    ctx: typer.Context,
+    set_: Annotated[bool, typer.Option("--set", help="Set/update host, public key, secret key (interactive).")] = False,
+    enable: Annotated[bool, typer.Option("--enable", help="Enable export to Langfuse (requires host/public key/secret key already set).")] = False,
+    disable: Annotated[bool, typer.Option("--disable", help="Disable export to Langfuse. Local OTel traces are unaffected.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Configure the Langfuse OTel trace export destination. Single instance, not a
+    multi-connection list like `icx sonar`/`icx gitlab` - a project has at most one Langfuse
+    destination. Local OTel traces under ~/.icx/otel/YYYY-MM-DD/traces.jsonl are always written
+    whether this is enabled or not; this only controls the second, optional export destination.
+    Bare `icx langfuse` shows current status.
+
+    \b
+    Examples:
+      icx langfuse --set        Set host/public key/secret key (interactive)
+      icx langfuse --enable     Turn on export to Langfuse (keys must already be set)
+      icx langfuse --disable    Turn off export to Langfuse
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from icx_engine.config_manager import ConfigManager
+    try:
+        if set_:
+            from icx_engine.services.connection_service import _connect_langfuse
+            _connect_langfuse(debug=debug)
+            return
+        if enable:
+            cfg = ConfigManager.load()
+            if not (cfg.langfuse.public_key and cfg.langfuse.secret_key):
+                console.print("[red]No Langfuse public/secret key configured. Run `icx langfuse --set` first.[/red]")
+                raise typer.Exit(1)
+            cfg.langfuse.enabled = True
+            ConfigManager.save(cfg)
+            console.print("[green]Langfuse export enabled.[/green]")
+            return
+        if disable:
+            cfg = ConfigManager.load()
+            cfg.langfuse.enabled = False
+            ConfigManager.save(cfg)
+            console.print("[green]Langfuse export disabled.[/green] Local OTel traces under ~/.icx/otel/ continue as always.")
+            return
+        cfg = ConfigManager.load().langfuse
+        console.print(f"  enabled:    {cfg.enabled}")
+        console.print(f"  host:       {cfg.host}")
+        console.print(f"  public_key: {cfg.public_key or '(none)'}")
+        console.print(f"  secret_key: {'(set)' if cfg.secret_key else '(none)'}")
+        console.print("  local OTel traces: always written to ~/.icx/otel/YYYY-MM-DD/traces.jsonl regardless of the above")
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=(debug or traceback))
+        raise typer.Exit(1)
 
 
 def _workstatus_resolve_name(value: str) -> str:

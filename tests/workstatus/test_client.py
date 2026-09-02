@@ -573,13 +573,15 @@ async def test_get_timesheet_posts_expected_body_and_unwraps_response_envelope(w
 
 
 @respx.mock
-async def test_get_timesheet_returns_empty_dict_when_no_items(workstatus_base_url):
+async def test_get_timesheet_raises_instead_of_false_success_when_no_items(workstatus_base_url):
+    """Silently returning {} for a not-found id gave callers no signal to stop,
+    inviting blind repeat calls with different ids - this must surface as a real error."""
     respx.post(f"{workstatus_base_url}/api/v5/timesheets/view").mock(
         return_value=httpx.Response(200, json={"response": {"code": "200", "message": "ok", "data": []}})
     )
     async with _client() as client:
-        entry = await client.get_timesheet(1)
-    assert entry == {}
+        with pytest.raises(WorkstatusError, match="not found"):
+            await client.get_timesheet(1)
 
 
 @respx.mock

@@ -607,11 +607,18 @@ ICX/
 |   |                           # with gitlab/sonar, reworked from an original single-instance design), mcp_tools.py
 |   |                           # (WORKSTATUS_TOOLS + dispatch_workstatus_tool()).
 |   +-- telemetry/              # Local, opt-out-free MCP tool-call usage logging - logger.py (ToolCallLogger, JSONL
-|   |                           # under ~/.icx/logs/YYYY-MM-DD/, never raises), report.py (pure per-tool aggregation,
-|   |                           # no CLI concerns), cli_commands.py (`icx logs report`). Wired into mcp_server.py's
+|   |                           # under ~/.icx/logs/YYYY-MM-DD/, IST timestamps, never raises), report.py (pure
+|   |                           # per-tool aggregation, no CLI concerns), cli_commands.py (`icx logs report`), otel.py
+|   |                           # (real OTel span per tool call, ALWAYS written to
+|   |                           # ~/.icx/otel/YYYY-MM-DD/traces.jsonl regardless of any config - LocalJsonlSpanExporter,
+|   |                           # SimpleSpanProcessor for immediate durability. Langfuse export is a separate,
+|   |                           # additive BatchSpanProcessor gated by AppConfig.langfuse.enabled, `icx langfuse`;
+|   |                           # a generic OTEL_EXPORTER_OTLP_* env-var-driven processor is a third, independent,
+|   |                           # stackable destination for any other OTLP backend). Wired into mcp_server.py's
 |   |                           # _call_tool as a thin timing wrapper around _call_tool_impl (the renamed original
-|   |                           # dispatch chain) - every tool call is logged regardless of which module handles it,
-|   |                           # with zero changes to any individual tool's dispatch code.
+|   |                           # dispatch chain) - every tool call is logged (JSONL) and traced (OTel) regardless
+|   |                           # of which module handles
+|   |                           # it, with zero changes to any individual tool's dispatch code.
 |   +-- jira/                   # Jira WRITE-back (close-out + create/delete + comments + search + links/assignee +
 |   |   |                       # attachments) - independent of connectors/jira/'s ConnectorBase read pipeline,
 |   |   |                       # matching sonar/gitlab's own client+service shape.
@@ -796,7 +803,9 @@ ICX/
 1. `icx_find_tools(module=...)` or `icx_find_tools(query=...)` or `icx_find_tools()` with neither (returns a module directory) - reads `_all_tools_full()`, returns full `name`/`description`/`inputSchema` for matches. An unknown module name returns the valid module list in the error text, never a silent empty result.
 2. `icx_call_tool(tool_name, arguments)` - forwards straight into `_call_tool_impl(tool_name, arguments)`, the exact same dispatch chain a native call would use. Zero new dispatch logic - it's a thin pass-through. A confirm_token-gated tool (e.g. `git_push`) still requires its normal two-call pattern when reached this way; gating is a property of the underlying tool, unaffected by how it's invoked.
 
-**Telemetry through the discovery path:** `_dispatch_with_telemetry(name, args)` is the shared helper both the native `_call_tool` entry point and `icx_call_tool`'s forwarding call - a tool invoked via `icx_call_tool` logs a `tool_calls.jsonl` entry under its own real name (e.g. `git_push`), not just under `icx_call_tool`. Both the outer (`icx_call_tool`) and inner (`git_push`) calls get logged - two entries per forwarded call is correct and expected, not a bug; `icx logs report` reflects real per-tool usage either way.
+**Telemetry through the discovery path:** `_dispatch_with_telemetry(name, args)` is the shared helper both the native `_call_tool` entry point and `icx_call_tool`'s forwarding call - a tool invoked via `icx_call_tool` logs a `tool_calls.jsonl` entry under its own real name (e.g. `git_push`), not just under `icx_call_tool`. Both the outer (`icx_call_tool`) and inner (`git_push`) calls get logged - two entries per forwarded call is correct and expected, not a bug; `icx logs report` reflects real per-tool usage either way. Each dispatch also emits a matching OTel span via `telemetry/otel.record_tool_call` (see `telemetry/` in the repository layout above) - same two-entries-per-forwarded-call shape, same no-op-until-configured behavior.
+
+**Repeated `icx_find_tools(module=...)` fetches are capped, not just discouraged in prose:** `_MODULE_FETCH_COUNTS` (process-lifetime dict in `mcp_server.py`) tracks how many times each module has been dumped this session. The 1st fetch returns full `name`/`description`/`inputSchema` for every tool in the module; the 2nd+ fetch of that same module returns `name`/`description` only (no `inputSchema`) plus `repeat_fetch_count`, cutting most of the payload automatically regardless of whether the calling agent reads the accompanying `instruction` text. A caller that still needs one specific tool's exact schema back mid-session uses `icx_find_tools(query=<exact tool name>)` instead of re-fetching the whole module.
 
 Real-world precedent this pattern is adapted from: [MCP Gateway Registry's dynamic tool discovery](https://github.com/agentic-community/mcp-gateway-registry/blob/main/docs/dynamic-tool-discovery.md) (`intelligent_tool_finder` + `invoke_mcp_tool`) and Anthropic's [Tool Search Tool](https://www.anthropic.com/engineering/advanced-tool-use) (`defer_loading` + search) - ICX's version had to be pure server-side since `defer_loading` is a client/Claude-API-specific parameter an MCP server has no access to; this pattern needs no client cooperation at all.
 
@@ -2565,6 +2574,23 @@ connection only), `icx workstatus profile`, `icx workstatus unread`,
 per-tool connection-name parameter, matching how `sonar_*`/most `gitlab_*`
 tools implicitly use the active connection too).
 
+**Config model (`models/config.py`):** `LangfuseConfig` - `enabled: bool =
+False`, `host: str = "https://cloud.langfuse.com"`, `public_key: str | None`
+(plain), `secret_key: str | None = Field(default=None, exclude=True)`
+(keyring-routed under the single account `langfuse_secret_key` - single
+instance, not a per-connection dict, so no `<name>` suffix like
+`sonar_conn_token:<name>`). `AppConfig.langfuse: LangfuseConfig =
+LangfuseConfig()` - always present, no active/inactive concept since there
+is only ever one. Gates ONLY the Langfuse `BatchSpanProcessor` in
+`telemetry/otel.py::_langfuse_processor()` - the always-on local
+`~/.icx/otel/` trace file is unaffected by `enabled`.
+
+**CLI:** `icx langfuse --set` (interactive: host/public key/secret key),
+`icx langfuse --enable`/`--disable` (refuses `--enable` with a clear message
+if public/secret key aren't both set yet), bare `icx langfuse` prints
+status (`enabled`/`host`/`public_key`/whether `secret_key` is set) plus a
+reminder that local OTel traces are written regardless.
+
 ---
 
 ## 7. Memory Module
@@ -3550,7 +3576,7 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 
 **Testing credential isolation:** No credential is ever written to the LangGraph checkpoint DB. `capture`/`inline` auth run through ICX's own Playwright process only (`icx-auth.mjs`) and never pass a credential through chat; a restored session is loaded by the agent from `storageState`, never re-authored as login steps. `~/.icx/testing_auth.json` (`0o600`, keyed by project_id+host) holds only non-secret session intent `{session_id, captured_at, expires_at}`. `sonar_token` uses `Field(exclude=True)`.
 
-**Telemetry never logs secrets.** `telemetry/logger.py`'s `ToolCallLogger` records byte counts and a rough token estimate on the raw tool-call JSON, never the JSON content itself - a tool call carrying a Jira/GitLab/Sonar/Workstatus token in its arguments never has that token written to `~/.icx/logs/`. `~/.icx/logs/YYYY-MM-DD/` is created `0o700` on POSIX, same as every other `~/.icx/` subdirectory.
+**Telemetry never logs secrets.** `telemetry/logger.py`'s `ToolCallLogger` records byte counts and a rough token estimate on the raw tool-call JSON, never the JSON content itself - a tool call carrying a Jira/GitLab/Sonar/Workstatus token in its arguments never has that token written to `~/.icx/logs/`. `~/.icx/logs/YYYY-MM-DD/` is created `0o700` on POSIX, same as every other `~/.icx/` subdirectory. `telemetry/otel.py` follows the exact same shape - span attributes are byte counts/token estimates/`ok`/`error_type`, never tool-call content - and this holds for every destination the span reaches: the always-on local `~/.icx/otel/YYYY-MM-DD/traces.jsonl` file, the Langfuse export (config-gated by `AppConfig.langfuse.enabled`), and the generic `OTEL_EXPORTER_OTLP_ENDPOINT`-driven destination alike. `LangfuseConfig.secret_key` is `Field(..., exclude=True)` and keyring-backed via `config_manager.py`'s `langfuse_secret_key` account, same convention as `SonarConnection.token`/`GitLabConnection.token`.
 
 ---
 

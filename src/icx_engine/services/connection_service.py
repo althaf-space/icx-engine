@@ -398,6 +398,33 @@ def _connect_workstatus(debug: bool = False, default_name: str = "default") -> N
     ConfigManager.warn_if_plaintext()
 
 
+def _connect_langfuse(debug: bool = False) -> None:
+    """Interactive Langfuse config flow - single instance, not a named-connections list like
+    GitLab/Sonar/Workstatus (a user has at most one Langfuse project wired up). Routed through
+    this module per CLAUDE.md's credential-prompt rule. No live validation call - Langfuse's
+    OTel ingestion endpoint has no lightweight health check, so bad keys surface only once a
+    trace is actually exported, same as pointing a raw OTel SDK at any OTLP endpoint."""
+    from icx_engine.config_manager import ConfigManager
+    from icx_engine.models.config import LangfuseConfig
+
+    config = ConfigManager.load()
+    current = config.langfuse
+    host = typer.prompt("Langfuse host", default=current.host).strip()
+    public_key = typer.prompt("Public key", default=current.public_key or "").strip()
+    secret_key = typer.prompt(
+        "Secret key (blank to keep existing)", default="", hide_input=not debug, show_default=False,
+    ).strip() or current.secret_key
+    enable_now = typer.confirm("Enable Langfuse export now?", default=current.enabled)
+
+    config.langfuse = LangfuseConfig(
+        enabled=enable_now, host=host or current.host,
+        public_key=public_key or None, secret_key=secret_key,
+    )
+    ConfigManager.save(config)
+    ConfigManager.warn_if_plaintext()
+    console.print(f"[green]Langfuse config saved.[/green] enabled={config.langfuse.enabled}")
+
+
 def _sonar_add_flow(default_name: str = "default") -> None:
     from icx_engine.sonar import service
     name = typer.prompt("Connection name", default=default_name)

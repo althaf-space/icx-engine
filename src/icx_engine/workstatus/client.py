@@ -530,7 +530,12 @@ class WorkstatusClient:
         resp = await self._request("POST", "/api/v5/timesheets/view", json=body)
         data = self._data(resp, "Fetching Workstatus timesheet")
         items = data if isinstance(data, list) else []
-        return items[0] if items else {}
+        if not items:
+            # Silently returning {} here previously reported false success on a
+            # not-found id - no signal to stop, inviting blind repeat calls with
+            # different ids. Surface it as a real error instead.
+            raise WorkstatusError(f"Timesheet {timesheet_id} not found (member_id={member_id if member_id is not None else self._user_id}).")
+        return items[0]
 
     async def edit_timesheet(
         self, timesheet_id: int, project_id: int, todo_id: int, date: str, from_time: str,

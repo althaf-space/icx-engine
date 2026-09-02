@@ -6,6 +6,10 @@ context, not on the wire) - *_tokens_est below is a local estimate (len(text) //
 English-text rule of thumb) on the JSON payload size. Good for relative trends across tools
 ("sonar_report is 5x heavier than sonar_status"), not a billing-accurate count.
 
+Timestamps and day-directory bucketing are IST (UTC+5:30, fixed offset - India has no DST, so
+this needs no IANA tzdata) rather than UTC, matching the local reporting default in
+telemetry/cli_commands.py (`datetime.now().date()`, i.e. the machine's local date).
+
 Logging failures must never break the tool call itself - every public function here is
 guarded and silently gives up rather than raising, mirroring testing/screen_cache.py's
 "pure I/O module; never raises" convention used elsewhere in this codebase."""
@@ -13,9 +17,10 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+_IST = timezone(timedelta(hours=5, minutes=30))
 _CHARS_PER_TOKEN_ESTIMATE = 4
 
 
@@ -46,7 +51,7 @@ class ToolCallLogger:
         (disk full, permissions, whatever) must never take down the actual tool call it's
         describing, which has already completed by the time this runs."""
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(_IST)
             day_dir = self._day_dir(now)
             day_dir.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
             record = {

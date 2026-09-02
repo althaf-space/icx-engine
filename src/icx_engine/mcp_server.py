@@ -1276,7 +1276,12 @@ async def _all_tools_full() -> list[Tool]:
                 "construct a correct icx_call_tool call). Call with query for a free-text search "
                 "by tool name/description instead. Call with NEITHER to get the module directory "
                 "(every module name + its tool count) as a starting point. Never invent a tool "
-                "name - always confirm it exists here first."
+                "name - always confirm it exists here first. IMPORTANT: call with module=X exactly "
+                "ONCE per module - that single response already contains every tool in it, so plan "
+                "every icx_call_tool invocation the task needs from that one dump. Do not call "
+                "icx_find_tools again for a module you already fetched, and do not issue a fresh "
+                "query per sub-action within an already-fetched module - that wastes calls and "
+                "tokens for no new information."
             ),
             inputSchema={
                 "type": "object",
@@ -1370,7 +1375,14 @@ def _tool_summary(t: Tool) -> dict:
     return summary
 
 
+_MODULE_FETCH_COUNTS: dict[str, int] = {}
+
+
 async def _dispatch_find_tools(args: dict) -> list[TextContent]:
+    """_MODULE_FETCH_COUNTS is process-lifetime (one MCP server process per client session) -
+    a 2nd+ module dump within the same session is a strong signal the caller already has this
+    module's tools and is re-querying instead of reusing them, so it gets a stripped response
+    (name+description, no inputSchema) instead of paying the full-schema token cost again."""
     from icx_engine.git.mcp_tools import _ok, _err
 
     module = args.get("module")
@@ -1383,7 +1395,31 @@ async def _dispatch_find_tools(args: dict) -> list[TextContent]:
                 f"Unknown module {module!r}. Valid modules: {sorted(index.keys())}. "
                 "Call icx_find_tools with no arguments to see each module's tool count first."
             )
-        return _ok({"module": module, "tools": [_tool_summary(t) for t in index[module]]})
+        _MODULE_FETCH_COUNTS[module] = _MODULE_FETCH_COUNTS.get(module, 0) + 1
+        fetch_count = _MODULE_FETCH_COUNTS[module]
+        if fetch_count > 1:
+            return _ok({
+                "module": module,
+                "repeat_fetch_count": fetch_count,
+                "tools": [{"name": t.name, "description": t.description} for t in index[module]],
+                "instruction": (
+                    f"You already fetched {module!r}'s full tool list {fetch_count - 1} time(s) "
+                    "earlier in this session - reuse the names and schemas from that result "
+                    "instead of calling icx_find_tools again. This repeat response omits "
+                    "inputSchema to cut token cost. If you need one specific tool's exact schema "
+                    "back, call icx_find_tools with query=<exact tool name> instead of "
+                    "module=<name> again."
+                ),
+            })
+        return _ok({
+            "module": module,
+            "tools": [_tool_summary(t) for t in index[module]],
+            "instruction": (
+                f"This is every tool in the {module!r} module - name, description, inputSchema, "
+                "all included. Plan every icx_call_tool invocation the current task needs from "
+                "this list now. Do not call icx_find_tools again for this module."
+            ),
+        })
 
     if query is not None:
         if not isinstance(query, str) or not query.strip():
@@ -1442,18 +1478,24 @@ async def _dispatch_with_telemetry(name: str, args: dict) -> list[TextContent]:
     Never lets a logging failure - or the logging itself - change the tool's own result or raise
     past this boundary beyond what _call_tool_impl itself would have raised."""
     import time
+    from icx_engine.telemetry import otel
     from icx_engine.telemetry.logger import ToolCallLogger
 
     input_text = json.dumps(args, default=str)
     start = time.monotonic()
+    start_ns = time.time_ns()
     try:
         result = await _call_tool_impl(name, args)
     except Exception as exc:
+        end_ns = time.time_ns()
+        error_type = type(exc).__name__
         ToolCallLogger().log_call(
             name, input_text, None, (time.monotonic() - start) * 1000,
-            ok=False, error_type=type(exc).__name__,
+            ok=False, error_type=error_type,
         )
+        otel.record_tool_call(name, input_text, None, start_ns, end_ns, ok=False, error_type=error_type)
         raise
+    end_ns = time.time_ns()
     duration_ms = (time.monotonic() - start) * 1000
     output_text = result[0].text if result and hasattr(result[0], "text") else ""
     ok = True
@@ -1466,6 +1508,7 @@ async def _dispatch_with_telemetry(name: str, args: dict) -> list[TextContent]:
     except (json.JSONDecodeError, TypeError):
         pass
     ToolCallLogger().log_call(name, input_text, output_text, duration_ms, ok=ok, error_type=error_type)
+    otel.record_tool_call(name, input_text, output_text, start_ns, end_ns, ok=ok, error_type=error_type)
     return result
 
 

@@ -246,7 +246,6 @@ async def test_each_new_service_function_raises_when_not_configured(fn, args, pa
         (list_expenses, {"start_date": "2026-07-01", "end_date": "2026-08-01"}, "expense/filtered-data"),
         (list_invoices, {}, "list/invoices"),
         (payroll_report, {"from_date": "2026-07-01", "to_date": "2026-08-01"}, "payroll/report/list"),
-        (get_timesheet, {"timesheet_id": 329559}, "timesheets/view"),
     ],
 )
 @respx.mock
@@ -255,6 +254,17 @@ async def test_each_new_service_function_calls_expected_endpoint_when_configured
         return_value=httpx.Response(200, json={"code": "200", "message": "ok", "data": {}, "result": {}})
     )
     await fn(**args, cfg=_configured_cfg())
+    assert route.called
+
+
+@respx.mock
+async def test_get_timesheet_calls_expected_endpoint_when_configured():
+    """Separate from the generic empty-data check above: an empty `data` list is get_timesheet's
+    own not-found signal (see client.get_timesheet), so it needs a real item in the envelope."""
+    route = respx.post(f"{BASE}/timesheets/view").mock(
+        return_value=httpx.Response(200, json={"code": "200", "message": "ok", "data": [{"id": 329559}]})
+    )
+    await get_timesheet(timesheet_id=329559, cfg=_configured_cfg())
     assert route.called
 
 

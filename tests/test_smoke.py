@@ -98,6 +98,15 @@ def test_logs_report_help(cli_runner):
     assert "--tool" in output
 
 
+def test_langfuse_help(cli_runner):
+    result = cli_runner.invoke(app, ["langfuse", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    assert "--set" in output
+    assert "--enable" in output
+    assert "--disable" in output
+
+
 def test_jira_help(cli_runner):
     result = cli_runner.invoke(app, ["jira", "--help"])
     assert result.exit_code == 0
@@ -971,6 +980,56 @@ def test_gitlab_connect_command_saves_connection(cli_runner, isolated_config, mo
     config = ConfigManager.load()
     assert config.active_gitlab == "default"
     assert config.gitlab_connections["default"].token == "glpat-x"
+
+
+def test_langfuse_status_shows_disabled_by_default(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["langfuse"])
+    assert result.exit_code == 0
+    output = result.stdout.lower()
+    assert "false" in output
+    assert "always written" in output
+
+
+def test_langfuse_set_saves_config(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: {
+        "Langfuse host": "https://cloud.langfuse.com",
+        "Public key": "pk-test-1",
+        "Secret key (blank to keep existing)": "sk-test-1",
+    }.get(a[0], k.get("default", "")))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    result = cli_runner.invoke(app, ["langfuse", "--set"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    config = ConfigManager.load()
+    assert config.langfuse.enabled is True
+    assert config.langfuse.public_key == "pk-test-1"
+    assert config.langfuse.secret_key == "sk-test-1"
+
+
+def test_langfuse_enable_without_keys_fails_cleanly(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["langfuse", "--enable"])
+    assert result.exit_code != 0
+    assert "langfuse --set" in result.stdout.lower() or "public/secret key" in result.stdout.lower()
+
+
+def test_langfuse_enable_and_disable_toggle_config(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    from icx_engine.config_manager import ConfigManager
+    from icx_engine.models.config import AppConfig, LangfuseConfig
+
+    cfg = AppConfig(langfuse=LangfuseConfig(public_key="pk", secret_key="sk"))
+    ConfigManager.save(cfg)
+
+    result = cli_runner.invoke(app, ["langfuse", "--enable"])
+    assert result.exit_code == 0
+    assert ConfigManager.load().langfuse.enabled is True
+
+    result = cli_runner.invoke(app, ["langfuse", "--disable"])
+    assert result.exit_code == 0
+    assert ConfigManager.load().langfuse.enabled is False
 
 
 def test_gitlab_status_command_reports_not_configured(cli_runner, isolated_config):

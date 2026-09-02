@@ -381,6 +381,7 @@ def test_remove_icx_entry_toml_returns_false_when_not_present(tmp_path):
 from icx_engine.mcp_server import (
     _handle_analyze_issue,
     _handle_save_memory,
+    _dispatch_find_tools,
 )
 from unittest.mock import MagicMock, AsyncMock
 
@@ -450,6 +451,46 @@ async def test_handle_analyze_issue_returns_error_json_when_no_connection():
     assert data.get("status") == "error"
     assert data.get("code") == "NO_CONNECTION"
     assert "action_required" in data
+
+
+@pytest.fixture(autouse=True)
+def _reset_module_fetch_counts():
+    """_MODULE_FETCH_COUNTS is process-lifetime state (see mcp_server._dispatch_find_tools) -
+    reset it around every test in this file so one test's module fetch doesn't count as a
+    repeat for another."""
+    from icx_engine import mcp_server
+    mcp_server._MODULE_FETCH_COUNTS.clear()
+    yield
+    mcp_server._MODULE_FETCH_COUNTS.clear()
+
+
+async def test_dispatch_find_tools_module_lookup_discourages_repeat_calls():
+    result = await _dispatch_find_tools({"module": "workstatus"})
+    data = json.loads(result[0].text)
+    assert data["ok"] is True
+    assert data["module"] == "workstatus"
+    assert len(data["tools"]) > 0
+    assert "inputSchema" in data["tools"][0]
+    assert "do not call icx_find_tools again" in data["instruction"].lower()
+
+
+async def test_dispatch_find_tools_repeat_module_fetch_omits_schema():
+    await _dispatch_find_tools({"module": "workstatus"})
+    result = await _dispatch_find_tools({"module": "workstatus"})
+    data = json.loads(result[0].text)
+    assert data["ok"] is True
+    assert data["repeat_fetch_count"] == 2
+    assert len(data["tools"]) > 0
+    assert "inputSchema" not in data["tools"][0]
+    assert set(data["tools"][0].keys()) == {"name", "description"}
+    assert "already fetched" in data["instruction"].lower()
+
+
+async def test_dispatch_find_tools_unknown_module_has_no_instruction_field():
+    result = await _dispatch_find_tools({"module": "not-a-real-module"})
+    data = json.loads(result[0].text)
+    assert data["ok"] is False
+    assert "instruction" not in data
 
 
 async def test_handle_analyze_issue_returns_error_json_on_invalid_key():
@@ -5458,6 +5499,8 @@ async def test_call_tool_logs_successful_call(tmp_path, monkeypatch):
     from icx_engine import mcp_server
     from icx_engine.telemetry.logger import ToolCallLogger
     monkeypatch.setattr("icx_engine.telemetry.logger.ToolCallLogger", lambda: ToolCallLogger(root=tmp_path))
+    otel_calls = []
+    monkeypatch.setattr("icx_engine.telemetry.otel.record_tool_call", lambda *a, **kw: otel_calls.append((a, kw)))
     await mcp_server._call_tool("git_check_branch_name_policy", {"repo_path": "/fake", "branch_name": "x"})
 
     files = list(tmp_path.rglob("tool_calls.jsonl"))
@@ -5466,12 +5509,17 @@ async def test_call_tool_logs_successful_call(tmp_path, monkeypatch):
     record = json.loads(files[0].read_text(encoding="utf-8").strip().splitlines()[0])
     assert record["tool"] == "git_check_branch_name_policy"
     assert "duration_ms" in record
+    assert len(otel_calls) == 1
+    assert otel_calls[0][0][0] == "git_check_branch_name_policy"
+    assert otel_calls[0][1]["ok"] == record["ok"]
 
 
 async def test_call_tool_logs_tool_reported_error_as_not_ok(tmp_path, monkeypatch):
     from icx_engine import mcp_server
     from icx_engine.telemetry.logger import ToolCallLogger
     monkeypatch.setattr("icx_engine.telemetry.logger.ToolCallLogger", lambda: ToolCallLogger(root=tmp_path))
+    otel_calls = []
+    monkeypatch.setattr("icx_engine.telemetry.otel.record_tool_call", lambda *a, **kw: otel_calls.append((a, kw)))
     # missing repo_path -> the tool itself returns ok:false, no exception raised
     await mcp_server._call_tool("git_check_branch_name_policy", {})
 
@@ -5480,6 +5528,8 @@ async def test_call_tool_logs_tool_reported_error_as_not_ok(tmp_path, monkeypatc
     record = json.loads(files[0].read_text(encoding="utf-8").strip().splitlines()[0])
     assert record["ok"] is False
     assert record["error_type"] == "tool_error"
+    assert otel_calls[0][1]["ok"] is False
+    assert otel_calls[0][1]["error_type"] == "tool_error"
 
 
 async def test_call_tool_logs_and_reraises_on_unhandled_exception(tmp_path, monkeypatch):
@@ -5490,6 +5540,8 @@ async def test_call_tool_logs_and_reraises_on_unhandled_exception(tmp_path, monk
         raise RuntimeError("simulated dispatch crash")
     monkeypatch.setattr(mcp_server, "_call_tool_impl", _boom)
     monkeypatch.setattr("icx_engine.telemetry.logger.ToolCallLogger", lambda: ToolCallLogger(root=tmp_path))
+    otel_calls = []
+    monkeypatch.setattr("icx_engine.telemetry.otel.record_tool_call", lambda *a, **kw: otel_calls.append((a, kw)))
 
     with pytest.raises(RuntimeError, match="simulated dispatch crash"):
         await mcp_server._call_tool("anything", {})
@@ -5499,6 +5551,8 @@ async def test_call_tool_logs_and_reraises_on_unhandled_exception(tmp_path, monk
     record = json.loads(files[0].read_text(encoding="utf-8").strip().splitlines()[0])
     assert record["ok"] is False
     assert record["error_type"] == "RuntimeError"
+    assert otel_calls[0][1]["ok"] is False
+    assert otel_calls[0][1]["error_type"] == "RuntimeError"
 
 
 # -- icx_find_tools / icx_call_tool - discovery + forwarding dispatch ----------------------

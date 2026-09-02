@@ -677,6 +677,21 @@ class ConfigManager:
         elif sonar_raw:
             needs_secret_migration = True
 
+        # Resolve langfuse.secret_key sentinel (single instance, not a per-connection dict -
+        # mirrors the sonar_token block above rather than the sonar_connections loop below).
+        _lf = raw.get("langfuse")
+        if isinstance(_lf, dict):
+            _lf_raw = _lf.get("secret_key") or ""
+            if _lf_raw == _SENTINEL:
+                _lf["secret_key"] = _resolve("langfuse_secret_key") or None
+            elif isinstance(_lf_raw, str) and _lf_raw.startswith(_DLOCK_PREFIX):
+                try:
+                    _lf["secret_key"] = _dlock_decrypt(_lf_raw)
+                except Exception:
+                    _lf["secret_key"] = _env_get("langfuse_secret_key") or None
+            elif _lf_raw:
+                needs_secret_migration = True
+
         # Resolve per-connection Sonar tokens
         for _sc_name, _sc in (raw.get("sonar_connections") or {}).items():
             if not isinstance(_sc, dict):
@@ -899,6 +914,21 @@ class ConfigManager:
                 _gc_raw["token"] = _gc_tok
                 _warn_plaintext(_gc_acct, f"GitLab token for connection '{_gc_name}'")
 
+        # Store langfuse.secret_key via keyring (excluded from Pydantic serialization).
+        # Single instance, not a per-connection dict, so this mirrors the legacy
+        # sonar_token block above rather than the sonar_connections/gitlab_connections loops.
+        _lf_secret = config.langfuse.secret_key
+        if _lf_secret:
+            if _check_keychain() and len(_lf_secret) > _DLOCK_THRESHOLD:
+                raw["langfuse"]["secret_key"] = _dlock_encrypt(_lf_secret)
+            elif _check_keychain() and _kset("langfuse_secret_key", _lf_secret):
+                raw["langfuse"]["secret_key"] = _SENTINEL
+            else:
+                raw["langfuse"]["secret_key"] = _lf_secret
+                _warn_plaintext("langfuse_secret_key", "Langfuse secret key")
+        else:
+            _kdel("langfuse_secret_key")
+
         # Store per-connection Workstatus secrets via keyring (mirrors gitlab_connections
         # above, but two secret fields per connection instead of one).
         for _wc_name, _wc_model in config.workstatus_connections.items():
@@ -1000,6 +1030,7 @@ class ConfigManager:
             _kdel(_llm_text_account(profile_name))
             _kdel(_llm_image_account(profile_name))
         _kdel("sonar_token")
+        _kdel("langfuse_secret_key")
         for _sc_name in (config.sonar_connections or {}):
             _kdel(f"sonar_conn_token:{_sc_name}")
         for _gc_name in (config.gitlab_connections or {}):

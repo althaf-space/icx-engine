@@ -49,6 +49,21 @@ class GitLabConnection(BaseModel):
     verify_tls: bool = True
 
 
+class LangfuseConfig(BaseModel):
+    """OTel trace export destination for telemetry/otel.py. Single instance, not a named-
+    connections dict like Sonar/GitLab/Workstatus - a user has at most one Langfuse project
+    wired up. `enabled` gates export explicitly; local OTel trace files
+    (~/.icx/otel/YYYY-MM-DD/traces.jsonl) are written unconditionally regardless of this
+    config, enabled or not. secret_key stored in the OS keyring, same convention as
+    SonarConnection.token/GitLabConnection.token."""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    host: str = "https://cloud.langfuse.com"
+    public_key: str | None = None
+    secret_key: str | None = Field(default=None, exclude=True)
+
+
 class WorkstatusConnection(BaseModel):
     """A single Workstatus session (captured browser headers, not a
     server-issued API token - see workstatus/config.py for the full auth
@@ -130,6 +145,11 @@ class AppConfig(BaseModel):
     # multi-connection parity (--add/--active/--remove/--list), same as GitLab/Sonar.
     workstatus_connections: dict[str, WorkstatusConnection] = {}
     active_workstatus: str | None = None
+
+    # Langfuse (OTel trace export destination for telemetry/otel.py). Single instance, not a
+    # named-connections dict - see LangfuseConfig's docstring. secret_key stored in the OS
+    # keyring, same as sonar_connections/gitlab_connections/workstatus_connections' secrets.
+    langfuse: LangfuseConfig = LangfuseConfig()
 
     # Legacy single-server fields - retained only for backward-compatible loading
     # of older config files. Resolved into an implicit "default" connection when a
