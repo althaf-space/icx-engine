@@ -5,17 +5,28 @@ import respx
 
 
 def test_workstatus_help(cli_runner):
+    """Only `status` stays visible in the Click command tree - the rest are agent-only-hidden
+    (cli_visibility.AGENT_ONLY_CLI_HIDDEN), still runnable but no longer advertised in --help.
+    Checked against the actual command tree, not the printed text, since some hidden command
+    names (e.g. "attendance") are also substrings of workstatus_app's own help prose. See
+    test_cli_visibility.py for the runnable-while-hidden coverage."""
+    import typer
     from icx_engine.cli import app
+
     result = cli_runner.invoke(app, ["workstatus", "--help"])
     assert result.exit_code == 0
-    for cmd in (
-        "status", "profile", "unread", "add-time", "projects", "project",
+
+    workstatus_cmd = typer.main.get_command(app).commands["workstatus"]
+    hidden = {name for name, sub in workstatus_cmd.commands.items() if sub.hidden}
+    visible = {name for name, sub in workstatus_cmd.commands.items() if not sub.hidden}
+    assert visible == {"status"}
+    assert hidden == {
+        "profile", "unread", "add-time", "projects", "project",
         "project-budget", "tasks", "task-statuses", "milestones", "task-checklist",
         "members", "teams", "attendance", "attendance-stats", "timesheets",
         "timesheet-clients", "weekly-report", "submission-kpis", "submission-table",
         "expenses", "invoices", "payroll", "timesheet", "edit-time",
-    ):
-        assert cmd in result.output
+    }
 
 
 @pytest.mark.parametrize("args", [

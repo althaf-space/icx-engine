@@ -15,26 +15,31 @@ def test_help_exits_cleanly(cli_runner):
         assert cmd in result.output
 
 
-def test_full_help_lists_every_command():
-    """Drift guard: EVERY registered command must appear in the hand-written `icx --help` text, so a
-    new command can never be silently invisible. If this fails, add the command to _FULL_HELP."""
+def test_full_help_lists_every_visible_command():
+    """Drift guard: every NON-hidden command must appear in the hand-written `icx --help` text, so
+    a new visible command can never be silently invisible. A command hidden via
+    cli_visibility.AGENT_ONLY_CLI_HIDDEN is deliberately exempt - see test_cli_visibility.py for
+    the coverage on hidden commands (still runnable, just not advertised here). If this fails for
+    a visible command, add it to _FULL_HELP; if it fails for a command that should be hidden, add
+    `hidden=_AGENT_ONLY_CLI_HIDDEN`/`hidden=AGENT_ONLY_CLI_HIDDEN` to its decorator instead."""
     import typer
     from icx_engine.cli import _FULL_HELP
 
     cli = typer.main.get_command(app)
 
-    def walk(cmd, prefix=""):
+    def walk(cmd, prefix="", parent_hidden=False):
         out = []
+        hidden = parent_hidden or bool(getattr(cmd, "hidden", False))
         if hasattr(cmd, "commands"):
             for name, sub in cmd.commands.items():
-                out += walk(sub, (prefix + " " + name).strip())
-        else:
+                out += walk(sub, (prefix + " " + name).strip(), parent_hidden=hidden)
+        elif not hidden:
             out.append(prefix)
         return out
 
     commands = walk(cli, "icx")
     missing = [c for c in commands if c not in _FULL_HELP and c[len("icx "):] not in _FULL_HELP]
-    assert not missing, f"commands missing from `icx --help`: {missing}"
+    assert not missing, f"visible commands missing from `icx --help`: {missing}"
 
 
 def test_every_leaf_command_has_debug_and_traceback_options():
@@ -698,12 +703,15 @@ def test_test_group_in_help(cli_runner):
     assert "test" in result.output
 
 
-def test_test_help_shows_subcommands(cli_runner):
+def test_test_help_shows_visible_subcommands_only(cli_runner):
+    """`cancel`/`configure`/`rules`/`analytics` are agent-only-hidden - they must not appear in
+    `icx test --help`, even though they still run (see test_cli_visibility.py)."""
     result = cli_runner.invoke(app, ["test", "--help"])
     assert result.exit_code == 0
     output = click.unstyle(result.output)
-    for cmd in ("sessions", "cancel"):
-        assert cmd in output
+    assert "sessions" in output
+    for cmd in ("cancel", "configure", "rules", "analytics"):
+        assert cmd not in output
 
 
 def test_test_module_importable():
@@ -848,12 +856,16 @@ def test_appconfig_has_sonar_enable_fields():
 
 
 def test_sonar_help_lists_commands(cli_runner):
+    """`projects`/`report` are agent-only-hidden - they must not appear here, even though they
+    still run (see test_cli_visibility.py)."""
     from icx_engine.cli import app
     result = cli_runner.invoke(app, ["sonar", "--help"])
     assert result.exit_code == 0
     out = result.stdout.lower()
-    for cmd in ("add", "list", "active", "remove", "status", "projects", "report"):
+    for cmd in ("add", "list", "active", "remove", "status"):
         assert cmd in out
+    for cmd in ("projects", "report"):
+        assert cmd not in out
 
 
 def test_sonar_report_no_connection_message(cli_runner, isolated_config):
@@ -980,6 +992,57 @@ def test_gitlab_connect_command_saves_connection(cli_runner, isolated_config, mo
     config = ConfigManager.load()
     assert config.active_gitlab == "default"
     assert config.gitlab_connections["default"].token == "glpat-x"
+
+
+def test_mcp_external_help(cli_runner):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["mcp-external", "--help"])
+    assert result.exit_code == 0
+
+
+def test_mcp_external_add_without_preset_is_rejected(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["mcp-external", "--add"])
+    assert result.exit_code == 0
+    assert "--preset is required" in result.stdout
+    from icx_engine.config_manager import ConfigManager
+    assert ConfigManager.load().external_mcp_servers == {}
+
+
+def test_mcp_external_add_preset_saves_config(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    from icx_engine.mcp_gateway import registry
+    monkeypatch.setitem(registry.PRESETS, "fake", {
+        "command": "npx", "args": ["-y", "fake-mcp@1.0.0"], "env": {},
+        "description": "Fake preset for tests.",
+    })
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: {
+        "Server name (used as the tool-name prefix)": "fake",
+    }.get(a[0], k.get("default", "")))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: a[0] == "Enable this server now?")
+    result = cli_runner.invoke(app, ["mcp-external", "--add", "--preset", "fake"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    config = ConfigManager.load()
+    server = config.external_mcp_servers["fake"]
+    assert server.command == "npx"
+    assert server.enabled is True
+    assert server.preset == "fake"
+
+
+def test_mcp_external_list_and_remove(cli_runner, isolated_config):
+    from icx_engine.mcp_gateway import service as gateway_service
+    gateway_service.add_server("s", "npx", enabled=True)
+
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["mcp-external", "--list"])
+    assert result.exit_code == 0
+    assert "s" in result.stdout
+
+    result = cli_runner.invoke(app, ["mcp-external", "--remove", "s"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    assert "s" not in ConfigManager.load().external_mcp_servers
 
 
 def test_langfuse_status_shows_disabled_by_default(cli_runner, isolated_config):

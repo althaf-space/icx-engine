@@ -493,6 +493,45 @@ async def test_dispatch_find_tools_unknown_module_has_no_instruction_field():
     assert "instruction" not in data
 
 
+async def test_all_tools_full_includes_dynamically_registered_external_tools(isolated_config, monkeypatch):
+    from mcp.types import Tool as MCPTool
+    from icx_engine.mcp_gateway import registry, service as gateway_service
+    from icx_engine.mcp_server import _all_tools_full
+
+    gateway_service.add_server("playwright", "npx", args=["-y", "@playwright/mcp@0.0.29"], enabled=True)
+
+    class _FakeClient:
+        async def list_tools(self):
+            return [MCPTool(name="navigate", description="d", inputSchema={"type": "object"})]
+
+    monkeypatch.setattr(registry, "get_client", lambda name: _FakeClient())
+    tools = await _all_tools_full()
+    names = {t.name for t in tools}
+    assert "ext_playwright_navigate" in names
+
+
+async def test_find_tools_module_lookup_reaches_external_server(isolated_config, monkeypatch):
+    from mcp.types import Tool as MCPTool
+    from icx_engine.mcp_gateway import registry, service as gateway_service
+
+    gateway_service.add_server("playwright", "npx", args=["-y", "@playwright/mcp@0.0.29"], enabled=True)
+
+    class _FakeClient:
+        async def list_tools(self):
+            return [MCPTool(name="navigate", description="d", inputSchema={"type": "object"})]
+
+    monkeypatch.setattr(registry, "get_client", lambda name: _FakeClient())
+    result = await _dispatch_find_tools({"module": "playwright"})
+    data = json.loads(result[0].text)
+    assert data["ok"] is True
+    assert data["tools"][0]["name"] == "ext_playwright_navigate"
+
+
+def test_external_tool_namespace_never_collides_with_a_core_tool_name():
+    from icx_engine.mcp_server import _CORE_TOOL_ORDER
+    assert not any(name.startswith("ext_") for name in _CORE_TOOL_ORDER)
+
+
 async def test_handle_analyze_issue_returns_error_json_on_invalid_key():
     with patch("icx_engine.mcp_server.ConfigManager") as mock_cm:
         mock_cm.load.return_value = AppConfig()
@@ -5000,10 +5039,19 @@ def test_skills_delete_command_cancelled_keeps_skill(monkeypatch, tmp_path):
     assert storage.read("keep-me") is not None
 
 
-def test_skills_create_and_delete_present_in_full_help():
-    from icx_engine.cli import _FULL_HELP
-    assert "icx skills create" in _FULL_HELP
-    assert "icx skills delete" in _FULL_HELP
+def test_skills_create_and_delete_hidden_from_full_help_but_still_runnable():
+    """skills create/delete are agent-only-hidden (cli_visibility.AGENT_ONLY_CLI_HIDDEN) - no
+    longer advertised in _FULL_HELP, but still directly invokable by exact name (hidden=True only
+    affects --help listing, never dispatch)."""
+    from icx_engine.cli import _FULL_HELP, app
+    assert "icx skills create" not in _FULL_HELP
+    assert "icx skills delete" not in _FULL_HELP
+    assert "icx skills list" in _FULL_HELP
+
+    result = _runner.invoke(app, ["skills", "list"])
+    assert result.exit_code == 0
+    result = _runner.invoke(app, ["skills", "create", "--help"])
+    assert result.exit_code == 0
 
 
 def test_cached_querier_reuses_instance_for_unchanged_mtime(tmp_path, monkeypatch):

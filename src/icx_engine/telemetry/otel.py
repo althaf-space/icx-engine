@@ -4,6 +4,13 @@ JSONL log's durability and local-only-by-default posture). This is unconditional
 opt-in-via-env-var design, a fresh install with zero configuration still gets a complete OTel
 trace on disk from the first tool call.
 
+The OTel SDK's own ReadableSpan.to_json() hardcodes UTC for start_time/end_time/event timestamps
+(opentelemetry.sdk.util.ns_to_iso_str always uses tz=utc) - there is no SDK hook to change that.
+LocalJsonlSpanExporter re-parses those UTC ISO strings and rewrites them in IST before writing,
+so the local trace file - the always-on record ICX guarantees - reads in the user's local time
+end to end, not just the day-folder name. Network exporters (Langfuse, generic OTLP) are left on
+standard UTC, per OTel convention for anything leaving the machine.
+
 Export to Langfuse (or any other OTLP backend) is a SEPARATE, additive destination, gated by
 explicit config (AppConfig.langfuse.enabled - see `icx langfuse`), not env-var presence: local
 traces are the guarantee, Langfuse is opt-in on top of it. The generic OTEL_EXPORTER_OTLP_ENDPOINT
@@ -19,6 +26,7 @@ token estimates/ok/error_type - see developer.md's "Telemetry never logs secrets
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -32,6 +40,17 @@ from icx_engine.telemetry.logger import estimate_tokens
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 _provider_initialized = False
+
+
+def _utc_iso_to_ist(value: str) -> str:
+    """Converts an OTel-SDK-formatted UTC ISO string ('...Z') to an IST ISO string
+    ('...+05:30'). Returns value unchanged if it doesn't parse as expected - a local trace
+    file must never lose a span over a formatting surprise."""
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        return dt.astimezone(_IST).strftime("%Y-%m-%dT%H:%M:%S.%f+05:30")
+    except ValueError:
+        return value
 
 
 class LocalJsonlSpanExporter(SpanExporter):
@@ -49,7 +68,14 @@ class LocalJsonlSpanExporter(SpanExporter):
             day_dir.mkdir(parents=True, exist_ok=True, **({"mode": 0o700} if sys.platform != "win32" else {}))
             with open(day_dir / "traces.jsonl", "a", encoding="utf-8") as f:
                 for span in spans:
-                    f.write(span.to_json(indent=None) + "\n")
+                    record = json.loads(span.to_json(indent=None))
+                    for key in ("start_time", "end_time"):
+                        if record.get(key):
+                            record[key] = _utc_iso_to_ist(record[key])
+                    for event in record.get("events") or []:
+                        if event.get("timestamp"):
+                            event["timestamp"] = _utc_iso_to_ist(event["timestamp"])
+                    f.write(json.dumps(record) + "\n")
             return SpanExportResult.SUCCESS
         except Exception:
             return SpanExportResult.FAILURE

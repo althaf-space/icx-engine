@@ -425,6 +425,63 @@ def _connect_langfuse(debug: bool = False) -> None:
     console.print(f"[green]Langfuse config saved.[/green] enabled={config.langfuse.enabled}")
 
 
+def _connect_external_mcp(debug: bool = False, preset: str | None = None) -> None:
+    """Interactive add flow for an external MCP server ICX will spawn and proxy tools from - see
+    mcp_gateway/. PRESET-ONLY, deliberately: a user cannot register an arbitrary custom command
+    here - `command`/`args` always come from mcp_gateway.registry.PRESETS, a curated set ICX adds
+    to in code, never from free-form user input. This is the one point where ICX spawns a
+    subprocess on the user's behalf; letting that command be arbitrary user-typed text would make
+    this an unaudited local code-execution primitive, not a curated integration. env values are
+    prompted one at a time (arbitrary key set per server, unlike a single fixed token field) and
+    every non-empty one is treated as secret-shaped by config_manager.py regardless of whether it
+    actually holds a secret."""
+    from icx_engine.mcp_gateway import service as gateway_service
+
+    if not preset:
+        console.print(
+            "[red]--preset is required.[/red] External MCP servers are added from a curated "
+            "preset only - a custom/arbitrary command cannot be registered here. "
+            f"Available presets: {sorted(gateway_service.PRESETS.keys())}"
+        )
+        return
+    try:
+        preset_data = gateway_service.resolve_preset(preset)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return
+    console.print(f"\nExternal MCP server - preset {preset!r}: {preset_data.get('description', '')}")
+
+    name = typer.prompt("Server name (used as the tool-name prefix)", default=preset).strip()
+    if not name:
+        console.print("[red]Server name is required.[/red]")
+        return
+    command = preset_data["command"]
+    args = list(preset_data.get("args", []))
+
+    env: dict[str, str] = dict(preset_data.get("env", {}))
+    if typer.confirm("Add an environment variable for this server?", default=False):
+        while True:
+            key = typer.prompt("  env var name (blank to stop)", default="", show_default=False).strip()
+            if not key:
+                break
+            value = typer.prompt(f"  value for {key}", hide_input=not debug, show_default=False).strip()
+            env[key] = value
+
+    require_confirmation = typer.confirm(
+        "Require confirmation before EVERY call to this server's tools? "
+        "(recommended if you don't fully trust this server)", default=False,
+    )
+    enable_now = typer.confirm("Enable this server now?", default=True)
+
+    from icx_engine.config_manager import ConfigManager
+    gateway_service.add_server(
+        name=name, command=command, args=args, env=env,
+        enabled=enable_now, require_confirmation=require_confirmation, preset=preset,
+    )
+    ConfigManager.warn_if_plaintext()
+    console.print(f"[green]External MCP server '{name}' saved.[/green] enabled={enable_now}")
+
+
 def _sonar_add_flow(default_name: str = "default") -> None:
     from icx_engine.sonar import service
     name = typer.prompt("Connection name", default=default_name)

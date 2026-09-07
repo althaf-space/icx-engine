@@ -11,6 +11,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 
+from icx_engine.cli_visibility import AGENT_ONLY_CLI_HIDDEN as _AGENT_ONLY_CLI_HIDDEN
 from icx_engine.jira import service
 
 jira_app = typer.Typer(help="Jira write-back - discover and apply issue close-out updates.",
@@ -228,7 +229,7 @@ def _select_issue_type(issue_types: list[dict], choice: str) -> dict | None:
     return None
 
 
-@jira_app.command("update")
+@jira_app.command("update", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def jira_update(
     key: str = typer.Argument(..., help="Issue key to close out or update, e.g. ABC-123"),
@@ -279,7 +280,7 @@ def jira_update(
     console.print("[green]Issue updated successfully.[/green]")
 
 
-@jira_app.command("create")
+@jira_app.command("create", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def jira_create(
     debug: _cli.DebugOpt = False,
@@ -326,7 +327,7 @@ def jira_create(
     console.print(f"[green]Created {result['issue_key']}.[/green]")
 
 
-@jira_app.command("delete")
+@jira_app.command("delete", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def jira_delete(
     key: str = typer.Argument(..., help="Issue key to permanently delete, e.g. ABC-123"),
@@ -416,7 +417,7 @@ def jira_comment_delete(
     console.print(f"[green]Deleted comment {comment_id} on {key}.[/green]")
 
 
-@jira_app.command("search")
+@jira_app.command("search", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def jira_search(
     jql: str = typer.Argument(..., help='JQL query, e.g. \'project = ABC AND status = "In Progress"\''),
@@ -441,7 +442,7 @@ def jira_search(
         console.print(f"[dim]More results available - next_page_token: {result.get('next_page_token')}[/dim]")
 
 
-@jira_app.command("get")
+@jira_app.command("get", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def jira_get(
     key: str = typer.Argument(..., help="Issue key for a lightweight raw fetch, e.g. ABC-123"),
@@ -518,7 +519,7 @@ def jira_link_delete(
     console.print(f"[green]Deleted link {link_id}.[/green]")
 
 
-@jira_app.command("assign")
+@jira_app.command("assign", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def jira_assign(
     key: str = typer.Argument(..., help="Issue key to assign, e.g. ABC-123"),
@@ -790,8 +791,8 @@ def jira_worklog_delete(
     console.print(f"[green]Deleted worklog {worklog_id} on {key}.[/green]")
 
 
-jira_app.add_typer(comment_app, name="comment")
-jira_app.add_typer(link_app, name="link")
-jira_app.add_typer(attach_app, name="attach")
-jira_app.add_typer(watch_app, name="watch")
-jira_app.add_typer(worklog_app, name="worklog")
+jira_app.add_typer(comment_app, name="comment", hidden=_AGENT_ONLY_CLI_HIDDEN)
+jira_app.add_typer(link_app, name="link", hidden=_AGENT_ONLY_CLI_HIDDEN)
+jira_app.add_typer(attach_app, name="attach", hidden=_AGENT_ONLY_CLI_HIDDEN)
+jira_app.add_typer(watch_app, name="watch", hidden=_AGENT_ONLY_CLI_HIDDEN)
+jira_app.add_typer(worklog_app, name="worklog", hidden=_AGENT_ONLY_CLI_HIDDEN)

@@ -45,6 +45,27 @@ def test_local_exporter_writes_one_jsonl_line_per_span(tmp_path):
     assert record["name"] == "git_push"
 
 
+def test_local_exporter_writes_start_end_time_in_ist_not_utc(tmp_path):
+    tracer, exporter = _memory_tracer()
+    # 2024-01-01T00:00:00Z -> 2024-01-01T05:30:00+05:30
+    span = tracer.start_span("git_push", start_time=1_704_067_200_000_000_000)
+    span.end(end_time=1_704_067_200_500_000_000)
+    finished = exporter.get_finished_spans()
+
+    local_exporter = otel.LocalJsonlSpanExporter(root=tmp_path)
+    local_exporter.export(finished)
+
+    record = json.loads(list(tmp_path.rglob("traces.jsonl"))[0].read_text(encoding="utf-8").strip())
+    assert record["start_time"] == "2024-01-01T05:30:00.000000+05:30"
+    assert record["end_time"] == "2024-01-01T05:30:00.500000+05:30"
+    assert "Z" not in record["start_time"]
+    assert "Z" not in record["end_time"]
+
+
+def test_utc_iso_to_ist_returns_input_unchanged_on_bad_format():
+    assert otel._utc_iso_to_ist("not-a-timestamp") == "not-a-timestamp"
+
+
 def test_local_exporter_appends_across_calls(tmp_path):
     tracer, exporter = _memory_tracer()
     for tool_name in ("a", "b"):

@@ -571,6 +571,26 @@ icx mcp list                     # list all supported editors and detection stat
 icx mcp run                      # start the MCP server (editors call this automatically)
 ```
 
+### External MCP servers
+
+Register a curated external MCP server - ICX spawns it, owns its subprocess lifecycle, and
+proxies its tools through `icx_find_tools`/`icx_call_tool`, namespaced `ext_<name>_<tool>`.
+Preset-only, deliberately: you cannot register an arbitrary custom command - the servers ICX
+will spawn on your behalf are a curated list added to in code, not free-form user input, since
+this is arbitrary third-party subprocess code ICX did not author and cannot audit. ICX ships
+with zero presets by default (`mcp_gateway.registry.PRESETS` is empty) - a deployment adds its
+own curated entries (e.g. Microsoft's Playwright MCP) in code. The interactive add flow still
+asks whether to require confirmation on every call to that server.
+
+```sh
+icx mcp-external --add --preset <name>       # register a curated preset (none ship by default)
+icx mcp-external --list                      # list registered servers (bare command also lists)
+icx mcp-external --enable <name>
+icx mcp-external --disable <name>
+icx mcp-external --remove <name>
+icx mcp-external test <name>                 # spawn once, list its tools, shut down
+```
+
 ### Telemetry
 
 ```sh
@@ -689,6 +709,8 @@ For every editor, `icx mcp setup` also installs ICX-first routing for the narrow
 | `icx_call_tool` | Actually invoke a tool discovered via `icx_find_tools` - `tool_name` plus `arguments` (the object matching that tool's real schema). Forwards straight into the same dispatch logic a native call would use; the result is identical either way. Every tool's own gating (`confirm_token`, etc.) still applies unchanged - only how it's reached changed, not its safety behavior. |
 
 Advertised-list shrinkage is the only behavior change - every one of the 167 tools below is still fully callable exactly as documented, either the normal way if your editor happens to still show it, or via `icx_find_tools` + `icx_call_tool` if it doesn't. The tables below document every tool's real behavior regardless of which path reaches it.
+
+**External MCP servers you register** (`icx mcp-external`) add their tools to this same discovery surface dynamically - `icx_find_tools(module=<server-name>)` returns them, namespaced `ext_<server>_<tool>` with an `[EXTERNAL - server ..., unverified by ICX]` description prefix so provenance is never hidden. Unlike every table below, these tools are not fixed - they come and go as you register/enable/disable servers, and ICX has not authored or audited them.
 
 | Tool | When the agent calls it |
 |------|------------------------|

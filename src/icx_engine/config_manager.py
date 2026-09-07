@@ -742,6 +742,28 @@ class ConfigManager:
                 elif _wc_val:
                     needs_secret_migration = True
 
+        # Resolve per-server, per-key External-MCP env secrets. `env` is an arbitrary dict, not a
+        # fixed field list like Workstatus's authorization/sd_token above - loop over whatever
+        # keys are actually configured for this server.
+        for _em_name, _em in (raw.get("external_mcp_servers") or {}).items():
+            if not isinstance(_em, dict):
+                continue
+            _em_env = _em.get("env")
+            if not isinstance(_em_env, dict):
+                continue
+            for _em_key in list(_em_env.keys()):
+                _em_acct = f"external_mcp_env:{_em_name}:{_em_key}"
+                _em_val = _em_env.get(_em_key) or ""
+                if _em_val == _SENTINEL:
+                    _em_env[_em_key] = _resolve(_em_acct) or ""
+                elif isinstance(_em_val, str) and _em_val.startswith(_DLOCK_PREFIX):
+                    try:
+                        _em_env[_em_key] = _dlock_decrypt(_em_val)
+                    except Exception:
+                        _em_env[_em_key] = _env_get(_em_acct) or ""
+                elif _em_val:
+                    needs_secret_migration = True
+
         # Resolve secret fields for registered third-party integrations.
         # No-op for configs without an "integrations" map (i.e. every existing config).
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
@@ -948,6 +970,27 @@ class ConfigManager:
                     _wc_raw[_wc_field] = _wc_val
                     _warn_plaintext(_wc_acct, f"Workstatus {_wc_field} for connection '{_wc_name}'")
 
+        # Store per-server, per-key External-MCP env secrets via keyring. `env` is excluded from
+        # model_dump() entirely (Field(..., exclude=True) on an arbitrary dict, not a fixed
+        # field), so it must be rebuilt from scratch here rather than patched in place.
+        for _em_name, _em_model in config.external_mcp_servers.items():
+            if _em_name not in raw.get("external_mcp_servers", {}):
+                continue
+            _em_raw = raw["external_mcp_servers"][_em_name]
+            _em_raw["env"] = {}
+            for _em_key, _em_val in (_em_model.env or {}).items():
+                if not _em_val:
+                    _em_raw["env"][_em_key] = _em_val
+                    continue
+                _em_acct = f"external_mcp_env:{_em_name}:{_em_key}"
+                if _check_keychain() and len(_em_val) > _DLOCK_THRESHOLD:
+                    _em_raw["env"][_em_key] = _dlock_encrypt(_em_val)
+                elif _check_keychain() and _kset(_em_acct, _em_val):
+                    _em_raw["env"][_em_key] = _SENTINEL
+                else:
+                    _em_raw["env"][_em_key] = _em_val
+                    _warn_plaintext(_em_acct, f"External MCP env var '{_em_key}' for server '{_em_name}'")
+
         # Store secret fields for registered integrations (generic; excluded
         # from plaintext serialization). No-op when no integrations are stored.
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
@@ -1038,6 +1081,9 @@ class ConfigManager:
         for _wc_name in (config.workstatus_connections or {}):
             _kdel(f"workstatus_conn_authorization:{_wc_name}")
             _kdel(f"workstatus_conn_sd_token:{_wc_name}")
+        for _em_name, _em_model in (config.external_mcp_servers or {}).items():
+            for _em_key in (_em_model.env or {}):
+                _kdel(f"external_mcp_env:{_em_name}:{_em_key}")
         # Registered integration secrets.
         from icx_engine.integrations import integration_secret_fields  # noqa: PLC0415
         for _int_name in (config.integrations or {}):
@@ -1081,6 +1127,16 @@ class ConfigManager:
             return
         _kdel(f"workstatus_conn_authorization:{name}")
         _kdel(f"workstatus_conn_sd_token:{name}")
+
+    @staticmethod
+    def delete_external_mcp_server_secret(name: str, env_keys: list[str] | None = None) -> None:
+        """env_keys is caller-supplied (the arbitrary key set of the server being removed,
+        read from the live config BEFORE it's popped) since - unlike GitLab/Workstatus's fixed
+        field names - there is no static list of accounts to guess here."""
+        if not _check_keychain():
+            return
+        for _key in (env_keys or []):
+            _kdel(f"external_mcp_env:{name}:{_key}")
 
     @staticmethod
     def delete_llm_profile_secrets(profile_name: str) -> None:

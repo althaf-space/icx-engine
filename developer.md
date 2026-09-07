@@ -619,6 +619,23 @@ ICX/
 |   |                           # dispatch chain) - every tool call is logged (JSONL) and traced (OTel) regardless
 |   |                           # of which module handles
 |   |                           # it, with zero changes to any individual tool's dispatch code.
+|   +-- mcp_gateway/            # External MCP server gateway - a user registers a curated preset MCP server
+|   |                           # (AppConfig.external_mcp_servers, named-dict, no "active" concept - every enabled
+|   |                           # server's tools are exposed simultaneously). client.py (ExternalMcpClient: owns one
+|   |                           # subprocess+ClientSession end to end inside a single dedicated background task -
+|   |                           # required because anyio's cancel scopes must be entered/exited in the same task, so a
+|   |                           # naive AsyncExitStack held open across the calling task and a later close() call would
+|   |                           # break). registry.py (lazy-started ExternalMcpClient cache, PRESETS - curated, pinned
+|   |                           # server configs, empty by default; a deployment adds its own in code).
+|   |                           # mcp_tools.py (external_tools()/
+|   |                           # external_tools_by_server()/dispatch_external_tool() - ICX's FIRST dynamic module:
+|   |                           # every other module's `<MODULE>_TOOLS` is a static, import-time list; this one is
+|   |                           # rebuilt from live config on every call. Tools namespaced `ext_<server>_<tool>`,
+|   |                           # description prefixed `[EXTERNAL - server ..., unverified by ICX]` - provenance is
+|   |                           # never hidden. Confirmation is opt-in per server (`require_confirmation`, routed
+|   |                           # through the same confirm.py token gate as git/jira/gitlab/memory) since ICX cannot
+|   |                           # itself audit arbitrary third-party subprocess code). service.py (CLI-facing config
+|   |                           # CRUD + an async smoke-test that spawns a server, lists its tools, and closes it).
 |   +-- jira/                   # Jira WRITE-back (close-out + create/delete + comments + search + links/assignee +
 |   |   |                       # attachments) - independent of connectors/jira/'s ConnectorBase read pipeline,
 |   |   |                       # matching sonar/gitlab's own client+service shape.
@@ -2593,6 +2610,80 @@ reminder that local OTel traces are written regardless.
 
 ---
 
+### 6c. External MCP Gateway (`mcp_gateway/`)
+
+Lets a user register any stdio-launched external MCP server (e.g. Microsoft's Playwright MCP,
+or a custom one) and have ICX own its subprocess lifecycle and proxy its tools through ICX's own
+`icx_find_tools`/`icx_call_tool` discovery pair, same as any ICX-authored module.
+
+**Config model (`models/config.py`):** `ExternalMcpServer` - `name`, `command`, `args: list[str]`,
+`env: dict[str, str] = Field(default_factory=dict, exclude=True)`, `enabled: bool = False`,
+`require_confirmation: bool = False`, `preset: str | None`. `AppConfig.external_mcp_servers:
+dict[str, ExternalMcpServer] = {}` - named-dict like `sonar_connections`/`gitlab_connections`/
+`workstatus_connections`, but with no "active" concept: every enabled server's tools are exposed
+simultaneously, not switched between. `env`'s values are treated as secret-shaped by default and
+keyring-routed one key at a time under `external_mcp_env:<name>:<key>` (config_manager.py) -
+unlike a fixed secret field (e.g. `GitLabConnection.token`), the key set is arbitrary per server,
+so the whole `env` dict is excluded from serialization and rebuilt from scratch on every `save()`.
+
+**Process lifecycle (`mcp_gateway/client.py`):** `ExternalMcpClient` runs the entire `async with
+stdio_client(...): async with ClientSession(...):` block inside one dedicated background task for
+the client's whole lifetime, communicating with callers only via `asyncio.Event`s and the session
+object itself - never by holding an `AsyncExitStack` open across the calling task and a later
+`close()` call. This is required because anyio (which the `mcp` SDK's stdio transport is built on)
+requires a cancel scope to be entered and exited in the same task; keeping one task alive for the
+whole session and having it `await` its own shutdown event sidesteps that entirely. Lazy-started
+on first real use (`ensure_started()`), never at registration or ICX-startup time. Every public
+method (`list_tools`/`call_tool`/`close`) never raises past its own boundary, mirroring
+`telemetry/logger.py`'s and `workstatus/client.py`'s "never raise" convention.
+
+**Dynamic tool aggregation (`mcp_gateway/mcp_tools.py`):** ICX's **first dynamic module** - every
+other module's `<MODULE>_TOOLS` is a static, import-time list; `external_tools()`/
+`external_tools_by_server()` are rebuilt from live config on every `icx_find_tools`/`tools/list`
+call, wired into `mcp_server.py`'s `_all_tools_full()` and `_module_index()` (each enabled server
+becomes its own pseudo-module, e.g. `icx_find_tools(module="playwright")`). Every proxied tool is
+namespaced `ext_<server>_<tool>` and its description is prefixed `[EXTERNAL - server ...,
+unverified by ICX]` - provenance is never hidden behind a native-looking name. `_call_tool_impl`
+gets one new fallthrough entry (`dispatch_external_tool`) at the end of its dispatch chain, after
+`boost` and before the inline core tools.
+
+**Trust boundary:** a registered external server is arbitrary third-party subprocess code ICX did
+not author and cannot itself audit. There is no automatic `confirm.py` gating - ICX cannot know
+which of an arbitrary server's tools are destructive. `require_confirmation` (per server) is the
+one opt-in safety knob: when set, *every* call to that server's tools is wrapped in the same
+`confirm.py` `issue_token`/`verify_token` round-trip used by git/jira/gitlab/memory's destructive
+tools, regardless of the tool's own declared `annotations`.
+
+**Presets (`mcp_gateway/registry.PRESETS`):** curated, pinned server configs - the ONLY way a
+server can be registered (`icx mcp-external --add --preset <name>`). Empty by default - ICX
+ships with zero external MCP servers; a deployment adds its own curated entries to this dict in
+code (e.g. `playwright`, pinned to an exact `@playwright/mcp` version - never `latest`, same "pin
+deliberately, bump deliberately" discipline as `testing/runners/install.py`'s `RUNNER_SPECS`).
+`--add` without
+`--preset` is rejected with a clear error - `command`/`args` are never accepted as free-form user
+input; the CLI only lets a user pick a name, add `env` values, and decide `require_confirmation`/
+`enabled` on top of a preset's fixed `command`/`args`. This is deliberate: ICX spawning an
+arbitrary user-typed command would make this an unaudited local code-execution primitive rather
+than a curated integration. Adding a new preset is a code change (`registry.PRESETS`), not a
+user-facing action.
+
+**CLI:** `icx mcp-external --add [--preset NAME]` (interactive), `--enable`/`--disable`/`--remove
+NAME`, bare `icx mcp-external`/`--list` shows registered servers, `icx mcp-external test NAME`
+spawns a server once, lists its tools, and shuts it down again without touching the live registry
+used by the running MCP server.
+
+**Shutdown:** `mcp_server.py`'s `_serve()` closes every live `ExternalMcpClient` (via
+`mcp_gateway.registry.shutdown_all()`) in its shutdown `finally` block, guarded like every other
+cleanup step there.
+
+**testing/ integration:** deliberately **not** part of this module. `testing/`'s AGENT-GENERATE
+UI-test flow (`node_author_flow`) still has the agent write and run its own persisted Playwright
+test file - registering the `playwright` preset here does not change that flow. Wiring
+testing/'s UI flow to drive a registered Playwright MCP server live (instead of, or alongside,
+authoring a test file) is a separate, unproposed future change.
+
+---
+
 ## 7. Memory Module
 
 The memory module lives at `src/icx_engine/memory/` and follows the same layering pattern as `llm/` and `connectors/`. It is completely connector-agnostic - it never imports from `connectors/` and operates only on the `MemoryQueryInput` contract.
@@ -3428,6 +3519,23 @@ The CLI uses [Typer](https://typer.tiangolo.com/) with `rich_markup_mode="rich"`
 - All errors are routed through `render_icx_error(exc, err_console, show_traceback=...)` (via `_guarded` or an explicit try/except) - never use `err_console.print(str(exc))` directly.
 - Consistency is enforced: `tests/test_smoke.py::test_every_leaf_command_has_debug_and_traceback_options` introspects `typer.main.get_command(app)`, walks the full command tree (including every sub-app registered via `app.add_typer` - git, jira, gitlab, memory, graph, test, sonar, boost, skills, mcp), and asserts every leaf command's params include both `debug` and `traceback` (76/76 as of 2026-07-31) - a new command with a soft/missing pair breaks this test, not just a manual count.
 - **Authentication flows belong in `services/connection_service.py`**, not inline in `cli.py`
+
+**CLI help visibility (`cli_visibility.AGENT_ONLY_CLI_HIDDEN`):** a code-level flag (not a user
+config - never in `AppConfig`/`config.json`) that hides the operational/feature-work half of the
+CLI from `--help` output, keeping only connection-setup and connection-testing commands visible
+to a human at a terminal - the rest is meant to be reached by an AI agent via MCP tools, not typed
+by hand. Applied via Typer's own `hidden=` kwarg on `.command(...)`/`.add_typer(...)` - this ONLY
+affects `--help` listing; every hidden command still runs if invoked by its exact name, and
+`typer.main.get_command(app)`'s command tree (which `tests/test_smoke.py` and Click's own
+dispatch use) is unaffected, so hiding a command breaks neither its own tests nor dispatch.
+Imported from its own tiny module (`cli_visibility.py`), not `cli.py`, so per-module CLI files
+(`jira/cli_commands.py`, etc.) can use it without a circular import back into `cli.py`. Currently
+visible: `setup`/`connection`/`model`/`status`/`logout`/`uninstall`/`update` (top-level), `mcp
+setup/remove/list/config/run`, `sonar`/`gitlab`/`workstatus` connection management + `status`
+(+`gitlab verify`), `langfuse`, `mcp-external` (all of it), `jira` bare/`whoami`, `test setup`/
+`sessions`, `memory status`/`list`/`export`/`import`, all of `graph`, `skills list`. Hidden:
+everything else, including all of `git`/`boost`/`logs` (whole groups) and `jira update/create/
+delete/search/get/assign` + its `comment`/`link`/`attach`/`watch`/`worklog` sub-apps.
 
 The REPL (`_start_repl`) re-enters Typer for each line - do not add state that persists between REPL iterations.
 

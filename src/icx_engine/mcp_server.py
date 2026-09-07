@@ -1319,7 +1319,18 @@ async def _all_tools_full() -> list[Tool]:
         # ------------------------------------------------------------------ #
         # Sonar code-quality tools - direct SonarQube reader, read-only      #
         # ------------------------------------------------------------------ #
-    ] + GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS + WORKSTATUS_TOOLS + SONAR_TOOLS + GRAPH_TOOLS + MEMORY_TOOLS + SKILLS_TOOLS + TESTING_TOOLS + BOOST_TOOLS
+    ] + GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS + WORKSTATUS_TOOLS + SONAR_TOOLS + GRAPH_TOOLS + MEMORY_TOOLS + SKILLS_TOOLS + TESTING_TOOLS + BOOST_TOOLS + await _external_tools_safe()
+
+
+async def _external_tools_safe() -> list[Tool]:
+    """external_tools() itself never raises, but an unexpected error here must never take down
+    tool listing for every other module - guarded the same way the rest of this dispatch chain
+    treats third-party/subprocess-backed integrations."""
+    try:
+        from icx_engine.mcp_gateway.mcp_tools import external_tools
+        return await external_tools()
+    except Exception:
+        return []
 
 
 @server.list_tools()
@@ -1356,6 +1367,14 @@ async def _module_index() -> dict[str, list[Tool]]:
         "memory": MEMORY_TOOLS, "testing": TESTING_TOOLS, "skills": SKILLS_TOOLS,
         "boost": BOOST_TOOLS,
     }
+    # Each registered+enabled external MCP server is its own pseudo-module (e.g.
+    # icx_find_tools(module="playwright")) - unlike the static dicts above, this set can change
+    # between calls as the user registers/enables/disables servers.
+    try:
+        from icx_engine.mcp_gateway.mcp_tools import external_tools_by_server
+        modules.update(await external_tools_by_server())
+    except Exception:
+        pass
     grouped_names = {t.name for tools in modules.values() for t in tools}
     full = await _all_tools_full()
     modules["core"] = [t for t in full if t.name not in grouped_names]
@@ -1575,6 +1594,11 @@ async def _call_tool_impl(name: str, args: dict) -> list[TextContent]:
     boost_result = await dispatch_boost_tool(name, args)
     if boost_result is not None:
         return boost_result
+
+    from icx_engine.mcp_gateway.mcp_tools import dispatch_external_tool
+    external_result = await dispatch_external_tool(name, args)
+    if external_result is not None:
+        return external_result
 
     if name in (_FAST_TOOL_NAME, _FULL_TOOL_NAME):
         # Validate issue_ref
@@ -3357,6 +3381,11 @@ def run_mcp_server() -> None:
             try:
                 from icx_engine.testing.graph import close_testing_graph
                 await close_testing_graph()
+            except Exception:
+                pass
+            try:
+                from icx_engine.mcp_gateway.registry import shutdown_all as _shutdown_external_mcp
+                await _shutdown_external_mcp()
             except Exception:
                 pass
 
