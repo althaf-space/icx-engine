@@ -131,13 +131,13 @@ AI-native intelligence layer for development teams. Connect your work tracker to
   [cyan]icx memory import <FILE>[/cyan]                                   Import from a JSON export file
   [cyan]icx memory status[/cyan]                                          Show entry count, storage size, model info
 
-[bold]Codebase Graph[/bold]
+[bold]Codebase Graph[/bold] - <NAME> below also accepts the registered project's path
   [cyan]icx graph add --name <NAME> --path <PATH> --project <KEY>[/cyan]  Register a project for graph indexing
   [cyan]icx graph build <NAME>[/cyan]                                     Build the knowledge graph (shows live progress)
   [cyan]icx graph build --project <KEY>[/cyan]                            Build all graphs tagged with a Jira project key
   [cyan]icx graph build <NAME> --force[/cyan]                             Force full rebuild even if graph is current
-  [cyan]icx graph build <NAME> --no-llm[/cyan]                            Build without LLM enrichment (faster, AST only)
-  [cyan]icx graph build <NAME> --force --no-llm[/cyan]                    Force rebuild, AST only
+  [cyan]icx graph build <NAME> --llm[/cyan]                               Opt in to LLM semantic enrichment (off by default)
+  [cyan]icx graph build <NAME> --force --llm[/cyan]                       Force rebuild, with LLM enrichment
   [cyan]icx graph list[/cyan]                                             List all projects: name, status, file count, last built
   [cyan]icx graph status <NAME>[/cyan]                                    Show detail: staleness, changed files, ETA
   [cyan]icx graph remove <NAME>[/cyan]                                    Delete registration and graph files
@@ -2679,13 +2679,33 @@ def _run_build_with_progress(mgr, project_id: str, force: bool, skip_llm: bool =
     return result_holder.get("value", {})
 
 
+def _resolve_graph_ref(mgr, ref: str) -> str:
+    """Resolve a graph CLI argument that may be either a registered project name or a
+    filesystem path - tries name first (exact registry lookup), falls back to path.
+    Every MCP graph_* tool addresses projects by project_path only; this lets `icx graph
+    build/status/remove` accept the same reference a user or agent already has in hand,
+    instead of requiring a separate `icx graph list` lookup for the registered name."""
+    from icx_engine.exceptions import GraphError
+    try:
+        return mgr.resolve_project(project_name=ref)
+    except GraphError:
+        pass
+    try:
+        return mgr.resolve_project(project_path=ref)
+    except GraphError:
+        raise GraphError(
+            f"'{ref}' is not a registered project name or a registered project path. "
+            "Run `icx graph list` to see registered projects."
+        )
+
+
 @graph_app.command("build")
 @_guarded
 def graph_build(
-    name: Annotated[Optional[str], typer.Argument(help="Registered project name.")] = None,
+    name: Annotated[Optional[str], typer.Argument(help="Registered project name or path.")] = None,
     project: Annotated[Optional[str], typer.Option("--project", help="Tracker project key - builds all graphs tagged with this project (case-insensitive).")] = None,
     force: Annotated[bool, typer.Option("--force", help="Force full rebuild even if graph is current.")] = False,
-    no_llm: Annotated[bool, typer.Option("--no-llm", help="Skip LLM semantic enrichment. Faster but fewer cross-file edges.")] = False,
+    llm: Annotated[bool, typer.Option("--llm", help="Enable LLM semantic enrichment (opt-in). Off by default - AST-only extraction is fast and has no rate-limit/cost risk; --llm adds cross-file semantic edges at the cost of real time and provider spend.")] = False,
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
 ) -> None:
@@ -2694,12 +2714,13 @@ def graph_build(
     \b
     Run this before using graph tools in your AI editor.
     Building from the CLI shows a progress bar and avoids blocking your editor.
+    LLM semantic enrichment is OFF by default - pass --llm to opt in.
 
     \b
     Examples:
       icx graph build myapp
       icx graph build myapp --force
-      icx graph build myapp --no-llm
+      icx graph build myapp --llm
       icx graph build --project PROJ
     """
     from icx_engine.graph.manager import GraphManager
@@ -2713,7 +2734,7 @@ def graph_build(
         project_ids: list[str] = []
 
         if name is not None:
-            project_id = mgr.resolve_project(project_name=name)
+            project_id = _resolve_graph_ref(mgr, name)
             project_ids = [project_id]
         elif project is not None:
             from icx_engine.graph.storage import lookup_by_tracker_project_key as _lookup_jp
@@ -2752,7 +2773,7 @@ def graph_build(
 
             import time as _time
             _build_started = _time.perf_counter()
-            result = _run_build_with_progress(mgr, pid, force, skip_llm=no_llm)
+            result = _run_build_with_progress(mgr, pid, force, skip_llm=not llm)
             _build_elapsed = _time.perf_counter() - _build_started
 
             if result.get("error"):
@@ -2765,11 +2786,16 @@ def graph_build(
             edge_count = result.get("edge_count", 0)
             community_count = result.get("community_count", 0)
 
+            _tip = (
+                f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
+                if not llm else
+                f"  [dim]Tip: rerun without [cyan]--llm[/cyan] for a much faster AST-only rebuild next time.[/dim]"
+            )
             console.print(
                 f"\n  [green]Graph ready.[/green] "
                 f"{file_count} files | {node_count} nodes | {edge_count} edges | {community_count} communities | "
                 f"{_format_build_duration(_build_elapsed)}\n"
-                f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
+                f"{_tip}"
             )
 
         if any_failed:
@@ -2847,7 +2873,7 @@ def graph_list(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None
 @graph_app.command("status")
 @_guarded
 def graph_status(
-    name: Annotated[str, typer.Argument(help="Registered project name.")],
+    name: Annotated[str, typer.Argument(help="Registered project name or path.")],
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
 ) -> None:
@@ -2861,7 +2887,7 @@ def graph_status(
 
     try:
         mgr = GraphManager()
-        project_id = mgr.resolve_project(project_name=name)
+        project_id = _resolve_graph_ref(mgr, name)
         meta = read_meta(project_id)
         if meta is None:
             err_console.print(f"Project '{name}' not found.")
@@ -2904,7 +2930,7 @@ def graph_status(
 @graph_app.command("remove")
 @_guarded
 def graph_remove(
-    name: Annotated[str, typer.Argument(help="Registered project name.")],
+    name: Annotated[str, typer.Argument(help="Registered project name or path.")],
     keep_cache: Annotated[bool, typer.Option("--keep-cache", help="Keep cache files; remove registration only.")] = False,
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
@@ -2921,12 +2947,17 @@ def graph_remove(
 
     try:
         mgr = GraphManager()
-        project_id = mgr.resolve_project(project_name=name)
+        project_id = _resolve_graph_ref(mgr, name)
+        # Show the registered short name in messages, not a raw path the user may have
+        # passed as `name` - _resolve_graph_ref accepts either.
+        from icx_engine.graph.storage import read_meta as _read_meta_for_display
+        _meta_for_display = _read_meta_for_display(project_id)
+        display_name = _meta_for_display.name if _meta_for_display else name
 
         if keep_cache:
-            action_desc = f"remove registration for '[bold]{name}[/bold]' (keep cache)"
+            action_desc = f"remove registration for '[bold]{display_name}[/bold]' (keep cache)"
         else:
-            action_desc = f"remove '[bold]{name}[/bold]' and delete all graph files"
+            action_desc = f"remove '[bold]{display_name}[/bold]' and delete all graph files"
 
         confirmed = typer.confirm(f"  This will {action_desc}. Continue?", default=False)
         if not confirmed:
@@ -2937,7 +2968,7 @@ def graph_remove(
         if keep_cache:
             console.print(f"[green]OK Registration removed. Cache kept at ~/.icx/graphs/{project_id}/cache/[/green]")
         else:
-            console.print(f"[green]OK Project '{name}' removed.[/green]")
+            console.print(f"[green]OK Project '{display_name}' removed.[/green]")
 
     except typer.Exit:
         raise

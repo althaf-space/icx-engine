@@ -244,12 +244,20 @@ def _build_project_isolated(
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
     progress_path: str | None = None,
+    force: bool = False,
 ) -> dict:
     """
     Runs inside an isolated subprocess spawned by ProcessPoolExecutor.
 
     llm_backend/llm_api_key/llm_base_url are read from ICX's configured model by
     the manager before spawning. Falls back to env var detection if not provided.
+
+    force=True bypasses the file-hash-based "nothing changed, skip rebuild" shortcut
+    below and always performs a full extraction, even when the incremental hash check
+    would otherwise find zero changed/deleted files. Without this, `icx graph build
+    --force` could never repair a graph.json that was corrupted or left incomplete by an
+    earlier failed/interrupted build - the skip shortcut fired before any real rebuild
+    work ran, on every subsequent attempt, regardless of --force.
 
     Returns a dict: {"file_count": int, "node_count": int, "edge_count": int,
                      "community_count": int, "extraction_mode": str, "error": str|None}
@@ -316,7 +324,7 @@ def _build_project_isolated(
         hash_cache_path = icx_cache / "file_hashes.json"
         stored_hashes = load_hashes(hash_cache_path)
         graph_json_path = icx_cache.parent / "graph.json"
-        _incremental = graph_json_path.exists() and bool(stored_hashes)
+        _incremental = not force and graph_json_path.exists() and bool(stored_hashes)
 
         # Convert Path objects to relative POSIX strings for hashing
         _rel_files = [f.relative_to(project_path).as_posix() for f in files]
@@ -947,12 +955,25 @@ def _build_project_isolated(
 # ETA helper (used by manager before a build starts)
 # ---------------------------------------------------------------------------
 
+LLM_ETA_CAVEAT = (
+    "This estimate assumes every LLM chunk succeeds in ~15s. Real time depends heavily on "
+    "provider rate limits and can be far higher if requests are throttled - the circuit "
+    "breaker aborts after repeated rate-limit failures rather than retrying forever, but "
+    "the time already spent before that point is not predictable from file count alone."
+)
+
+
 def estimate_build_eta(file_count: int, semantic: bool = False) -> int:
     """Estimated build time in seconds.
 
     Hybrid mode runs AST first then LLM sequentially:
       AST:  ~0.05s/file parallelised across cpu_count + 15s subprocess startup
       LLM:  ~20 files/chunk at 20k token budget, max_concurrency=1, ~15s/chunk
+
+    The LLM portion is a best-case estimate only - it assumes every chunk succeeds on the
+    first attempt. It does not, and cannot, model provider rate-limit/retry cost (see
+    LLM_ETA_CAVEAT) - callers presenting a semantic=True estimate to a user should include
+    that caveat rather than presenting this number as precise.
     """
     import os
     cpu = max(1, os.cpu_count() or 4)
@@ -960,5 +981,5 @@ def estimate_build_eta(file_count: int, semantic: bool = False) -> int:
     if not semantic:
         return ast_time
     chunks = max(1, file_count // 20)
-    llm_time = chunks * 15  # sequential (max_concurrency=1)
+    llm_time = chunks * 15  # best-case: every chunk succeeds first try, sequential
     return ast_time + llm_time

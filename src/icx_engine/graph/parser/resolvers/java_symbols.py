@@ -7,18 +7,38 @@ method calls / field type references against AST node IDs.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Iterable
 
 from icx_engine.graph.parser.confidence import (
-    AST_DIRECT, LSP_RESOLVED, annotate_edge,
+    AST_DIRECT, LSP_RESOLVED, FRAMEWORK_RESOLVED, annotate_edge,
 )
 
 _log = logging.getLogger(__name__)
 
 _RELATION_PRIORITY: dict[str, int] = {
-    "imports": 4, "inherits": 3, "calls": 2, "uses": 1,
+    "imports": 4, "inherits": 3, "calls": 2, "dao": 2, "queries": 2, "uses": 1,
 }
+
+# Classic (pre-Spring-Data) Hibernate DAO detection - session.get/load(Entity.class, id) and
+# session.createQuery(hql). jpa.py only detects Spring Data Repository<T,ID> interfaces and
+# @Query/@NamedQuery JPQL - it has no coverage for a plain DAO class calling
+# SessionFactory.getCurrentSession() directly, which is the older, still extremely common
+# enterprise Hibernate style. Detection is gated ONLY on the receiver variable's resolved
+# type actually being "Session" (via the existing var_type_map/_resolve_qualifier_type
+# machinery below) - never on method name alone, since "get"/"load" are common method names
+# on unrelated types (List.get, Optional.get) that would otherwise false-positive.
+_SESSION_ENTITY_LOOKUP_METHODS: frozenset[str] = frozenset({"get", "load"})
+
+# Mirrors jpa.py's _jpql_entity_re exactly - HQL and JPQL share this simple FROM/JOIN/
+# UPDATE/DELETE syntax subset. Kept as a local duplicate rather than importing from jpa.py:
+# every resolver in this codebase is self-contained (no cross-resolver imports), and this is
+# a two-line regex, not worth introducing a coupling for.
+_HQL_ENTITY_RE = re.compile(
+    r"\b(?:FROM|JOIN|UPDATE|DELETE\s+FROM)\s+([A-Z][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
 
 
 def extract_java_edges(
@@ -282,6 +302,23 @@ def _emit_type_ref(
                            src_id=src_id, rel=rel, relation="uses", position=position)
 
 
+def _resolve_entity_name(entity_name: str, import_map, fqn_to_file, node_index) -> str | None:
+    """Resolve a simple entity class name (e.g. from `Entity.class` or HQL `FROM Entity`)
+    to its graph node id, via the same import_map -> fqn_to_file -> node_index chain every
+    other resolution in this file uses. None if the entity isn't a project-local type this
+    build has actually parsed (a JDK/library type, or a name not in scope here)."""
+    fqn = import_map.get(entity_name)
+    if not fqn:
+        return None
+    target_file = fqn_to_file.get(fqn)
+    if not target_file:
+        return None
+    return (
+        node_index["by_symbol"].get((target_file, entity_name.lower()))
+        or node_index["by_file"].get(target_file)
+    )
+
+
 def _extract_type_name(type_node) -> str | None:
     name = getattr(type_node, "name", None)
     if name:
@@ -332,6 +369,37 @@ def _emit_body_refs(body, import_map, fqn_to_file, node_index, best_edge,
                                 getattr(node, "position", None),
                                 confidence=LSP_RESOLVED,
                                 source="java_symbols")
+            # Classic (pre-Spring-Data) Hibernate DAO pattern: session.get/load(Entity.class,
+            # id) and session.createQuery("FROM Entity ..."). Gated on the receiver
+            # resolving to "Session" via the exact same var_type_map/field_type_map chain
+            # above (never on method name alone - "get"/"load" are common on unrelated
+            # types like List/Optional, so this must never fire without that gate).
+            if type_name == "Session":
+                member = (node.member or "").lower()
+                args = node.arguments or []
+                if member in _SESSION_ENTITY_LOOKUP_METHODS and args:
+                    first = args[0]
+                    if isinstance(first, jt.ClassReference):
+                        entity_name = _extract_type_name(first.type)
+                        if entity_name:
+                            tgt = _resolve_entity_name(entity_name, import_map, fqn_to_file, node_index)
+                            if tgt and tgt != src_id:
+                                _record(best_edge, src_id, tgt, "dao", rel,
+                                        getattr(node, "position", None),
+                                        confidence=LSP_RESOLVED,
+                                        source="java_symbols_hibernate")
+                elif member == "createquery" and args:
+                    first = args[0]
+                    hql = getattr(first, "value", None)
+                    if isinstance(first, jt.Literal) and isinstance(hql, str):
+                        hql = hql.strip('"')
+                        for m in _HQL_ENTITY_RE.finditer(hql):
+                            tgt = _resolve_entity_name(m.group(1), import_map, fqn_to_file, node_index)
+                            if tgt and tgt != src_id:
+                                _record(best_edge, src_id, tgt, "queries", rel,
+                                        getattr(node, "position", None),
+                                        confidence=FRAMEWORK_RESOLVED,
+                                        source="java_symbols_hql")
         elif isinstance(node, jt.ClassCreator):
             type_name = _extract_type_name(node.type)
             if type_name and type_name in import_map:
@@ -406,6 +474,15 @@ def _emit_body_refs(body, import_map, fqn_to_file, node_index, best_edge,
                     dname = getattr(declarator, "name", None)
                     if dname:
                         var_type_map[dname] = var_type_name
+            # Unlike fields/params/return types above, a local variable declaration must emit
+            # its own type-reference edge here - nothing else in this walk visits `node.type`.
+            # _emit_type_ref recurses into generic arguments itself, so `CriteriaQuery<UserMaster>
+            # cq = ...` correctly records a `uses` edge to UserMaster, not just to CriteriaQuery.
+            _emit_type_ref(
+                node.type, import_map, fqn_to_file, node_index, best_edge,
+                src_id=src_id, rel=rel, relation="uses",
+                position=getattr(node, "position", None),
+            )
 
         for child in _iter_children(node):
             visit(child)

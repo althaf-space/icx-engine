@@ -368,12 +368,15 @@ Alongside skills you learn yourself, ICX also ships 15 pre-installed default ski
 icx graph add --name NAME --path PATH --project KEY   # register a project directory (--project required, e.g. a Jira project key like PROJ)
 icx graph build NAME               # build (or rebuild) the knowledge graph for a project
 icx graph build --project KEY      # build all graphs tagged with this tracker project key (case-insensitive)
-icx graph build NAME --force       # rebuild even if graph is current
+icx graph build NAME --force       # force a full rebuild, bypassing incremental reuse
+icx graph build NAME --llm         # opt in to LLM semantic enrichment (off by default)
 icx graph list                     # list all registered projects with status and file counts
 icx graph status NAME              # detailed status: build state, last commit, staleness info
 icx graph remove NAME              # remove a project and its graph data
 icx graph remove NAME --keep-cache # remove project but keep cached graph files
 ```
+
+`NAME` in every command above also accepts the project's registered path instead - `icx graph build/status/remove` all try the argument as a registered name first, then as a registered path, so you can use either the same short name from `icx graph list` or the same path every MCP `graph_*` tool already addresses the project by.
 
 Graph data (including build cache) is stored in `~/.icx/graphs/` - nothing is written inside your project directories.
 

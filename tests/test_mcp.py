@@ -2618,6 +2618,123 @@ def test_extract_tracker_key_returns_empty_for_invalid():
     assert _extract_tracker_key_from_ref("not-a-valid-ref") == ""
 
 
+# -- _staleness_warning_for / _load_querier_simple staleness parity ------------
+# Regression coverage: graph_important_nodes/blast_radius/cycles/dead_code/ownership all
+# route through _load_querier_simple, which previously never checked staleness at all -
+# unlike graph_find_context/call_chain/impact/subsystem (via _resolve_graph_path). These
+# five tools have no non-graph fallback, so a stale graph is warned about, never degraded.
+
+def test_staleness_warning_for_returns_none_when_fresh(monkeypatch):
+    import icx_engine.mcp_server as m
+    monkeypatch.setattr(
+        "icx_engine.graph.paths.check_staleness", lambda pid, path: {"status": "ok"},
+    )
+    assert m._staleness_warning_for("pid", "/repo") is None
+
+
+def test_staleness_warning_for_incremental(monkeypatch):
+    import icx_engine.mcp_server as m
+    monkeypatch.setattr(
+        "icx_engine.graph.paths.check_staleness",
+        lambda pid, path: {"status": "incremental", "changed": 2, "total": 500, "pct": 0.4},
+    )
+    warning = m._staleness_warning_for("pid", "/repo")
+    assert warning is not None
+    assert "0.4%" in warning
+    assert "icx graph build" in warning
+
+
+def test_staleness_warning_for_stale_warns_but_does_not_degrade(monkeypatch):
+    """The key behavioral difference from _resolve_graph_path: "stale" status here
+    produces a warning string, never a degraded/fallback response - these callers have
+    nothing to fall back to."""
+    import icx_engine.mcp_server as m
+    monkeypatch.setattr(
+        "icx_engine.graph.paths.check_staleness",
+        lambda pid, path: {"status": "stale", "changed": 140, "total": 500, "pct": 28.1},
+    )
+    warning = m._staleness_warning_for("pid", "/repo")
+    assert isinstance(warning, str)
+    assert "28.1%" in warning
+    assert "140/500" in warning
+
+
+def test_staleness_warning_for_freshness_unknown(monkeypatch):
+    import icx_engine.mcp_server as m
+    monkeypatch.setattr(
+        "icx_engine.graph.paths.check_staleness",
+        lambda pid, path: {"status": "freshness_unknown"},
+    )
+    warning = m._staleness_warning_for("pid", "/repo")
+    assert warning is not None
+    assert "git check timed out" in warning
+
+
+def test_load_querier_simple_returns_three_tuple_with_staleness(monkeypatch, tmp_path):
+    import icx_engine.mcp_server as m
+    from icx_engine.graph import storage as st
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    pid = st.derive_project_id(project_dir.resolve())
+    gpath = st.graph_path(pid)
+    gpath.parent.mkdir(parents=True, exist_ok=True)
+    gpath.write_text('{"nodes": [], "links": []}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        "icx_engine.graph.paths.check_staleness",
+        lambda project_id, path: {"status": "stale", "changed": 1, "total": 1, "pct": 100.0},
+    )
+    result = m._load_querier_simple(str(project_dir))
+    assert isinstance(result, tuple)
+    assert len(result) == 3
+    querier, validated_path, staleness_warning = result
+    assert staleness_warning is not None
+    assert "100.0%" in staleness_warning
+
+
+@pytest.mark.parametrize("tool_name,mock_method,mock_return", [
+    ("graph_important_nodes", "get_important_nodes", []),
+    ("graph_dead_code", "get_dead_code", []),
+    ("graph_cycles", "get_cycles", []),
+    ("graph_ownership", "get_ownership", {}),
+])
+async def test_graph_analysis_tools_surface_staleness_warning(monkeypatch, tool_name, mock_method, mock_return):
+    """Every one of the five previously-silent tools must surface staleness_warning in its
+    payload when the graph is stale - direct dispatch-level test, patched where
+    graph/mcp_tools.py actually imports the symbol (not where it's defined)."""
+    from icx_engine.graph import mcp_tools as gmt
+
+    class _Q:
+        def get_important_nodes(self, top_k): return []
+        def get_dead_code(self): return []
+        def get_cycles(self, max_cycles): return []
+        def get_ownership(self, file_path, project_path): return {}
+
+    monkeypatch.setattr(
+        gmt, "_load_querier_simple",
+        lambda p: (_Q(), "/repo", "Graph is 28.1% stale (140/500 files changed)"),
+    )
+    args = {"project_path": "/repo"}
+    if tool_name == "graph_ownership":
+        args["file_path"] = "src/a.py"
+    result = await gmt.dispatch_graph_tool(tool_name, args)
+    data = json.loads(result[0].text)
+    assert data.get("staleness_warning") == "Graph is 28.1% stale (140/500 files changed)"
+
+
+async def test_graph_dead_code_omits_staleness_warning_when_fresh(monkeypatch):
+    from icx_engine.graph import mcp_tools as gmt
+
+    class _Q:
+        def get_dead_code(self): return []
+
+    monkeypatch.setattr(gmt, "_load_querier_simple", lambda p: (_Q(), "/repo", None))
+    result = await gmt.dispatch_graph_tool("graph_dead_code", {"project_path": "/repo"})
+    data = json.loads(result[0].text)
+    assert "staleness_warning" not in data
+
+
 # -- graph_important_nodes -----------------------------------------------------
 
 async def test_graph_important_nodes_missing_project_path_returns_error():
@@ -4343,7 +4460,7 @@ def test_context_signals_emit_from_graph_semantic_memory(monkeypatch):
         def find_context(self, query):
             return [_Ctx("sem.py")]
 
-    monkeypatch.setattr(m, "_load_querier_simple", lambda p: (_Q(), "/repo"))
+    monkeypatch.setattr(m, "_load_querier_simple", lambda p: (_Q(), "/repo", None))
     monkeypatch.setattr(m, "_find_by_file_sync",
                         lambda f, k: [{"issue_key": "T-1", "files_changed": ["mem.py"]}])
     graph_sig, grep_sig, semantic_sig, memory_sig = m._context_signals("/repo", ["svc.py"], ["kw"])

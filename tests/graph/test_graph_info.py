@@ -146,6 +146,58 @@ def test_building_returns_eta(tmp_path):
     assert result.get("eta_seconds") is not None
 
 
+def test_building_no_eta_caveat_when_no_llm_configured(tmp_path, monkeypatch):
+    """Regression guard: estimate_build_eta's LLM portion is a best-case-only number
+    (assumes every chunk succeeds first try - see LLM_ETA_CAVEAT) that must never be
+    presented as precise. When no LLM is configured, the AST-only estimate is genuinely
+    fast/predictable and needs no caveat."""
+    project_dir = tmp_path / "building_app"
+    project_dir.mkdir()
+    mgr = GraphManager()
+    pid = mgr.register("buildingapp", str(project_dir))
+    meta = storage.read_meta(pid)
+    meta.build_status = "building"
+    write_meta(meta)
+
+    monkeypatch.setattr("icx_engine.graph.manager._read_icx_llm_cfg", lambda: None)
+    monkeypatch.setattr("icx_engine.graph.manager._detect_llm_backend", lambda: None)
+    result = graph_info_for_path(str(project_dir), check_stale=False)
+
+    assert result["status"] == "building"
+    assert "eta_caveat" not in result
+    assert "This estimate assumes" not in result["report_inline"]
+
+
+def test_building_includes_eta_caveat_when_llm_configured(tmp_path, monkeypatch):
+    """When an LLM IS configured, the number shown could be the semantic (LLM-inclusive)
+    estimate, which has real, unmodelled rate-limit/retry risk - the caveat must be
+    surfaced both as its own field and folded into report_inline (the text an agent
+    actually reads)."""
+    project_dir = tmp_path / "building_app"
+    project_dir.mkdir()
+    mgr = GraphManager()
+    pid = mgr.register("buildingapp", str(project_dir))
+    meta = storage.read_meta(pid)
+    meta.build_status = "building"
+    write_meta(meta)
+
+    monkeypatch.setattr(
+        "icx_engine.graph.manager._read_icx_llm_cfg", lambda: ("claude", "sk-x", None),
+    )
+    result = graph_info_for_path(str(project_dir), check_stale=False)
+
+    assert result["status"] == "building"
+    from icx_engine.graph.builder import LLM_ETA_CAVEAT
+    assert result["eta_caveat"] == LLM_ETA_CAVEAT
+    assert LLM_ETA_CAVEAT in result["report_inline"]
+
+
+def test_estimate_eta_caveat_none_for_unregistered_project():
+    from icx_engine.graph.manager import GraphManager
+    mgr = GraphManager()
+    assert mgr.estimate_eta_caveat("nonexistentidx") is None
+
+
 # ---------------------------------------------------------------------------
 # paths.check_staleness: git timeout returns freshness_unknown
 # ---------------------------------------------------------------------------

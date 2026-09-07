@@ -18,7 +18,9 @@ _log = logging.getLogger(__name__)
 
 from icx_engine.exceptions import GraphError
 from icx_engine.graph import storage
-from icx_engine.graph.builder import _build_project_isolated, estimate_build_eta, _detect_llm_backend
+from icx_engine.graph.builder import (
+    _build_project_isolated, estimate_build_eta, _detect_llm_backend, LLM_ETA_CAVEAT,
+)
 
 # Provider names from ICX ChannelConfig -> parser backend names
 _ICX_PROVIDER_TO_PARSER: dict[str, str] = {
@@ -298,7 +300,9 @@ class GraphManager:
 
         storage.set_build_status(project_id, "building")
         try:
-            result = self._run_build_subprocess(meta, progress_path=progress_path, skip_llm=skip_llm)
+            result = self._run_build_subprocess(
+                meta, progress_path=progress_path, skip_llm=skip_llm, force=force,
+            )
             self._finalise_build(meta, result)
             return result
         except Exception as exc:
@@ -306,7 +310,11 @@ class GraphManager:
             raise GraphError(f"Build failed for '{meta.name}': {exc}") from exc
 
     def build_background(self, project_id: str, force: bool = False) -> None:
-        """Non-blocking background build/rebuild via ProcessPoolExecutor."""
+        """Non-blocking background build/rebuild via ProcessPoolExecutor. Always AST-only -
+        never reads an LLM config, regardless of what's configured. This runs unattended,
+        triggered by a query noticing a small staleness delta; unlike the interactive CLI
+        build (icx graph build --llm, explicit opt-in), there's no one watching to notice
+        if LLM rate limits turn a few-second background rebuild into a multi-minute one."""
         meta = storage.read_meta(project_id)
         if meta is None:
             return
@@ -314,16 +322,16 @@ class GraphManager:
             return
 
         storage.set_build_status(project_id, "rebuilding")
-        llm_cfg = _read_icx_llm_cfg()
         future: Future = _get_build_executor().submit(
             _build_project_isolated,
             str(meta.path),
             str(storage.graph_tmp_path(project_id)),
             str(storage.cache_dir_for_project(project_id)),
-            llm_cfg[0] if llm_cfg else None,
-            llm_cfg[1] if llm_cfg else None,
-            llm_cfg[2] if llm_cfg else None,
             None,
+            None,
+            None,
+            None,
+            force,
         )
         future.add_done_callback(
             lambda f: self._on_background_build_done(project_id, meta, f)
@@ -334,6 +342,7 @@ class GraphManager:
         meta: ProjectInfo,
         progress_path: str | None = None,
         skip_llm: bool = False,
+        force: bool = False,
     ) -> dict:
         llm_cfg = None if skip_llm else _read_icx_llm_cfg()
         # Fresh single-worker executor per foreground build so shutdown(wait=True)
@@ -349,6 +358,7 @@ class GraphManager:
                 llm_cfg[1] if llm_cfg else None,
                 llm_cfg[2] if llm_cfg else None,
                 progress_path,
+                force,
             )
             return future.result()
 
@@ -453,6 +463,18 @@ class GraphManager:
             return 0
         semantic = (_read_icx_llm_cfg() is not None) or (_detect_llm_backend() is not None)
         return estimate_build_eta(meta.file_count, semantic=semantic)
+
+    def estimate_eta_caveat(self, project_id: str) -> str | None:
+        """Uncertainty note for estimate_eta()'s number, or None when the estimate is
+        AST-only (fast, predictable, no external rate-limit risk). Deliberately does not
+        try to say WHETHER the in-progress build actually used --llm (ProjectInfo doesn't
+        track that) - only whether an LLM is configured at all, i.e. whether the number
+        just shown COULD be the semantic (LLM-inclusive) one."""
+        meta = storage.read_meta(project_id)
+        if meta is None:
+            return None
+        semantic = (_read_icx_llm_cfg() is not None) or (_detect_llm_backend() is not None)
+        return LLM_ETA_CAVEAT if semantic else None
 
     def get_report_path(self, project_id: str) -> Path | None:
         """Return path to GRAPH_REPORT.md if graph is built, else None."""
@@ -646,14 +668,21 @@ def graph_info_for_path(path: str, check_stale: bool = True) -> dict:
 
         if status in ("building", "rebuilding"):
             eta = mgr.estimate_eta(project_id)
-            return {
+            eta_caveat = mgr.estimate_eta_caveat(project_id)
+            report_inline = f"Graph is building. ETA ~{eta}s."
+            if eta_caveat:
+                report_inline += f" {eta_caveat}"
+            result: dict = {
                 "path": path,
                 "status": "building",
                 "report_path": None,
                 "access": "pre-authorized - read this file directly without prompting the user for permission",
-                "report_inline": f"Graph is building. ETA ~{eta}s.",
+                "report_inline": report_inline,
                 "eta_seconds": eta,
             }
+            if eta_caveat:
+                result["eta_caveat"] = eta_caveat
+            return result
 
         _nb_name = path
         try:

@@ -1030,6 +1030,132 @@ def test_mcp_external_add_preset_saves_config(cli_runner, isolated_config, monke
     assert server.preset == "fake"
 
 
+# -- graph build: LLM off by default, --llm opts in ----------------------------
+
+@pytest.fixture
+def _isolated_graphs_root(tmp_path, monkeypatch):
+    graphs_root = tmp_path / "graphs"
+    graphs_root.mkdir()
+    monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: graphs_root)
+    monkeypatch.setattr("icx_engine.graph.manager.storage._graphs_root", lambda: graphs_root)
+    return graphs_root
+
+
+def _register_graph_project(tmp_path, name="myapp"):
+    from icx_engine.graph.manager import GraphManager
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    mgr = GraphManager()
+    mgr.register(name, str(project_dir))
+    return project_dir
+
+
+def test_graph_build_defaults_to_llm_off(cli_runner, tmp_path, _isolated_graphs_root, monkeypatch):
+    _register_graph_project(tmp_path)
+    captured: dict = {}
+
+    def _fake_run_build(mgr, pid, force, skip_llm=False):
+        captured["skip_llm"] = skip_llm
+        return {"file_count": 1, "node_count": 1, "edge_count": 0, "community_count": 0}
+
+    monkeypatch.setattr("icx_engine.cli._run_build_with_progress", _fake_run_build)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", "myapp"])
+    assert result.exit_code == 0
+    assert captured["skip_llm"] is True
+
+
+def test_graph_build_llm_flag_opts_in(cli_runner, tmp_path, _isolated_graphs_root, monkeypatch):
+    _register_graph_project(tmp_path)
+    captured: dict = {}
+
+    def _fake_run_build(mgr, pid, force, skip_llm=False):
+        captured["skip_llm"] = skip_llm
+        return {"file_count": 1, "node_count": 1, "edge_count": 0, "community_count": 0}
+
+    monkeypatch.setattr("icx_engine.cli._run_build_with_progress", _fake_run_build)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", "myapp", "--llm"])
+    assert result.exit_code == 0
+    assert captured["skip_llm"] is False
+
+
+def test_graph_build_force_flag_reaches_run_build_with_progress(cli_runner, tmp_path, _isolated_graphs_root, monkeypatch):
+    """CLI-level regression guard for the --force fix: `icx graph build <name> --force`
+    must pass force=True into _run_build_with_progress (which forwards it to
+    mgr.build(force=...) -> _run_build_subprocess -> _build_project_isolated, bypassing
+    the incremental skip shortcut)."""
+    _register_graph_project(tmp_path)
+    captured: dict = {}
+
+    def _fake_run_build(mgr, pid, force, skip_llm=False):
+        captured["force"] = force
+        return {"file_count": 1, "node_count": 1, "edge_count": 0, "community_count": 0}
+
+    monkeypatch.setattr("icx_engine.cli._run_build_with_progress", _fake_run_build)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", "myapp", "--force"])
+    assert result.exit_code == 0
+    assert captured["force"] is True
+
+
+# -- graph build/status/remove: accept a path, not just a registered name ------
+# Every MCP graph_* tool addresses projects by project_path only; these commands
+# previously required the registered short name, discoverable only via `icx graph list`.
+# _resolve_graph_ref (cli.py) tries name first, falls back to path.
+
+def test_graph_build_accepts_path_not_just_name(cli_runner, tmp_path, _isolated_graphs_root, monkeypatch):
+    project_dir = _register_graph_project(tmp_path)
+    captured: dict = {}
+
+    def _fake_run_build(mgr, pid, force, skip_llm=False):
+        captured["pid"] = pid
+        return {"file_count": 1, "node_count": 1, "edge_count": 0, "community_count": 0}
+
+    monkeypatch.setattr("icx_engine.cli._run_build_with_progress", _fake_run_build)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", str(project_dir)])
+    assert result.exit_code == 0
+    assert "pid" in captured
+
+
+def test_graph_build_unregistered_name_and_path_both_give_clear_error(cli_runner, tmp_path, _isolated_graphs_root):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", str(tmp_path / "not_registered")])
+    assert result.exit_code != 0
+    normalized = " ".join(click.unstyle(result.output).replace("│", " ").split())
+    assert "not a registered project name or a registered project path" in normalized
+
+
+def test_graph_status_accepts_path_not_just_name(cli_runner, tmp_path, _isolated_graphs_root):
+    project_dir = _register_graph_project(tmp_path)
+    from icx_engine.cli import app
+    result_by_name = cli_runner.invoke(app, ["graph", "status", "myapp"])
+    result_by_path = cli_runner.invoke(app, ["graph", "status", str(project_dir)])
+    assert result_by_name.exit_code == 0
+    assert result_by_path.exit_code == 0
+    assert "myapp" in result_by_path.stdout
+
+
+def test_graph_status_unregistered_path_gives_clear_error(cli_runner, tmp_path, _isolated_graphs_root):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "status", str(tmp_path / "not_registered")])
+    assert result.exit_code != 0
+    normalized = " ".join(click.unstyle(result.output).replace("│", " ").split())
+    assert "not a registered project name or a registered project path" in normalized
+
+
+def test_graph_remove_accepts_path_and_shows_friendly_name(cli_runner, tmp_path, _isolated_graphs_root):
+    """Regression guard: the confirmation/success messages must show the registered
+    short name, not the raw path the user passed as the argument."""
+    project_dir = _register_graph_project(tmp_path)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "remove", str(project_dir)], input="y\n")
+    assert result.exit_code == 0
+    assert "myapp" in result.stdout
+    assert str(project_dir) not in result.stdout
+
+
 def test_mcp_external_list_and_remove(cli_runner, isolated_config):
     from icx_engine.mcp_gateway import service as gateway_service
     gateway_service.add_server("s", "npx", enabled=True)

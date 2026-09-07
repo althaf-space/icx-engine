@@ -2031,7 +2031,7 @@ def _context_signals(project_path: str, seeds: list[str], keywords: list[str]):
         loaded = _load_querier_simple(project_path)
         if not isinstance(loaded, tuple):
             return []
-        q, _ = loaded
+        q, _, _sw = loaded
         out = []
         try:
             br = q.get_blast_radius(seeds, max_depth=5, min_confidence=0.3)
@@ -2055,7 +2055,7 @@ def _context_signals(project_path: str, seeds: list[str], keywords: list[str]):
         loaded = _load_querier_simple(project_path)
         if not isinstance(loaded, tuple):
             return []
-        q, _ = loaded
+        q, _, _sw = loaded
         query = " ".join(keywords) if keywords else " ".join(_P(s).stem for s in seeds)
         if not query.strip():
             return []
@@ -2087,10 +2087,46 @@ def _context_signals(project_path: str, seeds: list[str], keywords: list[str]):
     return _graph, _grep, _semantic, _memory
 
 
-def _load_querier_simple(project_path: str) -> tuple | dict:
-    """Validate path, derive project_id, load GraphQuerier.
+def _staleness_warning_for(project_id: str, project_path) -> str | None:
+    """Warning-only staleness note (never a hard degrade) - for tools whose only useful
+    answer IS graph-based (pagerank/cycles/dead-code/ownership/blast-radius have no
+    meaningful non-graph fallback, unlike find_context's grep fallback), so even a stale
+    graph is more useful than none. Mirrors _resolve_graph_path's incremental/
+    freshness_unknown wording exactly for consistency; unlike that function, "stale" gets a
+    louder warning here instead of a full degrade, since these callers have nothing to
+    degrade to."""
+    from icx_engine.graph.paths import check_staleness
 
-    Returns (GraphQuerier, validated_path) or an error dict.
+    staleness = check_staleness(project_id, project_path)
+    status = staleness["status"]
+    if status == "incremental":
+        pct = staleness.get("pct", 0)
+        return (
+            f"Graph is slightly stale ({pct}% of files changed, under 1% threshold). "
+            "Results may not reflect the very latest changes. "
+            f"Inform the user and suggest running: icx graph build \"{project_path}\""
+        )
+    if status == "stale":
+        pct = staleness.get("pct", 0)
+        changed = staleness.get("changed", 0)
+        total = staleness.get("total", 0)
+        return (
+            f"Graph is {pct}% stale ({changed}/{total} files changed) - results may not "
+            "reflect significant recent changes. Inform the user and suggest rebuilding: "
+            f"icx graph build \"{project_path}\""
+        )
+    if status == "freshness_unknown":
+        return (
+            "Could not determine graph freshness (git check timed out). "
+            "Results may be slightly stale. Inform the user."
+        )
+    return None
+
+
+def _load_querier_simple(project_path: str) -> tuple | dict:
+    """Validate path, derive project_id, load GraphQuerier, check staleness.
+
+    Returns (GraphQuerier, validated_path, staleness_warning) or an error dict.
     """
     from icx_engine.graph import storage as _st
     from icx_engine.graph.storage import validate_project_path, GraphError
@@ -2110,7 +2146,8 @@ def _load_querier_simple(project_path: str) -> tuple | dict:
                 f"results, build the graph: icx graph build \"{_validated}\""
             ),
         )
-    return _cached_querier(_gpath), _validated
+    _staleness_warning = _staleness_warning_for(_pid, _validated)
+    return _cached_querier(_gpath), _validated, _staleness_warning
 
 
 def _resolve_graph_path(raw_path: str):
