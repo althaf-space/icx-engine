@@ -368,9 +368,12 @@ GRAPH_TOOLS: list[Tool] = [
     Tool(
         name=_GRAPH_CROSS_LINKS_TOOL,
         description=(
-            "MICROSERVICES ONLY - SKIP IF SINGLE MONOLITH.\n"
-            "USE WHEN: Working on a project that makes HTTP calls to peer services and you need to know "
-            "which calls cross service boundaries.\n"
+            "PEER (SEPARATELY REGISTERED) PROJECTS ONLY.\n"
+            "USE WHEN: Working on a project that makes HTTP calls to a DIFFERENT registered ICX project "
+            "and you need to know which calls cross that service boundary.\n"
+            "A frontend calling its OWN backend in the SAME repo/registration is not a peer-project link - "
+            "those edges (relation=calls_api) are already part of the main graph and show up directly via "
+            "graph_call_chain/graph_impact on the calling file, no separate tool needed.\n"
             "Matches outgoing HTTP calls in THIS project to REST routes in peer registered projects.\n"
             "RETURNS: [{source_project, call_site, method, route, target_project, matched_route}] "
             "listing every cross-service HTTP link.\n"

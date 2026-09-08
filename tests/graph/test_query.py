@@ -168,3 +168,93 @@ def test_get_subsystem(tiny_graph: Path):
     result = q.get_subsystem("src/auth/service.py")
     assert "src/auth/service.py" in result.files
     assert "src/auth/repo.py" in result.files
+
+
+# -- ui_text scoring + phrase-level bonus ------------------------------------------------
+# Real-world motivation: a Jira ticket rarely names a class/file, but often echoes an
+# actual screen title/label almost verbatim - ui_text (extracted by parser/ui_text.py)
+# closes that gap with zero LLM calls and zero embeddings.
+
+@pytest.fixture
+def loyalty_screens_graph(tmp_path: Path) -> Path:
+    """Mirrors a real finding from this session: a common domain word ("loyalty")
+    legitimately appears across several distinct real screens, while only ONE of them
+    carries the exact, specific phrase a ticket is likely to quote verbatim."""
+    graph = {
+        "nodes": [
+            {"id": "loyalty_form", "label": "LoyaltyForm",
+             "source_file": "src/containers/Account/LoyaltyForm.jsx",
+             "community": 0, "role_tag": "[container]", "importance": 0.3,
+             "ui_text": "Loyalty Status"},
+            {"id": "loyalty_status", "label": "LoyaltyStatus",
+             "source_file": "src/components/LMS/LoyaltyStatus.jsx",
+             "community": 0, "role_tag": "[component]", "importance": 0.3,
+             "ui_text": "View Loyalty Status Details"},
+            {"id": "loyalty_points", "label": "LoyaltyPoints",
+             "source_file": "src/containers/Dashboard/Loyalty_New/LoyaltyPoints.jsx",
+             "community": 0, "role_tag": "[container]", "importance": 0.3,
+             "ui_text": "Loyalty Points-Earned V/S Redemption | Start Date | End Date"},
+        ],
+        "links": [],
+        "communities": {"0": ["loyalty_form", "loyalty_status", "loyalty_points"]},
+    }
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps(graph), encoding="utf-8")
+    return p
+
+
+def test_ui_text_makes_a_screen_findable_by_visible_label_not_just_filename(tmp_path: Path):
+    """A file whose NAME shares nothing with the query must still be found when its
+    extracted UI text matches - this is the whole point of ui_text."""
+    from icx_engine.graph.query import GraphQuerier
+    graph = {
+        "nodes": [
+            {"id": "n1", "label": "XyzScreen123", "source_file": "src/screens/XyzScreen123.jsx",
+             "community": 0, "role_tag": "", "importance": 0.5,
+             "ui_text": "Gamification Reward Allocation"},
+        ],
+        "links": [],
+        "communities": {"0": ["n1"]},
+    }
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps(graph), encoding="utf-8")
+    q = GraphQuerier(p)
+    results = q.find_context("gamification reward")
+    assert any(r.node_id == "n1" for r in results)
+
+
+def test_generic_shared_word_returns_multiple_candidates_not_a_forced_single_pick(loyalty_screens_graph: Path):
+    """Core precision guarantee: when the query only shares ONE common domain word
+    across several genuinely distinct real screens, find_context must return all of
+    them ranked, never silently assert a single winner. Ambiguity is a real property of
+    the codebase (multiple real "Loyalty" screens exist) - hiding it would risk a false
+    positive; surfacing it lets the caller disambiguate."""
+    from icx_engine.graph.query import GraphQuerier
+    q = GraphQuerier(loyalty_screens_graph)
+    results = q.find_context("loyalty issue reported by customer")
+    matched_ids = {r.node_id for r in results}
+    assert {"loyalty_form", "loyalty_status", "loyalty_points"} <= matched_ids
+
+
+def test_specific_phrase_match_clearly_outranks_generic_word_match(loyalty_screens_graph: Path):
+    """When the ticket quotes a real, specific, multi-word screen title almost
+    verbatim, that screen must rank clearly above the others that only share the
+    single common word "loyalty" - this is the phrase-bonus in action."""
+    from icx_engine.graph.query import GraphQuerier
+    q = GraphQuerier(loyalty_screens_graph)
+    results = q.find_context(
+        "the Loyalty Points-Earned V/S Redemption report is showing wrong numbers"
+    )
+    assert results[0].node_id == "loyalty_points"
+    assert results[0].score > results[1].score * 1.5  # clearly, not marginally, ahead
+    assert "phrase-match" in results[0].reason
+
+
+def test_phrase_bonus_does_not_trigger_on_single_common_word(loyalty_screens_graph: Path):
+    """A single shared word (even the same word every candidate has) must never count
+    as a "phrase match" - only a genuine multi-word phrase should."""
+    from icx_engine.graph.query import GraphQuerier
+    q = GraphQuerier(loyalty_screens_graph)
+    results = q.find_context("loyalty")
+    for r in results:
+        assert "phrase-match" not in r.reason

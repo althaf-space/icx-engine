@@ -770,9 +770,35 @@ def _build_project_isolated(
             )
             from icx_engine.graph import storage as _xstorage
             _out_dir = _xstorage._graphs_root() / _xstorage.derive_project_id(project_path)
-            run_cross_service_linking(files, project_path, extraction, _out_dir)
+            _csl_edges = run_cross_service_linking(files, project_path, extraction, _out_dir)
+            if _csl_edges:
+                extraction = {
+                    **extraction,
+                    "edges": list(extraction.get("edges", [])) + _csl_edges,
+                }
+            _log.debug("cross_service_rest: %d same-project edge(s)", len(_csl_edges or []))
         except Exception as _csl_exc:
             _log.debug("cross_service_rest linker failed (%s)", type(_csl_exc).__name__)
+
+        # UI-visible text (titles/labels/button text) attached to file nodes so
+        # graph_find_context can match a ticket description against what a user actually
+        # saw on screen, not just code identifiers - zero LLM calls, zero embeddings.
+        try:
+            from icx_engine.graph.parser.ui_text import extract_ui_text
+            _ui_text_by_file = extract_ui_text(files, project_path)
+            if _ui_text_by_file:
+                _root_posix = project_path.as_posix()
+                for _node in extraction.get("nodes", []):
+                    _sf = (_node.get("source_file") or _node.get("file") or "").replace("\\", "/")
+                    if not _sf:
+                        continue
+                    _rel = _sf[len(_root_posix) + 1:] if _sf.startswith(_root_posix + "/") else _sf
+                    _text = _ui_text_by_file.get(_rel)
+                    if _text:
+                        _node["ui_text"] = _text
+            _log.debug("ui_text: %d file(s) with extracted text", len(_ui_text_by_file))
+        except Exception as _uit_exc:
+            _log.debug("ui_text extraction failed (%s)", type(_uit_exc).__name__)
 
         # LLM enrichment: per-chunk LLM call. Chunk IDs are intentionally
         # discarded; Louvain rederives communities globally so cluster IDs
