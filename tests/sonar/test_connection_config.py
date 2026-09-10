@@ -1,6 +1,6 @@
 import icx_engine.config_manager as cm
 from icx_engine.config_manager import ConfigManager
-from icx_engine.models.config import AppConfig, GitLabConnection, SonarConnection, WorkstatusConnection
+from icx_engine.models.config import AppConfig, ExternalMcpServer, GitLabConnection, LangfuseConfig, SonarConnection, WorkstatusConnection
 
 
 def test_sonar_connection_token_roundtrip_and_excluded(isolated_config, monkeypatch):
@@ -280,3 +280,126 @@ def test_delete_all_secrets_clears_workstatus_connection_accounts(monkeypatch):
     ConfigManager.delete_all_secrets(cfg)
     assert "workstatus_conn_authorization:default" in deleted
     assert "workstatus_conn_sd_token:default" in deleted
+
+
+# --- Langfuse config (single instance, not multi-connection - mirrors the legacy
+# single-field sonar_token pattern rather than sonar_connections/gitlab_connections) ---
+
+def test_langfuse_config_excludes_secret_key():
+    lf = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
+    assert "secret_key" not in lf.model_dump()
+
+
+def test_langfuse_config_defaults_disabled():
+    cfg = AppConfig()
+    assert cfg.langfuse.enabled is False
+    assert cfg.langfuse.secret_key is None
+
+
+def test_langfuse_secret_key_roundtrip_and_excluded(isolated_config, monkeypatch):
+    store: dict[str, str] = {}
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kset", lambda account, value: store.__setitem__(account, value) or True)
+    monkeypatch.setattr(cm, "_kget", lambda account: store.get(account))
+    monkeypatch.setattr(cm, "_kdel", lambda account: store.pop(account, None))
+
+    cfg = AppConfig()
+    cfg.langfuse = LangfuseConfig(enabled=True, host="https://cloud.langfuse.com", public_key="pk-123", secret_key="sk-secret-456")
+    ConfigManager.save(cfg)
+
+    disk = isolated_config.read_text(encoding="utf-8")
+    assert "sk-secret-456" not in disk
+
+    loaded = ConfigManager.load()
+    assert loaded.langfuse.enabled is True
+    assert loaded.langfuse.public_key == "pk-123"
+    assert loaded.langfuse.secret_key == "sk-secret-456"
+
+
+def test_langfuse_secret_key_plaintext_fallback(isolated_config, monkeypatch):
+    monkeypatch.setattr(cm, "_check_keychain", lambda: False)
+    cfg = AppConfig(langfuse=LangfuseConfig(enabled=True, public_key="pk", secret_key="sk-secret"))
+    ConfigManager.save(cfg)
+    reloaded = ConfigManager.load()
+    assert reloaded.langfuse.secret_key == "sk-secret"
+
+
+def test_delete_all_secrets_clears_langfuse_secret_key(monkeypatch):
+    deleted = []
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kdel", lambda account: deleted.append(account))
+    cfg = AppConfig(langfuse=LangfuseConfig(enabled=True, secret_key="sk"))
+    ConfigManager.delete_all_secrets(cfg)
+    assert "langfuse_secret_key" in deleted
+
+
+def test_save_clears_langfuse_secret_key_when_disabled_and_unset(isolated_config, monkeypatch):
+    deleted = []
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kdel", lambda account: deleted.append(account))
+    monkeypatch.setattr(cm, "_kset", lambda a, v: True)
+    ConfigManager.save(AppConfig())
+    assert "langfuse_secret_key" in deleted
+
+
+# --- External MCP server env secrets (arbitrary per-key dict, not a fixed field like
+# GitLabConnection.token - one keyring entry per env var, external_mcp_env:<name>:<key>) ---
+
+def test_external_mcp_env_excluded_from_serialization():
+    server = ExternalMcpServer(name="playwright", command="npx", env={"API_KEY": "secret"})
+    assert "env" not in server.model_dump()
+
+
+def test_external_mcp_server_defaults():
+    cfg = AppConfig()
+    assert cfg.external_mcp_servers == {}
+
+
+def test_external_mcp_env_roundtrip_and_excluded(isolated_config, monkeypatch):
+    store: dict[str, str] = {}
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kset", lambda account, value: store.__setitem__(account, value) or True)
+    monkeypatch.setattr(cm, "_kget", lambda account: store.get(account))
+    monkeypatch.setattr(cm, "_kdel", lambda account: store.pop(account, None))
+
+    cfg = AppConfig()
+    cfg.external_mcp_servers["playwright"] = ExternalMcpServer(
+        name="playwright", command="npx", args=["-y", "@playwright/mcp@0.0.29"],
+        env={"API_KEY": "sk-secret-456"}, enabled=True,
+    )
+    ConfigManager.save(cfg)
+
+    disk = isolated_config.read_text(encoding="utf-8")
+    assert "sk-secret-456" not in disk
+
+    loaded = ConfigManager.load()
+    assert loaded.external_mcp_servers["playwright"].env == {"API_KEY": "sk-secret-456"}
+    assert loaded.external_mcp_servers["playwright"].enabled is True
+
+
+def test_external_mcp_env_plaintext_fallback(isolated_config, monkeypatch):
+    monkeypatch.setattr(cm, "_check_keychain", lambda: False)
+    cfg = AppConfig()
+    cfg.external_mcp_servers["s"] = ExternalMcpServer(name="s", command="npx", env={"K": "v-secret"})
+    ConfigManager.save(cfg)
+    reloaded = ConfigManager.load()
+    assert reloaded.external_mcp_servers["s"].env == {"K": "v-secret"}
+
+
+def test_delete_all_secrets_clears_external_mcp_env(monkeypatch):
+    deleted = []
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kdel", lambda account: deleted.append(account))
+    cfg = AppConfig()
+    cfg.external_mcp_servers["s"] = ExternalMcpServer(name="s", command="npx", env={"K1": "a", "K2": "b"})
+    ConfigManager.delete_all_secrets(cfg)
+    assert "external_mcp_env:s:K1" in deleted
+    assert "external_mcp_env:s:K2" in deleted
+
+
+def test_delete_external_mcp_server_secret_clears_given_keys(monkeypatch):
+    deleted = []
+    monkeypatch.setattr(cm, "_check_keychain", lambda: True)
+    monkeypatch.setattr(cm, "_kdel", lambda account: deleted.append(account))
+    ConfigManager.delete_external_mcp_server_secret("s", ["K1", "K2"])
+    assert deleted == ["external_mcp_env:s:K1", "external_mcp_env:s:K2"]

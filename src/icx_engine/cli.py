@@ -94,195 +94,109 @@ AI-native intelligence layer for development teams. Connect your work tracker to
 [bold]Quick start:[/bold]  [cyan]icx setup[/cyan]  ->  [cyan]icx connection --add[/cyan]  ->  [cyan]icx model --add[/cyan]  ->  [cyan]icx analyze <KEY>[/cyan]
 
 [bold]First-time Setup[/bold]
-  [cyan]icx setup[/cyan]                                              Download AI model files (run once after install)
-  [cyan]icx update[/cyan]                                             Apply config migrations + remove stale files after a package upgrade
+  [cyan]icx setup[/cyan]                                                  Download AI model files (run once after install)
+  [cyan]icx update[/cyan]                                                 Apply config migrations + remove stale files after a package upgrade
 
 [bold]Analysis[/bold]
-  [cyan]icx analyze <KEY>[/cyan]                                      Fetch and analyze a work item (bug, story, task, feature)
-  [cyan]icx analyze <KEY> --fast[/cyan]                               Skip all attachments - return raw text only
-  [cyan]icx analyze <KEY> --profile <NAME>[/cyan]                     Use a specific LLM profile for this run
-  [cyan]icx analyze <KEY> --profile <NAME> --fast[/cyan]              Specific profile + skip attachments
-  [cyan]icx analyze <KEY> --path <PATH>[/cyan]                        Show graph status for a codebase path
-  [cyan]icx analyze <KEY> --path <P1> --path <P2>[/cyan]              Show graph status for multiple paths
-  [cyan]icx analyze <KEY> --path <P1> --path <P2> --fast[/cyan]       Graph status + skip attachments
-  [cyan]icx analyze <KEY> --debug[/cyan]                              Show step-by-step debug output
-  [cyan]icx analyze <KEY> --traceback[/cyan]                          Show full Python traceback on error
+  [cyan]icx analyze <KEY>[/cyan]                                          Fetch and analyze a work item (bug, story, task, feature)
+  [cyan]icx analyze <KEY> --fast[/cyan]                                   Skip all attachments - return raw text only
+  [cyan]icx analyze <KEY> --profile <NAME>[/cyan]                         Use a specific LLM profile for this run
+  [cyan]icx analyze <KEY> --profile <NAME> --fast[/cyan]                  Specific profile + skip attachments
+  [cyan]icx analyze <KEY> --path <PATH>[/cyan]                            Show graph status for a codebase path
+  [cyan]icx analyze <KEY> --path <P1> --path <P2>[/cyan]                  Show graph status for multiple paths
+  [cyan]icx analyze <KEY> --path <P1> --path <P2> --fast[/cyan]           Graph status + skip attachments
+  [cyan]icx analyze <KEY> --debug[/cyan]                                  Show step-by-step debug output
+  [cyan]icx analyze <KEY> --traceback[/cyan]                              Show full Python traceback on error
 
 [bold]Connections[/bold]
-  [cyan]icx connection --add[/cyan]                                   Connect a new platform (interactive)
-  [cyan]icx connection --remove <DOMAIN>[/cyan]                       Remove connection by domain
-  [cyan]icx connection --remove <INDEX>[/cyan]                        Remove connection by index (from icx status)
-  [cyan]icx connection --active <DOMAIN>[/cyan]                       Set default connection
-  [cyan]icx connection --active <INDEX>[/cyan]                        Set default by index
+  [cyan]icx connection --add[/cyan]                                       Connect a new platform (interactive)
+  [cyan]icx connection --remove <DOMAIN>[/cyan]                           Remove connection by domain
+  [cyan]icx connection --remove <INDEX>[/cyan]                            Remove connection by index (from icx status)
+  [cyan]icx connection --active <DOMAIN>[/cyan]                           Set default connection
+  [cyan]icx connection --active <INDEX>[/cyan]                            Set default by index
 
 [bold]LLM Profiles[/bold]
-  [cyan]icx model --add[/cyan]                                        Add an AI provider (interactive)
-  [cyan]icx model --remove <PROFILE>[/cyan]                           Remove a profile by name
-  [cyan]icx model --remove <INDEX>[/cyan]                             Remove a profile by index (from icx status)
-  [cyan]icx model --remove <PROFILE> --channel text|image[/cyan]      Remove only one channel from a profile
-  [cyan]icx model --active <PROFILE>[/cyan]                           Set default profile (name or index)
+  [cyan]icx model --add[/cyan]                                            Add an AI provider (interactive)
+  [cyan]icx model --remove <PROFILE>[/cyan]                               Remove a profile by name
+  [cyan]icx model --remove <INDEX>[/cyan]                                 Remove a profile by index (from icx status)
+  [cyan]icx model --remove <PROFILE> --channel text|image[/cyan]          Remove only one channel from a profile
+  [cyan]icx model --active <PROFILE>[/cyan]                               Set default profile (name or index)
 
 [bold]Memory[/bold]
-  [cyan]icx memory save <KEY>[/cyan]                                  Save a resolved issue to local memory
-  [cyan]icx memory save <KEY> --note "..."[/cyan]                     Save with a note (non-interactive)
-  [cyan]icx memory search "<query>"[/cyan]                            Search past resolutions by description
-  [cyan]icx memory list[/cyan]                                        List all saved entries (newest first)
-  [cyan]icx memory list --project <KEY>[/cyan]                        Filter list by project key (e.g. PROJ)
-  [cyan]icx memory list --source <TYPE>[/cyan]                        Filter list by source type (e.g. jira)
-  [cyan]icx memory show <KEY>[/cyan]                                  Show full detail for one entry
-  [cyan]icx memory update <KEY>[/cyan]                                Update one field on a saved entry
-  [cyan]icx memory delete <KEY>[/cyan]                                Delete one saved entry
-  [cyan]icx memory export[/cyan]                                      Export all memory to a JSON file
-  [cyan]icx memory export --output <FILE>[/cyan]                      Export to a specific path
-  [cyan]icx memory import <FILE>[/cyan]                               Import from a JSON export file
-  [cyan]icx memory clear --confirm[/cyan]                             Delete all saved entries
-  [cyan]icx memory status[/cyan]                                      Show entry count, storage size, model info
-  [cyan]icx memory migrate[/cyan]                                     Re-embed all saved work items after an embedding model upgrade
-  [cyan]icx memory by-file <PATH>[/cyan]                              List all work items that touched a file path
-  [cyan]icx memory by-file <PATH> --project <KEY>[/cyan]              Filter by project key
-  [cyan]icx memory hotspots[/cyan]                                    Show files with most historical work items
-  [cyan]icx memory hotspots --project <KEY> --top <N>[/cyan]          Filter by project, show top N files
-  [cyan]icx memory related <KEY>[/cyan]                               Show work items related via shared file history
-  [cyan]icx memory related <KEY> --project <KEY>[/cyan]               Filter related items to one project
-  [cyan]icx memory patterns[/cyan]                                    Show auto-detected patterns across work items
-  [cyan]icx memory patterns --project <KEY>[/cyan]                    Filter patterns by project key
+  [cyan]icx memory list[/cyan]                                            List all saved entries (newest first)
+  [cyan]icx memory list --project <KEY>[/cyan]                            Filter list by project key (e.g. PROJ)
+  [cyan]icx memory list --source <TYPE>[/cyan]                            Filter list by source type (e.g. jira)
+  [cyan]icx memory export[/cyan]                                          Export all memory to a JSON file
+  [cyan]icx memory export --output <FILE>[/cyan]                          Export to a specific path
+  [cyan]icx memory import <FILE>[/cyan]                                   Import from a JSON export file
+  [cyan]icx memory status[/cyan]                                          Show entry count, storage size, model info
 
-[bold]Codebase Graph[/bold]
+[bold]Codebase Graph[/bold] - <NAME> below also accepts the registered project's path
   [cyan]icx graph add --name <NAME> --path <PATH> --project <KEY>[/cyan]  Register a project for graph indexing
-  [cyan]icx graph build <NAME>[/cyan]                                 Build the knowledge graph (shows live progress)
-  [cyan]icx graph build --project <KEY>[/cyan]                        Build all graphs tagged with a Jira project key
-  [cyan]icx graph build <NAME> --force[/cyan]                         Force full rebuild even if graph is current
-  [cyan]icx graph build <NAME> --no-llm[/cyan]                        Build without LLM enrichment (faster, AST only)
-  [cyan]icx graph build <NAME> --force --no-llm[/cyan]                Force rebuild, AST only
-  [cyan]icx graph list[/cyan]                                         List all projects: name, status, file count, last built
-  [cyan]icx graph status <NAME>[/cyan]                                Show detail: staleness, changed files, ETA
-  [cyan]icx graph remove <NAME>[/cyan]                                Delete registration and graph files
-  [cyan]icx graph remove <NAME> --keep-cache[/cyan]                   Delete registration only, keep cache on disk
+  [cyan]icx graph build <NAME>[/cyan]                                     Build the knowledge graph (shows live progress)
+  [cyan]icx graph build --project <KEY>[/cyan]                            Build all graphs tagged with a Jira project key
+  [cyan]icx graph build <NAME> --force[/cyan]                             Force full rebuild even if graph is current
+  [cyan]icx graph build <NAME> --llm[/cyan]                               Opt in to LLM semantic enrichment (off by default)
+  [cyan]icx graph build <NAME> --force --llm[/cyan]                       Force rebuild, with LLM enrichment
+  [cyan]icx graph list[/cyan]                                             List all projects: name, status, file count, last built
+  [cyan]icx graph status <NAME>[/cyan]                                    Show detail: staleness, changed files, ETA
+  [cyan]icx graph remove <NAME>[/cyan]                                    Delete registration and graph files
+  [cyan]icx graph remove <NAME> --keep-cache[/cyan]                       Delete registration only, keep cache on disk
 
 [bold]Testing[/bold]
-  [cyan]icx test setup[/cyan]                                           Download UI/API tooling (Playwright+Chromium, Schemathesis, Hurl) into ~/.icx
-  [cyan]icx test configure[/cyan]                                       Configure testing fix-iteration limit
-  [cyan]icx test rules[/cyan]                                           Manage the local testing rulebooks
-  [cyan]icx test sessions[/cyan]                                        List all active testing sessions
-  [cyan]icx test cancel <SESSION_ID>[/cyan]                             Cancel an active testing session
-  [cyan]icx test analytics[/cyan]                                       Build the run-history analytics dashboard
-
-[bold]Boost (thinking channel)[/bold]
-  [cyan]icx boost brief "<prompt>"[/cyan]                               Show the ICX boosted brief for a prompt (for editor hooks/scripts)
-  [cyan]icx boost benchmark[/cyan]                                      Measure the boost: raw vs ICX-boosted quality lift on your model
+  [cyan]icx test setup[/cyan]                                             Download UI/API tooling (Playwright+Chromium, Schemathesis, Hurl) into ~/.icx
+  [cyan]icx test sessions[/cyan]                                          List all active testing sessions
 
 [bold]Code Quality (SonarQube)[/bold]
-  [cyan]icx sonar --add[/cyan]                                          Add a SonarQube server connection (name, URL, token)
-  [cyan]icx sonar --list[/cyan]                                         List connections and which is active
-  [cyan]icx sonar --active <NAME>[/cyan]                                Set the active connection
-  [cyan]icx sonar --remove <NAME>[/cyan]                                Remove a connection
-  [cyan]icx sonar status[/cyan]                                         Show the active connection status
-  [cyan]icx sonar projects[/cyan]                                       List projects the token can access
-  [cyan]icx sonar report --project <KEY> --branch <B>[/cyan]           Compact summary: quality gate + counts (MCP tools give full detail)
+  [cyan]icx sonar --add[/cyan]                                            Add a SonarQube server connection (name, URL, token)
+  [cyan]icx sonar --list[/cyan]                                           List connections and which is active
+  [cyan]icx sonar --active <NAME>[/cyan]                                  Set the active connection
+  [cyan]icx sonar --remove <NAME>[/cyan]                                  Remove a connection
+  [cyan]icx sonar status[/cyan]                                           Show the active connection status
 
 [bold]Skills[/bold]
-  [cyan]icx skills list[/cyan]                                        List every skill ICX has learned from verified fixes
-  [cyan]icx skills create[/cyan]                                      Create a skill by hand - no ticket required
-  [cyan]icx skills delete <NAME>[/cyan]                                Delete one skill
-
-[bold]Git[/bold]
-  [cyan]icx git status[/cyan]                                         Show current branch, dirty files, and leftover state
-  [cyan]icx git branch --ticket <KEY> --name <TEXT>[/cyan]            Create a feature branch (or switch to it if it already exists)
-  [cyan]icx git checkout <BRANCH_NAME>[/cyan]                        Switch to an existing branch by its exact name - no derivation
-  [cyan]icx git sync --parent <branch> --ticket <KEY>[/cyan]          Reverse-merge parent in; quarantines conflicts on a scratch branch
-  [cyan]icx git push --remote <NAME>[/cyan]                          Push the current branch to the remote - plain push, no force
-  [cyan]icx git mr --parent <branch> --ticket <KEY> --summary <TEXT>[/cyan]  Create/reuse an MR and attempt one immediate merge
-  [cyan]icx git finish --parent <branch> --feature <NAME> --ticket <KEY> --mr-iid <N>[/cyan]  Post-merge cleanup
-  [cyan]icx git tag --env <ENV> --branch <NAME>[/cyan]                  Propose and hard-gate-approve the next tag for an environment
-  [cyan]icx git blame <FILE>[/cyan]                                    Per-line commit sha, author, and content - add --from-line/--to-line to narrow
-  [cyan]icx git log[/cyan]                                             Commit history - filter with --file/--author/--since/--limit
-  [cyan]icx git show <SHA>[/cyan]                                      Full detail for one commit - message plus changed files
-  [cyan]icx git diff <REF_A> <REF_B>[/cyan]                            Per-file status plus insertions/deletions between two refs
+  [cyan]icx skills list[/cyan]                                            List every skill ICX has learned from verified fixes
 
 [bold]Jira[/bold]
-  [cyan]icx jira update <KEY>[/cyan]                                   Discover close-out requirements (transitions, required fields) and apply them
-  [cyan]icx jira create[/cyan]                                        Interactively create a new issue (project, issue type, summary, required fields)
-  [cyan]icx jira delete <KEY>[/cyan]                                   Permanently delete an issue (no undo, no trash) - supports --delete-subtasks
-  [cyan]icx jira comment list <KEY>[/cyan]                             List comments on an issue
-  [cyan]icx jira comment add <KEY>[/cyan]                              Add a comment to an issue
-  [cyan]icx jira comment edit <KEY>[/cyan]                             Edit an existing comment
-  [cyan]icx jira comment delete <KEY>[/cyan]                           Permanently delete a comment (no undo, no trash)
-  [cyan]icx jira search <JQL>[/cyan]                                   Search issues by JQL, print matching keys/summaries (lightweight, raw)
-  [cyan]icx jira get <KEY>[/cyan]                                      Print an issue's raw fields (lightweight, raw - not full LLM analysis)
-  [cyan]icx jira link types[/cyan]                                    List link types available for linking two issues (e.g. Blocks, Relates to)
-  [cyan]icx jira link create <TYPE> <INWARD_KEY> <OUTWARD_KEY>[/cyan]  Link two issues together with the given link type
-  [cyan]icx jira link delete <ISSUE_KEY> <LINK_ID>[/cyan]              Remove a link between two issues (recreatable, but hides dependency info meanwhile)
-  [cyan]icx jira assign <KEY> <ACCOUNT_ID>[/cyan]                      Assign an issue to an account - supports --unassign and --default
-  [cyan]icx jira attach add <KEY> <FILE_PATH>[/cyan]                   Upload a local file as an attachment to an issue
-  [cyan]icx jira attach remove <ISSUE_KEY> <ATTACHMENT_ID>[/cyan]      Permanently delete an attachment (no undo, no trash)
-  [cyan]icx jira whoami[/cyan]                                        Print your own Jira identity (accountId, displayName)
-  [cyan]icx jira watch add <KEY> [dim](ACCOUNT_ID)[/dim][/cyan]         Add a watcher - self is immediate, another user asks to confirm first
-  [cyan]icx jira watch remove <KEY> [dim](ACCOUNT_ID)[/dim][/cyan]      Remove a watcher - self is immediate, another user asks to confirm first
-  [cyan]icx jira worklog list <KEY>[/cyan]                             List worklog entries on an issue
-  [cyan]icx jira worklog add <KEY> <SECONDS> <STARTED>[/cyan]         Log time against an issue - always logged as yourself
-  [cyan]icx jira worklog edit <KEY> <WORKLOG_ID>[/cyan]                Edit a worklog entry - own is immediate, someone else's asks to confirm first
-  [cyan]icx jira worklog delete <KEY> <WORKLOG_ID>[/cyan]              Delete a worklog entry - own is immediate, someone else's asks to confirm first
+  [cyan]icx jira whoami[/cyan]                                            Print your own Jira identity (accountId, displayName)
 
 [bold]GitLab[/bold]
-  [cyan]icx gitlab --add[/cyan]                     Add a GitLab server connection (name, URL, token)
-  [cyan]icx gitlab --list[/cyan]                    List connections and which is active
-  [cyan]icx gitlab --active <NAME>[/cyan]           Set the active connection
-  [cyan]icx gitlab --remove <NAME>[/cyan]           Remove a connection
-  [cyan]icx gitlab verify[/cyan]                    Re-check the connection, list accessible projects
-  [cyan]icx gitlab status[/cyan]                    Show the active GitLab connection
-  [cyan]icx gitlab mrs[/cyan]                       List merge requests - --project/--state/--target-branch/--limit
-  [cyan]icx gitlab commits[/cyan]                   List commit history - --project/--ref/--path/--since/--limit
-  [cyan]icx gitlab compare <FROM_REF> <TO_REF>[/cyan]  File-level diff summary between two refs
+  [cyan]icx gitlab --add[/cyan]                                           Add a GitLab server connection (name, URL, token)
+  [cyan]icx gitlab --list[/cyan]                                          List connections and which is active
+  [cyan]icx gitlab --active <NAME>[/cyan]                                 Set the active connection
+  [cyan]icx gitlab --remove <NAME>[/cyan]                                 Remove a connection
+  [cyan]icx gitlab verify[/cyan]                                          Re-check the connection, list accessible projects
+  [cyan]icx gitlab status[/cyan]                                          Show the active GitLab connection
 
 [bold]Workstatus[/bold]
-  [cyan]icx workstatus --add[/cyan]                 Add session credentials (interactive)
-  [cyan]icx workstatus status[/cyan]                Show the connection status
-  [cyan]icx workstatus profile[/cyan]                Show your own Workstatus profile
-  [cyan]icx workstatus unread[/cyan]                 Show your unread notification count
-  [cyan]icx workstatus add-time[/cyan]               Add a manual timesheet entry
-  [cyan]icx workstatus projects[/cyan]               List projects
-  [cyan]icx workstatus project[/cyan]                Show one project's details
-  [cyan]icx workstatus project-budget[/cyan]         Show a project's budget/margin analytics
-  [cyan]icx workstatus tasks[/cyan]                  List tasks for a project
-  [cyan]icx workstatus task-statuses[/cyan]          List task statuses for a project
-  [cyan]icx workstatus milestones[/cyan]             List milestones for a project
-  [cyan]icx workstatus task-checklist[/cyan]         List checklist items for a task
-  [cyan]icx workstatus members[/cyan]                List members
-  [cyan]icx workstatus teams[/cyan]                  List teams
-  [cyan]icx workstatus attendance[/cyan]              Show day-by-day attendance for a date range
-  [cyan]icx workstatus attendance-stats[/cyan]        Show summary attendance stats
-  [cyan]icx workstatus timesheets[/cyan]              List logged timesheet entries
-  [cyan]icx workstatus timesheet-clients[/cyan]       List timesheet-billable clients
-  [cyan]icx workstatus weekly-report[/cyan]           Show a weekly hours/activity/earnings report
-  [cyan]icx workstatus submission-kpis[/cyan]         Show timesheet submission/approval KPIs
-  [cyan]icx workstatus submission-table[/cyan]        Show the timesheet submission/approval table
-  [cyan]icx workstatus expenses[/cyan]                List expenses for a date range
-  [cyan]icx workstatus invoices[/cyan]                List invoices
-  [cyan]icx workstatus payroll[/cyan]                 Show a payroll report
-  [cyan]icx workstatus timesheet[/cyan]               Show one timesheet entry's full detail
-  [cyan]icx workstatus edit-time[/cyan]               Edit an existing timesheet entry
+  [cyan]icx workstatus --add[/cyan]                                       Add session credentials (interactive)
+  [cyan]icx workstatus status[/cyan]                                      Show the connection status
 
 [bold]MCP Server[/bold]
-  [cyan]icx mcp run[/cyan]                                            Start the MCP server (stdio transport)
-  [cyan]icx mcp setup[/cyan]                                          Register ICX with all detected AI editors
-  [cyan]icx mcp setup --host <HOST>[/cyan]                            Register with one specific editor
-  [cyan]icx mcp remove[/cyan]                                         Remove ICX from all detected editors
-  [cyan]icx mcp remove --host <HOST>[/cyan]                           Remove from one specific editor
-  [cyan]icx mcp config[/cyan]                                         Print config JSON snippets for all editors
-  [cyan]icx mcp list[/cyan]                                           List supported editors and detection status
+  [cyan]icx mcp run[/cyan]                                                Start the MCP server (stdio transport)
+  [cyan]icx mcp setup[/cyan]                                              Register ICX with all detected AI editors
+  [cyan]icx mcp setup --host <HOST>[/cyan]                                Register with one specific editor
+  [cyan]icx mcp remove[/cyan]                                             Remove ICX from all detected editors
+  [cyan]icx mcp remove --host <HOST>[/cyan]                               Remove from one specific editor
+  [cyan]icx mcp config[/cyan]                                             Print config JSON snippets for all editors
+  [cyan]icx mcp list[/cyan]                                               List supported editors and detection status
+  [cyan]icx mcp-external --add --preset <name>[/cyan]                     Register a curated preset (none ship by default)
+  [cyan]icx mcp-external --list[/cyan]                                    List registered external MCP servers
+  [cyan]icx mcp-external test <name>[/cyan]                               Spawn once, list its tools, shut down
 
 [bold]Telemetry[/bold]
-  [cyan]icx logs report[/cyan]                                        Per-tool call count, error count, avg duration, token estimates for today
-  [cyan]icx logs report --date <YYYY-MM-DD>[/cyan]                    Same, for a specific day
-  [cyan]icx logs report --tool <NAME>[/cyan]                          Scope to one tool
+  [cyan]icx langfuse[/cyan]                                               Show Langfuse OTel export status (local traces are always written regardless)
+  [cyan]icx langfuse --set[/cyan]                                         Set host/public key/secret key (interactive)
+  [cyan]icx langfuse --enable[/cyan]                                      Turn on export to Langfuse
+  [cyan]icx langfuse --disable[/cyan]                                     Turn off export to Langfuse
 
 [bold]General[/bold]
-  [cyan]icx status[/cyan]                                             Show all connections and LLM profiles
-  [cyan]icx logout[/cyan]                                             Remove all credentials from this machine
-  [cyan]icx uninstall[/cyan]                                          Remove ICX completely (data, credentials, editor configs, package)
-  [cyan]icx uninstall --yes[/cyan]                                    Uninstall without confirmation prompt
-  [cyan]icx --version[/cyan]                                          Show installed version
-  [cyan]icx --help[/cyan]                                             Show this help
+  [cyan]icx status[/cyan]                                                 Show all connections and LLM profiles
+  [cyan]icx logout[/cyan]                                                 Remove all credentials from this machine
+  [cyan]icx uninstall[/cyan]                                              Remove ICX completely (data, credentials, editor configs, package)
+  [cyan]icx uninstall --yes[/cyan]                                        Uninstall without confirmation prompt
+  [cyan]icx --version[/cyan]                                              Show installed version
+  [cyan]icx --help[/cyan]                                                 Show this help
 
 [dim]Run [cyan]icx --install-completion[/cyan] once to enable tab completion in your shell.[/dim]
 """
@@ -298,6 +212,8 @@ def _help_callback(ctx: typer.Context, param, value: bool) -> None:
         _print_full_help()
         raise typer.Exit()
 
+
+from icx_engine.cli_visibility import AGENT_ONLY_CLI_HIDDEN as _AGENT_ONLY_CLI_HIDDEN
 
 app = typer.Typer(
     name="icx",
@@ -360,10 +276,7 @@ test_app = typer.Typer(
         "Manage AI-driven local testing sessions.\n\n"
         "[bold]Subcommands:[/bold]\n\n"
         "  [bold]setup[/bold]     Download ICX's UI/API testing tooling into ~/.icx\n"
-        "  [bold]configure[/bold] Set the testing fix-iteration limit\n"
-        "  [bold]rules[/bold]     Manage the local testing rulebooks\n"
-        "  [bold]sessions[/bold]  List all active testing sessions\n"
-        "  [bold]cancel[/bold]    Cancel an active testing session"
+        "  [bold]sessions[/bold]  List all active testing sessions"
     ),
     rich_markup_mode="rich",
 )
@@ -373,16 +286,22 @@ sonar_app = typer.Typer(help="SonarQube code-quality integration (distinct from 
 app.add_typer(sonar_app, name="sonar", rich_help_panel="Code Quality")
 
 boost_app = typer.Typer(help="ICX boost channel - measure the prompt-boost quality lift.", rich_markup_mode="rich")
-app.add_typer(boost_app, name="boost", rich_help_panel="Boost")
+app.add_typer(boost_app, name="boost", rich_help_panel="Boost", hidden=_AGENT_ONLY_CLI_HIDDEN)
 
 skills_app = typer.Typer(help="Inspect ICX's learned skills.", rich_markup_mode="rich")
 app.add_typer(skills_app, name="skills", rich_help_panel="Skills")
 
 from icx_engine.git.cli_commands import git_app
-app.add_typer(git_app, name="git", rich_help_panel="Git")
+app.add_typer(git_app, name="git", rich_help_panel="Git", hidden=_AGENT_ONLY_CLI_HIDDEN)
 
 from icx_engine.telemetry.cli_commands import logs_app
-app.add_typer(logs_app, name="logs", rich_help_panel="Telemetry")
+app.add_typer(logs_app, name="logs", rich_help_panel="Telemetry", hidden=_AGENT_ONLY_CLI_HIDDEN)
+
+langfuse_app = typer.Typer(help="Langfuse OTel trace export destination (local OTel traces under ~/.icx/otel/ are always written regardless).", rich_markup_mode="rich")
+app.add_typer(langfuse_app, name="langfuse", rich_help_panel="Telemetry")
+
+mcp_external_app = typer.Typer(help="Register external MCP servers from a curated preset list (none ship by default) - ICX spawns and proxies their tools as ext_<name>_<tool>.", rich_markup_mode="rich")
+app.add_typer(mcp_external_app, name="mcp-external", rich_help_panel="MCP")
 
 from icx_engine.jira.cli_commands import jira_app
 app.add_typer(jira_app, name="jira", rich_help_panel="Jira")
@@ -566,7 +485,7 @@ def skills_list(debug: DebugOpt = False, traceback: TracebackOpt = False) -> Non
         raise typer.Exit(1)
 
 
-@skills_app.command("create")
+@skills_app.command("create", hidden=_AGENT_ONLY_CLI_HIDDEN)
 def skills_create(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Create a skill by hand - no ticket required, general-purpose knowledge welcome."""
     from icx_engine.skills.schema import SkillEntry
@@ -613,7 +532,7 @@ def skills_create(debug: DebugOpt = False, traceback: TracebackOpt = False) -> N
         raise typer.Exit(1)
 
 
-@skills_app.command("delete")
+@skills_app.command("delete", hidden=_AGENT_ONLY_CLI_HIDDEN)
 def skills_delete(
     name: Annotated[str, typer.Argument(help="Skill name to delete")],
     debug: DebugOpt = False,
@@ -641,7 +560,7 @@ def skills_delete(
 # Memory subcommands
 # ---------------------------------------------------------------------------
 
-@memory_app.command("save")
+@memory_app.command("save", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_save(
     key: Annotated[str, typer.Argument(help="Issue key, e.g. PROJ-456")],
@@ -723,7 +642,7 @@ def memory_save(
         raise typer.Exit(1)
 
 
-@memory_app.command("search")
+@memory_app.command("search", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_search(
     query: Annotated[str, typer.Argument(help="Search query, e.g. 'OAuth token expires'")],
@@ -786,7 +705,7 @@ def memory_list(
         raise typer.Exit(1)
 
 
-@memory_app.command("show")
+@memory_app.command("show", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_show(
     key: Annotated[str, typer.Argument(help="Issue key, e.g. PROJ-456")],
@@ -817,7 +736,7 @@ def memory_show(
         raise typer.Exit(1)
 
 
-@memory_app.command("delete")
+@memory_app.command("delete", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_delete(
     key: Annotated[str, typer.Argument(help="Issue key to delete, e.g. PROJ-456")],
@@ -839,7 +758,7 @@ def memory_delete(
         raise typer.Exit(1)
 
 
-@memory_app.command("update")
+@memory_app.command("update", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_update(
     key: Annotated[str, typer.Argument(help="Issue key to update, e.g. PROJ-456")],
@@ -870,7 +789,7 @@ def memory_update(
         raise typer.Exit(1)
 
 
-@memory_app.command("clear")
+@memory_app.command("clear", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_clear(
     confirm: Annotated[bool, typer.Option("--confirm", help="Required to delete all entries.")] = False,
@@ -917,7 +836,7 @@ def memory_status(debug: DebugOpt = False, traceback: TracebackOpt = False) -> N
         raise typer.Exit(1)
 
 
-@memory_app.command("migrate")
+@memory_app.command("migrate", hidden=_AGENT_ONLY_CLI_HIDDEN)
 def memory_migrate(
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
@@ -963,7 +882,7 @@ def memory_migrate(
         raise typer.Exit(1)
 
 
-@memory_app.command("by-file")
+@memory_app.command("by-file", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_by_file(
     path: Annotated[str, typer.Argument(help="File path to look up (substring match)")],
@@ -990,7 +909,7 @@ def memory_by_file(
         raise typer.Exit(1)
 
 
-@memory_app.command("hotspots")
+@memory_app.command("hotspots", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_hotspots(
     project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
@@ -1017,7 +936,7 @@ def memory_hotspots(
         raise typer.Exit(1)
 
 
-@memory_app.command("patterns")
+@memory_app.command("patterns", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_patterns(
     project: Annotated[Optional[str], typer.Option("--project", help="Filter by project key")] = None,
@@ -1042,7 +961,7 @@ def memory_patterns(
         raise typer.Exit(1)
 
 
-@memory_app.command("related")
+@memory_app.command("related", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def memory_related(
     key: Annotated[str, typer.Argument(help="Issue key, e.g. PROJ-456")],
@@ -2760,13 +2679,33 @@ def _run_build_with_progress(mgr, project_id: str, force: bool, skip_llm: bool =
     return result_holder.get("value", {})
 
 
+def _resolve_graph_ref(mgr, ref: str) -> str:
+    """Resolve a graph CLI argument that may be either a registered project name or a
+    filesystem path - tries name first (exact registry lookup), falls back to path.
+    Every MCP graph_* tool addresses projects by project_path only; this lets `icx graph
+    build/status/remove` accept the same reference a user or agent already has in hand,
+    instead of requiring a separate `icx graph list` lookup for the registered name."""
+    from icx_engine.exceptions import GraphError
+    try:
+        return mgr.resolve_project(project_name=ref)
+    except GraphError:
+        pass
+    try:
+        return mgr.resolve_project(project_path=ref)
+    except GraphError:
+        raise GraphError(
+            f"'{ref}' is not a registered project name or a registered project path. "
+            "Run `icx graph list` to see registered projects."
+        )
+
+
 @graph_app.command("build")
 @_guarded
 def graph_build(
-    name: Annotated[Optional[str], typer.Argument(help="Registered project name.")] = None,
+    name: Annotated[Optional[str], typer.Argument(help="Registered project name or path.")] = None,
     project: Annotated[Optional[str], typer.Option("--project", help="Tracker project key - builds all graphs tagged with this project (case-insensitive).")] = None,
     force: Annotated[bool, typer.Option("--force", help="Force full rebuild even if graph is current.")] = False,
-    no_llm: Annotated[bool, typer.Option("--no-llm", help="Skip LLM semantic enrichment. Faster but fewer cross-file edges.")] = False,
+    llm: Annotated[bool, typer.Option("--llm", help="Enable LLM semantic enrichment (opt-in). Off by default - AST-only extraction is fast and has no rate-limit/cost risk; --llm adds cross-file semantic edges at the cost of real time and provider spend.")] = False,
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
 ) -> None:
@@ -2775,12 +2714,13 @@ def graph_build(
     \b
     Run this before using graph tools in your AI editor.
     Building from the CLI shows a progress bar and avoids blocking your editor.
+    LLM semantic enrichment is OFF by default - pass --llm to opt in.
 
     \b
     Examples:
       icx graph build myapp
       icx graph build myapp --force
-      icx graph build myapp --no-llm
+      icx graph build myapp --llm
       icx graph build --project PROJ
     """
     from icx_engine.graph.manager import GraphManager
@@ -2794,7 +2734,7 @@ def graph_build(
         project_ids: list[str] = []
 
         if name is not None:
-            project_id = mgr.resolve_project(project_name=name)
+            project_id = _resolve_graph_ref(mgr, name)
             project_ids = [project_id]
         elif project is not None:
             from icx_engine.graph.storage import lookup_by_tracker_project_key as _lookup_jp
@@ -2833,7 +2773,7 @@ def graph_build(
 
             import time as _time
             _build_started = _time.perf_counter()
-            result = _run_build_with_progress(mgr, pid, force, skip_llm=no_llm)
+            result = _run_build_with_progress(mgr, pid, force, skip_llm=not llm)
             _build_elapsed = _time.perf_counter() - _build_started
 
             if result.get("error"):
@@ -2846,11 +2786,16 @@ def graph_build(
             edge_count = result.get("edge_count", 0)
             community_count = result.get("community_count", 0)
 
+            _tip = (
+                f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
+                if not llm else
+                f"  [dim]Tip: rerun without [cyan]--llm[/cyan] for a much faster AST-only rebuild next time.[/dim]"
+            )
             console.print(
                 f"\n  [green]Graph ready.[/green] "
                 f"{file_count} files | {node_count} nodes | {edge_count} edges | {community_count} communities | "
                 f"{_format_build_duration(_build_elapsed)}\n"
-                f"  [dim]Tip: add an LLM profile ([cyan]icx model --add[/cyan]) for richer query results.[/dim]"
+                f"{_tip}"
             )
 
         if any_failed:
@@ -2928,7 +2873,7 @@ def graph_list(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None
 @graph_app.command("status")
 @_guarded
 def graph_status(
-    name: Annotated[str, typer.Argument(help="Registered project name.")],
+    name: Annotated[str, typer.Argument(help="Registered project name or path.")],
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
 ) -> None:
@@ -2942,7 +2887,7 @@ def graph_status(
 
     try:
         mgr = GraphManager()
-        project_id = mgr.resolve_project(project_name=name)
+        project_id = _resolve_graph_ref(mgr, name)
         meta = read_meta(project_id)
         if meta is None:
             err_console.print(f"Project '{name}' not found.")
@@ -2985,7 +2930,7 @@ def graph_status(
 @graph_app.command("remove")
 @_guarded
 def graph_remove(
-    name: Annotated[str, typer.Argument(help="Registered project name.")],
+    name: Annotated[str, typer.Argument(help="Registered project name or path.")],
     keep_cache: Annotated[bool, typer.Option("--keep-cache", help="Keep cache files; remove registration only.")] = False,
     debug: DebugOpt = False,
     traceback: TracebackOpt = False,
@@ -3002,12 +2947,17 @@ def graph_remove(
 
     try:
         mgr = GraphManager()
-        project_id = mgr.resolve_project(project_name=name)
+        project_id = _resolve_graph_ref(mgr, name)
+        # Show the registered short name in messages, not a raw path the user may have
+        # passed as `name` - _resolve_graph_ref accepts either.
+        from icx_engine.graph.storage import read_meta as _read_meta_for_display
+        _meta_for_display = _read_meta_for_display(project_id)
+        display_name = _meta_for_display.name if _meta_for_display else name
 
         if keep_cache:
-            action_desc = f"remove registration for '[bold]{name}[/bold]' (keep cache)"
+            action_desc = f"remove registration for '[bold]{display_name}[/bold]' (keep cache)"
         else:
-            action_desc = f"remove '[bold]{name}[/bold]' and delete all graph files"
+            action_desc = f"remove '[bold]{display_name}[/bold]' and delete all graph files"
 
         confirmed = typer.confirm(f"  This will {action_desc}. Continue?", default=False)
         if not confirmed:
@@ -3018,7 +2968,7 @@ def graph_remove(
         if keep_cache:
             console.print(f"[green]OK Registration removed. Cache kept at ~/.icx/graphs/{project_id}/cache/[/green]")
         else:
-            console.print(f"[green]OK Project '{name}' removed.[/green]")
+            console.print(f"[green]OK Project '{display_name}' removed.[/green]")
 
     except typer.Exit:
         raise
@@ -3070,7 +3020,7 @@ def test_sessions(debug: DebugOpt = False, traceback: TracebackOpt = False) -> N
             console.print(f"    run_id: {s['run_id']}")
 
 
-@test_app.command("cancel")
+@test_app.command("cancel", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def test_cancel(
     session_id: Annotated[str, typer.Argument(help="Session UUID to cancel")],
@@ -3199,7 +3149,7 @@ def test_setup(
         console.print("\n[bold green]Testing tooling ready.[/bold green]")
 
 
-@test_app.command("analytics")
+@test_app.command("analytics", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def test_analytics(
     out: Annotated[str, typer.Option("--out", help="Path for the HTML analytics dashboard.")] = "test_analytics.html",
@@ -3282,7 +3232,7 @@ def _resolve_or_prompt_harness_node(yes: bool, node_opt: str = "") -> str | None
     return exe
 
 
-@test_app.command("configure")
+@test_app.command("configure", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def test_configure(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Configure the local testing engine.
@@ -3312,7 +3262,7 @@ def test_configure(debug: DebugOpt = False, traceback: TracebackOpt = False) -> 
     console.print(f"  max_iters:       {cfg.test_max_iterations}")
 
 
-@test_app.command("rules")
+@test_app.command("rules", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def test_rules(reset: bool = typer.Option(
                    False, "--reset",
@@ -3460,7 +3410,7 @@ def sonar_status_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -
         console.print(f"  connection: {conn}")
 
 
-@sonar_app.command("projects")
+@sonar_app.command("projects", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def sonar_projects_cmd(
     query: Annotated[Optional[str], typer.Option("--query", "-q", help="Filter projects by key/name substring")] = None,
@@ -3483,7 +3433,7 @@ def sonar_projects_cmd(
             f"key run `icx sonar report --project <key> --branch <branch>` directly.[/yellow]")
 
 
-@sonar_app.command("report")
+@sonar_app.command("report", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def sonar_report_cmd(
     project: Annotated[str, typer.Option("--project", "-p", help="SonarQube project key")],
@@ -3677,7 +3627,7 @@ def _gitlab_require_connection():
     return conn
 
 
-@gitlab_app.command("mrs")
+@gitlab_app.command("mrs", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def gitlab_mrs(
     project: Annotated[Optional[str], typer.Option("--project", help="GitLab project path (namespace/project) - derived from the current repo's origin remote if omitted")] = None,
@@ -3710,7 +3660,7 @@ def gitlab_mrs(
         console.print(f"!{mr['iid']}  {mr.get('state', ''):<8}  {escape(mr.get('title', ''))}{by}{at}")
 
 
-@gitlab_app.command("commits")
+@gitlab_app.command("commits", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def gitlab_commits(
     project: Annotated[Optional[str], typer.Option("--project", help="GitLab project path (namespace/project) - derived from the current repo's origin remote if omitted")] = None,
@@ -3744,7 +3694,7 @@ def gitlab_commits(
         )
 
 
-@gitlab_app.command("compare")
+@gitlab_app.command("compare", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def gitlab_compare(
     from_ref: Annotated[str, typer.Argument(help="Source ref - branch, tag, or commit")],
@@ -3780,6 +3730,154 @@ def gitlab_compare(
             marker = "M"
         path = d.get("new_path") or d.get("old_path")
         console.print(f"  {marker}  {path}")
+
+
+@langfuse_app.callback(invoke_without_command=True)
+def langfuse_main(
+    ctx: typer.Context,
+    set_: Annotated[bool, typer.Option("--set", help="Set/update host, public key, secret key (interactive).")] = False,
+    enable: Annotated[bool, typer.Option("--enable", help="Enable export to Langfuse (requires host/public key/secret key already set).")] = False,
+    disable: Annotated[bool, typer.Option("--disable", help="Disable export to Langfuse. Local OTel traces are unaffected.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Configure the Langfuse OTel trace export destination. Single instance, not a
+    multi-connection list like `icx sonar`/`icx gitlab` - a project has at most one Langfuse
+    destination. Local OTel traces under ~/.icx/otel/YYYY-MM-DD/traces.jsonl are always written
+    whether this is enabled or not; this only controls the second, optional export destination.
+    Bare `icx langfuse` shows current status.
+
+    \b
+    Examples:
+      icx langfuse --set        Set host/public key/secret key (interactive)
+      icx langfuse --enable     Turn on export to Langfuse (keys must already be set)
+      icx langfuse --disable    Turn off export to Langfuse
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from icx_engine.config_manager import ConfigManager
+    try:
+        if set_:
+            from icx_engine.services.connection_service import _connect_langfuse
+            _connect_langfuse(debug=debug)
+            return
+        if enable:
+            cfg = ConfigManager.load()
+            if not (cfg.langfuse.public_key and cfg.langfuse.secret_key):
+                console.print("[red]No Langfuse public/secret key configured. Run `icx langfuse --set` first.[/red]")
+                raise typer.Exit(1)
+            cfg.langfuse.enabled = True
+            ConfigManager.save(cfg)
+            console.print("[green]Langfuse export enabled.[/green]")
+            return
+        if disable:
+            cfg = ConfigManager.load()
+            cfg.langfuse.enabled = False
+            ConfigManager.save(cfg)
+            console.print("[green]Langfuse export disabled.[/green] Local OTel traces under ~/.icx/otel/ continue as always.")
+            return
+        cfg = ConfigManager.load().langfuse
+        console.print(f"  enabled:    {cfg.enabled}")
+        console.print(f"  host:       {cfg.host}")
+        console.print(f"  public_key: {cfg.public_key or '(none)'}")
+        console.print(f"  secret_key: {'(set)' if cfg.secret_key else '(none)'}")
+        console.print("  local OTel traces: always written to ~/.icx/otel/YYYY-MM-DD/traces.jsonl regardless of the above")
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=(debug or traceback))
+        raise typer.Exit(1)
+
+
+@mcp_external_app.callback(invoke_without_command=True)
+def mcp_external_main(
+    ctx: typer.Context,
+    add: Annotated[bool, typer.Option("--add", help="Register a server from a curated preset (interactive). Requires --preset.")] = False,
+    preset: Annotated[Optional[str], typer.Option("--preset", help="Required with --add. A curated preset name from mcp_gateway.registry.PRESETS (none ship by default) - custom/arbitrary commands cannot be registered.")] = None,
+    enable: Annotated[Optional[str], typer.Option("--enable", metavar="NAME", help="Enable a registered server.")] = None,
+    disable: Annotated[Optional[str], typer.Option("--disable", metavar="NAME", help="Disable a registered server (subprocess is not spawned while disabled).")] = None,
+    remove: Annotated[Optional[str], typer.Option("--remove", metavar="NAME", help="Remove a server (clears its keyring env secrets).")] = None,
+    list_servers: Annotated[bool, typer.Option("--list", help="List registered servers.")] = False,
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Register external MCP servers ICX spawns and proxies tools from - see developer.md's
+    "External MCP Gateway" section for the mcp_gateway/ module. A registered+enabled server's
+    tools appear under icx_find_tools(module=<name>) and are callable as ext_<name>_<tool>,
+    alongside ICX's own tools. PRESET-ONLY: --add always registers from a curated preset
+    (mcp_gateway.registry.PRESETS) - a custom/arbitrary command cannot be registered this way,
+    since it's arbitrary third-party subprocess code ICX did not author and cannot audit. ICX
+    ships with zero presets by default - a deployment adds its own curated entries to
+    registry.PRESETS in code. The interactive flow still asks whether to require confirmation on
+    every call to that server.
+
+    \b
+    Examples:
+      icx mcp-external --add --preset <name>       Add a curated preset registered in code
+      icx mcp-external --list                      List registered servers (bare command also lists)
+      icx mcp-external --enable <name>
+      icx mcp-external --disable <name>
+      icx mcp-external --remove <name>
+      icx mcp-external test <name>                  Spawn once, list its tools, report, shut down
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from icx_engine.mcp_gateway import service as gateway_service
+    try:
+        if add:
+            from icx_engine.services.connection_service import _connect_external_mcp
+            _connect_external_mcp(debug=debug, preset=preset)
+            return
+        if enable:
+            out = gateway_service.set_enabled(enable, True)
+            console.print(f"[green]'{out['name']}' enabled.[/green]")
+            return
+        if disable:
+            out = gateway_service.set_enabled(disable, False)
+            console.print(f"[green]'{out['name']}' disabled.[/green]")
+            return
+        if remove:
+            out = gateway_service.remove_server(remove)
+            console.print(f"[green]Removed '{out['removed']}'.[/green]")
+            return
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    except Exception as exc:
+        render_icx_error(exc, err_console, show_traceback=(debug or traceback))
+        raise typer.Exit(1)
+
+    servers = gateway_service.list_servers()
+    if not servers:
+        console.print("  (no external MCP servers registered - add a curated preset with `icx mcp-external --add --preset <name>`; none ship by default)")
+        return
+    for s in servers:
+        state = "enabled" if s["enabled"] else "disabled"
+        confirm_note = ", require-confirmation" if s["require_confirmation"] else ""
+        console.print(f"  {s['name']}  [{state}{confirm_note}]  {s['command']} {' '.join(s['args'])}")
+
+
+@mcp_external_app.command("test")
+@_guarded
+def mcp_external_test_cmd(
+    name: Annotated[str, typer.Argument(help="Registered server name.")],
+    debug: DebugOpt = False,
+    traceback: TracebackOpt = False,
+) -> None:
+    """Spawn a registered server once, list its tools, then shut it down - no lasting process,
+    no change to the live registry used by the MCP server."""
+    from icx_engine.mcp_gateway import service as gateway_service
+    try:
+        out = asyncio.run(gateway_service.test_server(name))
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    if not out["ok"]:
+        console.print(f"[red]'{name}' failed to start: {out['error']}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]'{name}' OK - {out['tool_count']} tool(s):[/green]")
+    for tool_name in out["tools"]:
+        console.print(f"  {tool_name}")
 
 
 def _workstatus_resolve_name(value: str) -> str:
@@ -3882,7 +3980,7 @@ def workstatus_status_cmd(debug: DebugOpt = False, traceback: TracebackOpt = Fal
     _workstatus_status_report()
 
 
-@workstatus_app.command("profile")
+@workstatus_app.command("profile", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_profile_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Show your own Workstatus profile."""
@@ -3897,7 +3995,7 @@ def workstatus_profile_cmd(debug: DebugOpt = False, traceback: TracebackOpt = Fa
     console.print(profile)
 
 
-@workstatus_app.command("unread")
+@workstatus_app.command("unread", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_unread_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """Show your unread Workstatus notification count."""
@@ -3912,7 +4010,7 @@ def workstatus_unread_cmd(debug: DebugOpt = False, traceback: TracebackOpt = Fal
     console.print(f"  unread notifications: {count}")
 
 
-@workstatus_app.command("add-time")
+@workstatus_app.command("add-time", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_add_time_cmd(
     project_id: Annotated[int, typer.Option("--project-id", help="Workstatus project id")],
@@ -3957,7 +4055,7 @@ def _workstatus_run(coro) -> None:
     console.print(result)
 
 
-@workstatus_app.command("projects")
+@workstatus_app.command("projects", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_projects_cmd(
     keyword: Annotated[str, typer.Option("--keyword", help="Filter by project name")] = "",
@@ -3968,7 +4066,7 @@ def workstatus_projects_cmd(
     _workstatus_run(service.list_projects(keyword=keyword))
 
 
-@workstatus_app.command("project")
+@workstatus_app.command("project", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_project_cmd(
     project_id: Annotated[int, typer.Option("--project-id")],
@@ -3979,7 +4077,7 @@ def workstatus_project_cmd(
     _workstatus_run(service.get_project(project_id))
 
 
-@workstatus_app.command("project-budget")
+@workstatus_app.command("project-budget", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_project_budget_cmd(
     project_id: Annotated[int, typer.Option("--project-id")],
@@ -3991,7 +4089,7 @@ def workstatus_project_budget_cmd(
     _workstatus_run(service.project_budget_analytics(project_id, quarter=quarter))
 
 
-@workstatus_app.command("tasks")
+@workstatus_app.command("tasks", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_tasks_cmd(
     project_id: Annotated[int, typer.Option("--project-id")],
@@ -4003,7 +4101,7 @@ def workstatus_tasks_cmd(
     _workstatus_run(service.list_tasks(project_id, search=search))
 
 
-@workstatus_app.command("task-statuses")
+@workstatus_app.command("task-statuses", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_task_statuses_cmd(
     project_id: Annotated[int, typer.Option("--project-id")],
@@ -4014,7 +4112,7 @@ def workstatus_task_statuses_cmd(
     _workstatus_run(service.list_task_statuses(project_id))
 
 
-@workstatus_app.command("milestones")
+@workstatus_app.command("milestones", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_milestones_cmd(
     project_id: Annotated[int, typer.Option("--project-id")],
@@ -4025,7 +4123,7 @@ def workstatus_milestones_cmd(
     _workstatus_run(service.list_milestones(project_id))
 
 
-@workstatus_app.command("task-checklist")
+@workstatus_app.command("task-checklist", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_task_checklist_cmd(
     task_id: Annotated[int, typer.Option("--task-id")],
@@ -4036,7 +4134,7 @@ def workstatus_task_checklist_cmd(
     _workstatus_run(service.list_task_checklist(task_id))
 
 
-@workstatus_app.command("members")
+@workstatus_app.command("members", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_members_cmd(
     search_key: Annotated[str, typer.Option("--search-key")] = "",
@@ -4047,7 +4145,7 @@ def workstatus_members_cmd(
     _workstatus_run(service.list_members(search_key=search_key))
 
 
-@workstatus_app.command("teams")
+@workstatus_app.command("teams", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_teams_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """List Workstatus teams."""
@@ -4055,7 +4153,7 @@ def workstatus_teams_cmd(debug: DebugOpt = False, traceback: TracebackOpt = Fals
     _workstatus_run(service.list_teams())
 
 
-@workstatus_app.command("attendance")
+@workstatus_app.command("attendance", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_attendance_cmd(
     start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
@@ -4067,7 +4165,7 @@ def workstatus_attendance_cmd(
     _workstatus_run(service.attendance_list(start_date, end_date))
 
 
-@workstatus_app.command("attendance-stats")
+@workstatus_app.command("attendance-stats", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_attendance_stats_cmd(
     start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
@@ -4079,7 +4177,7 @@ def workstatus_attendance_stats_cmd(
     _workstatus_run(service.attendance_stats(start_date, end_date))
 
 
-@workstatus_app.command("timesheets")
+@workstatus_app.command("timesheets", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_timesheets_cmd(
     start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
@@ -4091,7 +4189,7 @@ def workstatus_timesheets_cmd(
     _workstatus_run(service.list_timesheets(start_date, end_date))
 
 
-@workstatus_app.command("timesheet-clients")
+@workstatus_app.command("timesheet-clients", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_timesheet_clients_cmd(debug: DebugOpt = False, traceback: TracebackOpt = False) -> None:
     """List clients billable via Workstatus timesheets."""
@@ -4099,7 +4197,7 @@ def workstatus_timesheet_clients_cmd(debug: DebugOpt = False, traceback: Traceba
     _workstatus_run(service.list_timesheet_clients())
 
 
-@workstatus_app.command("weekly-report")
+@workstatus_app.command("weekly-report", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_weekly_report_cmd(
     start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
@@ -4111,7 +4209,7 @@ def workstatus_weekly_report_cmd(
     _workstatus_run(service.weekly_report_all(start_date, end_date))
 
 
-@workstatus_app.command("submission-kpis")
+@workstatus_app.command("submission-kpis", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_submission_kpis_cmd(
     start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
@@ -4123,7 +4221,7 @@ def workstatus_submission_kpis_cmd(
     _workstatus_run(service.timesheet_submission_kpis(start_date, end_date))
 
 
-@workstatus_app.command("submission-table")
+@workstatus_app.command("submission-table", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_submission_table_cmd(
     start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
@@ -4137,7 +4235,7 @@ def workstatus_submission_table_cmd(
     _workstatus_run(service.timesheet_submission_table(start_date, end_date, page=page, per_page=per_page))
 
 
-@workstatus_app.command("expenses")
+@workstatus_app.command("expenses", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_expenses_cmd(
     start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
@@ -4149,7 +4247,7 @@ def workstatus_expenses_cmd(
     _workstatus_run(service.list_expenses(start_date, end_date))
 
 
-@workstatus_app.command("invoices")
+@workstatus_app.command("invoices", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_invoices_cmd(
     search: Annotated[str, typer.Option("--search")] = "",
@@ -4160,7 +4258,7 @@ def workstatus_invoices_cmd(
     _workstatus_run(service.list_invoices(search=search))
 
 
-@workstatus_app.command("payroll")
+@workstatus_app.command("payroll", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_payroll_cmd(
     start_date: Annotated[str, typer.Option("--start-date", help="YYYY-MM-DD")],
@@ -4172,7 +4270,7 @@ def workstatus_payroll_cmd(
     _workstatus_run(service.payroll_report(start_date, end_date))
 
 
-@workstatus_app.command("timesheet")
+@workstatus_app.command("timesheet", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_get_timesheet_cmd(
     timesheet_id: Annotated[int, typer.Option("--timesheet-id")],
@@ -4183,7 +4281,7 @@ def workstatus_get_timesheet_cmd(
     _workstatus_run(service.get_timesheet(timesheet_id))
 
 
-@workstatus_app.command("edit-time")
+@workstatus_app.command("edit-time", hidden=_AGENT_ONLY_CLI_HIDDEN)
 @_guarded
 def workstatus_edit_timesheet_cmd(
     timesheet_id: Annotated[int, typer.Option("--timesheet-id")],

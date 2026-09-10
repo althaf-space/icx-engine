@@ -53,7 +53,7 @@ See `developer.md` for a step-by-step guide to adding a connector.
 
 - Give it its own `annotations={readOnlyHint, destructiveHint, idempotentHint, openWorldHint}` dict - every existing tool has one, don't skip it on a new one.
 - Keep the `description` under 2048 chars (some MCP clients hard-clamp there) - `tests/test_mcp.py::test_no_new_tool_exceeds_description_length_ceiling` enforces this for every tool except a short, documented exception list (see `developer.md`'s "What NOT to touch" table for why those exist). If your tool's description needs to grow past the ceiling, that's a sign the detail belongs in an ICX skill (`skills/defaults.py`, surfaced via `attach_skill_hint` on the tool's response) rather than the static description - see `safe-git-workflow` for the pattern.
-- Follow the `{service}_{action}_{resource}` naming convention (e.g. `git_start_branch`, `sonar_quality_gate`) - a tool name without its service prefix risks colliding with another MCP server's tool of the same bare name in the same session.
+- Follow the `{service}_{action}_{resource}` naming convention (e.g. `git_start_branch`, `sonar_quality_gate`) - a tool name without its service prefix risks colliding with another MCP server's tool of the same bare name in the same session. The one exception is `ext_<server>_<tool>` - tools proxied from a user-registered external MCP server (`mcp_gateway/`), namespaced by the registered server name rather than by an ICX-authored service, since ICX did not name or design those tools.
 
 ## Submitting a pull request
 

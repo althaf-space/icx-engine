@@ -49,6 +49,48 @@ class GitLabConnection(BaseModel):
     verify_tls: bool = True
 
 
+class LangfuseConfig(BaseModel):
+    """OTel trace export destination for telemetry/otel.py. Single instance, not a named-
+    connections dict like Sonar/GitLab/Workstatus - a user has at most one Langfuse project
+    wired up. `enabled` gates export explicitly; local OTel trace files
+    (~/.icx/otel/YYYY-MM-DD/traces.jsonl) are written unconditionally regardless of this
+    config, enabled or not. secret_key stored in the OS keyring, same convention as
+    SonarConnection.token/GitLabConnection.token."""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    host: str = "https://cloud.langfuse.com"
+    public_key: str | None = None
+    secret_key: str | None = Field(default=None, exclude=True)
+
+
+class ExternalMcpServer(BaseModel):
+    """One user-registered external MCP server ICX spawns (stdio) and proxies tools from - see
+    mcp_gateway/. Named-connections dict on AppConfig, mirroring Sonar/GitLab/Workstatus's shape,
+    but there is no "active" concept: every enabled server's tools are exposed simultaneously,
+    namespaced `ext_<name>_<tool>`, never switched between like a single active connection.
+
+    `env` is treated as secret-shaped by default and excluded from serialization exactly like
+    every other secret field in this file - config_manager.py re-injects it on save, routing each
+    key through the same keyring/D-Lock pipeline as SonarConnection.token, under account name
+    `external_mcp_env:<name>:<key>` (one keyring entry per env var, since the key set is
+    arbitrary per server, unlike a fixed field like GitLabConnection.token).
+
+    `require_confirmation`: when true, EVERY call to this server's tools is wrapped in ICX's
+    confirm.py token gate regardless of the tool's own declared hints - the one safety knob
+    available for a server whose tools ICX did not author and cannot itself audit (it is
+    arbitrary third-party subprocess code)."""
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    command: str
+    args: list[str] = []
+    env: dict[str, str] = Field(default_factory=dict, exclude=True)
+    enabled: bool = False
+    require_confirmation: bool = False
+    preset: str | None = None  # which mcp_gateway.registry.PRESETS entry this came from, if any
+
+
 class WorkstatusConnection(BaseModel):
     """A single Workstatus session (captured browser headers, not a
     server-issued API token - see workstatus/config.py for the full auth
@@ -130,6 +172,18 @@ class AppConfig(BaseModel):
     # multi-connection parity (--add/--active/--remove/--list), same as GitLab/Sonar.
     workstatus_connections: dict[str, WorkstatusConnection] = {}
     active_workstatus: str | None = None
+
+    # Langfuse (OTel trace export destination for telemetry/otel.py). Single instance, not a
+    # named-connections dict - see LangfuseConfig's docstring. secret_key stored in the OS
+    # keyring, same as sonar_connections/gitlab_connections/workstatus_connections' secrets.
+    langfuse: LangfuseConfig = LangfuseConfig()
+
+    # External MCP servers ICX spawns and proxies tools from (see mcp_gateway/). Named-dict,
+    # mirroring sonar_connections/gitlab_connections/workstatus_connections, but no "active"
+    # concept - every enabled server's tools are exposed simultaneously, namespaced
+    # ext_<name>_<tool>. env values are secret-shaped by default, keyring-routed same as every
+    # other credential here - see ExternalMcpServer's docstring.
+    external_mcp_servers: dict[str, ExternalMcpServer] = {}
 
     # Legacy single-server fields - retained only for backward-compatible loading
     # of older config files. Resolved into an implicit "default" connection when a

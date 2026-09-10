@@ -224,7 +224,7 @@ flowchart LR
 
 ## Install
 
-**Version:** 0.6.7 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
+**Version:** 0.6.8 &nbsp;|&nbsp; **Requires Python 3.11, 3.12, 3.13, or 3.14**
 
 ```
 pipx install icx-engine
@@ -368,12 +368,15 @@ Alongside skills you learn yourself, ICX also ships 15 pre-installed default ski
 icx graph add --name NAME --path PATH --project KEY   # register a project directory (--project required, e.g. a Jira project key like PROJ)
 icx graph build NAME               # build (or rebuild) the knowledge graph for a project
 icx graph build --project KEY      # build all graphs tagged with this tracker project key (case-insensitive)
-icx graph build NAME --force       # rebuild even if graph is current
+icx graph build NAME --force       # force a full rebuild, bypassing incremental reuse
+icx graph build NAME --llm         # opt in to LLM semantic enrichment (off by default)
 icx graph list                     # list all registered projects with status and file counts
 icx graph status NAME              # detailed status: build state, last commit, staleness info
 icx graph remove NAME              # remove a project and its graph data
 icx graph remove NAME --keep-cache # remove project but keep cached graph files
 ```
+
+`NAME` in every command above also accepts the project's registered path instead - `icx graph build/status/remove` all try the argument as a registered name first, then as a registered path, so you can use either the same short name from `icx graph list` or the same path every MCP `graph_*` tool already addresses the project by.
 
 Graph data (including build cache) is stored in `~/.icx/graphs/` - nothing is written inside your project directories.
 
@@ -571,6 +574,26 @@ icx mcp list                     # list all supported editors and detection stat
 icx mcp run                      # start the MCP server (editors call this automatically)
 ```
 
+### External MCP servers
+
+Register a curated external MCP server - ICX spawns it, owns its subprocess lifecycle, and
+proxies its tools through `icx_find_tools`/`icx_call_tool`, namespaced `ext_<name>_<tool>`.
+Preset-only, deliberately: you cannot register an arbitrary custom command - the servers ICX
+will spawn on your behalf are a curated list added to in code, not free-form user input, since
+this is arbitrary third-party subprocess code ICX did not author and cannot audit. ICX ships
+with zero presets by default (`mcp_gateway.registry.PRESETS` is empty) - a deployment adds its
+own curated entries (e.g. Microsoft's Playwright MCP) in code. The interactive add flow still
+asks whether to require confirmation on every call to that server.
+
+```sh
+icx mcp-external --add --preset <name>       # register a curated preset (none ship by default)
+icx mcp-external --list                      # list registered servers (bare command also lists)
+icx mcp-external --enable <name>
+icx mcp-external --disable <name>
+icx mcp-external --remove <name>
+icx mcp-external test <name>                 # spawn once, list its tools, shut down
+```
+
 ### Telemetry
 
 ```sh
@@ -579,7 +602,25 @@ icx logs report --date 2026-08-25      # same, for a specific day
 icx logs report --tool git_repo_status # scope to one tool
 ```
 
-Local only, under `~/.icx/logs/YYYY-MM-DD/tool_calls.jsonl` - never transmitted anywhere. Token counts are estimates (`len(text) // 4`) on the raw call payload size, not a billing-accurate count - an MCP server has no visibility into the host LLM's real context accounting.
+Local only, under `~/.icx/logs/YYYY-MM-DD/tool_calls.jsonl` - never transmitted anywhere. Timestamps and the day-directory date are IST (UTC+5:30). Token counts are estimates (`len(text) // 4`) on the raw call payload size, not a billing-accurate count - an MCP server has no visibility into the host LLM's real context accounting.
+
+**OpenTelemetry traces (always on, local).** Every MCP tool call also emits a standard OTel span (`icx_engine.mcp` tracer, span name = tool name, `icx.tool.*` attributes for bytes/token estimates/`ok`/`error_type`, OK/ERROR status), written unconditionally to `~/.icx/otel/YYYY-MM-DD/traces.jsonl` (IST-dated, one real OTel span record per line) - alongside, not instead of, the JSONL summary log above. Nothing needs to be configured for this to be there from the first tool call.
+
+**Langfuse export (opt-in, config-gated).** A second, additive destination for the same spans - off by default, turned on with real config, not an env var:
+
+```sh
+icx langfuse --set        # host / public key / secret key, interactive
+icx langfuse --enable     # turn on export (local traces.jsonl keeps recording either way)
+icx langfuse              # show current status
+icx langfuse --disable
+```
+
+Any *other* OTLP backend can also be pointed at independently, via the standard OTel SDK env vars (stackable with the Langfuse config above, not exclusive):
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://your-otel-collector/v1/traces"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic <...>"
+```
 
 ### General
 
@@ -667,10 +708,12 @@ For every editor, `icx mcp setup` also installs ICX-first routing for the narrow
 
 | Tool | Purpose |
 |------|---------|
-| `icx_find_tools` | Discover a tool that isn't in the core set. `module` (one of `git`/`gitlab`/`jira`/`workstatus`/`sonar`/`graph`/`memory`/`testing`/`skills`/`boost`/`core`) returns that module's full tool list - name, description, and complete `inputSchema` for each, everything needed to construct a call. `query` free-text searches every tool's name/description instead. Neither argument returns a directory of every module and its tool count, so the agent can navigate in cold. A wrong or unknown module name doesn't fail silently - it returns the valid module list right in the error. |
+| `icx_find_tools` | Discover a tool that isn't in the core set. `module` (one of `git`/`gitlab`/`jira`/`workstatus`/`sonar`/`graph`/`memory`/`testing`/`skills`/`boost`/`core`) returns that module's full tool list - name, description, and complete `inputSchema` for each, everything needed to construct a call. `query` free-text searches every tool's name/description instead. Neither argument returns a directory of every module and its tool count, so the agent can navigate in cold. A wrong or unknown module name doesn't fail silently - it returns the valid module list right in the error. One `module` call returns everything in that module - the response's `instruction` field, plus the tool description itself, tell the agent to plan every needed `icx_call_tool` invocation from that single dump instead of re-querying per sub-action. A 2nd+ `module` fetch for the same module in one session is answered with names+descriptions only (no `inputSchema`) and a `repeat_fetch_count`, to cap the token cost of a caller re-querying a module it already has - fetch one specific tool's exact schema back with `query=<exact tool name>` instead. |
 | `icx_call_tool` | Actually invoke a tool discovered via `icx_find_tools` - `tool_name` plus `arguments` (the object matching that tool's real schema). Forwards straight into the same dispatch logic a native call would use; the result is identical either way. Every tool's own gating (`confirm_token`, etc.) still applies unchanged - only how it's reached changed, not its safety behavior. |
 
 Advertised-list shrinkage is the only behavior change - every one of the 167 tools below is still fully callable exactly as documented, either the normal way if your editor happens to still show it, or via `icx_find_tools` + `icx_call_tool` if it doesn't. The tables below document every tool's real behavior regardless of which path reaches it.
+
+**External MCP servers you register** (`icx mcp-external`) add their tools to this same discovery surface dynamically - `icx_find_tools(module=<server-name>)` returns them, namespaced `ext_<server>_<tool>` with an `[EXTERNAL - server ..., unverified by ICX]` description prefix so provenance is never hidden. Unlike every table below, these tools are not fixed - they come and go as you register/enable/disable servers, and ICX has not authored or audited them.
 
 | Tool | When the agent calls it |
 |------|------------------------|
@@ -685,9 +728,9 @@ Advertised-list shrinkage is the only behavior change - every one of the 167 too
 | `memory_search` | Immediately after analysis - agent generates 3-6 tags from the analysis result and calls this for refined tag-filtered retrieval. Skip only when `memory.status != 'ready'`. |
 | `graph_find_context` | Find the most relevant files and symbols for a task description. Input: `task`, optional `project_paths`. |
 | `graph_subsystem` | List all files belonging to a subsystem cluster. Input: `file_path`, `project_path`. |
-| `graph_call_chain` | Trace call chains forward or backward from a function. Input: `node_id`, `project_path`. |
-| `graph_impact` | Find everything a file or function affects (callers, dependents). Input: `node_id`, `project_path`. |
-| `graph_cross_links` | Find cross-service or cross-module dependencies. Input: `project_path`. |
+| `graph_call_chain` | Trace call chains forward or backward from a function. Input: `node_id`, `project_path`, optional `depth`, `min_confidence`, `token_budget`. A high-fan-out node's upstream/downstream lists are capped by `token_budget` (nearest/most-confident kept first) rather than returned uncapped - the true `upstream_total`/`downstream_total` counts are always included even when capped. |
+| `graph_impact` | Find everything a file or function affects (callers, dependents). Input: `node_id`, `project_path`, optional `min_confidence`, `token_budget`. Direct dependents are always returned in full; the (potentially much larger) transitive list is capped by `token_budget`, high-confidence entries first - `total`/`transitive_total` always reflect the true, uncapped counts. |
+| `graph_cross_links` | Find HTTP-call links to a DIFFERENT, separately registered ICX project (peer microservice) - a frontend calling its own backend in the same repo/registration is not a peer-project link; those edges (`relation=calls_api`) are already part of the main graph and show up directly via `graph_call_chain`/`graph_impact`. Input: `project_path`. |
 | `graph_important_nodes` | Top files/functions by PageRank + betweenness centrality. Identifies architectural hotspots - useful before a refactor or when assessing blast radius. Input: `project_path`, optional `top_k`. |
 | `graph_blast_radius` | Given a list of changed files, returns all direct and transitive dependents, a risk score (0.0-1.0), and co-change partners not yet in the changed set. Input: `changed_files`, `project_path`. |
 | `graph_cycles` | Detect circular dependency chains using structural edges (imports, calls, implements). Returns chains up to `max_cycles`. Input: `project_path`, optional `max_cycles`. |
@@ -810,7 +853,7 @@ Advertised-list shrinkage is the only behavior change - every one of the 167 too
 | `workstatus_list_expenses` | Recorded expenses for a date range. Read-only, UNGATED. Input: `start_date`, `end_date`. Requires an active Workstatus connection. |
 | `workstatus_list_invoices` | Invoices. Read-only, UNGATED. Input: `search?`. Requires an active Workstatus connection. |
 | `workstatus_payroll_report` | Payroll report. Read-only, UNGATED. Input: `start_date`, `end_date`. Requires an active Workstatus connection. |
-| `workstatus_get_timesheet` | Full detail for one timesheet entry (do this before editing it). Read-only, UNGATED. Input: `timesheet_id`. Requires an active Workstatus connection. |
+| `workstatus_get_timesheet` | Full detail for one timesheet entry (do this before editing it). Raises a real error if `timesheet_id` doesn't exist - never a silent empty success, so don't blindly retry with a different id without checking why. Read-only, UNGATED. Input: `timesheet_id`. Requires an active Workstatus connection. |
 | `workstatus_edit_timesheet` | Edit an EXISTING timesheet entry - creates a REAL mutation. Same `source_type`/`time_type`/`time_mode`/`activity` unverified-defaults caveat as `workstatus_add_timesheet`. `billable` is NOT mandatory - omitted sends an empty value, never forced to `false`. Input: `timesheet_id`, `project_id`, `todo_id`, `date`, `from_time`, `to_time`, `duration`, `reason`, `updated_fields` (all required - `updated_fields` is a `[{field_name, previous_value, new_value}]` diff descriptor), `note`/`billable` optional. Requires an active Workstatus connection. |
 | `workstatus_recent_project_tasks` | Cheap "what have I logged against lately" shortcut - ONE `list_timesheets` call over a lookback window (default 90 days), deduped to distinct project/task pairs, most-recent-first. Call this FIRST when identifying a project/task to log time against, before `workstatus_list_projects`/`workstatus_list_tasks` (which can mean paging through hundreds of tasks). Read-only, UNGATED. Input: `lookback_days?` (default 90). Requires an active Workstatus connection. |
 | `jira_get_close_requirements` | Call first, before `jira_apply_update`: discover what a Jira issue actually needs to close out or update - available workflow transitions (with per-transition required fields) and the fields currently editable on the issue. Transitions/required fields vary per project/workflow - never guess them. `include_allowed_values` (default `true`) controls whether each field's full option catalogue (`allowedValues` - sometimes 50-70+ entries) is included - pass `false` on repeat calls for the same issue within a multi-hop workflow walk once the catalogue is already known from an earlier call; `required`/`schema` are still returned either way. The response always includes `status` - pass that back as `since_status` on the NEXT call for the same issue if the status hasn't changed since (only a field was updated): returns a compact `{status, unchanged: true}` instead of re-sending the full bundle, since transitions/editable_fields are purely a function of current status. Input: `issue_key`, optional `include_allowed_values`, `since_status`. |

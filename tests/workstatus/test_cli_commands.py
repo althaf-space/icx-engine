@@ -5,17 +5,28 @@ import respx
 
 
 def test_workstatus_help(cli_runner):
+    """Only `status` stays visible in the Click command tree - the rest are agent-only-hidden
+    (cli_visibility.AGENT_ONLY_CLI_HIDDEN), still runnable but no longer advertised in --help.
+    Checked against the actual command tree, not the printed text, since some hidden command
+    names (e.g. "attendance") are also substrings of workstatus_app's own help prose. See
+    test_cli_visibility.py for the runnable-while-hidden coverage."""
+    import typer
     from icx_engine.cli import app
+
     result = cli_runner.invoke(app, ["workstatus", "--help"])
     assert result.exit_code == 0
-    for cmd in (
-        "status", "profile", "unread", "add-time", "projects", "project",
+
+    workstatus_cmd = typer.main.get_command(app).commands["workstatus"]
+    hidden = {name for name, sub in workstatus_cmd.commands.items() if sub.hidden}
+    visible = {name for name, sub in workstatus_cmd.commands.items() if not sub.hidden}
+    assert visible == {"status"}
+    assert hidden == {
+        "profile", "unread", "add-time", "projects", "project",
         "project-budget", "tasks", "task-statuses", "milestones", "task-checklist",
         "members", "teams", "attendance", "attendance-stats", "timesheets",
         "timesheet-clients", "weekly-report", "submission-kpis", "submission-table",
         "expenses", "invoices", "payroll", "timesheet", "edit-time",
-    ):
-        assert cmd in result.output
+    }
 
 
 @pytest.mark.parametrize("args", [
@@ -58,11 +69,7 @@ def test_workstatus_status_reports_not_configured(cli_runner, isolated_config):
 
 
 @respx.mock
-@pytest.mark.xdist_group(name="workstatus_default_keyring")
 def test_workstatus_connect_command_saves_connection(cli_runner, isolated_config, monkeypatch):
-    """xdist_group: see test_smoke.py's identically-named test for why - both write real
-    keyring secrets under connection name 'default' and must not run on different xdist
-    workers concurrently."""
     from icx_engine.cli import app
     respx.get("https://web-api.workstatus.io/api/v5/notifications/unread-count").mock(
         return_value=httpx.Response(200, json={"code": 200, "message": "ok", "data": {"count": 0}})
@@ -85,7 +92,6 @@ def test_workstatus_connect_command_saves_connection(cli_runner, isolated_config
 
 
 @respx.mock
-@pytest.mark.xdist_group(name="workstatus_default_keyring")
 def test_workstatus_status_reports_connected_after_add(cli_runner, isolated_config, monkeypatch):
     from icx_engine.cli import app
     respx.get("https://web-api.workstatus.io/api/v5/notifications/unread-count").mock(

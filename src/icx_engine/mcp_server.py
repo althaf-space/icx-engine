@@ -1276,7 +1276,12 @@ async def _all_tools_full() -> list[Tool]:
                 "construct a correct icx_call_tool call). Call with query for a free-text search "
                 "by tool name/description instead. Call with NEITHER to get the module directory "
                 "(every module name + its tool count) as a starting point. Never invent a tool "
-                "name - always confirm it exists here first."
+                "name - always confirm it exists here first. IMPORTANT: call with module=X exactly "
+                "ONCE per module - that single response already contains every tool in it, so plan "
+                "every icx_call_tool invocation the task needs from that one dump. Do not call "
+                "icx_find_tools again for a module you already fetched, and do not issue a fresh "
+                "query per sub-action within an already-fetched module - that wastes calls and "
+                "tokens for no new information."
             ),
             inputSchema={
                 "type": "object",
@@ -1314,7 +1319,18 @@ async def _all_tools_full() -> list[Tool]:
         # ------------------------------------------------------------------ #
         # Sonar code-quality tools - direct SonarQube reader, read-only      #
         # ------------------------------------------------------------------ #
-    ] + GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS + WORKSTATUS_TOOLS + SONAR_TOOLS + GRAPH_TOOLS + MEMORY_TOOLS + SKILLS_TOOLS + TESTING_TOOLS + BOOST_TOOLS
+    ] + GIT_TOOLS + JIRA_TOOLS + GITLAB_TOOLS + WORKSTATUS_TOOLS + SONAR_TOOLS + GRAPH_TOOLS + MEMORY_TOOLS + SKILLS_TOOLS + TESTING_TOOLS + BOOST_TOOLS + await _external_tools_safe()
+
+
+async def _external_tools_safe() -> list[Tool]:
+    """external_tools() itself never raises, but an unexpected error here must never take down
+    tool listing for every other module - guarded the same way the rest of this dispatch chain
+    treats third-party/subprocess-backed integrations."""
+    try:
+        from icx_engine.mcp_gateway.mcp_tools import external_tools
+        return await external_tools()
+    except Exception:
+        return []
 
 
 @server.list_tools()
@@ -1351,6 +1367,14 @@ async def _module_index() -> dict[str, list[Tool]]:
         "memory": MEMORY_TOOLS, "testing": TESTING_TOOLS, "skills": SKILLS_TOOLS,
         "boost": BOOST_TOOLS,
     }
+    # Each registered+enabled external MCP server is its own pseudo-module (e.g.
+    # icx_find_tools(module="playwright")) - unlike the static dicts above, this set can change
+    # between calls as the user registers/enables/disables servers.
+    try:
+        from icx_engine.mcp_gateway.mcp_tools import external_tools_by_server
+        modules.update(await external_tools_by_server())
+    except Exception:
+        pass
     grouped_names = {t.name for tools in modules.values() for t in tools}
     full = await _all_tools_full()
     modules["core"] = [t for t in full if t.name not in grouped_names]
@@ -1370,7 +1394,14 @@ def _tool_summary(t: Tool) -> dict:
     return summary
 
 
+_MODULE_FETCH_COUNTS: dict[str, int] = {}
+
+
 async def _dispatch_find_tools(args: dict) -> list[TextContent]:
+    """_MODULE_FETCH_COUNTS is process-lifetime (one MCP server process per client session) -
+    a 2nd+ module dump within the same session is a strong signal the caller already has this
+    module's tools and is re-querying instead of reusing them, so it gets a stripped response
+    (name+description, no inputSchema) instead of paying the full-schema token cost again."""
     from icx_engine.git.mcp_tools import _ok, _err
 
     module = args.get("module")
@@ -1383,7 +1414,31 @@ async def _dispatch_find_tools(args: dict) -> list[TextContent]:
                 f"Unknown module {module!r}. Valid modules: {sorted(index.keys())}. "
                 "Call icx_find_tools with no arguments to see each module's tool count first."
             )
-        return _ok({"module": module, "tools": [_tool_summary(t) for t in index[module]]})
+        _MODULE_FETCH_COUNTS[module] = _MODULE_FETCH_COUNTS.get(module, 0) + 1
+        fetch_count = _MODULE_FETCH_COUNTS[module]
+        if fetch_count > 1:
+            return _ok({
+                "module": module,
+                "repeat_fetch_count": fetch_count,
+                "tools": [{"name": t.name, "description": t.description} for t in index[module]],
+                "instruction": (
+                    f"You already fetched {module!r}'s full tool list {fetch_count - 1} time(s) "
+                    "earlier in this session - reuse the names and schemas from that result "
+                    "instead of calling icx_find_tools again. This repeat response omits "
+                    "inputSchema to cut token cost. If you need one specific tool's exact schema "
+                    "back, call icx_find_tools with query=<exact tool name> instead of "
+                    "module=<name> again."
+                ),
+            })
+        return _ok({
+            "module": module,
+            "tools": [_tool_summary(t) for t in index[module]],
+            "instruction": (
+                f"This is every tool in the {module!r} module - name, description, inputSchema, "
+                "all included. Plan every icx_call_tool invocation the current task needs from "
+                "this list now. Do not call icx_find_tools again for this module."
+            ),
+        })
 
     if query is not None:
         if not isinstance(query, str) or not query.strip():
@@ -1442,18 +1497,24 @@ async def _dispatch_with_telemetry(name: str, args: dict) -> list[TextContent]:
     Never lets a logging failure - or the logging itself - change the tool's own result or raise
     past this boundary beyond what _call_tool_impl itself would have raised."""
     import time
+    from icx_engine.telemetry import otel
     from icx_engine.telemetry.logger import ToolCallLogger
 
     input_text = json.dumps(args, default=str)
     start = time.monotonic()
+    start_ns = time.time_ns()
     try:
         result = await _call_tool_impl(name, args)
     except Exception as exc:
+        end_ns = time.time_ns()
+        error_type = type(exc).__name__
         ToolCallLogger().log_call(
             name, input_text, None, (time.monotonic() - start) * 1000,
-            ok=False, error_type=type(exc).__name__,
+            ok=False, error_type=error_type,
         )
+        otel.record_tool_call(name, input_text, None, start_ns, end_ns, ok=False, error_type=error_type)
         raise
+    end_ns = time.time_ns()
     duration_ms = (time.monotonic() - start) * 1000
     output_text = result[0].text if result and hasattr(result[0], "text") else ""
     ok = True
@@ -1466,6 +1527,7 @@ async def _dispatch_with_telemetry(name: str, args: dict) -> list[TextContent]:
     except (json.JSONDecodeError, TypeError):
         pass
     ToolCallLogger().log_call(name, input_text, output_text, duration_ms, ok=ok, error_type=error_type)
+    otel.record_tool_call(name, input_text, output_text, start_ns, end_ns, ok=ok, error_type=error_type)
     return result
 
 
@@ -1532,6 +1594,11 @@ async def _call_tool_impl(name: str, args: dict) -> list[TextContent]:
     boost_result = await dispatch_boost_tool(name, args)
     if boost_result is not None:
         return boost_result
+
+    from icx_engine.mcp_gateway.mcp_tools import dispatch_external_tool
+    external_result = await dispatch_external_tool(name, args)
+    if external_result is not None:
+        return external_result
 
     if name in (_FAST_TOOL_NAME, _FULL_TOOL_NAME):
         # Validate issue_ref
@@ -1964,7 +2031,7 @@ def _context_signals(project_path: str, seeds: list[str], keywords: list[str]):
         loaded = _load_querier_simple(project_path)
         if not isinstance(loaded, tuple):
             return []
-        q, _ = loaded
+        q, _, _sw = loaded
         out = []
         try:
             br = q.get_blast_radius(seeds, max_depth=5, min_confidence=0.3)
@@ -1988,7 +2055,7 @@ def _context_signals(project_path: str, seeds: list[str], keywords: list[str]):
         loaded = _load_querier_simple(project_path)
         if not isinstance(loaded, tuple):
             return []
-        q, _ = loaded
+        q, _, _sw = loaded
         query = " ".join(keywords) if keywords else " ".join(_P(s).stem for s in seeds)
         if not query.strip():
             return []
@@ -2020,10 +2087,46 @@ def _context_signals(project_path: str, seeds: list[str], keywords: list[str]):
     return _graph, _grep, _semantic, _memory
 
 
-def _load_querier_simple(project_path: str) -> tuple | dict:
-    """Validate path, derive project_id, load GraphQuerier.
+def _staleness_warning_for(project_id: str, project_path) -> str | None:
+    """Warning-only staleness note (never a hard degrade) - for tools whose only useful
+    answer IS graph-based (pagerank/cycles/dead-code/ownership/blast-radius have no
+    meaningful non-graph fallback, unlike find_context's grep fallback), so even a stale
+    graph is more useful than none. Mirrors _resolve_graph_path's incremental/
+    freshness_unknown wording exactly for consistency; unlike that function, "stale" gets a
+    louder warning here instead of a full degrade, since these callers have nothing to
+    degrade to."""
+    from icx_engine.graph.paths import check_staleness
 
-    Returns (GraphQuerier, validated_path) or an error dict.
+    staleness = check_staleness(project_id, project_path)
+    status = staleness["status"]
+    if status == "incremental":
+        pct = staleness.get("pct", 0)
+        return (
+            f"Graph is slightly stale ({pct}% of files changed, under 1% threshold). "
+            "Results may not reflect the very latest changes. "
+            f"Inform the user and suggest running: icx graph build \"{project_path}\""
+        )
+    if status == "stale":
+        pct = staleness.get("pct", 0)
+        changed = staleness.get("changed", 0)
+        total = staleness.get("total", 0)
+        return (
+            f"Graph is {pct}% stale ({changed}/{total} files changed) - results may not "
+            "reflect significant recent changes. Inform the user and suggest rebuilding: "
+            f"icx graph build \"{project_path}\""
+        )
+    if status == "freshness_unknown":
+        return (
+            "Could not determine graph freshness (git check timed out). "
+            "Results may be slightly stale. Inform the user."
+        )
+    return None
+
+
+def _load_querier_simple(project_path: str) -> tuple | dict:
+    """Validate path, derive project_id, load GraphQuerier, check staleness.
+
+    Returns (GraphQuerier, validated_path, staleness_warning) or an error dict.
     """
     from icx_engine.graph import storage as _st
     from icx_engine.graph.storage import validate_project_path, GraphError
@@ -2043,7 +2146,8 @@ def _load_querier_simple(project_path: str) -> tuple | dict:
                 f"results, build the graph: icx graph build \"{_validated}\""
             ),
         )
-    return _cached_querier(_gpath), _validated
+    _staleness_warning = _staleness_warning_for(_pid, _validated)
+    return _cached_querier(_gpath), _validated, _staleness_warning
 
 
 def _resolve_graph_path(raw_path: str):
@@ -3314,6 +3418,11 @@ def run_mcp_server() -> None:
             try:
                 from icx_engine.testing.graph import close_testing_graph
                 await close_testing_graph()
+            except Exception:
+                pass
+            try:
+                from icx_engine.mcp_gateway.registry import shutdown_all as _shutdown_external_mcp
+                await _shutdown_external_mcp()
             except Exception:
                 pass
 

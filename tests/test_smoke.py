@@ -15,26 +15,31 @@ def test_help_exits_cleanly(cli_runner):
         assert cmd in result.output
 
 
-def test_full_help_lists_every_command():
-    """Drift guard: EVERY registered command must appear in the hand-written `icx --help` text, so a
-    new command can never be silently invisible. If this fails, add the command to _FULL_HELP."""
+def test_full_help_lists_every_visible_command():
+    """Drift guard: every NON-hidden command must appear in the hand-written `icx --help` text, so
+    a new visible command can never be silently invisible. A command hidden via
+    cli_visibility.AGENT_ONLY_CLI_HIDDEN is deliberately exempt - see test_cli_visibility.py for
+    the coverage on hidden commands (still runnable, just not advertised here). If this fails for
+    a visible command, add it to _FULL_HELP; if it fails for a command that should be hidden, add
+    `hidden=_AGENT_ONLY_CLI_HIDDEN`/`hidden=AGENT_ONLY_CLI_HIDDEN` to its decorator instead."""
     import typer
     from icx_engine.cli import _FULL_HELP
 
     cli = typer.main.get_command(app)
 
-    def walk(cmd, prefix=""):
+    def walk(cmd, prefix="", parent_hidden=False):
         out = []
+        hidden = parent_hidden or bool(getattr(cmd, "hidden", False))
         if hasattr(cmd, "commands"):
             for name, sub in cmd.commands.items():
-                out += walk(sub, (prefix + " " + name).strip())
-        else:
+                out += walk(sub, (prefix + " " + name).strip(), parent_hidden=hidden)
+        elif not hidden:
             out.append(prefix)
         return out
 
     commands = walk(cli, "icx")
     missing = [c for c in commands if c not in _FULL_HELP and c[len("icx "):] not in _FULL_HELP]
-    assert not missing, f"commands missing from `icx --help`: {missing}"
+    assert not missing, f"visible commands missing from `icx --help`: {missing}"
 
 
 def test_every_leaf_command_has_debug_and_traceback_options():
@@ -96,6 +101,15 @@ def test_logs_report_help(cli_runner):
     output = click.unstyle(result.output)
     assert "--date" in output
     assert "--tool" in output
+
+
+def test_langfuse_help(cli_runner):
+    result = cli_runner.invoke(app, ["langfuse", "--help"])
+    assert result.exit_code == 0
+    output = click.unstyle(result.output)
+    assert "--set" in output
+    assert "--enable" in output
+    assert "--disable" in output
 
 
 def test_jira_help(cli_runner):
@@ -689,12 +703,15 @@ def test_test_group_in_help(cli_runner):
     assert "test" in result.output
 
 
-def test_test_help_shows_subcommands(cli_runner):
+def test_test_help_shows_visible_subcommands_only(cli_runner):
+    """`cancel`/`configure`/`rules`/`analytics` are agent-only-hidden - they must not appear in
+    `icx test --help`, even though they still run (see test_cli_visibility.py)."""
     result = cli_runner.invoke(app, ["test", "--help"])
     assert result.exit_code == 0
     output = click.unstyle(result.output)
-    for cmd in ("sessions", "cancel"):
-        assert cmd in output
+    assert "sessions" in output
+    for cmd in ("cancel", "configure", "rules", "analytics"):
+        assert cmd not in output
 
 
 def test_test_module_importable():
@@ -839,12 +856,16 @@ def test_appconfig_has_sonar_enable_fields():
 
 
 def test_sonar_help_lists_commands(cli_runner):
+    """`projects`/`report` are agent-only-hidden - they must not appear here, even though they
+    still run (see test_cli_visibility.py)."""
     from icx_engine.cli import app
     result = cli_runner.invoke(app, ["sonar", "--help"])
     assert result.exit_code == 0
     out = result.stdout.lower()
-    for cmd in ("add", "list", "active", "remove", "status", "projects", "report"):
+    for cmd in ("add", "list", "active", "remove", "status"):
         assert cmd in out
+    for cmd in ("projects", "report"):
+        assert cmd not in out
 
 
 def test_sonar_report_no_connection_message(cli_runner, isolated_config):
@@ -973,6 +994,233 @@ def test_gitlab_connect_command_saves_connection(cli_runner, isolated_config, mo
     assert config.gitlab_connections["default"].token == "glpat-x"
 
 
+def test_mcp_external_help(cli_runner):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["mcp-external", "--help"])
+    assert result.exit_code == 0
+
+
+def test_mcp_external_add_without_preset_is_rejected(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["mcp-external", "--add"])
+    assert result.exit_code == 0
+    assert "--preset is required" in result.stdout
+    from icx_engine.config_manager import ConfigManager
+    assert ConfigManager.load().external_mcp_servers == {}
+
+
+def test_mcp_external_add_preset_saves_config(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    from icx_engine.mcp_gateway import registry
+    monkeypatch.setitem(registry.PRESETS, "fake", {
+        "command": "npx", "args": ["-y", "fake-mcp@1.0.0"], "env": {},
+        "description": "Fake preset for tests.",
+    })
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: {
+        "Server name (used as the tool-name prefix)": "fake",
+    }.get(a[0], k.get("default", "")))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: a[0] == "Enable this server now?")
+    result = cli_runner.invoke(app, ["mcp-external", "--add", "--preset", "fake"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    config = ConfigManager.load()
+    server = config.external_mcp_servers["fake"]
+    assert server.command == "npx"
+    assert server.enabled is True
+    assert server.preset == "fake"
+
+
+# -- graph build: LLM off by default, --llm opts in ----------------------------
+
+@pytest.fixture
+def _isolated_graphs_root(tmp_path, monkeypatch):
+    graphs_root = tmp_path / "graphs"
+    graphs_root.mkdir()
+    monkeypatch.setattr("icx_engine.graph.storage._graphs_root", lambda: graphs_root)
+    monkeypatch.setattr("icx_engine.graph.manager.storage._graphs_root", lambda: graphs_root)
+    return graphs_root
+
+
+def _register_graph_project(tmp_path, name="myapp"):
+    from icx_engine.graph.manager import GraphManager
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    mgr = GraphManager()
+    mgr.register(name, str(project_dir))
+    return project_dir
+
+
+def test_graph_build_defaults_to_llm_off(cli_runner, tmp_path, _isolated_graphs_root, monkeypatch):
+    _register_graph_project(tmp_path)
+    captured: dict = {}
+
+    def _fake_run_build(mgr, pid, force, skip_llm=False):
+        captured["skip_llm"] = skip_llm
+        return {"file_count": 1, "node_count": 1, "edge_count": 0, "community_count": 0}
+
+    monkeypatch.setattr("icx_engine.cli._run_build_with_progress", _fake_run_build)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", "myapp"])
+    assert result.exit_code == 0
+    assert captured["skip_llm"] is True
+
+
+def test_graph_build_llm_flag_opts_in(cli_runner, tmp_path, _isolated_graphs_root, monkeypatch):
+    _register_graph_project(tmp_path)
+    captured: dict = {}
+
+    def _fake_run_build(mgr, pid, force, skip_llm=False):
+        captured["skip_llm"] = skip_llm
+        return {"file_count": 1, "node_count": 1, "edge_count": 0, "community_count": 0}
+
+    monkeypatch.setattr("icx_engine.cli._run_build_with_progress", _fake_run_build)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", "myapp", "--llm"])
+    assert result.exit_code == 0
+    assert captured["skip_llm"] is False
+
+
+def test_graph_build_force_flag_reaches_run_build_with_progress(cli_runner, tmp_path, _isolated_graphs_root, monkeypatch):
+    """CLI-level regression guard for the --force fix: `icx graph build <name> --force`
+    must pass force=True into _run_build_with_progress (which forwards it to
+    mgr.build(force=...) -> _run_build_subprocess -> _build_project_isolated, bypassing
+    the incremental skip shortcut)."""
+    _register_graph_project(tmp_path)
+    captured: dict = {}
+
+    def _fake_run_build(mgr, pid, force, skip_llm=False):
+        captured["force"] = force
+        return {"file_count": 1, "node_count": 1, "edge_count": 0, "community_count": 0}
+
+    monkeypatch.setattr("icx_engine.cli._run_build_with_progress", _fake_run_build)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", "myapp", "--force"])
+    assert result.exit_code == 0
+    assert captured["force"] is True
+
+
+# -- graph build/status/remove: accept a path, not just a registered name ------
+# Every MCP graph_* tool addresses projects by project_path only; these commands
+# previously required the registered short name, discoverable only via `icx graph list`.
+# _resolve_graph_ref (cli.py) tries name first, falls back to path.
+
+def test_graph_build_accepts_path_not_just_name(cli_runner, tmp_path, _isolated_graphs_root, monkeypatch):
+    project_dir = _register_graph_project(tmp_path)
+    captured: dict = {}
+
+    def _fake_run_build(mgr, pid, force, skip_llm=False):
+        captured["pid"] = pid
+        return {"file_count": 1, "node_count": 1, "edge_count": 0, "community_count": 0}
+
+    monkeypatch.setattr("icx_engine.cli._run_build_with_progress", _fake_run_build)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", str(project_dir)])
+    assert result.exit_code == 0
+    assert "pid" in captured
+
+
+def test_graph_build_unregistered_name_and_path_both_give_clear_error(cli_runner, tmp_path, _isolated_graphs_root):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "build", str(tmp_path / "not_registered")])
+    assert result.exit_code != 0
+    normalized = " ".join(click.unstyle(result.output).replace("│", " ").split())
+    assert "not a registered project name or a registered project path" in normalized
+
+
+def test_graph_status_accepts_path_not_just_name(cli_runner, tmp_path, _isolated_graphs_root):
+    project_dir = _register_graph_project(tmp_path)
+    from icx_engine.cli import app
+    result_by_name = cli_runner.invoke(app, ["graph", "status", "myapp"])
+    result_by_path = cli_runner.invoke(app, ["graph", "status", str(project_dir)])
+    assert result_by_name.exit_code == 0
+    assert result_by_path.exit_code == 0
+    assert "myapp" in result_by_path.stdout
+
+
+def test_graph_status_unregistered_path_gives_clear_error(cli_runner, tmp_path, _isolated_graphs_root):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "status", str(tmp_path / "not_registered")])
+    assert result.exit_code != 0
+    normalized = " ".join(click.unstyle(result.output).replace("│", " ").split())
+    assert "not a registered project name or a registered project path" in normalized
+
+
+def test_graph_remove_accepts_path_and_shows_friendly_name(cli_runner, tmp_path, _isolated_graphs_root):
+    """Regression guard: the confirmation/success messages must show the registered
+    short name, not the raw path the user passed as the argument."""
+    project_dir = _register_graph_project(tmp_path)
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["graph", "remove", str(project_dir)], input="y\n")
+    assert result.exit_code == 0
+    assert "myapp" in result.stdout
+    assert str(project_dir) not in result.stdout
+
+
+def test_mcp_external_list_and_remove(cli_runner, isolated_config):
+    from icx_engine.mcp_gateway import service as gateway_service
+    gateway_service.add_server("s", "npx", enabled=True)
+
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["mcp-external", "--list"])
+    assert result.exit_code == 0
+    assert "s" in result.stdout
+
+    result = cli_runner.invoke(app, ["mcp-external", "--remove", "s"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    assert "s" not in ConfigManager.load().external_mcp_servers
+
+
+def test_langfuse_status_shows_disabled_by_default(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["langfuse"])
+    assert result.exit_code == 0
+    output = result.stdout.lower()
+    assert "false" in output
+    assert "always written" in output
+
+
+def test_langfuse_set_saves_config(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    monkeypatch.setattr("typer.prompt", lambda *a, **k: {
+        "Langfuse host": "https://cloud.langfuse.com",
+        "Public key": "pk-test-1",
+        "Secret key (blank to keep existing)": "sk-test-1",
+    }.get(a[0], k.get("default", "")))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    result = cli_runner.invoke(app, ["langfuse", "--set"])
+    assert result.exit_code == 0
+    from icx_engine.config_manager import ConfigManager
+    config = ConfigManager.load()
+    assert config.langfuse.enabled is True
+    assert config.langfuse.public_key == "pk-test-1"
+    assert config.langfuse.secret_key == "sk-test-1"
+
+
+def test_langfuse_enable_without_keys_fails_cleanly(cli_runner, isolated_config):
+    from icx_engine.cli import app
+    result = cli_runner.invoke(app, ["langfuse", "--enable"])
+    assert result.exit_code != 0
+    assert "langfuse --set" in result.stdout.lower() or "public/secret key" in result.stdout.lower()
+
+
+def test_langfuse_enable_and_disable_toggle_config(cli_runner, isolated_config, monkeypatch):
+    from icx_engine.cli import app
+    from icx_engine.config_manager import ConfigManager
+    from icx_engine.models.config import AppConfig, LangfuseConfig
+
+    cfg = AppConfig(langfuse=LangfuseConfig(public_key="pk", secret_key="sk"))
+    ConfigManager.save(cfg)
+
+    result = cli_runner.invoke(app, ["langfuse", "--enable"])
+    assert result.exit_code == 0
+    assert ConfigManager.load().langfuse.enabled is True
+
+    result = cli_runner.invoke(app, ["langfuse", "--disable"])
+    assert result.exit_code == 0
+    assert ConfigManager.load().langfuse.enabled is False
+
+
 def test_gitlab_status_command_reports_not_configured(cli_runner, isolated_config):
     from icx_engine.cli import app
     result = cli_runner.invoke(app, ["gitlab", "status"])
@@ -1079,15 +1327,7 @@ def test_gitlab_connect_with_debug_still_hides_token_input(cli_runner, isolated_
 
 
 @respx.mock
-@pytest.mark.xdist_group(name="workstatus_default_keyring")
 def test_workstatus_connect_command_saves_connection(cli_runner, isolated_config, monkeypatch):
-    """xdist_group: config_manager.py writes workstatus secrets to the REAL OS keyring, keyed by
-    connection name - isolated_config only patches the plaintext config file path, not the
-    keyring. This test and workstatus/test_cli_commands.py's identically-named test both use
-    connection name 'default' - without pinning them to the same xdist worker, two parallel
-    workers can race on the same real keyring entry (observed: this test intermittently read
-    back the OTHER file's 'Bearer x' value instead of its own). The group name only needs to be
-    consistent across every test that shares the collision risk, not globally unique."""
     from icx_engine.cli import app
     respx.get("https://web-api.workstatus.io/api/v5/notifications/unread-count").mock(
         return_value=httpx.Response(200, json={"code": 200, "message": "ok", "data": {"count": 3}})

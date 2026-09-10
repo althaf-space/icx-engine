@@ -36,6 +36,7 @@ def test_log_call_writes_one_jsonl_line(tmp_path):
     assert record["input_tokens_est"] > 0
     assert record["output_tokens_est"] > 0
     assert "ts" in record
+    assert record["ts"].endswith("+05:30")
 
 
 def test_log_call_records_failure_without_raising(tmp_path):

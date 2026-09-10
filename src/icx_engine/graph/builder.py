@@ -244,12 +244,20 @@ def _build_project_isolated(
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
     progress_path: str | None = None,
+    force: bool = False,
 ) -> dict:
     """
     Runs inside an isolated subprocess spawned by ProcessPoolExecutor.
 
     llm_backend/llm_api_key/llm_base_url are read from ICX's configured model by
     the manager before spawning. Falls back to env var detection if not provided.
+
+    force=True bypasses the file-hash-based "nothing changed, skip rebuild" shortcut
+    below and always performs a full extraction, even when the incremental hash check
+    would otherwise find zero changed/deleted files. Without this, `icx graph build
+    --force` could never repair a graph.json that was corrupted or left incomplete by an
+    earlier failed/interrupted build - the skip shortcut fired before any real rebuild
+    work ran, on every subsequent attempt, regardless of --force.
 
     Returns a dict: {"file_count": int, "node_count": int, "edge_count": int,
                      "community_count": int, "extraction_mode": str, "error": str|None}
@@ -316,7 +324,7 @@ def _build_project_isolated(
         hash_cache_path = icx_cache / "file_hashes.json"
         stored_hashes = load_hashes(hash_cache_path)
         graph_json_path = icx_cache.parent / "graph.json"
-        _incremental = graph_json_path.exists() and bool(stored_hashes)
+        _incremental = not force and graph_json_path.exists() and bool(stored_hashes)
 
         # Convert Path objects to relative POSIX strings for hashing
         _rel_files = [f.relative_to(project_path).as_posix() for f in files]
@@ -762,9 +770,35 @@ def _build_project_isolated(
             )
             from icx_engine.graph import storage as _xstorage
             _out_dir = _xstorage._graphs_root() / _xstorage.derive_project_id(project_path)
-            run_cross_service_linking(files, project_path, extraction, _out_dir)
+            _csl_edges = run_cross_service_linking(files, project_path, extraction, _out_dir)
+            if _csl_edges:
+                extraction = {
+                    **extraction,
+                    "edges": list(extraction.get("edges", [])) + _csl_edges,
+                }
+            _log.debug("cross_service_rest: %d same-project edge(s)", len(_csl_edges or []))
         except Exception as _csl_exc:
             _log.debug("cross_service_rest linker failed (%s)", type(_csl_exc).__name__)
+
+        # UI-visible text (titles/labels/button text) attached to file nodes so
+        # graph_find_context can match a ticket description against what a user actually
+        # saw on screen, not just code identifiers - zero LLM calls, zero embeddings.
+        try:
+            from icx_engine.graph.parser.ui_text import extract_ui_text
+            _ui_text_by_file = extract_ui_text(files, project_path)
+            if _ui_text_by_file:
+                _root_posix = project_path.as_posix()
+                for _node in extraction.get("nodes", []):
+                    _sf = (_node.get("source_file") or _node.get("file") or "").replace("\\", "/")
+                    if not _sf:
+                        continue
+                    _rel = _sf[len(_root_posix) + 1:] if _sf.startswith(_root_posix + "/") else _sf
+                    _text = _ui_text_by_file.get(_rel)
+                    if _text:
+                        _node["ui_text"] = _text
+            _log.debug("ui_text: %d file(s) with extracted text", len(_ui_text_by_file))
+        except Exception as _uit_exc:
+            _log.debug("ui_text extraction failed (%s)", type(_uit_exc).__name__)
 
         # LLM enrichment: per-chunk LLM call. Chunk IDs are intentionally
         # discarded; Louvain rederives communities globally so cluster IDs
@@ -947,12 +981,25 @@ def _build_project_isolated(
 # ETA helper (used by manager before a build starts)
 # ---------------------------------------------------------------------------
 
+LLM_ETA_CAVEAT = (
+    "This estimate assumes every LLM chunk succeeds in ~15s. Real time depends heavily on "
+    "provider rate limits and can be far higher if requests are throttled - the circuit "
+    "breaker aborts after repeated rate-limit failures rather than retrying forever, but "
+    "the time already spent before that point is not predictable from file count alone."
+)
+
+
 def estimate_build_eta(file_count: int, semantic: bool = False) -> int:
     """Estimated build time in seconds.
 
     Hybrid mode runs AST first then LLM sequentially:
       AST:  ~0.05s/file parallelised across cpu_count + 15s subprocess startup
       LLM:  ~20 files/chunk at 20k token budget, max_concurrency=1, ~15s/chunk
+
+    The LLM portion is a best-case estimate only - it assumes every chunk succeeds on the
+    first attempt. It does not, and cannot, model provider rate-limit/retry cost (see
+    LLM_ETA_CAVEAT) - callers presenting a semantic=True estimate to a user should include
+    that caveat rather than presenting this number as precise.
     """
     import os
     cpu = max(1, os.cpu_count() or 4)
@@ -960,5 +1007,5 @@ def estimate_build_eta(file_count: int, semantic: bool = False) -> int:
     if not semantic:
         return ast_time
     chunks = max(1, file_count // 20)
-    llm_time = chunks * 15  # sequential (max_concurrency=1)
+    llm_time = chunks * 15  # best-case: every chunk succeeds first try, sequential
     return ast_time + llm_time

@@ -50,6 +50,92 @@ def test_find_context_returns_results(tiny_graph: Path):
     assert any("auth" in f for f in top_files)
 
 
+@pytest.fixture
+def false_substring_graph(tmp_path: Path) -> Path:
+    """A node whose label contains "and" as a raw substring (inside "ReferAndWin...") but
+    never as a whole word - reproduces the exact false-match shape reported against real
+    Java code (e.g. "and" inside "ApprovalDaoImpl" is not this literal case, but the same
+    class of bug: a short query term matching inside an unrelated identifier)."""
+    graph = {
+        "nodes": [
+            # importance > 0 with zero degree/edges so a false "and" substring match would
+            # still produce a nonzero score under the old bug (base=0 path still returns
+            # kw_score * 0.1 * importance) - without this the test would pass vacuously
+            # regardless of whether the bug is present, since a zero-degree/zero-importance
+            # node scores 0 either way.
+            {"id": "promo_ctrl", "label": "ReferAndWinRestController",
+             "source_file": "src/promo/referandwin.py", "community": 0, "role_tag": "",
+             "importance": 0.5},
+            {"id": "unrelated", "label": "PaymentGateway",
+             "source_file": "src/payments/gateway.py", "community": 1, "role_tag": "",
+             "importance": 0.5},
+        ],
+        "links": [],
+        "communities": {"0": ["promo_ctrl"], "1": ["unrelated"]},
+    }
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps(graph), encoding="utf-8")
+    return p
+
+
+def test_find_context_ignores_short_word_false_substring_match(false_substring_graph: Path):
+    """"and" must not false-match inside "ReferAndWinRestController" merely because it is
+    a raw substring there - regression guard for the word-boundary fix in
+    _score_node/find_context. Query terms are "review and summary": "and" is a real
+    substring of the promo controller's label but never a whole word in either node, so
+    under the old `t in text` substring bug this node would score/match on "and"; after
+    the fix it must not."""
+    from icx_engine.graph.query import GraphQuerier
+    q = GraphQuerier(false_substring_graph)
+    results = q.find_context("review and summary")
+    # None of "review"/"and"/"summary" is a whole-word match anywhere in this fixture, so
+    # with the word-boundary fix the promo controller must score 0 and be excluded entirely
+    # (under the old substring bug it would false-match "and" and appear here).
+    assert "promo_ctrl" not in [r.node_id for r in results]
+    for r in results:
+        assert "'and'" not in r.reason
+
+
+def test_find_context_matches_terms_inside_snake_case_and_constant_case_identifiers(tmp_path: Path):
+    """Critical regression guard: Python's `\\b` treats "_" as a word character, so a naive
+    `\\bterm\\b` fix would fail to match "user"/"master" inside "MFS_USER_MASTER" or a
+    snake_case source path - breaking exactly the kind of query this scorer must support
+    (e.g. "ApprovalDaoImpl reads and writes MFS_USER_MASTER via UserMaster entity"). The
+    boundary must treat "_" as a separator, not as part of the word."""
+    from icx_engine.graph.query import GraphQuerier
+    graph = {
+        "nodes": [
+            {"id": "user_master_dao", "label": "MFS_USER_MASTER",
+             "source_file": "src/dao/approval_dao_impl.java", "community": 0, "role_tag": "",
+             "importance": 0.5},
+        ],
+        "links": [],
+        "communities": {"0": ["user_master_dao"]},
+    }
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps(graph), encoding="utf-8")
+    q = GraphQuerier(p)
+    # find_context only splits the task on whitespace (never on "_" or camelCase), so
+    # "user" and "master" must be given as separate whitespace-delimited query words to
+    # exercise matching them individually inside the underscore-joined "mfs_user_master".
+    results = q.find_context("user master reads")
+    assert len(results) == 1
+    assert "user_master_dao" == results[0].node_id
+    assert "'user'" in results[0].reason
+    assert "'master'" in results[0].reason
+
+
+def test_find_context_still_matches_whole_word_terms(tiny_graph: Path):
+    """Regression guard: the word-boundary fix must not over-tighten matching - a real
+    whole-word term that legitimately appears inside an identifier (e.g. "db" inside the
+    node id/label "db_session") must still match."""
+    from icx_engine.graph.query import GraphQuerier
+    q = GraphQuerier(tiny_graph)
+    results = q.find_context("db session")
+    matched_files = [r.file for r in results]
+    assert any("session" in f for f in matched_files)
+
+
 def test_get_call_chain(tiny_graph: Path):
     from icx_engine.graph.query import GraphQuerier
     q = GraphQuerier(tiny_graph)
@@ -82,3 +168,93 @@ def test_get_subsystem(tiny_graph: Path):
     result = q.get_subsystem("src/auth/service.py")
     assert "src/auth/service.py" in result.files
     assert "src/auth/repo.py" in result.files
+
+
+# -- ui_text scoring + phrase-level bonus ------------------------------------------------
+# Real-world motivation: a Jira ticket rarely names a class/file, but often echoes an
+# actual screen title/label almost verbatim - ui_text (extracted by parser/ui_text.py)
+# closes that gap with zero LLM calls and zero embeddings.
+
+@pytest.fixture
+def loyalty_screens_graph(tmp_path: Path) -> Path:
+    """Mirrors a real finding from this session: a common domain word ("loyalty")
+    legitimately appears across several distinct real screens, while only ONE of them
+    carries the exact, specific phrase a ticket is likely to quote verbatim."""
+    graph = {
+        "nodes": [
+            {"id": "loyalty_form", "label": "LoyaltyForm",
+             "source_file": "src/containers/Account/LoyaltyForm.jsx",
+             "community": 0, "role_tag": "[container]", "importance": 0.3,
+             "ui_text": "Loyalty Status"},
+            {"id": "loyalty_status", "label": "LoyaltyStatus",
+             "source_file": "src/components/LMS/LoyaltyStatus.jsx",
+             "community": 0, "role_tag": "[component]", "importance": 0.3,
+             "ui_text": "View Loyalty Status Details"},
+            {"id": "loyalty_points", "label": "LoyaltyPoints",
+             "source_file": "src/containers/Dashboard/Loyalty_New/LoyaltyPoints.jsx",
+             "community": 0, "role_tag": "[container]", "importance": 0.3,
+             "ui_text": "Loyalty Points-Earned V/S Redemption | Start Date | End Date"},
+        ],
+        "links": [],
+        "communities": {"0": ["loyalty_form", "loyalty_status", "loyalty_points"]},
+    }
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps(graph), encoding="utf-8")
+    return p
+
+
+def test_ui_text_makes_a_screen_findable_by_visible_label_not_just_filename(tmp_path: Path):
+    """A file whose NAME shares nothing with the query must still be found when its
+    extracted UI text matches - this is the whole point of ui_text."""
+    from icx_engine.graph.query import GraphQuerier
+    graph = {
+        "nodes": [
+            {"id": "n1", "label": "XyzScreen123", "source_file": "src/screens/XyzScreen123.jsx",
+             "community": 0, "role_tag": "", "importance": 0.5,
+             "ui_text": "Gamification Reward Allocation"},
+        ],
+        "links": [],
+        "communities": {"0": ["n1"]},
+    }
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps(graph), encoding="utf-8")
+    q = GraphQuerier(p)
+    results = q.find_context("gamification reward")
+    assert any(r.node_id == "n1" for r in results)
+
+
+def test_generic_shared_word_returns_multiple_candidates_not_a_forced_single_pick(loyalty_screens_graph: Path):
+    """Core precision guarantee: when the query only shares ONE common domain word
+    across several genuinely distinct real screens, find_context must return all of
+    them ranked, never silently assert a single winner. Ambiguity is a real property of
+    the codebase (multiple real "Loyalty" screens exist) - hiding it would risk a false
+    positive; surfacing it lets the caller disambiguate."""
+    from icx_engine.graph.query import GraphQuerier
+    q = GraphQuerier(loyalty_screens_graph)
+    results = q.find_context("loyalty issue reported by customer")
+    matched_ids = {r.node_id for r in results}
+    assert {"loyalty_form", "loyalty_status", "loyalty_points"} <= matched_ids
+
+
+def test_specific_phrase_match_clearly_outranks_generic_word_match(loyalty_screens_graph: Path):
+    """When the ticket quotes a real, specific, multi-word screen title almost
+    verbatim, that screen must rank clearly above the others that only share the
+    single common word "loyalty" - this is the phrase-bonus in action."""
+    from icx_engine.graph.query import GraphQuerier
+    q = GraphQuerier(loyalty_screens_graph)
+    results = q.find_context(
+        "the Loyalty Points-Earned V/S Redemption report is showing wrong numbers"
+    )
+    assert results[0].node_id == "loyalty_points"
+    assert results[0].score > results[1].score * 1.5  # clearly, not marginally, ahead
+    assert "phrase-match" in results[0].reason
+
+
+def test_phrase_bonus_does_not_trigger_on_single_common_word(loyalty_screens_graph: Path):
+    """A single shared word (even the same word every candidate has) must never count
+    as a "phrase match" - only a genuine multi-word phrase should."""
+    from icx_engine.graph.query import GraphQuerier
+    q = GraphQuerier(loyalty_screens_graph)
+    results = q.find_context("loyalty")
+    for r in results:
+        assert "phrase-match" not in r.reason

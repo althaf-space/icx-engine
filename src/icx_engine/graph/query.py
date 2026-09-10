@@ -11,11 +11,18 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
+
+# Multiplier applied to kw_score when the full task phrase appears verbatim in a node's
+# text (see _score_node) - deliberately large relative to single-term overlap, so a real
+# multi-word phrase match (a ticket echoing an actual screen title) clearly outranks
+# candidates that only share one common word.
+_PHRASE_MATCH_BONUS = 3.0
 
 
 @dataclass
@@ -148,14 +155,32 @@ class GraphQuerier:
                 best = cs
         return best
 
-    def _score_node(self, node_id: str, terms: list[str]) -> float:
+    def _score_node(
+        self, node_id: str, term_patterns: list[tuple[str, "re.Pattern[str]"]],
+        task_lower: str = "",
+    ) -> float:
         nd = self._nodes.get(node_id, {})
         label = (nd.get("label") or "").lower()
         src = (nd.get("source_file") or "").lower()
         rtag = (nd.get("role_tag") or "").lower()
-        text = f"{label} {src} {rtag}"
-        matched = sum(1 for t in terms if t in text)
-        kw_score = matched / max(len(terms), 1)
+        # ui_text: literal JSX text/labels extracted at build time (parser/ui_text.py) -
+        # matches what a user actually saw on screen, closer to how a ticket is worded
+        # than a class name or filename is.
+        ui_text = (nd.get("ui_text") or "").lower()
+        text = f"{label} {src} {rtag} {ui_text}"
+        matched = sum(1 for _, pat in term_patterns if pat.search(text))
+        kw_score = matched / max(len(term_patterns), 1)
+        # Phrase-level bonus: a real multi-word UI phrase (an actual screen title/label,
+        # extracted verbatim from source) appearing INSIDE the task description is a much
+        # stronger, much less ambiguous signal than scattered single-word overlap - e.g.
+        # the ticket says "...Loyalty Points-Earned V/S Redemption is wrong..." and that
+        # exact phrase is this node's own extracted title. A common single word like
+        # "loyalty" alone must never trigger this - only a genuine multi-word phrase.
+        if ui_text and task_lower:
+            for phrase in ui_text.split(" | "):
+                if " " in phrase and len(phrase) >= 12 and phrase in task_lower:
+                    kw_score *= _PHRASE_MATCH_BONUS
+                    break
         deg_weight = math.log(1 + self._degree.get(node_id, 0))
         conf_bonus = 0.5 + 0.5 * self._max_edge_confidence(node_id)
         base = kw_score * deg_weight * conf_bonus
@@ -183,10 +208,24 @@ class GraphQuerier:
         terms = [t.lower() for t in task.split() if t]
         if not terms:
             return []
+        task_lower = task.lower()
+        # Word-boundary match, not substring containment - a raw `t in text` check makes
+        # a short/common query term (e.g. "and", "via") false-match inside an unrelated
+        # identifier that merely contains those letters (e.g. "and" inside
+        # "referandwinrestcontroller"), polluting rankings with irrelevant files.
+        # NOT Python's `\b`: it treats "_" as a word character, so `\buser\b` would fail to
+        # match "user" inside "MFS_USER_MASTER" - exactly the snake_case/CONSTANT_CASE
+        # identifiers this scorer must match against. Boundary is instead "not adjacent to
+        # another alnum char", so "_" (and every other separator) counts as a break.
+        # Compiled once per call (not per node) since find_context scans every graph node.
+        term_patterns = [
+            (t, re.compile(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])"))
+            for t in terms
+        ]
 
         scored: list[tuple[float, str]] = []
         for nid in self._nodes:
-            s = self._score_node(nid, terms)
+            s = self._score_node(nid, term_patterns, task_lower)
             if s > 0:
                 scored.append((s, nid))
         scored.sort(key=lambda x: -x[0])
@@ -205,14 +244,22 @@ class GraphQuerier:
         results: list[ContextResult] = []
         for src, (score, nid) in file_ranked:
             nd = self._nodes[nid]
-            matched_terms = [t for t in terms if t in f"{nd.get('label', '')} {src}".lower()]
+            ui_text = (nd.get("ui_text") or "").lower()
+            reason_text = f"{nd.get('label', '')} {src} {ui_text}".lower()
+            matched_terms = [t for t, pat in term_patterns if pat.search(reason_text)]
             conf = self._max_edge_confidence(nid)
+            phrase_note = ""
+            if ui_text:
+                for phrase in ui_text.split(" | "):
+                    if " " in phrase and len(phrase) >= 12 and phrase in task_lower:
+                        phrase_note = f" phrase-match:'{phrase}'"
+                        break
             reason = (
                 f"matched {'+'.join(repr(t) for t in matched_terms)} "
                 f"in {nd.get('label', nid)} "
                 f"{nd.get('role_tag', '')} "
                 f"degree:{self._degree.get(nid, 0)} "
-                f"conf:{conf:.2f}"
+                f"conf:{conf:.2f}{phrase_note}"
             ).strip()
             results.append(ContextResult(
                 file=src,

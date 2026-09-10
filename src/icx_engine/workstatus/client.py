@@ -148,8 +148,25 @@ class WorkstatusClient:
         message, result}`; a few more (timesheet view/edit) nest the WHOLE
         envelope under a `response` key - `{response: {code, message, data}}`.
         `key` picks which field holds the payload, verified per-endpoint
-        rather than assumed uniform."""
+        rather than assumed uniform.
+
+        A genuinely empty body (0 bytes / whitespace-only) is treated as its own
+        distinct, actionable failure - not a generic JSON parse error. This is the
+        same in-band-failure pattern already found and fixed once for
+        `/timesheet/add` (HTTP 200 with an empty body when the write silently
+        failed server-side, uncaught by `_raise_for_workstatus` since it only
+        inspects the status code) - confirmed recurring on `/member/myprofile` too,
+        so the fix belongs here, shared by all endpoints, not patched per-endpoint."""
         _raise_for_workstatus(resp, action)
+        if not resp.text.strip():
+            raise WorkstatusError(
+                f"{action}: Workstatus returned HTTP {resp.status_code} with a "
+                "completely empty response body - an in-band failure signal the "
+                "status code alone doesn't catch (see /timesheet/add's identical "
+                "finding in developer.md). Do not treat this as success or retry "
+                "blindly; if it persists, re-run `icx workstatus --add` with fresh "
+                "session header values, or Workstatus's API contract may have changed."
+            )
         try:
             body = resp.json()
         except Exception as exc:
@@ -173,7 +190,15 @@ class WorkstatusClient:
         return int(data.get("count", 0) or 0)
 
     async def my_profile(self) -> dict:
-        resp = await self._request("POST", "/api/v5/member/myprofile")
+        """Real bug found 2026-09-09: this call previously sent no request body at
+        all, so Workstatus returned an empty HTTP 200 - not a server-side failure.
+        A real browser capture confirmed the endpoint requires
+        `{organization_id, user_id}` in the body, both already held as
+        `self._org_id`/`self._user_id` (same fields every other endpoint sends)."""
+        resp = await self._request(
+            "POST", "/api/v5/member/myprofile",
+            json={"organization_id": int(self._org_id), "user_id": int(self._user_id)},
+        )
         return self._data(resp, "Fetching Workstatus profile")
 
     async def add_timesheet(
@@ -529,8 +554,19 @@ class WorkstatusClient:
         }
         resp = await self._request("POST", "/api/v5/timesheets/view", json=body)
         data = self._data(resp, "Fetching Workstatus timesheet")
-        items = data if isinstance(data, list) else []
-        return items[0] if items else {}
+        # Real bug found 2026-09-09: this assumed `data` was always a list and took
+        # item [0], but a live capture showed /timesheets/view returns `data` as a
+        # single dict directly - `isinstance(data, list)` was always False, so every
+        # call fell through to the empty-list branch and raised false "not found",
+        # even when the entry existed. Handle both shapes rather than assuming one.
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        if not data:
+            # Silently returning {} here previously reported false success on a
+            # not-found id - no signal to stop, inviting blind repeat calls with
+            # different ids. Surface it as a real error instead.
+            raise WorkstatusError(f"Timesheet {timesheet_id} not found (member_id={member_id if member_id is not None else self._user_id}).")
+        return data
 
     async def edit_timesheet(
         self, timesheet_id: int, project_id: int, todo_id: int, date: str, from_time: str,

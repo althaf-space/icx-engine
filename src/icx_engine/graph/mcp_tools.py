@@ -16,6 +16,26 @@ from icx_engine.mcp_server import (
 
 _log = logging.getLogger(__name__)
 
+
+def _cap_by_chars(items: list, char_budget: int, used_chars: int = 0) -> tuple[list, int, bool]:
+    """Keep items (already in the caller's priority order) until char_budget is spent.
+    Mirrors graph_find_context's own truncation heuristic (~4 chars/token, not a real
+    tokenizer count - a coarse but consistent cap). Returns (kept_items, chars_used_total,
+    was_truncated). Always keeps at least one item so a single oversized entry doesn't
+    silently produce an empty list."""
+    kept: list = []
+    running = used_chars
+    truncated = False
+    for it in items:
+        it_chars = len(json.dumps(it))
+        if kept and running + it_chars > char_budget:
+            truncated = True
+            break
+        kept.append(it)
+        running += it_chars
+    return kept, running, truncated
+
+
 _GRAPH_CONTEXT_TOOL = "graph_find_context"
 _GRAPH_SUBSYSTEM_TOOL = "graph_subsystem"
 _GRAPH_CHAIN_TOOL = "graph_call_chain"
@@ -324,6 +344,7 @@ GRAPH_TOOLS: list[Tool] = [
                 "node_id": {"type": "string", "description": "Graph node ID."},
                 "depth": {"type": "integer", "default": 3},
                 "min_confidence": {"type": "number", "default": 0.5},
+                "token_budget": {"type": "integer", "default": 8000, "description": "Caps upstream/downstream list size for a high-fan-out node - see graph_find_context's token_budget for the same heuristic."},
             },
             "required": ["project_path", "node_id"],
         },
@@ -338,6 +359,7 @@ GRAPH_TOOLS: list[Tool] = [
                 "project_path": {"type": "string"},
                 "node_id": {"type": "string"},
                 "min_confidence": {"type": "number", "default": 0.5},
+                "token_budget": {"type": "integer", "default": 8000, "description": "Caps the transitive-dependent list size for a high-fan-out node (direct dependents are always returned in full) - the true total count is always preserved even when the list is capped."},
             },
             "required": ["project_path", "node_id"],
         },
@@ -346,9 +368,12 @@ GRAPH_TOOLS: list[Tool] = [
     Tool(
         name=_GRAPH_CROSS_LINKS_TOOL,
         description=(
-            "MICROSERVICES ONLY - SKIP IF SINGLE MONOLITH.\n"
-            "USE WHEN: Working on a project that makes HTTP calls to peer services and you need to know "
-            "which calls cross service boundaries.\n"
+            "PEER (SEPARATELY REGISTERED) PROJECTS ONLY.\n"
+            "USE WHEN: Working on a project that makes HTTP calls to a DIFFERENT registered ICX project "
+            "and you need to know which calls cross that service boundary.\n"
+            "A frontend calling its OWN backend in the SAME repo/registration is not a peer-project link - "
+            "those edges (relation=calls_api) are already part of the main graph and show up directly via "
+            "graph_call_chain/graph_impact on the calling file, no separate tool needed.\n"
             "Matches outgoing HTTP calls in THIS project to REST routes in peer registered projects.\n"
             "RETURNS: [{source_project, call_site, method, route, target_project, matched_route}] "
             "listing every cross-service HTTP link.\n"
@@ -551,15 +576,80 @@ async def dispatch_graph_tool(name: str, arguments: dict) -> list[TextContent] |
                     depth=_depth,
                     min_confidence=_min_confidence,
                 )
+                # A central node's fan-out was previously returned uncapped, unlike
+                # graph_find_context's own char-budget truncation - a large fan-out node
+                # would blow past the MCP host's own hard token cap and fail outright with
+                # no partial answer at all. Each direction gets its own full char_budget
+                # (deliberately not split between them - simpler, and in practice either
+                # direction alone can be the one that's huge). Nearest/most-confident nodes
+                # are kept first when a direction must be capped.
+                char_budget = max(_token_budget, 1) * 4
+                _up_sorted = sorted(
+                    (_asdict(n) for n in chain.upstream),
+                    key=lambda n: (n["depth"], -n["confidence"]),
+                )
+                _down_sorted = sorted(
+                    (_asdict(n) for n in chain.downstream),
+                    key=lambda n: (n["depth"], -n["confidence"]),
+                )
+                _up_kept, _, _up_trunc = _cap_by_chars(_up_sorted, char_budget)
+                _down_kept, _, _down_trunc = _cap_by_chars(_down_sorted, char_budget)
                 payload = {
                     "status": "ok",
                     "project_path": str(_project_path),
-                    "upstream": [_asdict(n) for n in chain.upstream],
-                    "downstream": [_asdict(n) for n in chain.downstream],
+                    "upstream": _up_kept,
+                    "downstream": _down_kept,
+                    "upstream_total": len(_up_sorted),
+                    "downstream_total": len(_down_sorted),
                 }
+                if _up_trunc or _down_trunc:
+                    payload["truncated"] = True
+                    payload["note"] = (
+                        f"upstream: {len(_up_kept)}/{len(_up_sorted)} returned, "
+                        f"downstream: {len(_down_kept)}/{len(_down_sorted)} returned - "
+                        f"capped to stay within token_budget ({_token_budget}). The "
+                        "_total fields above reflect the true full counts. Raise "
+                        "token_budget to see more, or lower depth/raise min_confidence "
+                        "to narrow the chain."
+                    )
             elif name == _GRAPH_IMPACT_TOOL:
                 impact = q.get_impact(node_id=node_id, min_confidence=_min_confidence)
-                payload = {"status": "ok", "project_path": str(_project_path), **_asdict(impact)}
+                impact_dict = _asdict(impact)
+                # direct dependents are always returned in full (pre-refactor callers must
+                # never lose these - they're the immediate blast radius); only the
+                # (potentially much larger) transitive list is capped, high-confidence
+                # entries first, using by_confidence's own tiering so this doesn't need to
+                # re-derive tier order. 'total' is always the true, uncapped count.
+                char_budget = max(_token_budget, 1) * 4
+                _tier_rank: dict[str, int] = {}
+                for _tier, _ids in (impact_dict.get("by_confidence") or {}).items():
+                    _rank = {"high": 0, "medium": 1, "low": 2}.get(_tier, 3)
+                    for _nid in _ids:
+                        _tier_rank.setdefault(_nid, _rank)
+                _transitive_sorted = sorted(
+                    impact_dict["transitive"], key=lambda nid: _tier_rank.get(nid, 3),
+                )
+                _used = len(json.dumps({
+                    "status": "ok", "project_path": str(_project_path),
+                    "direct": impact_dict["direct"], "total": impact_dict["total"],
+                    "by_confidence": impact_dict["by_confidence"],
+                }))
+                _trans_kept, _, _trans_trunc = _cap_by_chars(_transitive_sorted, char_budget, _used)
+                payload = {
+                    "status": "ok", "project_path": str(_project_path), **impact_dict,
+                    "transitive": _trans_kept,
+                }
+                if _trans_trunc:
+                    payload["truncated"] = True
+                    payload["transitive_returned"] = len(_trans_kept)
+                    payload["transitive_total"] = len(_transitive_sorted)
+                    payload["note"] = (
+                        f"{len(_transitive_sorted) - len(_trans_kept)} more transitive "
+                        f"dependent(s) omitted to stay within token_budget ({_token_budget}) "
+                        f"- 'total' above ({impact_dict['total']}) is the true full count, "
+                        "direct dependents are always complete. Raise token_budget to see "
+                        "more, or use graph_subsystem for a coarser view."
+                    )
             else:
                 sub = q.get_subsystem(file_path_str)
                 payload = {"status": "ok", "project_path": str(_project_path), **_asdict(sub)}
@@ -658,7 +748,7 @@ async def dispatch_graph_tool(name: str, arguments: dict) -> list[TextContent] |
             _r = _load_querier_simple(project_path)
             if isinstance(_r, dict):
                 return _r
-            q, _proj = _r
+            q, _proj, _staleness = _r
             important = q.get_important_nodes(top_k)
             result_nodes = [
                 {
@@ -670,7 +760,10 @@ async def dispatch_graph_tool(name: str, arguments: dict) -> list[TextContent] |
                 }
                 for n in important
             ]
-            return {"important_nodes": result_nodes, "total": len(result_nodes)}
+            _result = {"important_nodes": result_nodes, "total": len(result_nodes)}
+            if _staleness:
+                _result["staleness_warning"] = _staleness
+            return _result
 
         try:
             loop = asyncio.get_running_loop()
@@ -707,8 +800,11 @@ async def dispatch_graph_tool(name: str, arguments: dict) -> list[TextContent] |
             _r = _load_querier_simple(project_path)
             if isinstance(_r, dict):
                 return _r
-            q, _proj = _r
-            return q.get_blast_radius(changed_files, max_depth=max_depth, min_confidence=min_confidence)
+            q, _proj, _staleness = _r
+            _result = q.get_blast_radius(changed_files, max_depth=max_depth, min_confidence=min_confidence)
+            if _staleness:
+                _result["staleness_warning"] = _staleness
+            return _result
 
         try:
             loop = asyncio.get_running_loop()
@@ -734,9 +830,12 @@ async def dispatch_graph_tool(name: str, arguments: dict) -> list[TextContent] |
             _r = _load_querier_simple(project_path)
             if isinstance(_r, dict):
                 return _r
-            q, _proj = _r
+            q, _proj, _staleness = _r
             cycles = q.get_cycles(max_cycles=max_cycles)
-            return {"cycles": cycles, "cycle_count": len(cycles)}
+            _result = {"cycles": cycles, "cycle_count": len(cycles)}
+            if _staleness:
+                _result["staleness_warning"] = _staleness
+            return _result
 
         try:
             loop = asyncio.get_running_loop()
@@ -758,9 +857,12 @@ async def dispatch_graph_tool(name: str, arguments: dict) -> list[TextContent] |
             _r = _load_querier_simple(project_path)
             if isinstance(_r, dict):
                 return _r
-            q, _proj = _r
+            q, _proj, _staleness = _r
             dead = q.get_dead_code()
-            return {"dead_code_candidates": dead, "count": len(dead)}
+            _result = {"dead_code_candidates": dead, "count": len(dead)}
+            if _staleness:
+                _result["staleness_warning"] = _staleness
+            return _result
 
         try:
             loop = asyncio.get_running_loop()
@@ -798,8 +900,11 @@ async def dispatch_graph_tool(name: str, arguments: dict) -> list[TextContent] |
             _r = _load_querier_simple(project_path)
             if isinstance(_r, dict):
                 return _r
-            q, _proj = _r
-            return q.get_ownership(file_path, str(_proj))
+            q, _proj, _staleness = _r
+            _result = q.get_ownership(file_path, str(_proj))
+            if _staleness:
+                _result["staleness_warning"] = _staleness
+            return _result
 
         try:
             loop = asyncio.get_running_loop()

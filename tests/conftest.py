@@ -105,6 +105,38 @@ def jira_context():
 
 @pytest.fixture
 def isolated_config(tmp_path, monkeypatch):
+    """Isolates ConfigManager from every piece of real machine state, not just the
+    plaintext config file. Two confirmed real flakes (both under pytest-xdist)
+    traced back to this fixture previously patching only `CONFIG_PATH`:
+    `test_workstatus_connect_command_saves_connection` read back a stale
+    'Bearer x' from the real OS keyring instead of the value it had just saved,
+    and `test_langfuse_enable_and_disable_toggle_config` similarly raced on
+    `langfuse.secret_key`'s real keyring entry. Root cause: any test that
+    exercises a real `ConfigManager.save()`/`load()` round trip (rather than
+    mocking `ConfigManager.save` outright) reaches through `_kset`/`_kget` to the
+    REAL system keyring - global, persistent, shared across every xdist worker
+    and every pytest invocation on the machine, keyed only by connection/field
+    name with no per-test-run namespacing. `_master_key_cache` (an in-process
+    cache of the D-Lock encryption key) and `_MASTER_KEY_FILE` (its DPAPI file
+    cache, computed once from the real home directory at import time - never
+    re-derived from a patched `CONFIG_PATH`) compound this across tests sharing
+    an xdist worker process. Fixed generically here so every one of this
+    fixture's ~10 consuming test files gets it for free, matching the pattern
+    several of them were already hand-rolling per-test (see
+    tests/sonar/test_connection_config.py, tests/test_models.py) - individual
+    tests remain free to override `_keychain_ok`/`_kset`/`_kget`/`_kdel` again to
+    exercise the plaintext/env-var fallback path deliberately."""
+    import icx_engine.config_manager as cm
+
     config_file = tmp_path / ".icx" / "config.json"
-    monkeypatch.setattr("icx_engine.config_manager.CONFIG_PATH", config_file)
+    monkeypatch.setattr(cm, "CONFIG_PATH", config_file)
+    monkeypatch.setattr(cm, "_MASTER_KEY_FILE", tmp_path / ".icx" / ".master_key")
+    monkeypatch.setattr(cm, "_master_key_cache", None)
+
+    fake_keyring: dict[str, str] = {}
+    monkeypatch.setattr(cm, "_keychain_ok", True)
+    monkeypatch.setattr(cm, "_kset", lambda account, value: fake_keyring.__setitem__(account, value) or True)
+    monkeypatch.setattr(cm, "_kget", lambda account: fake_keyring.get(account))
+    monkeypatch.setattr(cm, "_kdel", lambda account: fake_keyring.pop(account, None))
+
     return config_file

@@ -607,11 +607,35 @@ ICX/
 |   |                           # with gitlab/sonar, reworked from an original single-instance design), mcp_tools.py
 |   |                           # (WORKSTATUS_TOOLS + dispatch_workstatus_tool()).
 |   +-- telemetry/              # Local, opt-out-free MCP tool-call usage logging - logger.py (ToolCallLogger, JSONL
-|   |                           # under ~/.icx/logs/YYYY-MM-DD/, never raises), report.py (pure per-tool aggregation,
-|   |                           # no CLI concerns), cli_commands.py (`icx logs report`). Wired into mcp_server.py's
+|   |                           # under ~/.icx/logs/YYYY-MM-DD/, IST timestamps, never raises), report.py (pure
+|   |                           # per-tool aggregation, no CLI concerns), cli_commands.py (`icx logs report`), otel.py
+|   |                           # (real OTel span per tool call, ALWAYS written to
+|   |                           # ~/.icx/otel/YYYY-MM-DD/traces.jsonl regardless of any config - LocalJsonlSpanExporter,
+|   |                           # SimpleSpanProcessor for immediate durability. Langfuse export is a separate,
+|   |                           # additive BatchSpanProcessor gated by AppConfig.langfuse.enabled, `icx langfuse`;
+|   |                           # a generic OTEL_EXPORTER_OTLP_* env-var-driven processor is a third, independent,
+|   |                           # stackable destination for any other OTLP backend). Wired into mcp_server.py's
 |   |                           # _call_tool as a thin timing wrapper around _call_tool_impl (the renamed original
-|   |                           # dispatch chain) - every tool call is logged regardless of which module handles it,
-|   |                           # with zero changes to any individual tool's dispatch code.
+|   |                           # dispatch chain) - every tool call is logged (JSONL) and traced (OTel) regardless
+|   |                           # of which module handles
+|   |                           # it, with zero changes to any individual tool's dispatch code.
+|   +-- mcp_gateway/            # External MCP server gateway - a user registers a curated preset MCP server
+|   |                           # (AppConfig.external_mcp_servers, named-dict, no "active" concept - every enabled
+|   |                           # server's tools are exposed simultaneously). client.py (ExternalMcpClient: owns one
+|   |                           # subprocess+ClientSession end to end inside a single dedicated background task -
+|   |                           # required because anyio's cancel scopes must be entered/exited in the same task, so a
+|   |                           # naive AsyncExitStack held open across the calling task and a later close() call would
+|   |                           # break). registry.py (lazy-started ExternalMcpClient cache, PRESETS - curated, pinned
+|   |                           # server configs, empty by default; a deployment adds its own in code).
+|   |                           # mcp_tools.py (external_tools()/
+|   |                           # external_tools_by_server()/dispatch_external_tool() - ICX's FIRST dynamic module:
+|   |                           # every other module's `<MODULE>_TOOLS` is a static, import-time list; this one is
+|   |                           # rebuilt from live config on every call. Tools namespaced `ext_<server>_<tool>`,
+|   |                           # description prefixed `[EXTERNAL - server ..., unverified by ICX]` - provenance is
+|   |                           # never hidden. Confirmation is opt-in per server (`require_confirmation`, routed
+|   |                           # through the same confirm.py token gate as git/jira/gitlab/memory) since ICX cannot
+|   |                           # itself audit arbitrary third-party subprocess code). service.py (CLI-facing config
+|   |                           # CRUD + an async smoke-test that spawns a server, lists its tools, and closes it).
 |   +-- jira/                   # Jira WRITE-back (close-out + create/delete + comments + search + links/assignee +
 |   |   |                       # attachments) - independent of connectors/jira/'s ConnectorBase read pipeline,
 |   |   |                       # matching sonar/gitlab's own client+service shape.
@@ -796,7 +820,9 @@ ICX/
 1. `icx_find_tools(module=...)` or `icx_find_tools(query=...)` or `icx_find_tools()` with neither (returns a module directory) - reads `_all_tools_full()`, returns full `name`/`description`/`inputSchema` for matches. An unknown module name returns the valid module list in the error text, never a silent empty result.
 2. `icx_call_tool(tool_name, arguments)` - forwards straight into `_call_tool_impl(tool_name, arguments)`, the exact same dispatch chain a native call would use. Zero new dispatch logic - it's a thin pass-through. A confirm_token-gated tool (e.g. `git_push`) still requires its normal two-call pattern when reached this way; gating is a property of the underlying tool, unaffected by how it's invoked.
 
-**Telemetry through the discovery path:** `_dispatch_with_telemetry(name, args)` is the shared helper both the native `_call_tool` entry point and `icx_call_tool`'s forwarding call - a tool invoked via `icx_call_tool` logs a `tool_calls.jsonl` entry under its own real name (e.g. `git_push`), not just under `icx_call_tool`. Both the outer (`icx_call_tool`) and inner (`git_push`) calls get logged - two entries per forwarded call is correct and expected, not a bug; `icx logs report` reflects real per-tool usage either way.
+**Telemetry through the discovery path:** `_dispatch_with_telemetry(name, args)` is the shared helper both the native `_call_tool` entry point and `icx_call_tool`'s forwarding call - a tool invoked via `icx_call_tool` logs a `tool_calls.jsonl` entry under its own real name (e.g. `git_push`), not just under `icx_call_tool`. Both the outer (`icx_call_tool`) and inner (`git_push`) calls get logged - two entries per forwarded call is correct and expected, not a bug; `icx logs report` reflects real per-tool usage either way. Each dispatch also emits a matching OTel span via `telemetry/otel.record_tool_call` (see `telemetry/` in the repository layout above) - same two-entries-per-forwarded-call shape, same no-op-until-configured behavior.
+
+**Repeated `icx_find_tools(module=...)` fetches are capped, not just discouraged in prose:** `_MODULE_FETCH_COUNTS` (process-lifetime dict in `mcp_server.py`) tracks how many times each module has been dumped this session. The 1st fetch returns full `name`/`description`/`inputSchema` for every tool in the module; the 2nd+ fetch of that same module returns `name`/`description` only (no `inputSchema`) plus `repeat_fetch_count`, cutting most of the payload automatically regardless of whether the calling agent reads the accompanying `instruction` text. A caller that still needs one specific tool's exact schema back mid-session uses `icx_find_tools(query=<exact tool name>)` instead of re-fetching the whole module.
 
 Real-world precedent this pattern is adapted from: [MCP Gateway Registry's dynamic tool discovery](https://github.com/agentic-community/mcp-gateway-registry/blob/main/docs/dynamic-tool-discovery.md) (`intelligent_tool_finder` + `invoke_mcp_tool`) and Anthropic's [Tool Search Tool](https://www.anthropic.com/engineering/advanced-tool-use) (`defer_loading` + search) - ICX's version had to be pure server-side since `defer_loading` is a client/Claude-API-specific parameter an MCP server has no access to; this pattern needs no client cooperation at all.
 
@@ -2353,10 +2379,30 @@ deeper under a `response` key: `{response: {code, message, data}}`.
 param (`"data"` or `"result"`) per endpoint rather than assuming one shape
 everywhere.
 
+**Empty-body-on-200 is a recurring, `_data()`-level failure, not a one-off:**
+first found on `/timesheet/add` (below - HTTP 200 with an empty `data` payload
+when the write silently failed server-side), then confirmed recurring on
+`/member/myprofile` (HTTP 200, but the response body itself was completely
+empty - `resp.json()` raised `JSONDecodeError: Expecting value: line 1 column
+1 (char 0)`, surfacing as an unhelpful generic "malformed response body"
+message with no indication of the real, previously-observed cause). Both are
+in-band failures `_raise_for_workstatus` never catches, since it only
+inspects the HTTP status code. Fixed generically in `_data()` itself (not
+per-endpoint): a genuinely empty/whitespace-only body now raises its own
+distinct, actionable `WorkstatusError` before `resp.json()` is even
+attempted - "Workstatus returned HTTP {status} with a completely empty
+response body... re-run `icx workstatus --add`..." - rather than falling
+through to the generic JSON-parse-error message. This benefits all 24
+endpoints, not just the two where it's been directly observed so far. The
+existing `/timesheet/add`-specific `if not data:` check (a body that DOES
+parse as valid JSON, but the unwrapped payload is empty) is a distinct,
+complementary case and is unaffected by this fix - never silently treat
+either case as success.
+
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/notifications/unread-count` | response `{data:{count}}`; doubles as the connection health check (no dedicated validate endpoint exists) |
-| POST | `/member/myprofile` | response includes `bankinginformation`/`paypal_account`/`razorpay_account`/`stripe_account_id` - this is a full HRIS profile, not just time-tracking |
+| POST | `/member/myprofile` | request body `{organization_id, user_id}` - response includes `bankinginformation`/`paypal_account`/`razorpay_account`/`stripe_account_id` - this is a full HRIS profile, not just time-tracking. **Real bug, fixed 2026-09-09**: `client.py:my_profile()` previously sent no request body at all (`json=None`), so Workstatus returned an empty HTTP 200 - not a server-side failure as first assumed. A real browser capture confirmed the endpoint requires `{organization_id, user_id}` in the body, both already held as `self._org_id`/`self._user_id`; the empty-body `_data()` guard (above) was a real, worthwhile fix but was masking this root cause rather than being the root cause itself |
 | POST | `/timesheet/add` | request body UPDATED 2026-08-03 (see below): `{billable, date, deviceId, deviceType, from, ip_address, member_id, notes:{note}, organization_id, os_version, project_id, client_id, reason, source_type, time_type, to, todo_id, activity, time_mode, duration, togglenotes, togglereason}`. `deviceId` has no verified generation algorithm - a random UUID is used per client instance. **Real bug, fixed**: observed live, HTTP 200 with an empty `data` body when the write silently failed server-side - an in-band failure signal `_raise_for_workstatus` never catches (it only inspects the status code). `client.py:add_timesheet` now raises `WorkstatusError` when `data` comes back empty instead of returning `{}` as if it were a created entry - previously reported false success on a failed write |
 | POST | `/table/view/project/list` | paginated project list; envelope nests under `result`, not `data`. `page` accepted as a query-string param (Laravel's `paginate()` reads it by framework convention - not endpoint-specific behavior that needed live capture). `lean=True` (client-level flag, not a Workstatus param) strips any list/dict-valued field from each row post-response - real symptom fixed: each row embeds a full member roster (100+ users with email/avatar/pivot rows), ~50KB+ per project even when the caller only needs id/name |
 | POST | `/project/detailsview` | one project's details; response `data` is a one-item list, client unwraps to the item |
@@ -2377,7 +2423,7 @@ everywhere.
 | POST | `/expense/filtered-data` | recorded expenses for a date range, paginated |
 | POST | `/list/invoices` | invoices, paginated, with paid/open/overdue totals |
 | POST | `/payroll/report/list` | payroll report for a date range, paginated |
-| POST | `/timesheets/view` | one timesheet entry's full detail (member/project/task/date/times/OS/location/IP/reason/notes); envelope nests under a `response` key |
+| POST | `/timesheets/view` | one timesheet entry's full detail (member/project/task/date/times/OS/location/IP/reason/notes); envelope nests under a `response` key. **Real bug, fixed 2026-09-09**: `client.py:get_timesheet()` assumed the unwrapped `data` was always a list and took `[0]` - a live capture showed it can also be a single dict directly, so `isinstance(data, list)` was False and every such call fell through to the empty-list branch, raising a false "not found" even though the entry existed. Now handles both shapes |
 | POST | `/edit/timesheet/{id}` | edit an existing manual entry - auto-saves per field change in the web UI; requires an `updatedFields` diff descriptor; envelope also nests under `response` |
 
 **Time format (WS-3, CONFIRMED via a live read, not just the one earlier write
@@ -2564,6 +2610,97 @@ connection only), `icx workstatus profile`, `icx workstatus unread`,
 `_make_client`, unaffected by which connection is active at call time (no
 per-tool connection-name parameter, matching how `sonar_*`/most `gitlab_*`
 tools implicitly use the active connection too).
+
+**Config model (`models/config.py`):** `LangfuseConfig` - `enabled: bool =
+False`, `host: str = "https://cloud.langfuse.com"`, `public_key: str | None`
+(plain), `secret_key: str | None = Field(default=None, exclude=True)`
+(keyring-routed under the single account `langfuse_secret_key` - single
+instance, not a per-connection dict, so no `<name>` suffix like
+`sonar_conn_token:<name>`). `AppConfig.langfuse: LangfuseConfig =
+LangfuseConfig()` - always present, no active/inactive concept since there
+is only ever one. Gates ONLY the Langfuse `BatchSpanProcessor` in
+`telemetry/otel.py::_langfuse_processor()` - the always-on local
+`~/.icx/otel/` trace file is unaffected by `enabled`.
+
+**CLI:** `icx langfuse --set` (interactive: host/public key/secret key),
+`icx langfuse --enable`/`--disable` (refuses `--enable` with a clear message
+if public/secret key aren't both set yet), bare `icx langfuse` prints
+status (`enabled`/`host`/`public_key`/whether `secret_key` is set) plus a
+reminder that local OTel traces are written regardless.
+
+---
+
+### 6c. External MCP Gateway (`mcp_gateway/`)
+
+Lets a user register any stdio-launched external MCP server (e.g. Microsoft's Playwright MCP,
+or a custom one) and have ICX own its subprocess lifecycle and proxy its tools through ICX's own
+`icx_find_tools`/`icx_call_tool` discovery pair, same as any ICX-authored module.
+
+**Config model (`models/config.py`):** `ExternalMcpServer` - `name`, `command`, `args: list[str]`,
+`env: dict[str, str] = Field(default_factory=dict, exclude=True)`, `enabled: bool = False`,
+`require_confirmation: bool = False`, `preset: str | None`. `AppConfig.external_mcp_servers:
+dict[str, ExternalMcpServer] = {}` - named-dict like `sonar_connections`/`gitlab_connections`/
+`workstatus_connections`, but with no "active" concept: every enabled server's tools are exposed
+simultaneously, not switched between. `env`'s values are treated as secret-shaped by default and
+keyring-routed one key at a time under `external_mcp_env:<name>:<key>` (config_manager.py) -
+unlike a fixed secret field (e.g. `GitLabConnection.token`), the key set is arbitrary per server,
+so the whole `env` dict is excluded from serialization and rebuilt from scratch on every `save()`.
+
+**Process lifecycle (`mcp_gateway/client.py`):** `ExternalMcpClient` runs the entire `async with
+stdio_client(...): async with ClientSession(...):` block inside one dedicated background task for
+the client's whole lifetime, communicating with callers only via `asyncio.Event`s and the session
+object itself - never by holding an `AsyncExitStack` open across the calling task and a later
+`close()` call. This is required because anyio (which the `mcp` SDK's stdio transport is built on)
+requires a cancel scope to be entered and exited in the same task; keeping one task alive for the
+whole session and having it `await` its own shutdown event sidesteps that entirely. Lazy-started
+on first real use (`ensure_started()`), never at registration or ICX-startup time. Every public
+method (`list_tools`/`call_tool`/`close`) never raises past its own boundary, mirroring
+`telemetry/logger.py`'s and `workstatus/client.py`'s "never raise" convention.
+
+**Dynamic tool aggregation (`mcp_gateway/mcp_tools.py`):** ICX's **first dynamic module** - every
+other module's `<MODULE>_TOOLS` is a static, import-time list; `external_tools()`/
+`external_tools_by_server()` are rebuilt from live config on every `icx_find_tools`/`tools/list`
+call, wired into `mcp_server.py`'s `_all_tools_full()` and `_module_index()` (each enabled server
+becomes its own pseudo-module, e.g. `icx_find_tools(module="playwright")`). Every proxied tool is
+namespaced `ext_<server>_<tool>` and its description is prefixed `[EXTERNAL - server ...,
+unverified by ICX]` - provenance is never hidden behind a native-looking name. `_call_tool_impl`
+gets one new fallthrough entry (`dispatch_external_tool`) at the end of its dispatch chain, after
+`boost` and before the inline core tools.
+
+**Trust boundary:** a registered external server is arbitrary third-party subprocess code ICX did
+not author and cannot itself audit. There is no automatic `confirm.py` gating - ICX cannot know
+which of an arbitrary server's tools are destructive. `require_confirmation` (per server) is the
+one opt-in safety knob: when set, *every* call to that server's tools is wrapped in the same
+`confirm.py` `issue_token`/`verify_token` round-trip used by git/jira/gitlab/memory's destructive
+tools, regardless of the tool's own declared `annotations`.
+
+**Presets (`mcp_gateway/registry.PRESETS`):** curated, pinned server configs - the ONLY way a
+server can be registered (`icx mcp-external --add --preset <name>`). Empty by default - ICX
+ships with zero external MCP servers; a deployment adds its own curated entries to this dict in
+code (e.g. `playwright`, pinned to an exact `@playwright/mcp` version - never `latest`, same "pin
+deliberately, bump deliberately" discipline as `testing/runners/install.py`'s `RUNNER_SPECS`).
+`--add` without
+`--preset` is rejected with a clear error - `command`/`args` are never accepted as free-form user
+input; the CLI only lets a user pick a name, add `env` values, and decide `require_confirmation`/
+`enabled` on top of a preset's fixed `command`/`args`. This is deliberate: ICX spawning an
+arbitrary user-typed command would make this an unaudited local code-execution primitive rather
+than a curated integration. Adding a new preset is a code change (`registry.PRESETS`), not a
+user-facing action.
+
+**CLI:** `icx mcp-external --add [--preset NAME]` (interactive), `--enable`/`--disable`/`--remove
+NAME`, bare `icx mcp-external`/`--list` shows registered servers, `icx mcp-external test NAME`
+spawns a server once, lists its tools, and shuts it down again without touching the live registry
+used by the running MCP server.
+
+**Shutdown:** `mcp_server.py`'s `_serve()` closes every live `ExternalMcpClient` (via
+`mcp_gateway.registry.shutdown_all()`) in its shutdown `finally` block, guarded like every other
+cleanup step there.
+
+**testing/ integration:** deliberately **not** part of this module. `testing/`'s AGENT-GENERATE
+UI-test flow (`node_author_flow`) still has the agent write and run its own persisted Playwright
+test file - registering the `playwright` preset here does not change that flow. Wiring
+testing/'s UI flow to drive a registered Playwright MCP server live (instead of, or alongside,
+authoring a test file) is a separate, unproposed future change.
 
 ---
 
@@ -2918,6 +3055,7 @@ The graph module lives at `src/icx_engine/graph/`. The AST parser under `graph/p
 | `graph/parser/dedup.py` | `fuse_and_dedup()` - multi-source edge fusion; confidence summing for fusable families; highest-confidence deduplication for all others |
 | `graph/parser/centrality.py` | PageRank + betweenness + degree centrality; writes `pagerank`, `betweenness`, `degree_centrality`, `importance` attributes onto graph nodes |
 | `graph/parser/ownership.py` | CODEOWNERS file parser; `GraphQuerier.get_ownership()` resolves file owners and cross-team dependency edges |
+| `graph/parser/ui_text.py` | Extracts literal, user-visible UI text (JSX/TSX text nodes, `title`/`aria-label`/`placeholder`/`alt` attributes) - attaches a `ui_text` field to file nodes so `find_context` can match a ticket description against a real screen title/label, no LLM calls, no embeddings |
 | `graph/parser/resolvers/_common.py` | `make_edge()` - shared edge-dict constructor used by go/terraform/jsp/proto/rails/event resolvers |
 
 **Maintainer note - do not split `extract.py`.** It is large by design. The parallel
@@ -2967,6 +3105,7 @@ On second and subsequent builds, the graph avoids full re-extraction for unchang
 
 - `graph/parser/file_cache.py` - reads and writes `file_hashes.json` alongside `graph.json` in `~/.icx/graphs/<id>/`. Each entry maps a file path to its SHA-256 digest. `compute_changed_files()` returns changed/deleted file lists as repo-relative POSIX paths.
 - `builder.py:_merge_incremental()` - called when `graph.json` and `file_hashes.json` both exist. Files whose digest matches are carried forward from the previous graph without re-parsing; only changed and new files go through AST extraction. Stale nodes/edges are purged by comparing each node/edge's `file`/`source_file`/`target_file` against the changed/deleted sets via `_rel_path()`, which normalizes Windows backslashes to `/` and strips an absolute project-root prefix (passed as `root_posix`) - this keeps the comparison correct even though some resolvers (`_abs_edges()`) store `source_file` as an absolute POSIX path while the changed/deleted sets are always repo-relative.
+- `builder.py:_build_project_isolated`'s `_incremental` gate is `not force and graph_json_path.exists() and bool(stored_hashes)` - `force=True` (threaded from `icx graph build --force` through `GraphManager.build()` -> `_run_build_subprocess()` -> `_build_project_isolated()`, and separately from `GraphManager.build_background(force=...)`) always bypasses the hash check entirely and runs a full extraction. Without this, `--force` never actually forced anything: when the hash check found zero changed/deleted files it took a "graph unchanged - skip rebuild" shortcut (`builder.py`, returns a placeholder zero-valued result and never writes `graph.json.tmp` at all) regardless of `--force`, meaning a corrupted/incomplete `graph.json` from an earlier failed build could never be repaired - the shortcut fired before any real rebuild work ran, on every subsequent attempt.
 - `storage.py:ProjectInfo.incremental_capable` - `True` when the stored graph supports incremental merge (i.e., `file_hashes.json` is present). First builds always run full extraction.
 - `storage.py:ProjectInfo.tracker_project_key` - Optional tracker project key (uppercase, e.g. a Jira project key `"PROJ"`, or another tracker's project identifier) linking this graph to a tracker project. Set via `icx graph add --project`. Used by `lookup_by_tracker_project_key()`/`find_projects_by_tracker_key()` and `icx graph build --project` to resolve all graphs for a project key. Legacy `meta.json`/`registry.json` entries using the old field name `jira_project` are migrated to `tracker_project_key` automatically on read.
 - `storage.py:lookup_by_tracker_project_key(key)` - Returns all `ProjectInfo` entries whose `tracker_project_key` matches `key` (case-insensitive). Used by `icx graph build --project`.
@@ -2990,7 +3129,7 @@ After all resolvers have run, `fuse_and_dedup()` in `graph/parser/dedup.py` cons
 - PageRank dangling redistribution is O(N) per iteration: all dangling contributions are summed once then distributed, not looped per dangling node. This keeps 5k+ node graphs fast (seconds, not minutes).
 - All four values are stored as node attributes and exported to `graph.json` so they are available to `GraphQuerier` without re-computation.
 - `importance` = `0.50 * pagerank + 0.30 * degree_centrality + 0.20 * betweenness`.
-- `find_context()` in `query.py` multiplies its TF-IDF relevance score by `(1.0 + importance)` so structurally central files rank higher for ambiguous queries.
+- `find_context()` in `query.py` multiplies its keyword-match relevance score by `(1.0 + importance)` so structurally central files rank higher for ambiguous queries. Scoring text per node is `label + source_file + role_tag + ui_text` (word-boundary matched, not substring - see the graph module's other "What NOT to touch" notes on this). `ui_text` (from `parser/ui_text.py`, see below) additionally earns a `_PHRASE_MATCH_BONUS` (3x) when a genuine multi-word phrase from it appears verbatim in the task string - e.g. a ticket echoing a real screen title almost word-for-word - so that clearly outranks candidates that only share one common word. A single shared word never triggers this bonus; ambiguous single-word queries correctly return multiple ranked candidates rather than a forced single pick, since that ambiguity (e.g. several real screens sharing one domain word) is a genuine property of the codebase, not something scoring should hide.
 
 ### CO_CHANGED semantics
 
@@ -3045,8 +3184,8 @@ Builds run in a `ProcessPoolExecutor(max_workers=max(1, cpu_count))`. Each build
    - **Fallback:** rglob filtered by `_is_noise_dir` from `parser/detect.py`
    - **`.icxignore` exclusions:** patterns from `~/.icx/graphs/<project_id>/.icxignore` are applied after file collection (seeded with defaults on first build).
 3. **AST extraction** (`emit: scan, ast`) - `parser.extract.extract(files, cache_root=icx_cache, parallel=False, on_progress=...)` via tree-sitter. Produces all nodes + intra-file edges. Zero API cost, zero misses. `parallel=False` prevents grandchild process spawning inside the subprocess (deadlocks on Windows with the "spawn" context).
-4. **LSP + semantic resolver pass** (`emit: lsp`) - runs language-appropriate resolvers in order; each resolver appends edges to the extraction dict. Resolvers run per-language (Python, Java, Kotlin, JS/TS). Resolver failures are logged at DEBUG and skipped - never fatal. LSP servers (Pyright, tsserver) are managed by `lsp_manager.py` under `~/.icx/<server>/<runtime-version>/`, a per-runtime-version cache so switching Node/Python (or Java/Rust/.NET/etc) versions across projects reuses the cached install instead of reinstalling. **Batch-open protocol:** ts_lsp and pyright_lsp open all files with `did_open` before making any `definition()` queries, so the server indexes the full workspace once rather than re-analysing on every file. A circuit breaker (5 consecutive timeouts) aborts LSP queries cleanly when the server is overloaded. Per-request timeout is 3s.
-5. **LLM edge enrichment** (optional, `emit: llm`) - `extract_corpus_parallel()` sends file batches to the LLM for cross-file semantic edges. Only edges merged; LLM community IDs discarded (collide across chunk boundaries).
+4. **LSP + semantic resolver pass** (`emit: lsp`) - runs language-appropriate resolvers in order; each resolver appends edges to the extraction dict. Resolvers run per-language (Python, Java, Kotlin, JS/TS). Resolver failures are logged at DEBUG and skipped - never fatal. LSP servers (Pyright, tsserver) are managed by `lsp_manager.py` under `~/.icx/<server>/<runtime-version>/`, a per-runtime-version cache so switching Node/Python (or Java/Rust/.NET/etc) versions across projects reuses the cached install instead of reinstalling. **Batch-open protocol:** ts_lsp and pyright_lsp open all files with `did_open` before making any `definition()` queries, so the server indexes the full workspace once rather than re-analysing on every file. A circuit breaker (5 consecutive timeouts) aborts LSP queries cleanly when the server is overloaded. Per-request timeout is 3s. **`cross_service_rest.py`** (regex-matches HTTP calls against Spring/FastAPI route annotations, normalized-URL string matching, confidence 0.85) runs here too, but routes its output to two different places depending on match type: same-project matches (frontend calling its own backend in one repo) are real edges (`relation="calls_api"`) merged into `extraction["edges"]` like any other resolver, traversable via `graph_call_chain`/`graph_impact`; peer-registered-project matches (two separately registered ICX graphs) can't become normal edges - node ids aren't shared across separate `graph.json` files - so those are written to `cross_links.json` instead, read only by the `graph_cross_links` MCP tool. Detection is shape-based, not tied to any one project's conventions: frontend call detection includes `_GENERIC_PATH_ARG_RE`, matching any path-shaped quoted literal passed as a call argument regardless of the function name (catches a project's own custom HTTP wrapper, e.g. `sendRequest(data, "/x")`, not just axios/fetch/requests/RestTemplate); backend route detection resolves a Spring mapping annotation's argument through a project-wide Java constant map (`_build_java_const_map`, scans every `public static final String` declaration by declaring type name) when the route is referenced by a constant (`@GetMapping(ServicePaths.GET_X)`) rather than inlined as a literal - common in enterprise codebases that centralize route strings. An unresolvable constant reference is skipped, never guessed. Both `value=` and `path=` are recognized (Spring aliases). The class-level `@RequestMapping` occurrence is excluded from the method-level scan by exact source position, since both regexes match the same `@RequestMapping` token and would otherwise double-count it as a spurious method route. FastAPI's own documented `APIRouter(prefix="/x")` multi-router structure is resolved via `_FASTAPI_ROUTER_PREFIX_RE`, keyed by whatever variable name the router is actually assigned to (never hardcoded to literally "router"). **`parser/ui_text.py`** also runs here: extracts literal, user-visible text (JSX/TSX text nodes, `title`/`aria-label`/`placeholder`/`alt` attribute values) from UI source files and attaches it as a new `ui_text` field on the matching file node - purely deterministic text extraction, zero LLM calls, zero embeddings. Lets `graph_find_context` match a ticket description against what a user actually saw on screen (a real page title/button label) instead of only code identifiers/filenames - see the `find_context()` scoring note above for how `ui_text` and its phrase-match bonus feed into ranking.
+5. **LLM edge enrichment** (opt-in, `--llm`, `emit: llm`) - `extract_corpus_parallel()` sends file batches to the LLM for cross-file semantic edges. Only edges merged; LLM community IDs discarded (collide across chunk boundaries). Off by default in both entry points: `icx graph build` requires explicit `--llm`, and `GraphManager.build_background()` (the query-triggered small-delta auto-rebuild) never runs it at all, regardless of configuration - an unattended background job must never silently pay LLM time/cost. Both `OpenAI()` and `anthropic.Anthropic()` client construction sets `max_retries=0` so ICX's own `_extract_with_adaptive_retry`/chunk-loop logic is the only retry layer, never stacked under an SDK-hidden retry-with-backoff. A circuit breaker (`_looks_like_rate_limited`, 5 cumulative rate-limit-shaped chunk failures) aborts remaining chunks - submitted in `workers`-sized batches, not all eagerly upfront, so the abort point is deterministic rather than racing already-launched threads. `estimate_build_eta`'s LLM-inclusive number is a best-case-only estimate (assumes every chunk succeeds first try) - `LLM_ETA_CAVEAT`/`GraphManager.estimate_eta_caveat()` surface that uncertainty to callers rather than presenting the number as precise.
 6. **Community detection** (`emit: louvain`) - `build_from_json(extraction)` + `cluster(G)` -> merged graph with Louvain communities. **Completion floor:** `_partition_safe` runs Louvain under a wall-clock cap via `_run_partition_with_timeout` (watchdog thread + `PyThreadState_SetAsyncExc`). networkx Louvain's inner `while nb_moves > 0` move loop is unbounded even when `max_level` caps the outer levels, so one giant weakly-separable dense component (e.g. a heavily cross-coupled UI graph whose 2-core spans ~half the nodes) can grind for minutes. The cap is a pure safety net - a healthy graph partitions in seconds regardless of size, so it never fires on a legitimately-working run and community quality is identical for every repo that finishes in time. On cap the partition degrades in two tiers: first `_coarse_partition` (weighted, seeded label propagation via `asyn_lpa_communities` under `_COARSE_TIMEOUT = 60s`), which is near-linear and splits the dense mesh into real communities in seconds where even single-level Louvain would grind; then connected-components as a last resort. Cap defaults: `_PARTITION_TIMEOUT_BOUNDED_DEFAULT = 120s` (bounded Louvain), `_PARTITION_TIMEOUT = 90s` (old unbounded networkx). Override with the `ICX_LOUVAIN_TIMEOUT` env var (seconds).
 7. **Export** (`emit: export`) - `to_json(G, communities, output_path=graph_tmp_path, skip_safety_check=True)` writes compact JSON (no indent, `separators=(",", ":")`) directly to a file handle via `json.dump` - no in-memory string. Then `_finalise_build` renames atomically to `graph.json`. `skip_safety_check=True` skips the existing-node-count guard during builds (guard still applies for manual/admin callers).
 8. **LLM cluster descriptions** (optional) - `_generate_cluster_descriptions(graph_path)` sends top-5 files per cluster to the LLM, writes `cluster_descriptions.json`. Non-fatal: silently skipped when no LLM configured or on any failure.
@@ -3149,7 +3288,7 @@ Agents can instantiate `GraphQuerier(graph_json_path)` directly from the path re
 - `graph/builder.py:_collect_source_files` - git-first file collection with vendor filtering. Do not replace with direct `rglob` - it does not respect `.gitignore` and includes `node_modules` and build artifacts.
 - `graph/builder.py:_build_project_isolated` - `cache_root=icx_cache` must be passed to `extract()`. When omitted, the parser infers `effective_root` from absolute source file paths (= project root) and writes output into the project directory.
 - `graph/storage.py:derive_project_id` - changing the hash function or length invalidates all existing project IDs. The input is always `path.as_posix()` (forward-slash separated) to ensure cross-platform hash stability.
-- `mcp_server.py:_load_querier_simple` - all five graph analysis tools (`graph_important_nodes`, `graph_blast_radius`, `graph_cycles`, `graph_dead_code`, `graph_ownership`) route through this helper which calls `validate_project_path()` before any filesystem access. Do not bypass it with raw `Path(project_path)` - matches the pattern used by the other graph query tools via `_resolve_graph_path()`.
+- `mcp_server.py:_load_querier_simple` - all five graph analysis tools (`graph_important_nodes`, `graph_blast_radius`, `graph_cycles`, `graph_dead_code`, `graph_ownership`) route through this helper which calls `validate_project_path()` before any filesystem access. Do not bypass it with raw `Path(project_path)` - matches the pattern used by the other graph query tools via `_resolve_graph_path()`. Returns a 3-tuple `(GraphQuerier, validated_path, staleness_warning)` on success - unlike `_resolve_graph_path`, a stale graph here is never hard-degraded (these five tools have no non-graph fallback, unlike `graph_find_context`'s grep fallback), only warned about via `_staleness_warning_for()`. Every caller must unpack 3 values, not 2.
 - `graph/report.py:_role_tag` hook detection - the check `stem.startswith("use") and len(stem) > 3 and stem[3].isupper()` is intentional. React hooks start with lowercase `use` + uppercase letter. Changing to `sl.startswith("use")` causes false matches on `userList`, `userActions` etc.
 - `graph/report.py` deduplication - the `used_filenames` set must use `.lower()` for membership checks. Windows NTFS is case-insensitive; without this, two communities with labels like "Modal" and "modal" silently overwrite each other's cluster file.
 - `graph/report.py:_community_label:_SKIP_PARTS` - the extended set of Java package directory names must stay. Removing them causes generic package names to bleed through as cluster labels on Java projects.
@@ -3403,6 +3542,23 @@ The CLI uses [Typer](https://typer.tiangolo.com/) with `rich_markup_mode="rich"`
 - Consistency is enforced: `tests/test_smoke.py::test_every_leaf_command_has_debug_and_traceback_options` introspects `typer.main.get_command(app)`, walks the full command tree (including every sub-app registered via `app.add_typer` - git, jira, gitlab, memory, graph, test, sonar, boost, skills, mcp), and asserts every leaf command's params include both `debug` and `traceback` (76/76 as of 2026-07-31) - a new command with a soft/missing pair breaks this test, not just a manual count.
 - **Authentication flows belong in `services/connection_service.py`**, not inline in `cli.py`
 
+**CLI help visibility (`cli_visibility.AGENT_ONLY_CLI_HIDDEN`):** a code-level flag (not a user
+config - never in `AppConfig`/`config.json`) that hides the operational/feature-work half of the
+CLI from `--help` output, keeping only connection-setup and connection-testing commands visible
+to a human at a terminal - the rest is meant to be reached by an AI agent via MCP tools, not typed
+by hand. Applied via Typer's own `hidden=` kwarg on `.command(...)`/`.add_typer(...)` - this ONLY
+affects `--help` listing; every hidden command still runs if invoked by its exact name, and
+`typer.main.get_command(app)`'s command tree (which `tests/test_smoke.py` and Click's own
+dispatch use) is unaffected, so hiding a command breaks neither its own tests nor dispatch.
+Imported from its own tiny module (`cli_visibility.py`), not `cli.py`, so per-module CLI files
+(`jira/cli_commands.py`, etc.) can use it without a circular import back into `cli.py`. Currently
+visible: `setup`/`connection`/`model`/`status`/`logout`/`uninstall`/`update` (top-level), `mcp
+setup/remove/list/config/run`, `sonar`/`gitlab`/`workstatus` connection management + `status`
+(+`gitlab verify`), `langfuse`, `mcp-external` (all of it), `jira` bare/`whoami`, `test setup`/
+`sessions`, `memory status`/`list`/`export`/`import`, all of `graph`, `skills list`. Hidden:
+everything else, including all of `git`/`boost`/`logs` (whole groups) and `jira update/create/
+delete/search/get/assign` + its `comment`/`link`/`attach`/`watch`/`worklog` sub-apps.
+
 The REPL (`_start_repl`) re-enters Typer for each line - do not add state that persists between REPL iterations.
 
 ---
@@ -3438,7 +3594,7 @@ def test_something(isolated_config):
     ConfigManager.save(...)
 ```
 
-**A test that adds a real connection (`icx <connector> --add` style, via `typer.prompt` mocking rather than `patch.object(ConfigManager, "load", return_value=...)`) writes secret fields to the REAL OS keyring** - `isolated_config` only redirects the plaintext `CONFIG_PATH`, it does not isolate the keyring, which is genuine machine-wide state. Under `pytest -n auto`, two such tests using the same connection name (e.g. `"default"`) can land on different worker *processes* and race on the same real keyring entry - one test intermittently reads back the other's secret value. If you add a test like this reusing an existing connection name, mark every test sharing that name with `@pytest.mark.xdist_group(name="<connector>_<name>_keyring")` (pytest-xdist's built-in worker-pinning marker - forces the whole group onto one worker, serializing just those tests, not the whole suite) - see `tests/test_smoke.py::test_workstatus_connect_command_saves_connection` and `tests/workstatus/test_cli_commands.py`'s identically-named test for the pattern (both write connection name `"default"`'s secrets).
+**`isolated_config` fully isolates `ConfigManager` from real machine state, not just the config file (fixed 2026-09-09, real bug).** It previously redirected only `CONFIG_PATH`, leaving `_kset`/`_kget`/`_kdel` pointed at the REAL OS keyring (genuine machine-wide, cross-process, cross-pytest-invocation state, keyed only by connection/field name), plus `_master_key_cache` (in-process D-Lock key cache) and `_MASTER_KEY_FILE` (its DPAPI file cache, computed once from the real home directory at import time, never re-derived from a patched `CONFIG_PATH`) both able to leak across tests sharing an xdist worker process. Two real flakes were traced to this: `test_workstatus_connect_command_saves_connection` intermittently read back a stale `'Bearer x'` from the real keyring instead of the value it had just saved, and `test_langfuse_enable_and_disable_toggle_config` raced the same way on `langfuse.secret_key`'s real keyring entry - both nondeterministic under `pytest -n auto`, occasionally reproducing in serial runs too depending on what a previous real `icx <connector> --add` run (test or manual) had left in the machine's actual keyring. `isolated_config` now also patches `_MASTER_KEY_FILE` to a temp path, resets `_master_key_cache` to `None`, forces `_keychain_ok = True`, and backs `_kset`/`_kget`/`_kdel` with a fresh in-memory dict scoped to that one test - matching the per-test manual pattern several files were already hand-rolling (`tests/sonar/test_connection_config.py`, `tests/test_models.py`). A test that needs to exercise the plaintext/env-var fallback path can still override `_keychain_ok`/`_kset`/`_kget`/`_kdel` again after requesting the fixture, same as before. The now-unnecessary `@pytest.mark.xdist_group(...)` worker-pinning workaround on the two flaky tests was removed - they no longer touch anything real or shared.
 
 **Patching `ConfigManager.load` in tests:** `ConfigManager` is imported lazily inside several functions (`analyze`, `_handle_analyze_issue`, etc.) to avoid circular imports. Patch it at the source, not at the importing module:
 
@@ -3492,7 +3648,7 @@ texts, images, full_texts, raw = await process_attachments(raw, downloader, llm_
 ### Fixtures available in `conftest.py`
 
 - `cli_runner` - `CliRunner` instance for CLI tests
-- `isolated_config` - redirects config path to a temp file; yields the `Path`
+- `isolated_config` - redirects config path to a temp file and fully fakes the keyring/D-Lock layer (see the note above); yields the `Path`
 
 ### ANSI codes in CLI output assertions
 
@@ -3550,7 +3706,7 @@ Never write directly to `CONFIG_PATH`. Never skip the lock.
 
 **Testing credential isolation:** No credential is ever written to the LangGraph checkpoint DB. `capture`/`inline` auth run through ICX's own Playwright process only (`icx-auth.mjs`) and never pass a credential through chat; a restored session is loaded by the agent from `storageState`, never re-authored as login steps. `~/.icx/testing_auth.json` (`0o600`, keyed by project_id+host) holds only non-secret session intent `{session_id, captured_at, expires_at}`. `sonar_token` uses `Field(exclude=True)`.
 
-**Telemetry never logs secrets.** `telemetry/logger.py`'s `ToolCallLogger` records byte counts and a rough token estimate on the raw tool-call JSON, never the JSON content itself - a tool call carrying a Jira/GitLab/Sonar/Workstatus token in its arguments never has that token written to `~/.icx/logs/`. `~/.icx/logs/YYYY-MM-DD/` is created `0o700` on POSIX, same as every other `~/.icx/` subdirectory.
+**Telemetry never logs secrets.** `telemetry/logger.py`'s `ToolCallLogger` records byte counts and a rough token estimate on the raw tool-call JSON, never the JSON content itself - a tool call carrying a Jira/GitLab/Sonar/Workstatus token in its arguments never has that token written to `~/.icx/logs/`. `~/.icx/logs/YYYY-MM-DD/` is created `0o700` on POSIX, same as every other `~/.icx/` subdirectory. `telemetry/otel.py` follows the exact same shape - span attributes are byte counts/token estimates/`ok`/`error_type`, never tool-call content - and this holds for every destination the span reaches: the always-on local `~/.icx/otel/YYYY-MM-DD/traces.jsonl` file, the Langfuse export (config-gated by `AppConfig.langfuse.enabled`), and the generic `OTEL_EXPORTER_OTLP_ENDPOINT`-driven destination alike. `LangfuseConfig.secret_key` is `Field(..., exclude=True)` and keyring-backed via `config_manager.py`'s `langfuse_secret_key` account, same convention as `SonarConnection.token`/`GitLabConnection.token`.
 
 ---
 

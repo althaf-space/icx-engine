@@ -407,7 +407,11 @@ def _call_openai_compat(
                 timeout_s = v
         except ValueError:
             pass
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
+    # max_retries=0: the SDK's own default retry-with-backoff on 429 would silently eat
+    # 30-50s+ per call before _extract_with_adaptive_retry / the chunk-loop circuit breaker
+    # ever see the failure - ICX's own retry/circuit-breaker logic is the only retry layer,
+    # not stacked under an opaque SDK-hidden one.
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s, max_retries=0)
     kwargs: dict = {
         "model": model,
         "messages": [
@@ -517,7 +521,8 @@ def _call_claude(api_key: str, model: str, user_message: str, max_tokens: int = 
             "Run: pip install anthropic"
         ) from exc
 
-    client = anthropic.Anthropic(api_key=api_key)
+    # max_retries=0 - see the matching comment on the OpenAI client above; same reasoning.
+    client = anthropic.Anthropic(api_key=api_key, max_retries=0)
     resp = client.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -804,6 +809,49 @@ def _looks_like_context_exceeded(exc: BaseException) -> bool:
     return any(marker in msg for marker in _CONTEXT_EXCEEDED_MARKERS)
 
 
+_RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "too many requests",
+    "quota exceeded",
+    "resource_exhausted",   # Gemini's rate-limit status name
+)
+
+
+def _looks_like_rate_limited(exc: BaseException) -> bool:
+    """Heuristically classify an exception as a provider rate-limit/quota rejection (HTTP
+    429 or equivalent), driving the chunk-loop circuit breaker below.
+
+    Matches on the exception's own class name first - both the `openai` and `anthropic`
+    SDKs name their 429 exception class exactly `RateLimitError` regardless of the actual
+    response body text, which varies by provider and is not a reliable signal on its own.
+    Message-substring matching is the fallback for backends that don't raise a typed
+    exception (local OpenAI-compat servers via raw httpx)."""
+    if type(exc).__name__ == "RateLimitError":
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _RATE_LIMIT_MARKERS)
+
+
+# Cumulative (not "consecutive") rate-limit-shaped failure count that trips the chunk-loop
+# circuit breaker. Deliberately not reset on an intervening success - a real quota
+# exhaustion (the reported case: 184/186 chunks failing) trips this almost immediately
+# either way, and not resetting means a build with occasional scattered rate-limit blips
+# across many chunks still eventually stops rather than silently eating that cost forever.
+_RATE_LIMIT_CIRCUIT_BREAKER_THRESHOLD = 5
+
+
+def _rate_limit_abort_message(failure_count: int, skipped_count: int) -> str:
+    return (
+        f"[icx graph] {failure_count} chunk(s) failed with what looks like a provider "
+        f"rate-limit/quota error - aborting rather than paying the same cost {skipped_count} "
+        "more time(s). AST-only edges are unaffected and complete; semantic (LLM) edges "
+        "are partial for this build. Check your API key's rate limit/quota, then rerun "
+        "icx graph build --llm once resolved."
+    )
+
+
 def _extract_with_adaptive_retry(
     chunk: list[Path],
     backend: str,
@@ -996,8 +1044,11 @@ def extract_corpus_parallel(
         "nodes": [], "edges": [], "hyperedges": [],
         "input_tokens": 0, "output_tokens": 0,
         "failed_chunks": 0,  # count of chunks that raised - loud failure on chunk errors
+        "aborted_chunks": 0,  # chunks skipped by the rate-limit circuit breaker below
     }
     total = len(chunks)
+    rate_limit_failures = 0
+    circuit_tripped = False
 
     def _run_one(idx: int, chunk: list[Path]) -> tuple[int, dict | None, Exception | None]:
         t0 = time.time()
@@ -1034,27 +1085,54 @@ def extract_corpus_parallel(
             if exc is not None:
                 print(f"[icx graph] chunk {idx + 1}/{total} failed: {exc}", file=sys.stderr)
                 merged["failed_chunks"] += 1
+                if _looks_like_rate_limited(exc):
+                    rate_limit_failures += 1
+                    if rate_limit_failures >= _RATE_LIMIT_CIRCUIT_BREAKER_THRESHOLD:
+                        remaining = total - idx - 1
+                        merged["aborted_chunks"] = remaining
+                        circuit_tripped = True
+                        print(_rate_limit_abort_message(rate_limit_failures, remaining), file=sys.stderr)
+                        break
                 continue
             assert result is not None
             _merge_into(merged, result)
             if callable(on_chunk_done):
                 on_chunk_done(idx, total, result)
     else:
+        # Submitted in batches of `workers` (not all `total` futures eagerly upfront) so
+        # the circuit breaker has a real, deterministic point to stop at. An eager-submit-
+        # everything design can't reliably bound work done once max_retries=0 (above) makes
+        # failed calls near-instant: with fast failures, worker threads race through queued
+        # futures faster than a completion-loop check-and-cancel can react, so cancel()
+        # frequently loses the race and every chunk still runs anyway. Batching trades a
+        # small amount of worker idle time between batches (workers must finish the whole
+        # batch before the next one starts) for a guarantee that at most one extra batch
+        # ever runs beyond the one that tripped the breaker.
+        remaining = list(enumerate(chunks))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_run_one, idx, chunk) for idx, chunk in enumerate(chunks)]
-            for future in as_completed(futures):
-                idx, result, exc = future.result()
-                if exc is not None:
-                    print(
-                        f"[icx graph] chunk {idx + 1}/{total} failed: {exc}",
-                        file=sys.stderr,
-                    )
-                    merged["failed_chunks"] += 1
-                    continue
-                assert result is not None
-                _merge_into(merged, result)
-                if callable(on_chunk_done):
-                    on_chunk_done(idx, total, result)
+            while remaining and not circuit_tripped:
+                batch, remaining = remaining[:workers], remaining[workers:]
+                futures = [pool.submit(_run_one, idx, chunk) for idx, chunk in batch]
+                for future in as_completed(futures):
+                    idx, result, exc = future.result()
+                    if exc is not None:
+                        print(
+                            f"[icx graph] chunk {idx + 1}/{total} failed: {exc}",
+                            file=sys.stderr,
+                        )
+                        merged["failed_chunks"] += 1
+                        if _looks_like_rate_limited(exc):
+                            rate_limit_failures += 1
+                            if rate_limit_failures >= _RATE_LIMIT_CIRCUIT_BREAKER_THRESHOLD:
+                                circuit_tripped = True
+                        continue
+                    assert result is not None
+                    _merge_into(merged, result)
+                    if callable(on_chunk_done):
+                        on_chunk_done(idx, total, result)
+            if circuit_tripped and remaining:
+                merged["aborted_chunks"] = len(remaining)
+                print(_rate_limit_abort_message(rate_limit_failures, len(remaining)), file=sys.stderr)
 
     # Loud failure summary - surface chunk failures at end so they're never
     # buried mid-log. Exit 0 preserved for caller compatibility; the
@@ -1179,6 +1257,7 @@ def extract_corpus_two_pass(
         "input_tokens": pass1.get("input_tokens", 0) + pass2.get("input_tokens", 0),
         "output_tokens": pass1.get("output_tokens", 0) + pass2.get("output_tokens", 0),
         "failed_chunks": pass1.get("failed_chunks", 0) + pass2.get("failed_chunks", 0),
+        "aborted_chunks": pass1.get("aborted_chunks", 0) + pass2.get("aborted_chunks", 0),
         "consensus_edges": len(consensus),
         "single_pass_edges": len(single),
     }
@@ -1215,7 +1294,7 @@ def _call_llm(prompt: str, *, backend: str, max_tokens: int = 200) -> str:
             import anthropic
         except ImportError as exc:
             raise ImportError("anthropic package required for claude backend") from exc
-        client = anthropic.Anthropic(api_key=key)
+        client = anthropic.Anthropic(api_key=key, max_retries=0)
         resp = client.messages.create(
             model=mdl,
             max_tokens=max_tokens,
@@ -1266,7 +1345,7 @@ def _call_llm(prompt: str, *, backend: str, max_tokens: int = 200) -> str:
         from openai import OpenAI
     except ImportError as exc:
         raise ImportError("openai package required for this backend") from exc
-    client = OpenAI(api_key=key, base_url=cfg["base_url"])
+    client = OpenAI(api_key=key, base_url=cfg["base_url"], max_retries=0)
     kwargs: dict = {
         "model": mdl,
         "messages": [{"role": "user", "content": prompt}],
