@@ -1327,15 +1327,7 @@ def test_gitlab_connect_with_debug_still_hides_token_input(cli_runner, isolated_
 
 
 @respx.mock
-@pytest.mark.xdist_group(name="workstatus_default_keyring")
 def test_workstatus_connect_command_saves_connection(cli_runner, isolated_config, monkeypatch):
-    """xdist_group: config_manager.py writes workstatus secrets to the REAL OS keyring, keyed by
-    connection name - isolated_config only patches the plaintext config file path, not the
-    keyring. This test and workstatus/test_cli_commands.py's identically-named test both use
-    connection name 'default' - without pinning them to the same xdist worker, two parallel
-    workers can race on the same real keyring entry (observed: this test intermittently read
-    back the OTHER file's 'Bearer x' value instead of its own). The group name only needs to be
-    consistent across every test that shares the collision risk, not globally unique."""
     from icx_engine.cli import app
     respx.get("https://web-api.workstatus.io/api/v5/notifications/unread-count").mock(
         return_value=httpx.Response(200, json={"code": 200, "message": "ok", "data": {"count": 3}})

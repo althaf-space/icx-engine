@@ -58,6 +58,35 @@ async def test_my_profile_returns_data_payload(workstatus_base_url):
 
 
 @respx.mock
+async def test_my_profile_sends_org_and_user_id_body(workstatus_base_url):
+    """Real reported bug: this call previously sent no request body at all
+    (json=None), so Workstatus returned an empty HTTP 200 - not a server-side
+    failure. A real browser capture confirmed the endpoint requires
+    {organization_id, user_id} in the body."""
+    route = respx.post(f"{workstatus_base_url}/api/v5/member/myprofile").mock(
+        return_value=httpx.Response(200, json={"code": "200", "message": "ok", "data": {"primaryinfo": {"name": "A"}}})
+    )
+    async with _client() as client:
+        await client.my_profile()
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"organization_id": 8570, "user_id": 175599}
+
+
+@respx.mock
+async def test_my_profile_empty_body_raises_clear_actionable_error(workstatus_base_url):
+    """Real reported bug: /member/myprofile returning HTTP 200 with a completely empty
+    body previously surfaced as a raw 'Expecting value: line 1 column 1 (char 0)'
+    JSONDecodeError message with no indication of cause. Must now raise the same
+    clear, actionable empty-body error every endpoint gets via _data()."""
+    respx.post(f"{workstatus_base_url}/api/v5/member/myprofile").mock(
+        return_value=httpx.Response(200, text="")
+    )
+    async with _client() as client:
+        with pytest.raises(WorkstatusError, match="completely empty response body"):
+            await client.my_profile()
+
+
+@respx.mock
 async def test_validate_reports_invalid_on_401(workstatus_base_url):
     respx.get(f"{workstatus_base_url}/api/v5/notifications/unread-count").mock(return_value=httpx.Response(401))
     async with _client() as client:
@@ -119,6 +148,44 @@ async def test_malformed_json_response_raises_workstatus_error(workstatus_base_u
     async with _client() as client:
         with pytest.raises(WorkstatusError):
             await client.unread_notifications_count()
+
+
+@respx.mock
+async def test_empty_body_on_200_raises_distinct_actionable_error_not_json_error(workstatus_base_url):
+    """A genuinely empty (0-byte) response body must raise the specific, actionable
+    empty-body message - not fall through to the generic JSONDecodeError-wrapping
+    message, which gives no indication of the real, previously-observed cause
+    (same in-band-failure pattern already fixed once for /timesheet/add)."""
+    respx.get(f"{workstatus_base_url}/api/v5/notifications/unread-count").mock(
+        return_value=httpx.Response(200, text="")
+    )
+    async with _client() as client:
+        with pytest.raises(WorkstatusError, match="completely empty response body"):
+            await client.unread_notifications_count()
+
+
+@respx.mock
+async def test_whitespace_only_body_on_200_also_treated_as_empty(workstatus_base_url):
+    respx.get(f"{workstatus_base_url}/api/v5/notifications/unread-count").mock(
+        return_value=httpx.Response(200, text="   \n  ")
+    )
+    async with _client() as client:
+        with pytest.raises(WorkstatusError, match="completely empty response body"):
+            await client.unread_notifications_count()
+
+
+@respx.mock
+async def test_non_empty_but_malformed_body_still_raises_generic_message(workstatus_base_url):
+    """Regression guard: a body that IS present but isn't valid JSON ("not json") must
+    keep raising the existing generic malformed-body message, not the new empty-body
+    message - these are two distinct failure modes with two distinct causes."""
+    respx.get(f"{workstatus_base_url}/api/v5/notifications/unread-count").mock(
+        return_value=httpx.Response(200, text="not json")
+    )
+    async with _client() as client:
+        with pytest.raises(WorkstatusError, match="malformed response body") as exc_info:
+            await client.unread_notifications_count()
+    assert "completely empty" not in str(exc_info.value)
 
 
 @respx.mock
@@ -573,11 +640,36 @@ async def test_get_timesheet_posts_expected_body_and_unwraps_response_envelope(w
 
 
 @respx.mock
+async def test_get_timesheet_unwraps_dict_shaped_data(workstatus_base_url):
+    """Real reported bug: /timesheets/view can return `data` as a single dict
+    directly, not wrapped in a list. `isinstance(data, list)` was always False in
+    this case, so every call fell through to the empty-list branch and raised a
+    false "not found" even though the entry existed."""
+    respx.post(f"{workstatus_base_url}/api/v5/timesheets/view").mock(
+        return_value=httpx.Response(200, json={"response": {"code": "200", "message": "ok", "data": {"id": 410536, "start": "2026-09-01 11:00:00"}}})
+    )
+    async with _client() as client:
+        entry = await client.get_timesheet(410536)
+    assert entry["id"] == 410536
+    assert entry["start"] == "2026-09-01 11:00:00"
+
+
+@respx.mock
 async def test_get_timesheet_raises_instead_of_false_success_when_no_items(workstatus_base_url):
     """Silently returning {} for a not-found id gave callers no signal to stop,
     inviting blind repeat calls with different ids - this must surface as a real error."""
     respx.post(f"{workstatus_base_url}/api/v5/timesheets/view").mock(
         return_value=httpx.Response(200, json={"response": {"code": "200", "message": "ok", "data": []}})
+    )
+    async with _client() as client:
+        with pytest.raises(WorkstatusError, match="not found"):
+            await client.get_timesheet(1)
+
+
+@respx.mock
+async def test_get_timesheet_raises_instead_of_false_success_when_empty_dict(workstatus_base_url):
+    respx.post(f"{workstatus_base_url}/api/v5/timesheets/view").mock(
+        return_value=httpx.Response(200, json={"response": {"code": "200", "message": "ok", "data": {}}})
     )
     async with _client() as client:
         with pytest.raises(WorkstatusError, match="not found"):

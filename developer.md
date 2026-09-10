@@ -2379,10 +2379,30 @@ deeper under a `response` key: `{response: {code, message, data}}`.
 param (`"data"` or `"result"`) per endpoint rather than assuming one shape
 everywhere.
 
+**Empty-body-on-200 is a recurring, `_data()`-level failure, not a one-off:**
+first found on `/timesheet/add` (below - HTTP 200 with an empty `data` payload
+when the write silently failed server-side), then confirmed recurring on
+`/member/myprofile` (HTTP 200, but the response body itself was completely
+empty - `resp.json()` raised `JSONDecodeError: Expecting value: line 1 column
+1 (char 0)`, surfacing as an unhelpful generic "malformed response body"
+message with no indication of the real, previously-observed cause). Both are
+in-band failures `_raise_for_workstatus` never catches, since it only
+inspects the HTTP status code. Fixed generically in `_data()` itself (not
+per-endpoint): a genuinely empty/whitespace-only body now raises its own
+distinct, actionable `WorkstatusError` before `resp.json()` is even
+attempted - "Workstatus returned HTTP {status} with a completely empty
+response body... re-run `icx workstatus --add`..." - rather than falling
+through to the generic JSON-parse-error message. This benefits all 24
+endpoints, not just the two where it's been directly observed so far. The
+existing `/timesheet/add`-specific `if not data:` check (a body that DOES
+parse as valid JSON, but the unwrapped payload is empty) is a distinct,
+complementary case and is unaffected by this fix - never silently treat
+either case as success.
+
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/notifications/unread-count` | response `{data:{count}}`; doubles as the connection health check (no dedicated validate endpoint exists) |
-| POST | `/member/myprofile` | response includes `bankinginformation`/`paypal_account`/`razorpay_account`/`stripe_account_id` - this is a full HRIS profile, not just time-tracking |
+| POST | `/member/myprofile` | request body `{organization_id, user_id}` - response includes `bankinginformation`/`paypal_account`/`razorpay_account`/`stripe_account_id` - this is a full HRIS profile, not just time-tracking. **Real bug, fixed 2026-09-09**: `client.py:my_profile()` previously sent no request body at all (`json=None`), so Workstatus returned an empty HTTP 200 - not a server-side failure as first assumed. A real browser capture confirmed the endpoint requires `{organization_id, user_id}` in the body, both already held as `self._org_id`/`self._user_id`; the empty-body `_data()` guard (above) was a real, worthwhile fix but was masking this root cause rather than being the root cause itself |
 | POST | `/timesheet/add` | request body UPDATED 2026-08-03 (see below): `{billable, date, deviceId, deviceType, from, ip_address, member_id, notes:{note}, organization_id, os_version, project_id, client_id, reason, source_type, time_type, to, todo_id, activity, time_mode, duration, togglenotes, togglereason}`. `deviceId` has no verified generation algorithm - a random UUID is used per client instance. **Real bug, fixed**: observed live, HTTP 200 with an empty `data` body when the write silently failed server-side - an in-band failure signal `_raise_for_workstatus` never catches (it only inspects the status code). `client.py:add_timesheet` now raises `WorkstatusError` when `data` comes back empty instead of returning `{}` as if it were a created entry - previously reported false success on a failed write |
 | POST | `/table/view/project/list` | paginated project list; envelope nests under `result`, not `data`. `page` accepted as a query-string param (Laravel's `paginate()` reads it by framework convention - not endpoint-specific behavior that needed live capture). `lean=True` (client-level flag, not a Workstatus param) strips any list/dict-valued field from each row post-response - real symptom fixed: each row embeds a full member roster (100+ users with email/avatar/pivot rows), ~50KB+ per project even when the caller only needs id/name |
 | POST | `/project/detailsview` | one project's details; response `data` is a one-item list, client unwraps to the item |
@@ -2403,7 +2423,7 @@ everywhere.
 | POST | `/expense/filtered-data` | recorded expenses for a date range, paginated |
 | POST | `/list/invoices` | invoices, paginated, with paid/open/overdue totals |
 | POST | `/payroll/report/list` | payroll report for a date range, paginated |
-| POST | `/timesheets/view` | one timesheet entry's full detail (member/project/task/date/times/OS/location/IP/reason/notes); envelope nests under a `response` key |
+| POST | `/timesheets/view` | one timesheet entry's full detail (member/project/task/date/times/OS/location/IP/reason/notes); envelope nests under a `response` key. **Real bug, fixed 2026-09-09**: `client.py:get_timesheet()` assumed the unwrapped `data` was always a list and took `[0]` - a live capture showed it can also be a single dict directly, so `isinstance(data, list)` was False and every such call fell through to the empty-list branch, raising a false "not found" even though the entry existed. Now handles both shapes |
 | POST | `/edit/timesheet/{id}` | edit an existing manual entry - auto-saves per field change in the web UI; requires an `updatedFields` diff descriptor; envelope also nests under `response` |
 
 **Time format (WS-3, CONFIRMED via a live read, not just the one earlier write
@@ -3574,7 +3594,7 @@ def test_something(isolated_config):
     ConfigManager.save(...)
 ```
 
-**A test that adds a real connection (`icx <connector> --add` style, via `typer.prompt` mocking rather than `patch.object(ConfigManager, "load", return_value=...)`) writes secret fields to the REAL OS keyring** - `isolated_config` only redirects the plaintext `CONFIG_PATH`, it does not isolate the keyring, which is genuine machine-wide state. Under `pytest -n auto`, two such tests using the same connection name (e.g. `"default"`) can land on different worker *processes* and race on the same real keyring entry - one test intermittently reads back the other's secret value. If you add a test like this reusing an existing connection name, mark every test sharing that name with `@pytest.mark.xdist_group(name="<connector>_<name>_keyring")` (pytest-xdist's built-in worker-pinning marker - forces the whole group onto one worker, serializing just those tests, not the whole suite) - see `tests/test_smoke.py::test_workstatus_connect_command_saves_connection` and `tests/workstatus/test_cli_commands.py`'s identically-named test for the pattern (both write connection name `"default"`'s secrets).
+**`isolated_config` fully isolates `ConfigManager` from real machine state, not just the config file (fixed 2026-09-09, real bug).** It previously redirected only `CONFIG_PATH`, leaving `_kset`/`_kget`/`_kdel` pointed at the REAL OS keyring (genuine machine-wide, cross-process, cross-pytest-invocation state, keyed only by connection/field name), plus `_master_key_cache` (in-process D-Lock key cache) and `_MASTER_KEY_FILE` (its DPAPI file cache, computed once from the real home directory at import time, never re-derived from a patched `CONFIG_PATH`) both able to leak across tests sharing an xdist worker process. Two real flakes were traced to this: `test_workstatus_connect_command_saves_connection` intermittently read back a stale `'Bearer x'` from the real keyring instead of the value it had just saved, and `test_langfuse_enable_and_disable_toggle_config` raced the same way on `langfuse.secret_key`'s real keyring entry - both nondeterministic under `pytest -n auto`, occasionally reproducing in serial runs too depending on what a previous real `icx <connector> --add` run (test or manual) had left in the machine's actual keyring. `isolated_config` now also patches `_MASTER_KEY_FILE` to a temp path, resets `_master_key_cache` to `None`, forces `_keychain_ok = True`, and backs `_kset`/`_kget`/`_kdel` with a fresh in-memory dict scoped to that one test - matching the per-test manual pattern several files were already hand-rolling (`tests/sonar/test_connection_config.py`, `tests/test_models.py`). A test that needs to exercise the plaintext/env-var fallback path can still override `_keychain_ok`/`_kset`/`_kget`/`_kdel` again after requesting the fixture, same as before. The now-unnecessary `@pytest.mark.xdist_group(...)` worker-pinning workaround on the two flaky tests was removed - they no longer touch anything real or shared.
 
 **Patching `ConfigManager.load` in tests:** `ConfigManager` is imported lazily inside several functions (`analyze`, `_handle_analyze_issue`, etc.) to avoid circular imports. Patch it at the source, not at the importing module:
 
@@ -3628,7 +3648,7 @@ texts, images, full_texts, raw = await process_attachments(raw, downloader, llm_
 ### Fixtures available in `conftest.py`
 
 - `cli_runner` - `CliRunner` instance for CLI tests
-- `isolated_config` - redirects config path to a temp file; yields the `Path`
+- `isolated_config` - redirects config path to a temp file and fully fakes the keyring/D-Lock layer (see the note above); yields the `Path`
 
 ### ANSI codes in CLI output assertions
 
